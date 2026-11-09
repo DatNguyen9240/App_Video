@@ -569,7 +569,7 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return HTML_TEMPLATE, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
