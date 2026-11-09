@@ -11,3 +11,4 @@ imageio-ffmpeg>=0.5.0
 # Google Gemini AI SDK chính thức
 google-genai>=1.0.0
 pydantic>=2.0.0
+
