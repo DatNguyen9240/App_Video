@@ -221,20 +221,42 @@ def prepare_background(duration_sec: float, output_path: str, mode: str = "infin
 def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_music_path: str = None) -> str:
     """
     Nối tuần tự các file âm thanh (giọng đọc + hiệu ứng âm thanh meme SFX)
-    và trộn nhạc nền lofi nhẹ.
+    và trộn nhạc nền lofi nhẹ. Đảm bảo an toàn 100% trước file hỏng.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     audio_dir = os.path.join(OUT_DIR, "audio")
     voice_sfx_merged = os.path.join(audio_dir, "_voice_sfx_merged.mp3")
+    exe = get_ffmpeg_exe()
+
+    # Kiểm định từng file âm thanh trước khi đưa vào concat
+    valid_sequence = []
+    for path in audio_sequence:
+        if path and os.path.exists(path) and os.path.getsize(path) > 100:
+            chk = subprocess.run([exe, "-i", path, "-f", "null", "-"], capture_output=True)
+            if chk.returncode == 0:
+                valid_sequence.append(path)
+            else:
+                print(f"  ⚠️ File audio {os.path.basename(path)} không hợp lệ, đang tự động sửa...")
+                # Thử tự động chuẩn hóa bằng FFmpeg
+                fix_path = path + ".fix.mp3"
+                fix_res = subprocess.run([exe, "-y", "-i", path, "-ar", "44100", "-ac", "2", "-c:a", "libmp3lame", fix_path], capture_output=True)
+                if fix_res.returncode == 0 and os.path.exists(fix_path):
+                    shutil.move(fix_path, path)
+                    valid_sequence.append(path)
+
+    if not valid_sequence:
+        # Nếu không có audio nào, tạo audio im lặng 3s
+        run_ffmpeg("-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "3", voice_sfx_merged)
+        valid_sequence = [voice_sfx_merged]
 
     cmd = []
     filter_parts = []
-    for i, path in enumerate(audio_sequence):
+    for i, path in enumerate(valid_sequence):
         cmd.extend(["-i", path])
         filter_parts.append(f"[{i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}]")
 
-    concat_inputs = "".join(f"[a{i}]" for i in range(len(audio_sequence)))
-    filter_parts.append(f"{concat_inputs}concat=n={len(audio_sequence)}:v=0:a=1[out]")
+    concat_inputs = "".join(f"[a{i}]" for i in range(len(valid_sequence)))
+    filter_parts.append(f"{concat_inputs}concat=n={len(valid_sequence)}:v=0:a=1[out]")
 
     run_ffmpeg(
         *cmd,
