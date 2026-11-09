@@ -72,6 +72,19 @@ def build_timeline_with_sfx_and_memes(post, timing: dict) -> tuple[list[dict], l
     comment_cursor = cursor + post_dur + gap
 
     # 2. Các thẻ bình luận
+    # Tính tọa độ Y của thẻ Comment dựa trên chiều cao thực tế của thẻ Post
+    post_path = os.path.join(CARDS_DIR, "post.png")
+    actual_post_h = 320
+    if os.path.exists(post_path):
+        try:
+            from PIL import Image
+            with Image.open(post_path) as p_img:
+                actual_post_h = p_img.height
+        except Exception:
+            pass
+
+    actual_comment_y = POST_Y + actual_post_h + 24
+
     for i, c in enumerate(post.comments, 1):
         c_dur = timing["comments"][i - 1]["duration_ms"] / 1000.0
         c_audio_path = timing["comments"][i - 1]["path"]
@@ -96,8 +109,8 @@ def build_timeline_with_sfx_and_memes(post, timing: dict) -> tuple[list[dict], l
             "start": c_start,
             "end": c_end,
             "x": "(W-w)/2",
-            "y": COMMENT_Y,
-            "width": 980,
+            "y": actual_comment_y,
+            "width": 960,
             "image": os.path.join(CARDS_DIR, f"comment_{i}.png"),
         })
 
@@ -109,9 +122,9 @@ def build_timeline_with_sfx_and_memes(post, timing: dict) -> tuple[list[dict], l
                     "type": "meme_sticker",
                     "start": c_start + c_dur,
                     "end": c_end,
-                    "x": "860",               # Nổi bật ở góc phải dưới thẻ comment
-                    "y": str(COMMENT_Y + 160),
-                    "width": 180,
+                    "x": "820",               # Nổi bật ở góc phải dưới thẻ comment
+                    "y": str(actual_comment_y + 140),
+                    "width": 190,
                     "image": meme_file,
                 })
 
@@ -126,7 +139,7 @@ def build_timeline_with_sfx_and_memes(post, timing: dict) -> tuple[list[dict], l
         "end": total_duration,
         "x": "(W-w)/2",
         "y": POST_Y,
-        "width": 980,
+        "width": 960,
         "image": os.path.join(CARDS_DIR, "post.png"),
     })
 
@@ -223,7 +236,8 @@ def run_pipeline(post=None, bg_mode: str = None) -> str:
 
     for i, c in enumerate(post.comments, 1):
         c_img = card_mod.render_comment_card(
-            c.username, c.content, c.avatar_color, c.is_verified, c.likes, index=i
+            c.username, c.content, c.avatar_color, c.is_verified, c.likes,
+            index=i, reply_to=post.username
         )
         card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
 
