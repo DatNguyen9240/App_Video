@@ -2,7 +2,7 @@
 App Video Automation — Main Entrypoint
 =======================================
 Hệ thống tự động tạo video ngắn (TikTok / Shorts / Reels)
-Nội dung: Gemini AI sáng tạo bài đăng Threads + Nền Gradient / Minecraft + Giọng đọc tiếng Việt
+Nội dung: Gemini AI sáng tạo bài đăng Threads + Thẻ Threads siêu thực + Nền 3D Infinity Tunnel / Gameplay + Giọng đọc tiếng Việt
 
 Cách dùng:
   python main.py
@@ -22,8 +22,9 @@ def clear_screen():
 
 
 def get_current_settings():
-    bg_mode = "gradient"
+    bg_mode = "infinity"
     voice = "vi-VN-NamMinhNeural"
+    card_theme = "light"
     if os.path.exists(ENV_PATH):
         with open(ENV_PATH, "r", encoding="utf-8") as f:
             for line in f:
@@ -34,7 +35,10 @@ def get_current_settings():
                 elif line.startswith("TTS_VOICE="):
                     val = line.split("=", 1)[1].strip()
                     if val: voice = val
-    return bg_mode, voice
+                elif line.startswith("CARD_THEME="):
+                    val = line.split("=", 1)[1].strip()
+                    if val: card_theme = val
+    return bg_mode, voice, card_theme
 
 
 def set_env_value(key, value):
@@ -55,36 +59,55 @@ def set_env_value(key, value):
 
 
 def print_banner():
-    bg_mode, voice = get_current_settings()
-    bg_label = "🎨 Nền màu Gradient chuyển động" if bg_mode == "gradient" else "🎮 Video Minecraft Parkour"
+    bg_mode, voice, card_theme = get_current_settings()
+    if bg_mode == "infinity":
+        bg_label = "🌀 3D Infinity Tunnel (Đường hầm vô cực)"
+    elif bg_mode == "gradient":
+        bg_label = "🎨 Nền màu Gradient chuyển động"
+    else:
+        bg_label = "🎮 Video Minecraft Parkour"
+
     voice_label = "Nam Minh (Nam)" if "NamMinh" in voice else "Hoài My (Nữ)"
+    theme_label = "☀️ Sáng (Light - Chuẩn Threads thật)" if card_theme == "light" else "🌙 Tối (Dark Mode)"
 
     print(f"""
 ╔═══════════════════════════════════════════════════════════╗
 ║          🎬  THREADS VIDEO AUTOMATION BOT  🎬             ║
-║     AI Sáng tạo bài đăng + Nền màu / Gameplay 9:16        ║
+║     AI Sáng tạo + Thẻ Threads như thật + Nền 3D 9:16      ║
 ╚═══════════════════════════════════════════════════════════╝
   ⚙️ Chế độ nền hiện tại : {bg_label}
+  🎨 Giao diện thẻ Threads: {theme_label}
   🎙️ Giọng đọc hiện tại  : {voice_label}
     """)
 
 
 def toggle_settings():
-    bg_mode, voice = get_current_settings()
+    bg_mode, voice, card_theme = get_current_settings()
     print("\n--- CÀI ĐẶT HỆ THỐNG ---")
     print(f"[1] Đổi chế độ nền (Hiện tại: {bg_mode})")
-    print("    -> 'gradient' (Nền màu chuyển sắc sang trọng - Nhanh, nhẹ)")
-    print("    -> 'minecraft' (Dùng video gameplay trong assets/backgrounds/)")
-    print(f"[2] Đổi giọng đọc (Hiện tại: {'Nam' if 'NamMinh' in voice else 'Nữ'})")
-    print("    -> '1': Giọng Nam Minh")
-    print("    -> '2': Giọng Nữ Hoài My")
+    print("    -> 1: 🌀 3D Infinity Tunnel (Vô cực 3D - Siêu cuốn hút, mặc định)")
+    print("    -> 2: 🎮 Minecraft Parkour (Dùng gameplay trong assets/backgrounds/)")
+    print("    -> 3: 🎨 Nền Gradient chuyển màu nhẹ")
+    print(f"[2] Đổi giao diện thẻ Threads (Hiện tại: {card_theme.upper()})")
+    print("    -> 1: Sáng (Light Theme - Chuẩn ảnh mẫu 100%)")
+    print("    -> 2: Tối (Dark Theme)")
+    print(f"[3] Đổi giọng đọc (Hiện tại: {'Nam' if 'NamMinh' in voice else 'Nữ'})")
+    print("    -> 1: Giọng Nam (Nam Minh)")
+    print("    -> 2: Giọng Nữ (Hoài My)")
 
-    sub = input("\nChọn mục [1/2]: ").strip()
+    sub = input("\nChọn mục [1/2/3]: ").strip()
     if sub == "1":
-        new_mode = "minecraft" if bg_mode == "gradient" else "gradient"
+        print("  1: infinity | 2: minecraft | 3: gradient")
+        m = input("  Chọn chế độ nền [1-3]: ").strip()
+        modes = {"1": "infinity", "2": "minecraft", "3": "gradient"}
+        new_mode = modes.get(m, "infinity")
         set_env_value("BG_MODE", new_mode)
-        print(f"[✓] Đã đổi nền sang: {new_mode}")
+        print(f"[✓] Đã đổi chế độ nền sang: {new_mode}")
     elif sub == "2":
+        new_theme = "dark" if card_theme == "light" else "light"
+        set_env_value("CARD_THEME", new_theme)
+        print(f"[✓] Đã đổi giao diện thẻ sang: {new_theme.upper()}")
+    elif sub == "3":
         new_voice = "vi-VN-HoaiMyNeural" if "NamMinh" in voice else "vi-VN-NamMinhNeural"
         set_env_value("TTS_VOICE", new_voice)
         print(f"[✓] Đã đổi giọng sang: {'Nữ (Hoài My)' if 'HoaiMy' in new_voice else 'Nam (Nam Minh)'}")
@@ -96,7 +119,7 @@ def main():
         print("  [1] 🤖 Dùng Gemini AI tạo 1 video theo chủ đề")
         print("  [2] 🏭 Sản xuất HÀNG LOẠT video tự động (Batch Mode 3, 5, 10 video)")
         print("  [3] 🚀 Render video ngay từ kịch bản hiện tại (sample_post.json)")
-        print("  [4] ⚙️ Đổi Chế độ Nền (Nền màu Gradient ↔ Minecraft) & Giọng đọc")
+        print("  [4] ⚙️ Cài đặt (Đổi Nền Vô Cực / Minecraft, Đổi Theme Thẻ, Đổi Giọng)")
         print("  [5] 📝 Xem & chỉnh sửa trực tiếp nội dung bài đăng (JSON)")
         print("  [6] 🎨 Test Module 2: Render ảnh thẻ Threads (PNG)")
         print("  [7] 📂 Mở thư mục video thành phẩm (output/final/)")

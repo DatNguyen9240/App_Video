@@ -118,13 +118,23 @@ def build_timeline_with_sfx_and_memes(post, timing: dict) -> tuple[list[dict], l
         if sfx_name in SFX_TO_MEME and sfx_dur > 0:
             meme_file = os.path.join(MEME_DIR, SFX_TO_MEME[sfx_name])
             if os.path.exists(meme_file):
+                c_card_path = os.path.join(CARDS_DIR, f"comment_{i}.png")
+                actual_cmt_h = 320
+                if os.path.exists(c_card_path):
+                    try:
+                        from PIL import Image
+                        with Image.open(c_card_path) as c_file:
+                            actual_cmt_h = c_file.height
+                    except Exception:
+                        pass
+
                 timeline.append({
                     "type": "meme_sticker",
                     "start": c_start + c_dur,
                     "end": c_end,
-                    "x": "820",               # Nổi bật ở góc phải dưới thẻ comment
-                    "y": str(actual_comment_y + 140),
-                    "width": 190,
+                    "x": "(W-w)/2",               # Căn chính giữa khung hình chuẩn 100% như ảnh mẫu
+                    "y": str(actual_comment_y + actual_cmt_h + 35), # Đặt ngay phía dưới thẻ bình luận
+                    "width": 260,
                     "image": meme_file,
                 })
 
