@@ -1,0 +1,13 @@
+# Thư viện xử lý ảnh và giao diện thẻ bài viết
+Pillow>=10.0.0
+
+# Thư viện tạo giọng đọc AI tiếng Việt
+edge-tts>=7.0.0
+gTTS>=2.5.0
+
+# Bộ giải mã video FFmpeg tự động (không cần cài thủ công vào PATH)
+imageio-ffmpeg>=0.5.0
+
+# Google Gemini AI SDK chính thức
+google-genai>=1.0.0
+pydantic>=2.0.0

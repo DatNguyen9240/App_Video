@@ -1,0 +1,33 @@
+# Environment variables & API keys (CHỨA KEY BẢO MẬT, TUYỆT ĐỐI KHÔNG PUSH)
+.env
+*.env
+!.env.example
+
+# Video nền nặng (GitHub chặn file > 100MB, file gameplay thường hàng GB)
+assets/backgrounds/*.mp4
+assets/backgrounds/*.mkv
+assets/backgrounds/*.mov
+assets/backgrounds/*.avi
+!assets/backgrounds/.gitkeep
+
+# Thư mục xuất file sản phẩm (video render, audio tạm, ảnh card tạm)
+output/
+!output/.gitkeep
+
+# Python cache & virtual environment
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+ENV/
+
+# IDE & OS temporary files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
