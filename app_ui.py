@@ -641,6 +641,8 @@ def api_generate_script():
             }
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)})
 
 @app.route("/api/save_and_render_cards", methods=["POST"])
@@ -671,6 +673,8 @@ def api_save_cards():
 
         return jsonify({"success": True})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)})
 
 @app.route("/api/card/<filename>")
@@ -689,6 +693,7 @@ def api_render_video():
             comments.append(content_mod.Comment(
                 username=c.get("username", "user"),
                 content=c.get("content", ""),
+                avatar_color=c.get("avatar_color", "#8b5cf6"),
                 likes=int(c.get("likes", 1200)),
                 sfx=c.get("sfx", "none")
             ))
@@ -696,6 +701,7 @@ def api_render_video():
         post_obj = content_mod.Post(
             username=p_data.get("username", "author"),
             content=p_data.get("content", ""),
+            avatar_color=p_data.get("avatar_color", "#6366f1"),
             likes=int(p_data.get("likes", 25000)),
             is_verified=bool(p_data.get("is_verified", True)),
             comments=comments
@@ -716,6 +722,8 @@ def api_render_video():
             "caption": caption_text
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)})
 
 @app.route("/api/batch_render", methods=["POST"])
@@ -737,6 +745,8 @@ def api_batch_render():
 
         return jsonify({"success": True, "completed": completed})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)})
 
 @app.route("/api/latest_video")

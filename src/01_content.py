@@ -21,7 +21,7 @@ from typing import Literal
 class Comment:
     username: str
     content: str
-    avatar_color: str           # Màu avatar hex, vd: "#f43f5e"
+    avatar_color: str = "#8b5cf6"           # Màu avatar hex mặc định
     is_verified: bool = False
     likes: int = 0
     # Âm thanh hiệu ứng phát sau khi đọc xong comment này
@@ -32,7 +32,7 @@ class Comment:
 class Post:
     username: str
     content: str
-    avatar_color: str
+    avatar_color: str = "#6366f1"
     is_verified: bool = False
     likes: int = 0
     video_title: str = ""
