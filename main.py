@@ -6,6 +6,7 @@ Nội dung: Gemini AI sáng tạo bài đăng Threads + Thẻ Threads siêu th�
 
 Cách dùng:
   python main.py
+  (Hoặc chạy trực tiếp Web UI: python app_ui.py)
 """
 
 import os
@@ -116,12 +117,12 @@ def toggle_settings():
 def main():
     while True:
         print_banner()
-        print("  [1] 🤖 Dùng Gemini AI tạo 1 video theo chủ đề")
-        print("  [2] 🏭 Sản xuất HÀNG LOẠT video tự động (Batch Mode 3, 5, 10 video)")
-        print("  [3] 🚀 Render video ngay từ kịch bản hiện tại (sample_post.json)")
-        print("  [4] ⚙️ Cài đặt (Đổi Nền Vô Cực / Minecraft, Đổi Theme Thẻ, Đổi Giọng)")
-        print("  [5] 📝 Xem & chỉnh sửa trực tiếp nội dung bài đăng (JSON)")
-        print("  [6] 🎨 Test Module 2: Render ảnh thẻ Threads (PNG)")
+        print("  [1] 🌟 MỞ GIAO DIỆN WEB STUDIO ĐỒ HỌA (Đẹp mắt, trực quan, có Player 9:16)")
+        print("  [2] 🤖 Dùng Gemini AI tạo 1 video theo chủ đề (Terminal)")
+        print("  [3] 🏭 Sản xuất HÀNG LOẠT video tự động (Batch Mode 3, 5, 10 video)")
+        print("  [4] 🚀 Render video ngay từ kịch bản hiện tại (sample_post.json)")
+        print("  [5] ⚙️ Cài đặt (Đổi Nền Vô Cực / Minecraft, Đổi Theme Thẻ, Đổi Giọng)")
+        print("  [6] 📝 Xem & chỉnh sửa trực tiếp nội dung bài đăng (JSON)")
         print("  [7] 📂 Mở thư mục video thành phẩm (output/final/)")
         print("  [0] ❌ Thoát")
         print()
@@ -129,17 +130,18 @@ def main():
         choice = input("👉 Nhập số bạn muốn chọn [0-7]: ").strip()
 
         if choice == "1":
-            subprocess.run([sys.executable, os.path.join(SRC_DIR, "01_ai_content.py")])
+            print("\n🚀 Đang khởi động Web Studio tại http://localhost:5000 ...")
+            subprocess.run([sys.executable, os.path.join(BASE_DIR, "app_ui.py")])
         elif choice == "2":
-            subprocess.run([sys.executable, os.path.join(SRC_DIR, "07_batch_factory.py")])
+            subprocess.run([sys.executable, os.path.join(SRC_DIR, "01_ai_content.py")])
         elif choice == "3":
-            subprocess.run([sys.executable, os.path.join(SRC_DIR, "05_pipeline.py")])
+            subprocess.run([sys.executable, os.path.join(SRC_DIR, "07_batch_factory.py")])
         elif choice == "4":
-            toggle_settings()
+            subprocess.run([sys.executable, os.path.join(SRC_DIR, "05_pipeline.py")])
         elif choice == "5":
-            subprocess.run([sys.executable, os.path.join(SRC_DIR, "01_content.py")])
+            toggle_settings()
         elif choice == "6":
-            subprocess.run([sys.executable, os.path.join(SRC_DIR, "02_card_gen.py")])
+            subprocess.run([sys.executable, os.path.join(SRC_DIR, "01_content.py")])
         elif choice == "7":
             final_folder = os.path.join(BASE_DIR, "output", "final")
             if os.name == "nt":

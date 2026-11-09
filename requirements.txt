@@ -12,3 +12,6 @@ imageio-ffmpeg>=0.5.0
 google-genai>=1.0.0
 pydantic>=2.0.0
 
+# Giao diện người dùng Web Studio & Desktop UI
+flask>=3.0.0
+customtkinter>=6.0.0
