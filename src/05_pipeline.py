@@ -190,7 +190,7 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
 
 
 def get_default_bg_mode() -> str:
-    """Đọc chế độ nền mặc định từ .env: 'gradient' (nền màu) hoặc 'minecraft' (video)."""
+    """Đọc chế độ nền mặc định từ .env: 'infinity' (đường hầm vô cực), 'minecraft' (gameplay)."""
     mode = os.environ.get("BG_MODE", "").strip().lower()
     env_file = os.path.join(BASE_DIR, ".env")
     if os.path.exists(env_file):
@@ -199,7 +199,7 @@ def get_default_bg_mode() -> str:
                 if line.strip().startswith("BG_MODE="):
                     val = line.split("=", 1)[1].strip().lower()
                     if val: mode = val
-    return mode or "gradient"
+    return mode or "infinity"
 
 
 def run_pipeline(post=None, bg_mode: str = None) -> str:

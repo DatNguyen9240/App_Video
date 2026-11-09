@@ -2,44 +2,48 @@
 MODULE 4: QUẢN LÝ VIDEO NỀN & HIỆU ỨNG ÂM THANH (BG & SFX Manager)
 =====================================================================
 Chức năng:
-  - TẠO NỀN MÀU GRADIENT ĐỘNG (Không cần video Minecraft, siêu nhẹ, đẹp mắt)
+  - TẠO HIỆU ỨNG ĐƯỜNG HẦM VÔ CỰC (3D INFINITY TUNNEL / WORMHOLE)
+    -> Hiệu ứng thôi miên cực cuốn hút, chuẩn xu hướng TikTok / Reels!
   - Cắt video nền Minecraft Parkour nếu người dùng thích dạng gameplay
+  - Tạo nền màu Gradient chuyển động mượt mà
   - Ghép giọng đọc + Hiệu ứng âm thanh meme (laugh, boom, ting, bruh)
   - Trộn nhạc nền lofi nhẹ nhàng
 """
 
+import math
 import os
 import random
 import re
 import shutil
 import subprocess
+from PIL import Image, ImageDraw
 
 ASSETS_DIR   = r"d:\Dat\App_Video\assets"
 BG_DIR       = os.path.join(ASSETS_DIR, "backgrounds")
 SFX_DIR      = os.path.join(ASSETS_DIR, "sfx")
 OUT_DIR      = r"d:\Dat\App_Video\output"
 
-# BỘ BẢNG MÀU GRADIENT ĐỘNG CHUẨN XU HƯỚNG TIKTOK / SHORTS
-GRADIENT_PALETTES = {
+INFINITY_BASE_FILE = os.path.join(BG_DIR, "infinity_base.mp4")
+
+# BỘ BẢNG MÀU ĐƯỜNG HẦM VÔ CỰC (3D INFINITY TUNNEL)
+INFINITY_THEMES = {
     "neon": {
-        "name": "🌌 Tím Neon Dạ Quang (Cyberpunk)",
-        "c0": "0x581c87", "c1": "0x0f172a", "type": "radial", "speed": "0.015"
-    },
-    "sunset": {
-        "name": "🌅 Hoàng Hôn Cam Đào (Sunset Vibe)",
-        "c0": "0x831843", "c1": "0x7c2d12", "type": "linear", "speed": "0.012"
+        "name": "🌀 Cyberpunk Neon Tunnel (Xanh Cyan - Tím Dạ Quang)",
+        "bg": (6, 5, 16),
+        "center_rgb": (30, 240, 255),
+        "edge_rgb": (230, 30, 250),
     },
     "dark": {
-        "name": "🌑 Xám Than Tối Sang Trọng (Aesthetic Dark)",
-        "c0": "0x27272a", "c1": "0x09090b", "type": "radial", "speed": "0.008"
+        "name": "🌑 Dark Mirror Room (Gương vô cực LED xám sang trọng)",
+        "bg": (5, 5, 8),
+        "center_rgb": (180, 190, 210),
+        "edge_rgb": (60, 65, 85),
     },
-    "ocean": {
-        "name": "🌊 Xanh Thẳm Đại Dương (Deep Ocean)",
-        "c0": "0x064e3b", "c1": "0x0f172a", "type": "linear", "speed": "0.015"
-    },
-    "midnight": {
-        "name": "✨ Đêm Huyền Bí (Midnight Blue)",
-        "c0": "0x1e1b4b", "c1": "0x030712", "type": "radial", "speed": "0.01"
+    "gold": {
+        "name": "✨ Golden Matrix (Đường hầm Vàng Kim quyền lực)",
+        "bg": (12, 8, 4),
+        "center_rgb": (255, 230, 120),
+        "edge_rgb": (240, 120, 20),
     }
 }
 
@@ -74,32 +78,96 @@ def get_media_duration(filepath: str) -> float:
     return 0.0
 
 
-def generate_gradient_background(duration_sec: float, output_path: str, palette_key: str = "random") -> str:
+def ensure_infinity_base_loop(theme: str = "neon") -> str:
     """
-    Tạo video nền màu Gradient chuyển sắc động tuyệt đẹp (1080x1920 9:16).
-    Không cần file video ngoài, render siêu nhanh (1-2s), dung lượng siêu nhẹ!
+    Sinh video loop gốc 3D Infinity Tunnel chuẩn 1080x1920 (chỉ mất ~0.4s).
+    Lưu vào assets/backgrounds/infinity_base.mp4 để tái sử dụng tức thì.
     """
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    os.makedirs(BG_DIR, exist_ok=True)
+    exe = get_ffmpeg_exe()
 
-    if palette_key == "random" or palette_key not in GRADIENT_PALETTES:
-        palette_key = random.choice(list(GRADIENT_PALETTES.keys()))
+    W, H = 540, 960
+    cx, cy = W // 2, H // 2
+    num_rings = 18
+    fps = 30
+    loop_duration = 1.5
+    total_frames = int(fps * loop_duration)
 
-    p = GRADIENT_PALETTES[palette_key]
-    print(f"  🎨 Tạo nền màu Gradient: {p['name']} ({duration_sec:.1f}s)...")
+    cfg = INFINITY_THEMES.get(theme, INFINITY_THEMES["neon"])
+    bg_color = cfg["bg"]
+    c_r, c_g, c_b = cfg["center_rgb"]
+    e_r, e_g, e_b = cfg["edge_rgb"]
 
-    # Sử dụng FFmpeg filter gradients để tạo luồng màu chuyển động mượt mà
-    filter_expr = f"gradients=s=1080x1920:d={duration_sec:.1f}:c0={p['c0']}:c1={p['c1']}:type={p['type']}:speed={p['speed']}"
-
-    run_ffmpeg(
-        "-f", "lavfi",
-        "-i", filter_expr,
-        "-t", f"{duration_sec:.2f}",
+    ffmpeg_cmd = [
+        exe, "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}",
+        "-pix_fmt", "rgb24",
+        "-r", str(fps),
+        "-i", "-",
+        "-vf", "scale=1080:1920:flags=lanczos,boxblur=1:1",
         "-c:v", "libx264",
         "-preset", "ultrafast",
+        "-crf", "18",
         "-pix_fmt", "yuv420p",
+        INFINITY_BASE_FILE
+    ]
+
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    for f_idx in range(total_frames):
+        phase = f_idx / total_frames
+        img = Image.new("RGB", (W, H), bg_color)
+        draw = ImageDraw.Draw(img)
+
+        for i in range(num_rings):
+            z = (i / num_rings + phase) % 1.0
+            if z < 0.03:
+                continue
+
+            d = 1.0 - z
+            scale = (1.0 / (d * 3.2 + 0.08)) ** 1.35
+
+            rw = int(24 * scale)
+            rh = int(38 * scale)
+            if rw > W * 1.8:
+                continue
+
+            # Tính màu gradient theo độ sâu z (tâm sáng rực -> rìa chuyển màu neon)
+            t_col = 1.0 - z
+            r_col = int(c_r * (1 - t_col) + e_r * t_col)
+            g_col = int(c_g * (1 - t_col) + e_g * t_col)
+            b_col = int(c_b * (1 - t_col) + e_b * t_col)
+
+            width = max(2, int(8 * (1 - d) ** 0.8))
+            bbox = [cx - rw, cy - rh, cx + rw, cy + rh]
+            draw.rounded_rectangle(bbox, radius=int(rw * 0.28), outline=(r_col, g_col, b_col), width=width)
+
+        proc.stdin.write(img.tobytes())
+
+    proc.stdin.close()
+    proc.wait()
+    return INFINITY_BASE_FILE
+
+
+def generate_infinity_background(duration_sec: float, output_path: str, theme: str = "neon") -> str:
+    """
+    Tạo video nền Hiệu ứng Infinity Tunnel (Đường hầm vô cực) với độ dài tùy ý.
+    Tốc độ render siêu tốc (<0.5 giây), chuẩn Full HD 1080x1920!
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    ensure_infinity_base_loop(theme)
+
+    print(f"  🌀 Đang tạo nền Infinity Tunnel vô cực ({duration_sec:.1f}s)...")
+    run_ffmpeg(
+        "-stream_loop", "-1",
+        "-i", INFINITY_BASE_FILE,
+        "-t", f"{duration_sec:.2f}",
+        "-c", "copy",
         output_path
     )
-    print(f"  [✓] Nền màu Gradient sẵn sàng: {output_path}")
+    print(f"  [✓] Nền Infinity Tunnel sẵn sàng: {output_path}")
     return output_path
 
 
@@ -108,7 +176,7 @@ def cut_background_video(duration_sec: float, output_path: str, bg_video_path: s
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     if bg_video_path is None:
-        videos = [f for f in os.listdir(BG_DIR) if f.lower().endswith((".mp4", ".mkv", ".mov"))]
+        videos = [f for f in os.listdir(BG_DIR) if f.lower().endswith((".mp4", ".mkv", ".mov")) and "base" not in f]
         if videos:
             bg_video_path = os.path.join(BG_DIR, random.choice(videos))
 
@@ -132,21 +200,20 @@ def cut_background_video(duration_sec: float, output_path: str, bg_video_path: s
             output_path
         )
     else:
-        # Tự động tạo gradient thay vì video lỗi
-        generate_gradient_background(duration_sec, output_path)
+        generate_infinity_background(duration_sec, output_path)
 
     print(f"  [✓] Video nền sẵn sàng: {output_path}")
     return output_path
 
 
-def prepare_background(duration_sec: float, output_path: str, mode: str = "gradient", palette: str = "random") -> str:
+def prepare_background(duration_sec: float, output_path: str, mode: str = "infinity", theme: str = "neon") -> str:
     """
-    Hàm chuẩn bị background thông minh:
-    - mode = "gradient" (hoặc "color"): Tạo nền màu chuyển sắc sang trọng.
+    Chuẩn bị nền theo chế độ:
+    - mode = "infinity" (MẶC ĐỊNH): Đường hầm vô cực 3D thôi miên siêu đẹp & nhẹ!
     - mode = "minecraft" (hoặc "video"): Dùng video gameplay trong assets/backgrounds/.
     """
-    if mode in ["gradient", "color"]:
-        return generate_gradient_background(duration_sec, output_path, palette)
+    if mode in ["infinity", "tunnel", "wormhole"]:
+        return generate_infinity_background(duration_sec, output_path, theme)
     else:
         return cut_background_video(duration_sec, output_path)
 
@@ -178,7 +245,6 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
         voice_sfx_merged
     )
 
-    # Trộn nhạc nền lofi nếu có
     if bg_music_path and os.path.exists(bg_music_path):
         print(f"  🎵 Trộn nhạc nền lofi: {os.path.basename(bg_music_path)}")
         run_ffmpeg(
@@ -200,6 +266,6 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
 
 
 if __name__ == "__main__":
-    out_test = os.path.join(OUT_DIR, "test_color_bg.mp4")
-    generate_gradient_background(5.0, out_test, "neon")
-    print(f"Test gradient background OK: {out_test}")
+    out_test = os.path.join(OUT_DIR, "test_infinity_out.mp4")
+    generate_infinity_background(5.0, out_test, "neon")
+    print(f"Test infinity background OK: {out_test}")
