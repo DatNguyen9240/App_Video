@@ -29,6 +29,7 @@ CARDS_DIR  = os.path.join(OUTPUT_DIR, "cards")
 AUDIO_DIR  = os.path.join(OUTPUT_DIR, "audio")
 MEMES_DIR  = os.path.join(BASE_DIR, "assets", "memes")
 AVATARS_DIR = os.path.join(BASE_DIR, "assets", "avatars")
+JS_DIR     = os.path.join(BASE_DIR, "assets", "js")
 ENV_PATH   = os.path.join(BASE_DIR, ".env")
 
 sys.path.insert(0, SRC_DIR)
@@ -62,7 +63,13 @@ HTML_TEMPLATE = """
   <title>Threads Video Automation Studio Pro</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <!-- Vue 3 nạp từ file cục bộ (100% offline nội bộ, tránh lỗi unpkg.com bị chặn tại VN) -->
+  <script src="/static/js/vue.global.js"></script>
+  <script>
+    if (typeof Vue === 'undefined') {
+      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.prod.js"><\\/script>');
+    }
+  </script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -78,6 +85,7 @@ HTML_TEMPLATE = """
   </script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+    [v-cloak] { display: none !important; }
     body { font-family: 'Plus Jakarta Sans', sans-serif; }
     .font-mono { font-family: 'JetBrains Mono', monospace; }
     .glass-panel {
@@ -100,7 +108,7 @@ HTML_TEMPLATE = """
   </style>
 </head>
 <body class="bg-dark-900 text-slate-100 min-h-screen">
-  <div id="app" class="flex flex-col min-h-screen">
+  <div id="app" v-cloak class="flex flex-col min-h-screen">
     
     <!-- Top Navigation Header -->
     <header class="h-16 border-b border-slate-800 glass-panel sticky top-0 z-50 px-6 flex items-center justify-between">
@@ -964,7 +972,8 @@ HTML_TEMPLATE = """
     </main>
 
     <!-- Modal Chọn Avatar Người Thật Trực Quan -->
-    <div v-if="showAvatarModal" class="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center z-50 p-4">
+    <div v-if="showAvatarModal" :style="{ display: showAvatarModal ? 'flex' : 'none' }" style="display: none;"
+      class="fixed inset-0 bg-black/85 backdrop-blur-md items-center justify-center z-50 p-4">
       <div class="glass-panel max-w-2xl w-full rounded-2xl p-6 shadow-2xl border border-indigo-500/40 space-y-4 max-h-[90vh] flex flex-col">
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
           <div>
@@ -973,7 +982,7 @@ HTML_TEMPLATE = """
               <span>Kho Avatar Người Thật Sắc Nét HD</span>
             </h3>
             <p class="text-xs text-slate-400 mt-0.5">
-              Đang chọn cho: <strong class="text-indigo-300">{{ avatarTarget.type === 'author' ? 'Tác giả bài đăng' : ('Bình luận #' + (avatarTarget.index + 1)) }}</strong>
+              Đang chọn cho: <strong class="text-indigo-300">{{ (avatarTarget && avatarTarget.type === 'author') ? 'Tác giả bài đăng' : ('Bình luận #' + (((avatarTarget && avatarTarget.index) || 0) + 1)) }}</strong>
             </p>
           </div>
           <button @click="showAvatarModal = false" class="text-slate-400 hover:text-white p-1 rounded-lg">
@@ -1028,7 +1037,20 @@ HTML_TEMPLATE = """
           cardTimestamp: Date.now(),
           showAvatarModal: false,
           avatarTarget: { type: 'author', index: 0 },
-          avatarGallery: [],
+          avatarGallery: [
+            { id: "female_office_1.jpg", label: "Chị Trưởng Phòng", sub: "Nữ Công Sở #1", category: "cong_so", url: "/api/avatar_file/female_office_1.jpg" },
+            { id: "female_office_2.jpg", label: "Nữ Văn Phòng", sub: "Nữ Công Sở #2", category: "cong_so", url: "/api/avatar_file/female_office_2.jpg" },
+            { id: "female_office_3.jpg", label: "Nữ Chuyên Viên", sub: "Nữ Công Sở #3", category: "cong_so", url: "/api/avatar_file/female_office_3.jpg" },
+            { id: "male_office_1.jpg", label: "Anh Quản Lý", sub: "Nam Công Sở #1", category: "cong_so", url: "/api/avatar_file/male_office_1.jpg" },
+            { id: "male_office_2.jpg", label: "Nam Nhân Viên IT", sub: "Nam Công Sở #2", category: "cong_so", url: "/api/avatar_file/male_office_2.jpg" },
+            { id: "male_office_3.jpg", label: "Nam Chuyên Viên Dự Án", sub: "Nam Công Sở #3", category: "cong_so", url: "/api/avatar_file/male_office_3.jpg" },
+            { id: "female_student_1.jpg", label: "Bạn Nữ Gen Z", sub: "Sinh Viên #1", category: "sinh_vien", url: "/api/avatar_file/female_student_1.jpg" },
+            { id: "female_student_2.jpg", label: "Nữ Sinh Viên", sub: "Sinh Viên #2", category: "sinh_vien", url: "/api/avatar_file/female_student_2.jpg" },
+            { id: "female_student_3.jpg", label: "Nữ Gen Z Năng Động", sub: "Sinh Viên #3", category: "sinh_vien", url: "/api/avatar_file/female_student_3.jpg" },
+            { id: "male_student_1.jpg", label: "Bạn Nam Gen Z", sub: "Sinh Viên #1", category: "sinh_vien", url: "/api/avatar_file/male_student_1.jpg" },
+            { id: "male_student_2.jpg", label: "Nam Sinh Viên", sub: "Sinh Viên #2", category: "sinh_vien", url: "/api/avatar_file/male_student_2.jpg" },
+            { id: "male_student_3.jpg", label: "Nam Gen Z Trẻ Trung", sub: "Sinh Viên #3", category: "sinh_vien", url: "/api/avatar_file/male_student_3.jpg" }
+          ],
           avatarTabFilter: 'all',
           trendingTopicsInfo: {
             date: '',
@@ -1741,6 +1763,16 @@ def api_save_cards():
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/static/js/<path:filename>")
+def serve_static_js(filename):
+    return send_from_directory(JS_DIR, filename)
+
+
+@app.route("/assets/js/<path:filename>")
+def serve_assets_js(filename):
+    return send_from_directory(JS_DIR, filename)
 
 
 @app.route("/api/card/<filename>")
