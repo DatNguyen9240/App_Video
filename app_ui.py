@@ -176,36 +176,32 @@ HTML_TEMPLATE = """
           </div>
 
           <div class="space-y-3">
-            <div class="flex items-center gap-2.5 flex-wrap">
+            <!-- Thanh nhập chủ đề (Rộng rãi, rõ ràng) -->
+            <div class="relative flex items-center">
+              <i class="fa-solid fa-magnifying-glass absolute left-4 text-slate-500 text-sm"></i>
               <input v-model="topicInput" @keyup.enter="generateScriptOnly" type="text"
-                placeholder="Nhập chủ đề muốn làm video (ví dụ: Chuyện công sở, phỏng vấn xin việc, người yêu cũ... hoặc chọn trend bên dưới)"
-                class="flex-1 min-w-[280px] glass-input rounded-xl px-4 py-3 text-sm focus:outline-none placeholder-slate-500 font-medium">
-              
+                placeholder="Nhập chủ đề muốn làm video (ví dụ: đèn ngủ, công sở, phỏng vấn, người yêu cũ...) hoặc chọn trend bên dưới..."
+                class="w-full glass-input rounded-xl pl-11 pr-4 py-3 text-sm focus:outline-none placeholder-slate-500 font-medium border border-slate-700/80 focus:border-indigo-500 transition">
+            </div>
+
+            <!-- Đúng 2 nút bấm hành động chính rõ ràng, cân đối -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <!-- Nút 1: Tạo kịch bản để duyệt và sửa trước -->
               <button @click="generateScriptOnly" :disabled="pipelineState.is_running || isGeneratingScript"
                 title="AI nghĩ kịch bản và tải vào form để bạn tự do đọc duyệt và sửa từng câu chữ trước khi dựng video"
-                class="px-4 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/30 transition flex items-center gap-2 disabled:opacity-50 cursor-pointer">
+                class="py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/30 transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer">
                 <i v-if="isGeneratingScript" class="fa-solid fa-spinner fa-spin text-sm"></i>
                 <i v-else class="fa-solid fa-pen-nib text-sm"></i>
-                <span>📝 AI TẠO KỊCH BẢN ĐỂ DUYỆT</span>
+                <span>📝 TẠO KỊCH BẢN ĐỂ DUYỆT</span>
               </button>
 
-              <!-- Nút 2: Cào bài viết thịnh hành thật trên Threads -->
-              <button @click="crawlTrendingThreads(false)" :disabled="pipelineState.is_running || isCrawlingTrending"
-                title="Quét bài viết thịnh hành thật trên Threads kèm avatar người thật đưa vào bảng duyệt"
-                class="px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/40 font-bold text-xs shadow-md transition flex items-center gap-2 disabled:opacity-50 cursor-pointer">
-                <i v-if="isCrawlingTrending" class="fa-solid fa-spinner fa-spin text-sm"></i>
-                <i v-else class="fa-solid fa-hashtag text-sm"></i>
-                <span>🌐 DÒ QUÉT THREADS</span>
-              </button>
-
-              <!-- Nút 3: Tự động 100% 1-Click từ A-Z -->
+              <!-- Nút 2: Tự động 100% 1-Click từ A-Z -->
               <button @click="createVideoOneClick" :disabled="pipelineState.is_running"
                 title="Tự động 100% từ A đến Z: AI kịch bản -> Avatar thật -> Render video 60 FPS ngay"
-                class="px-4 py-3 rounded-xl bg-gradient-to-r from-pink-600 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center gap-2 disabled:opacity-50 cursor-pointer">
+                class="py-3 px-4 rounded-xl bg-gradient-to-r from-pink-600 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer">
                 <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-sm"></i>
                 <i v-else class="fa-solid fa-bolt text-sm"></i>
-                <span>🚀 1-CLICK TỰ ĐỘNG</span>
+                <span>🚀 1-CLICK TỰ ĐỘNG XUẤT VIDEO</span>
               </button>
             </div>
 
@@ -224,12 +220,23 @@ HTML_TEMPLATE = """
                     (Cập nhật lúc: {{ trendingTopicsInfo.updated_at }})
                   </span>
                 </div>
-                <button @click="loadDailyTrendingTopics(true)" :disabled="isRefreshingTrends"
-                  class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-slate-700/60 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm"
-                  title="Quét lại xu hướng thịnh hành mới nhất trên Threads hôm nay">
-                  <i class="fa-solid fa-arrows-rotate text-indigo-400" :class="{'fa-spin': isRefreshingTrends}"></i>
-                  <span class="font-medium">{{ isRefreshingTrends ? 'Đang quét...' : 'Làm mới trend hôm nay' }}</span>
-                </button>
+                <div class="flex items-center gap-2">
+                  <!-- Tùy chọn cào bài thật Threads phụ trợ -->
+                  <button @click="crawlTrendingThreads(false)" :disabled="pipelineState.is_running || isCrawlingTrending"
+                    class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-cyan-300 hover:text-cyan-200 border border-cyan-500/30 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
+                    title="Cào bài viết thật từ Threads đưa vào bảng duyệt">
+                    <i v-if="isCrawlingTrending" class="fa-solid fa-spinner fa-spin text-[10px]"></i>
+                    <i v-else class="fa-solid fa-hashtag text-[10px]"></i>
+                    <span>Quét bài thật Threads</span>
+                  </button>
+
+                  <button @click="loadDailyTrendingTopics(true)" :disabled="isRefreshingTrends"
+                    class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-slate-700/60 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
+                    title="Quét lại xu hướng thịnh hành mới nhất trên Threads hôm nay">
+                    <i class="fa-solid fa-arrows-rotate text-indigo-400" :class="{'fa-spin': isRefreshingTrends}"></i>
+                    <span class="font-medium">{{ isRefreshingTrends ? 'Đang quét...' : 'Làm mới trend' }}</span>
+                  </button>
+                </div>
               </div>
 
               <div class="flex items-center gap-1.5 flex-wrap">
