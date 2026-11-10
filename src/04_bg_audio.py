@@ -87,10 +87,14 @@ def get_media_duration(filepath: str) -> float:
 def ensure_infinity_base_loop(theme: str = "neon") -> str:
     """
     Sinh video loop gốc 3D Infinity Tunnel chuẩn Native 1080x1920 @ 60 FPS siêu mượt.
-    Lưu vào assets/backgrounds/infinity_base.mp4 để tái sử dụng tức thì.
+    Lưu vào assets/backgrounds/infinity_base_{theme}.mp4 để tái sử dụng tức thì.
     """
     os.makedirs(BG_DIR, exist_ok=True)
     exe = get_ffmpeg_exe()
+
+    target_file = os.path.join(BG_DIR, f"infinity_base_{theme}.mp4")
+    if os.path.exists(target_file) and os.path.getsize(target_file) > 10000:
+        return target_file
 
     cfg_main = config_mod.load_config()
     layout = cfg_main.get("visual_layout", {})
@@ -123,7 +127,7 @@ def ensure_infinity_base_loop(theme: str = "neon") -> str:
         "-colorspace", "bt709",
         "-color_primaries", "bt709",
         "-color_trc", "bt709",
-        INFINITY_BASE_FILE
+        target_file
     ]
 
     proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -160,7 +164,7 @@ def ensure_infinity_base_loop(theme: str = "neon") -> str:
 
     proc.stdin.close()
     proc.wait()
-    return INFINITY_BASE_FILE
+    return target_file
 
 
 def generate_infinity_background(duration_sec: float, output_path: str, theme: str = "neon") -> str:
@@ -169,12 +173,12 @@ def generate_infinity_background(duration_sec: float, output_path: str, theme: s
     Tốc độ render siêu tốc (<0.5 giây), chuẩn Full HD 1080x1920!
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    ensure_infinity_base_loop(theme)
+    base_file = ensure_infinity_base_loop(theme)
 
-    print(f"  🌀 Đang tạo nền Infinity Tunnel vô cực ({duration_sec:.1f}s)...")
+    print(f"  🌀 Đang tạo nền Infinity Tunnel ({theme}) vô cực ({duration_sec:.1f}s)...")
     run_ffmpeg(
         "-stream_loop", "-1",
-        "-i", INFINITY_BASE_FILE,
+        "-i", base_file,
         "-t", f"{duration_sec:.2f}",
         "-c", "copy",
         output_path
@@ -218,16 +222,103 @@ def cut_background_video(duration_sec: float, output_path: str, bg_video_path: s
     return output_path
 
 
+def generate_split_screen_background(duration_sec: float, output_path: str) -> str:
+    """
+    Tạo video nền TikTok Split-Screen chuẩn viral:
+    - Nửa trên (0 đến 900px): Gameplay Minecraft/Parkour sắc nét 60 FPS.
+    - Đường chia đôi: Thanh LED dạ quang cyan/indigo cao cấp (4px).
+    - Nửa dưới (900 đến 1920px): Nền tối sang trọng (#090d16) để hiển thị thẻ Threads rõ nét.
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    exe = get_ffmpeg_exe()
+
+    videos = [f for f in os.listdir(BG_DIR) if f.lower().endswith((".mp4", ".mkv", ".mov")) and "base" not in f]
+    bg_video_path = os.path.join(BG_DIR, random.choice(videos)) if videos else None
+
+    if bg_video_path and os.path.exists(bg_video_path):
+        total_duration = get_media_duration(bg_video_path)
+        max_start = max(0.0, total_duration - duration_sec - 1.0)
+        start_sec = random.uniform(0.0, max_start) if max_start > 0 else 0.0
+
+        print(f"  🔥 Tạo nền TikTok Split-Screen từ gameplay (từ {start_sec:.1f}s, dài {duration_sec:.1f}s)...")
+        cmd = [
+            exe, "-y",
+            "-ss", str(start_sec),
+            "-t", f"{duration_sec:.2f}",
+            "-i", bg_video_path,
+            "-f", "lavfi",
+            "-i", "color=c=0x090d16:s=1080x1920:r=60",
+            "-filter_complex",
+            "[0:v]scale=1080:900:force_original_aspect_ratio=increase,crop=1080:900[top];"
+            "[1:v][top]overlay=0:0[bg];"
+            "[bg]drawbox=y=898:color=0x6366f1@0.85:width=1080:height=4:t=fill[out]",
+            "-map", "[out]",
+            "-t", f"{duration_sec:.2f}",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            output_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            return output_path
+
+    # Fallback nếu không có video gameplay
+    return generate_infinity_background(duration_sec, output_path, "neon")
+
+
+def generate_gradient_background(duration_sec: float, output_path: str, theme: str = "cyber") -> str:
+    """
+    Tạo video nền Gradient màu tĩnh cao cấp (Dark Cyberpunk hoặc Cozy Lofi).
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    exe = get_ffmpeg_exe()
+    color_hex = "0x090d16" if theme == "cyber" else "0x160e0a"
+
+    cmd = [
+        exe, "-y",
+        "-f", "lavfi",
+        "-i", f"color=c={color_hex}:s=1080x1920:r=60",
+        "-t", f"{duration_sec:.2f}",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        output_path
+    ]
+    subprocess.run(cmd, capture_output=True, text=True)
+    return output_path
+
+
 def prepare_background(duration_sec: float, output_path: str, mode: str = "infinity", theme: str = "neon") -> str:
     """
-    Chuẩn bị nền theo chế độ:
-    - mode = "infinity" (MẶC ĐỊNH): Đường hầm vô cực 3D thôi miên siêu đẹp & nhẹ!
-    - mode = "minecraft" (hoặc "video"): Dùng video gameplay trong assets/backgrounds/.
+    Chuẩn bị nền theo chế độ đa dạng:
+    - split_gameplay: TikTok Split-Screen (Nửa trên Gameplay 60FPS, Nửa dưới Thẻ Threads)
+    - infinity_neon / infinity: 3D Infinity Cyberpunk Neon
+    - infinity_dark: 3D Infinity Dark Luxury
+    - infinity_gold: 3D Infinity Golden Matrix
+    - minecraft / video: Gameplay toàn màn hình 9:16
+    - gradient_cyber: Nền tối Neon tĩnh cao cấp
+    - gradient_lofi: Nền cà phê Lofi ấm cúng
     """
-    if mode in ["infinity", "tunnel", "wormhole"]:
-        return generate_infinity_background(duration_sec, output_path, theme)
-    else:
+    m = (mode or "infinity").lower()
+    if m in ["split", "split_gameplay", "split_screen"]:
+        return generate_split_screen_background(duration_sec, output_path)
+    elif m in ["gradient_cyber", "cyber"]:
+        return generate_gradient_background(duration_sec, output_path, "cyber")
+    elif m in ["gradient_lofi", "lofi"]:
+        return generate_gradient_background(duration_sec, output_path, "lofi")
+    elif m in ["infinity_dark", "dark"]:
+        return generate_infinity_background(duration_sec, output_path, "dark")
+    elif m in ["infinity_gold", "gold"]:
+        return generate_infinity_background(duration_sec, output_path, "gold")
+    elif m in ["infinity_neon", "infinity", "tunnel", "wormhole"]:
+        return generate_infinity_background(duration_sec, output_path, "neon")
+    elif m in ["minecraft", "video", "parkour"]:
         return cut_background_video(duration_sec, output_path)
+    else:
+        return generate_infinity_background(duration_sec, output_path, theme)
 
 
 def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_music_path: str = None) -> str:

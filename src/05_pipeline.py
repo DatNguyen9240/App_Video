@@ -50,15 +50,26 @@ tts_mod     = load_module("tts", "03_tts.py")
 bg_mod      = load_module("bg_audio", "04_bg_audio.py")
 
 
-def build_timeline_with_emotional_pacing(post, timing: dict) -> tuple[list[dict], list[str], float, list[dict]]:
+def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str = None, bg_mode: str = None) -> tuple[list[dict], list[str], float, list[dict]]:
     """
     Tính mốc thời gian hiển thị từng thẻ, danh sách audio cần nối kèm khoảng lặng nhịp thở,
     SFX meme tại điểm rơi (ưu tiên video meme .mp4 trước PNG) và dữ liệu đồ thị cảm xúc cho Web UI.
+    Hỗ trợ bố cục đa dạng: split_screen (TikTok Split), center (truyền thống), bottom_story.
     """
     cfg = config_mod.load_config()
     layout = cfg.get("visual_layout", {})
 
-    post_y = layout.get("post_card_y", 240)
+    # Tùy biến toạ độ Y theo bố cục dựng video
+    mode_str = (bg_mode or "").lower()
+    preset_str = (layout_preset or "").lower()
+
+    if preset_str == "split_screen" or mode_str in ["split", "split_gameplay", "split_screen"]:
+        post_y = 940
+    elif preset_str == "bottom_story":
+        post_y = 1040
+    else:
+        post_y = layout.get("post_card_y", 240)
+
     card_w = layout.get("card_width", 960)
     card_gap = layout.get("comment_card_gap", 24)
     sticker_sz = layout.get("sticker_size", 260)
@@ -360,10 +371,12 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
 
 
 def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
-                 reset_tracker: bool = True, skip_cards_render: bool = False) -> str:
+                 reset_tracker: bool = True, skip_cards_render: bool = False,
+                 layout_preset: str = None) -> str:
     """
     Quy trình tự động hoàn chỉnh từ dữ liệu -> video thành phẩm chuẩn đồ thị cảm xúc.
     Đồng bộ và cập nhật liên tục sang tracker để giao diện Web UI hiển thị.
+    Hỗ trợ tùy biến bố cục video: split_screen, center, bottom_story.
     """
     cfg = config_mod.load_config()
     layout = cfg.get("visual_layout", {})
@@ -425,7 +438,7 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
 
         # BƯỚC 4: THIẾT KẾ ÂM THANH & NHỊP THỞ
         tracker.start_step("audio", "Đang đồng bộ timeline, chèn khoảng lặng kịch tính & mix nhạc nền...", 70)
-        timeline, audio_sequence, total_duration, emotional_arc_data = build_timeline_with_emotional_pacing(post, timing)
+        timeline, audio_sequence, total_duration, emotional_arc_data = build_timeline_with_emotional_pacing(post, timing, layout_preset=layout_preset, bg_mode=bg_mode)
         tracker.set_emotional_arc(emotional_arc_data)
 
         bg_video_out = os.path.join(FINAL_DIR, "_bg_temp.mp4")

@@ -28,6 +28,7 @@ FINAL_DIR  = os.path.join(OUTPUT_DIR, "final")
 CARDS_DIR  = os.path.join(OUTPUT_DIR, "cards")
 AUDIO_DIR  = os.path.join(OUTPUT_DIR, "audio")
 MEMES_DIR  = os.path.join(BASE_DIR, "assets", "memes")
+AVATARS_DIR = os.path.join(BASE_DIR, "assets", "avatars")
 ENV_PATH   = os.path.join(BASE_DIR, ".env")
 
 sys.path.insert(0, SRC_DIR)
@@ -158,26 +159,45 @@ HTML_TEMPLATE = """
       <div class="lg:col-span-7 flex flex-col space-y-6">
         
         <!-- Section 1: AI Prompt & Generator -->
-        <div class="glass-panel rounded-2xl p-5 shadow-xl">
-          <div class="flex items-center justify-between mb-3">
+        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+          <div class="flex items-center justify-between">
             <h2 class="text-sm font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-2">
-              <i class="fa-solid fa-robot"></i> 1. Sáng Tạo Nội Dung Bằng Gemini AI & Quét Trending Threads
+              <i class="fa-solid fa-wand-magic-sparkles"></i> 1. Sáng Tạo Kịch Bản Bằng Gemini AI & Quét Threads
             </h2>
             <span class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">gemini-3.5-flash</span>
           </div>
 
           <div class="space-y-3">
-            <div class="flex items-center gap-2">
-              <input v-model="topicInput" @keyup.enter="createVideoOneClick" type="text"
-                placeholder="Nhập chủ đề muốn làm video (ví dụ: Chuyện công sở, phỏng vấn xin việc, người yêu cũ... hoặc click tag bên dưới)"
-                class="flex-1 glass-input rounded-xl px-4 py-3.5 text-sm focus:outline-none placeholder-slate-500 font-medium">
+            <div class="flex items-center gap-2.5 flex-wrap">
+              <input v-model="topicInput" @keyup.enter="generateScriptOnly" type="text"
+                placeholder="Nhập chủ đề muốn làm video (ví dụ: Chuyện công sở, phỏng vấn xin việc, người yêu cũ... hoặc chọn trend bên dưới)"
+                class="flex-1 min-w-[280px] glass-input rounded-xl px-4 py-3 text-sm focus:outline-none placeholder-slate-500 font-medium">
               
+              <!-- Nút 1: Tạo kịch bản để duyệt và sửa trước -->
+              <button @click="generateScriptOnly" :disabled="pipelineState.is_running || isGeneratingScript"
+                title="AI nghĩ kịch bản và tải vào form để bạn tự do đọc duyệt và sửa từng câu chữ trước khi dựng video"
+                class="px-4 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/30 transition flex items-center gap-2 disabled:opacity-50 cursor-pointer">
+                <i v-if="isGeneratingScript" class="fa-solid fa-spinner fa-spin text-sm"></i>
+                <i v-else class="fa-solid fa-pen-nib text-sm"></i>
+                <span>📝 AI TẠO KỊCH BẢN ĐỂ DUYỆT</span>
+              </button>
+
+              <!-- Nút 2: Cào bài viết thịnh hành thật trên Threads -->
+              <button @click="crawlTrendingThreads(false)" :disabled="pipelineState.is_running || isCrawlingTrending"
+                title="Quét bài viết thịnh hành thật trên Threads kèm avatar người thật đưa vào bảng duyệt"
+                class="px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/40 font-bold text-xs shadow-md transition flex items-center gap-2 disabled:opacity-50 cursor-pointer">
+                <i v-if="isCrawlingTrending" class="fa-solid fa-spinner fa-spin text-sm"></i>
+                <i v-else class="fa-solid fa-hashtag text-sm"></i>
+                <span>🌐 DÒ QUÉT THREADS</span>
+              </button>
+
+              <!-- Nút 3: Tự động 100% 1-Click từ A-Z -->
               <button @click="createVideoOneClick" :disabled="pipelineState.is_running"
-                title="Tạo kịch bản -> Lấy Avatar thật trên Threads -> Render video Full HD 60 FPS từ A đến Z"
-                class="px-6 py-3.5 rounded-xl bg-gradient-to-r from-pink-600 via-rose-500 to-indigo-600 hover:opacity-95 transition text-sm font-extrabold shadow-xl shadow-pink-500/30 flex items-center gap-2.5 disabled:opacity-50 text-white whitespace-nowrap cursor-pointer">
-                <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-base"></i>
-                <i v-else class="fa-solid fa-wand-magic-sparkles text-base"></i>
-                <span>🚀 TẠO VIDEO TỰ ĐỘNG (1-CLICK)</span>
+                title="Tự động 100% từ A đến Z: AI kịch bản -> Avatar thật -> Render video 60 FPS ngay"
+                class="px-4 py-3 rounded-xl bg-gradient-to-r from-pink-600 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center gap-2 disabled:opacity-50 cursor-pointer">
+                <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-sm"></i>
+                <i v-else class="fa-solid fa-bolt text-sm"></i>
+                <span>🚀 1-CLICK TỰ ĐỘNG</span>
               </button>
             </div>
 
@@ -220,55 +240,81 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
-        <!-- Section 2: Script Detail Editor -->
+        <!-- Section 2: Script Detail Editor & Review Workspace -->
         <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
-          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-            <h2 class="text-sm font-bold uppercase tracking-wider text-pink-400 flex items-center gap-2">
-              <i class="fa-solid fa-pen-to-square"></i> 2. Chi Tiết Bài Đăng & Phân Vai Diễn Xuất
-            </h2>
-            <button @click="refreshCardPreview" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
-              <i class="fa-solid fa-rotate-right"></i> Xem trước thẻ PNG
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+            <div>
+              <h2 class="text-sm font-bold uppercase tracking-wider text-pink-400 flex items-center gap-2">
+                <i class="fa-solid fa-pen-to-square"></i> 2. Bảng Soạn & Duyệt Kịch Bản (Tự Do Chỉnh Sửa)
+              </h2>
+              <p class="text-xs text-slate-400 mt-0.5">Sửa câu từ, chọn ảnh người thật, đổi Meme GIF/SFX, thêm hoặc xóa bình luận tùy ý.</p>
+            </div>
+            <button @click="refreshCardPreview" class="px-3 py-1.5 rounded-xl bg-indigo-600/80 hover:bg-indigo-600 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-sm cursor-pointer">
+              <i class="fa-solid fa-rotate-right"></i>
+              <span>Cập Nhật Thẻ Xem Trước</span>
             </button>
           </div>
 
           <!-- Post Editor (Author) -->
-          <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-2.5">
-            <div class="flex items-center gap-3">
-              <span class="text-xs font-bold text-slate-400">Tác giả bài đăng:</span>
-              <input v-model="post.username" type="text" class="glass-input rounded-lg px-2.5 py-1 text-xs w-36 font-semibold text-slate-200">
-              <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
-                <input type="checkbox" v-model="post.is_verified" class="rounded bg-slate-800 border-slate-700 text-indigo-500 focus:ring-0">
-                <span>Tích xanh ✓</span>
-              </label>
-              <div class="flex items-center gap-1.5 text-xs text-slate-400 ml-auto">
-                <span>Tim:</span>
-                <input v-model="post.likes" type="number" class="glass-input rounded-lg px-2 py-1 text-xs w-20 text-right">
+          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
+            <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
+              <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-feather-pointed"></i> BÀI ĐĂNG CỦA TÁC GIẢ (HOOK MỞ MÀN)
+              </span>
+              <div class="flex items-center gap-3">
+                <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+                  <input type="checkbox" v-model="post.is_verified" class="rounded bg-slate-800 border-slate-700 text-indigo-500 focus:ring-0">
+                  <span class="text-indigo-400 font-semibold">Tích xanh ✓</span>
+                </label>
+                <div class="flex items-center gap-1.5 text-xs text-slate-400">
+                  <i class="fa-regular fa-heart text-rose-500"></i>
+                  <input v-model="post.likes" type="number" class="glass-input rounded-lg px-2 py-0.5 text-xs w-20 text-right font-mono">
+                </div>
               </div>
             </div>
+
+            <div class="flex items-center gap-2.5">
+              <span class="text-xs text-slate-400 font-medium">Tên tác giả:</span>
+              <input v-model="post.username" type="text" class="glass-input rounded-lg px-2.5 py-1 text-xs w-44 font-semibold text-slate-200">
+            </div>
+
             <textarea v-model="post.content" rows="3"
-              class="w-full glass-input rounded-xl p-3 text-sm focus:outline-none placeholder-slate-500"
+              class="w-full glass-input rounded-xl p-3 text-sm focus:outline-none placeholder-slate-500 font-normal leading-relaxed"
               placeholder="Nội dung bài đăng chính..."></textarea>
             
-            <div class="flex items-center gap-2 pt-1 text-xs text-slate-400">
-              <i class="fa-solid fa-user-circle text-indigo-400"></i>
-              <span>Avatar người thật:</span>
-              <input v-model="post.avatar_url" type="text" placeholder="Dán link ảnh đại diện (tuỳ chọn) hoặc để trống để tự động lấy từ kho ảnh thật"
-                class="flex-1 glass-input rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-300">
+            <!-- Avatar Picker Row for Author -->
+            <div class="flex items-center gap-2.5 pt-1 text-xs flex-wrap">
+              <img :src="getAvatarThumb(post.avatar_url || post.avatar_path)" alt="Author Avatar"
+                class="w-8 h-8 rounded-full border-2 border-indigo-500/60 object-cover shadow-sm bg-slate-800">
+              <button @click="openAvatarModal('author')"
+                class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/40 text-xs font-semibold flex items-center gap-1.5 transition">
+                <i class="fa-solid fa-image-portrait"></i>
+                <span>📷 Chọn Avatar Người Thật</span>
+              </button>
+              <input v-model="post.avatar_url" type="text" placeholder="Dán link ảnh đại diện hoặc để trống để tự động lấy từ kho người thật"
+                class="flex-1 min-w-[200px] glass-input rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-300">
             </div>
           </div>
 
           <!-- Comments Editor -->
-          <div class="space-y-3">
+          <div class="space-y-3 pt-1">
             <div class="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wide">
-              <span>3 Bình luận tương tác (Tung hứng & Bẻ lái):</span>
-              <span class="text-[11px] text-indigo-400 font-normal">Tự động ngắt nghỉ & đổi giọng</span>
+              <span class="flex items-center gap-2 text-indigo-300">
+                <i class="fa-solid fa-comments"></i>
+                <span>Các Bình Luận Tương Tác & Bẻ Lái ({{ post.comments ? post.comments.length : 0 }} bình luận)</span>
+              </span>
+              <button @click="addComment"
+                class="px-3 py-1 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer">
+                <i class="fa-solid fa-plus"></i>
+                <span>➕ Thêm Bình Luận</span>
+              </button>
             </div>
             
             <div v-for="(cmt, idx) in post.comments" :key="idx"
-              class="p-3.5 rounded-xl bg-slate-900/40 border border-slate-800/60 space-y-2.5">
+              class="p-3.5 rounded-xl bg-slate-900/50 border border-slate-800/80 space-y-2.5">
               <div class="flex items-center gap-2.5 flex-wrap">
-                <span class="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 text-xs flex items-center justify-center font-bold">#{{ idx+1 }}</span>
-                <input v-model="cmt.username" type="text" placeholder="username" class="glass-input rounded-lg px-2.5 py-1 text-xs w-32 font-semibold">
+                <span class="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-300 text-xs flex items-center justify-center font-bold">#{{ idx+1 }}</span>
+                <input v-model="cmt.username" type="text" placeholder="username" class="glass-input rounded-lg px-2.5 py-1 text-xs w-32 font-semibold text-slate-200">
                 
                 <!-- Emotion Badge -->
                 <select v-model="cmt.emotion" class="glass-input rounded-lg px-2 py-1 text-xs bg-slate-800 text-indigo-300 font-medium">
@@ -279,9 +325,9 @@ HTML_TEMPLATE = """
                   <option value="insightful">✨ Thông minh</option>
                 </select>
 
-                <!-- SFX selector -->
-                <div class="flex items-center gap-1.5 ml-auto">
-                  <span class="text-xs text-slate-500">SFX:</span>
+                <!-- SFX & Meme selector (14 Gifs) -->
+                <div class="flex items-center gap-1.5 ml-auto flex-wrap">
+                  <span class="text-xs text-slate-500">Meme/SFX:</span>
                   <select v-model="cmt.sfx" class="glass-input rounded-lg px-2 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
                     <option value="none">Không SFX</option>
                     <option value="laugh">😂 Cười nghiêng ngả (laugh.gif)</option>
@@ -294,7 +340,17 @@ HTML_TEMPLATE = """
                     <option value="math">📐 Tính toán hoang mang (math.gif)</option>
                     <option value="applause">👏 Vỗ tay / Nâng ly (applause.gif)</option>
                     <option value="ting">✨ Ting nảy số thông minh (ting.gif)</option>
+                    <option value="awkward">😬 Ngại ngùng bối rối (awkward.gif)</option>
+                    <option value="facepalm">🤦 Đập trán bất lực (facepalm.gif)</option>
+                    <option value="shocked_cat">🙀 Mèo há hốc sốc (shocked_cat.gif)</option>
+                    <option value="dancing_cat">💃 Mèo nhảy ăn mừng (dancing_cat.gif)</option>
                   </select>
+
+                  <!-- Nút Xóa Comment nếu thừa -->
+                  <button @click="removeComment(idx)" title="Xóa bình luận này"
+                    class="w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-400 flex items-center justify-center transition border border-rose-500/30">
+                    <i class="fa-solid fa-trash-can text-xs"></i>
+                  </button>
                 </div>
               </div>
 
@@ -302,46 +358,79 @@ HTML_TEMPLATE = """
                 class="w-full glass-input rounded-xl p-2.5 text-xs focus:outline-none placeholder-slate-500"
                 :placeholder="'Bình luận ' + (idx+1) + '...'"></textarea>
 
-              <div class="flex items-center gap-2 pt-0.5 text-[11px] text-slate-500">
-                <i class="fa-regular fa-image text-slate-400"></i>
-                <span>Avatar:</span>
-                <input v-model="cmt.avatar_url" type="text" placeholder="Link ảnh đại diện (tuỳ chọn) hoặc để trống để tự động gán ảnh người thật"
-                  class="flex-1 glass-input rounded-lg px-2 py-0.5 text-[10px] font-mono text-slate-300">
+              <!-- Avatar Picker Row for Commenter -->
+              <div class="flex items-center gap-2 pt-0.5 text-[11px] text-slate-400 flex-wrap">
+                <img :src="getAvatarThumb(cmt.avatar_url || cmt.avatar_path)" alt="Comment Avatar"
+                  class="w-6 h-6 rounded-full border border-slate-700 object-cover bg-slate-800">
+                <button @click="openAvatarModal('comment', idx)"
+                  class="px-2.5 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/30 text-[11px] font-semibold flex items-center gap-1 transition">
+                  <i class="fa-solid fa-image-portrait"></i>
+                  <span>📷 Chọn Avatar</span>
+                </button>
+                <input v-model="cmt.avatar_url" type="text" placeholder="Link ảnh hoặc để trống để gán ảnh thật"
+                  class="flex-1 min-w-[180px] glass-input rounded-lg px-2 py-0.5 text-[10px] font-mono text-slate-300">
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Section 3: Studio Settings -->
+        <!-- Section 3: Phong Cách Dựng Video & Bố Cục Đa Dạng -->
         <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
-          <h2 class="text-sm font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
-            <i class="fa-solid fa-sliders"></i> 3. Cài Đặt Video & Nền 3D
-          </h2>
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h2 class="text-sm font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
+              <i class="fa-solid fa-sliders"></i> 3. Phong Cách Dựng Video & Bố Cục (Đa Dạng Hóa)
+            </h2>
+            <span class="text-xs text-slate-400">Tùy biến chuẩn TikTok & Reels</span>
+          </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <!-- Chế độ nền -->
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <!-- Bố cục video (Layout Presets) -->
             <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300">Chế độ nền video:</label>
-              <select v-model="settings.bg_mode" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800">
-                <option value="infinity">🌀 3D Infinity Tunnel (Vô cực)</option>
-                <option value="minecraft">🎮 Minecraft Parkour</option>
-                <option value="gradient">🎨 Nền màu Gradient nhẹ</option>
+              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-table-columns text-indigo-400"></i> Bố cục khung hình:
+              </label>
+              <select v-model="settings.layout_preset" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                <option value="split_screen">📱 TikTok Split-Screen (Hot nhất)</option>
+                <option value="center">🎯 Center Focus (Chính giữa)</option>
+                <option value="bottom_story">📖 Storyteller (Góc dưới tối giản)</option>
+              </select>
+            </div>
+
+            <!-- Chế độ nền video -->
+            <div class="space-y-1.5">
+              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-film text-pink-400"></i> Chế độ nền video:
+              </label>
+              <select v-model="settings.bg_mode" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                <option value="split_gameplay">🔥 Split (Gameplay 60FPS + Thẻ dưới)</option>
+                <option value="minecraft">🎮 Minecraft Parkour Full 9:16</option>
+                <option value="infinity_neon">🌀 3D Infinity Cyberpunk (Neon)</option>
+                <option value="infinity_dark">🌑 3D Infinity Dark Luxury (Kim loại)</option>
+                <option value="infinity_gold">✨ 3D Infinity Golden Matrix (Vàng)</option>
+                <option value="gradient_cyber">🌌 Gradient Dark Cyberpunk (Tĩnh)</option>
+                <option value="gradient_lofi">☕ Gradient Lofi Cozy (Ấm cúng)</option>
               </select>
             </div>
 
             <!-- Giao diện thẻ -->
             <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300">Giao diện thẻ Threads:</label>
-              <select v-model="settings.card_theme" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800">
+              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-palette text-amber-400"></i> Giao diện thẻ Threads:
+              </label>
+              <select v-model="settings.card_theme" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
                 <option value="light">☀️ Sáng (Chuẩn Threads thật 100%)</option>
-                <option value="dark">🌙 Tối (Dark Mode)</option>
+                <option value="dark">🌙 Tối (Dark Mode OLED)</option>
+                <option value="glass">🔮 Glassmorphism (Kính mờ viền sáng)</option>
+                <option value="cyber_neon">⚡ Cyber Neon (Viền hồng dạ quang)</option>
               </select>
             </div>
 
             <!-- Giọng đọc tác giả -->
             <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300">Giọng đọc dẫn chuyện:</label>
-              <select v-model="settings.voice" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800">
+              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc dẫn chuyện:
+              </label>
+              <select v-model="settings.voice" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
                 <option value="vi-VN-NamMinhNeural">🎙️ Nam Minh (Nam trầm ấm)</option>
                 <option value="vi-VN-HoaiMyNeural">🎙️ Hoài My (Nữ truyền cảm)</option>
               </select>
@@ -349,14 +438,17 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
-        <!-- Big Render Action Button -->
+        <!-- Big Render Action Button: Duyệt Kịch Bản & Render Ngay -->
         <div>
           <button @click="startRender" :disabled="pipelineState.is_running"
-            class="w-full py-4 rounded-2xl bg-gradient-to-r from-brand-600 via-indigo-500 to-pink-500 hover:opacity-95 transition font-extrabold text-base shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-3 disabled:opacity-50">
+            class="w-full py-4 rounded-2xl bg-gradient-to-r from-brand-600 via-indigo-500 to-pink-500 hover:opacity-95 transition font-extrabold text-base shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-3 disabled:opacity-50 text-white cursor-pointer">
             <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-xl"></i>
-            <i v-else class="fa-solid fa-film text-xl"></i>
-            <span>{{ pipelineState.is_running ? '⏳ ' + pipelineState.message : '🚀 RENDER VIDEO FULL HD (1080x1920) NGAY' }}</span>
+            <i v-else class="fa-solid fa-circle-check text-xl text-emerald-300"></i>
+            <span>{{ pipelineState.is_running ? '⏳ ' + pipelineState.message : '🚀 DUYỆT KỊCH BẢN & BẮT ĐẦU DỰNG VIDEO (RENDER NGAY)' }}</span>
           </button>
+          <p class="text-center text-[11px] text-slate-500 mt-2">
+            Hệ thống sẽ lấy chính xác kịch bản và phong cách dựng video bạn vừa duyệt để xuất file 60 FPS chuẩn Studio.
+          </p>
         </div>
 
       </div>
@@ -416,12 +508,30 @@ HTML_TEMPLATE = """
           </div>
 
           <!-- Cards Preview Display -->
-          <div v-show="previewMode === 'cards'" class="w-full space-y-3 max-h-[620px] overflow-y-auto pr-1">
-            <div class="text-xs text-slate-400 font-semibold">Thẻ bài viết:</div>
-            <img :src="'/api/card/post.png?t=' + cardTimestamp" alt="Post Card" class="w-full rounded-xl shadow-md border border-slate-700/40">
+          <div v-show="previewMode === 'cards'" class="w-full space-y-4 max-h-[640px] overflow-y-auto pr-1">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                <i class="fa-solid fa-layer-group"></i> Xem trước các thẻ Threads (PNG)
+              </span>
+              <button @click="refreshCardPreview" class="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
+                <i class="fa-solid fa-arrows-rotate"></i> Cập nhật thẻ
+              </button>
+            </div>
+
+            <!-- Thẻ Post chính -->
+            <div class="space-y-1">
+              <div class="text-[11px] text-slate-400 font-medium">Thẻ bài viết của tác giả:</div>
+              <img :src="'/api/card/post.png?t=' + cardTimestamp" alt="Post Card" class="w-full rounded-xl shadow-md border border-slate-700/60">
+            </div>
             
-            <div class="text-xs text-slate-400 font-semibold pt-2">Thẻ bình luận 1:</div>
-            <img :src="'/api/card/comment_1.png?t=' + cardTimestamp" alt="Comment 1" class="w-full rounded-xl shadow-md border border-slate-700/40">
+            <!-- Danh sách thẻ các bình luận -->
+            <div v-for="(cmt, idx) in post.comments" :key="idx" class="space-y-1 pt-1">
+              <div class="text-[11px] text-slate-400 font-medium flex items-center justify-between">
+                <span>Thẻ bình luận #{{ idx + 1 }} (@{{ cmt.username }}):</span>
+                <span class="text-[10px] text-slate-500 font-mono">{{ cmt.emotion }} • {{ cmt.sfx }}</span>
+              </div>
+              <img :src="'/api/card/comment_' + (idx + 1) + '.png?t=' + cardTimestamp" :alt="'Comment ' + (idx + 1)" class="w-full rounded-xl shadow-md border border-slate-700/60">
+            </div>
           </div>
         </div>
 
@@ -853,6 +963,55 @@ HTML_TEMPLATE = """
       </div>
     </main>
 
+    <!-- Modal Chọn Avatar Người Thật Trực Quan -->
+    <div v-if="showAvatarModal" class="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center z-50 p-4">
+      <div class="glass-panel max-w-2xl w-full rounded-2xl p-6 shadow-2xl border border-indigo-500/40 space-y-4 max-h-[90vh] flex flex-col">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-image-portrait text-indigo-400"></i>
+              <span>Kho Avatar Người Thật Sắc Nét HD</span>
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">
+              Đang chọn cho: <strong class="text-indigo-300">{{ avatarTarget.type === 'author' ? 'Tác giả bài đăng' : ('Bình luận #' + (avatarTarget.index + 1)) }}</strong>
+            </p>
+          </div>
+          <button @click="showAvatarModal = false" class="text-slate-400 hover:text-white p-1 rounded-lg">
+            <i class="fa-solid fa-xmark text-lg"></i>
+          </button>
+        </div>
+
+        <!-- Filter Tabs -->
+        <div class="flex items-center gap-2 text-xs">
+          <button @click="avatarTabFilter = 'all'" :class="avatarTabFilter === 'all' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'bg-slate-800 text-slate-400 hover:text-slate-200'" class="px-3.5 py-1.5 rounded-lg transition">
+            Tất Cả (12)
+          </button>
+          <button @click="avatarTabFilter = 'cong_so'" :class="avatarTabFilter === 'cong_so' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'bg-slate-800 text-slate-400 hover:text-slate-200'" class="px-3.5 py-1.5 rounded-lg transition flex items-center gap-1.5">
+            <i class="fa-solid fa-briefcase"></i> Công Sở / Văn Phòng (6)
+          </button>
+          <button @click="avatarTabFilter = 'sinh_vien'" :class="avatarTabFilter === 'sinh_vien' ? 'bg-indigo-600 text-white font-bold shadow-md' : 'bg-slate-800 text-slate-400 hover:text-slate-200'" class="px-3.5 py-1.5 rounded-lg transition flex items-center gap-1.5">
+            <i class="fa-solid fa-graduation-cap"></i> Sinh Viên / Gen Z (6)
+          </button>
+        </div>
+
+        <!-- Avatar Grid -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 overflow-y-auto p-1 flex-1">
+          <div v-for="av in filteredAvatars" :key="av.id" @click="selectAvatar(av)"
+            class="p-3 rounded-xl bg-slate-800/60 hover:bg-indigo-950/70 border border-slate-700/60 hover:border-indigo-400 transition cursor-pointer flex flex-col items-center text-center group">
+            <img :src="av.url" :alt="av.label"
+              class="w-16 h-16 rounded-full object-cover border-2 border-slate-700 group-hover:border-indigo-400 group-hover:scale-105 transition shadow-lg">
+            <div class="text-xs font-semibold text-slate-200 mt-2.5 group-hover:text-indigo-300">{{ av.label }}</div>
+            <div class="text-[10px] text-slate-400 mt-0.5">{{ av.sub }}</div>
+          </div>
+        </div>
+
+        <div class="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-500">
+          <span>Click vào ảnh bất kỳ để chọn và tự động cập nhật thẻ</span>
+          <button @click="showAvatarModal = false" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">Đóng</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -865,8 +1024,12 @@ HTML_TEMPLATE = """
           topicInput: '',
           isGeneratingScript: false,
           isCrawlingTrending: false,
-          previewMode: 'video',
+          previewMode: 'cards',
           cardTimestamp: Date.now(),
+          showAvatarModal: false,
+          avatarTarget: { type: 'author', index: 0 },
+          avatarGallery: [],
+          avatarTabFilter: 'all',
           trendingTopicsInfo: {
             date: '',
             date_display: '',
@@ -886,7 +1049,8 @@ HTML_TEMPLATE = """
             comments: []
           },
           settings: {
-            bg_mode: 'infinity',
+            layout_preset: 'split_screen',
+            bg_mode: 'split_gameplay',
             card_theme: 'light',
             voice: 'vi-VN-NamMinhNeural'
           },
@@ -906,12 +1070,19 @@ HTML_TEMPLATE = """
           pollTimer: null
         }
       },
+      computed: {
+        filteredAvatars() {
+          if (this.avatarTabFilter === 'all') return this.avatarGallery;
+          return this.avatarGallery.filter(a => a.category === this.avatarTabFilter);
+        }
+      },
       mounted() {
         this.loadSettings();
         this.loadCurrentScript();
         this.loadLatestVideo();
         this.loadDailyTrendingTopics(false);
         this.loadDirectorConfig();
+        this.loadAvatarGallery();
         this.startStatusPolling();
       },
       beforeUnmount() {
@@ -973,16 +1144,81 @@ HTML_TEMPLATE = """
             alert('Lỗi: ' + e);
           }
         },
+        getAvatarThumb(av) {
+          if (!av) return '/api/avatar_file/female_office_1.jpg';
+          if (av.startsWith('http://') || av.startsWith('https://')) return av;
+          const clean = av.replace(/\\/g, '/').split('/').pop();
+          if (clean.endsWith('.jpg') || clean.endsWith('.png') || clean.endsWith('.jpeg')) {
+            return '/api/avatar_file/' + clean;
+          }
+          return '/api/avatar_file/female_office_1.jpg';
+        },
+        async loadAvatarGallery() {
+          try {
+            const res = await fetch('/api/avatar_gallery');
+            const data = await res.json();
+            if (data.avatars) {
+              this.avatarGallery = data.avatars;
+            }
+          } catch(e) {}
+        },
+        openAvatarModal(targetType, commentIndex = 0) {
+          this.avatarTarget = { type: targetType, index: commentIndex };
+          this.showAvatarModal = true;
+          if (!this.avatarGallery || this.avatarGallery.length === 0) {
+            this.loadAvatarGallery();
+          }
+        },
+        selectAvatar(avatar) {
+          if (this.avatarTarget.type === 'author') {
+            this.post.avatar_url = avatar.id;
+          } else if (this.avatarTarget.type === 'comment') {
+            if (this.post.comments && this.post.comments[this.avatarTarget.index]) {
+              this.post.comments[this.avatarTarget.index].avatar_url = avatar.id;
+            }
+          }
+          this.showAvatarModal = false;
+          this.refreshCardPreview();
+        },
+        addComment() {
+          if (!this.post.comments) this.post.comments = [];
+          const idx = this.post.comments.length + 1;
+          const sfxOptions = ['laugh', 'boom', 'bruh', 'shock', 'huh', 'side_eye', 'clown', 'math', 'applause', 'ting'];
+          const pickedSfx = sfxOptions[Math.floor(Math.random() * sfxOptions.length)];
+          this.post.comments.push({
+            username: `user_${Math.floor(1000 + Math.random() * 9000)}`,
+            content: `Bình luận tương tác số ${idx}...`,
+            likes: 1200 + idx * 350,
+            avatar_path: '',
+            avatar_url: '',
+            sfx: pickedSfx,
+            emotion: 'funny'
+          });
+          this.refreshCardPreview();
+        },
+        removeComment(idx) {
+          if (this.post.comments && this.post.comments.length > 1) {
+            this.post.comments.splice(idx, 1);
+            this.refreshCardPreview();
+          } else {
+            alert('Cần giữ lại ít nhất 1 bình luận tương tác!');
+          }
+        },
+        async generateScriptOnly() {
+          await this.generateScript();
+          this.currentTab = 'studio';
+          this.previewMode = 'cards';
+        },
         pickTopic(t) {
           this.topicInput = t;
-          this.createVideoOneClick();
+          this.generateScriptOnly();
         },
         async crawlAndRenderVideo() {
           await this.createVideoOneClick();
         },
         async crawlTrendingThreads(autoRender = false) {
           this.isCrawlingTrending = true;
-          this.currentTab = 'pipeline';
+          if (autoRender) this.currentTab = 'pipeline';
           try {
             const res = await fetch('/api/crawl_trending_threads', {
               method: 'POST',
@@ -1013,7 +1249,8 @@ HTML_TEMPLATE = """
           try {
             const res = await fetch('/api/settings');
             const data = await res.json();
-            this.settings.bg_mode = data.bg_mode || 'infinity';
+            this.settings.layout_preset = data.layout_preset || 'split_screen';
+            this.settings.bg_mode = data.bg_mode || 'split_gameplay';
             this.settings.card_theme = data.card_theme || 'light';
             this.settings.voice = data.voice || 'vi-VN-NamMinhNeural';
           } catch(e) {}
@@ -1208,7 +1445,8 @@ def api_reset_director_config():
 def api_settings():
     if request.method == "POST":
         data = request.json
-        bg_mode = data.get("bg_mode", "infinity")
+        layout_preset = data.get("layout_preset", "split_screen")
+        bg_mode = data.get("bg_mode", "split_gameplay")
         card_theme = data.get("card_theme", "light")
         voice = data.get("voice", "vi-VN-NamMinhNeural")
 
@@ -1216,8 +1454,9 @@ def api_settings():
         if os.path.exists(ENV_PATH):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
-                    if not any(line.strip().startswith(k + "=") for k in ["BG_MODE", "CARD_THEME", "TTS_VOICE"]):
+                    if not any(line.strip().startswith(k + "=") for k in ["LAYOUT_PRESET", "BG_MODE", "CARD_THEME", "TTS_VOICE"]):
                         lines.append(line)
+        lines.append(f"LAYOUT_PRESET={layout_preset}\n")
         lines.append(f"BG_MODE={bg_mode}\n")
         lines.append(f"CARD_THEME={card_theme}\n")
         lines.append(f"TTS_VOICE={voice}\n")
@@ -1225,17 +1464,19 @@ def api_settings():
             f.writelines(lines)
         return jsonify({"success": True})
     else:
-        bg_mode = "infinity"
+        layout_preset = "split_screen"
+        bg_mode = "split_gameplay"
         card_theme = "light"
         voice = "vi-VN-NamMinhNeural"
         if os.path.exists(ENV_PATH):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("BG_MODE="): bg_mode = line.split("=", 1)[1].strip()
+                    if line.startswith("LAYOUT_PRESET="): layout_preset = line.split("=", 1)[1].strip()
+                    elif line.startswith("BG_MODE="): bg_mode = line.split("=", 1)[1].strip()
                     elif line.startswith("CARD_THEME="): card_theme = line.split("=", 1)[1].strip()
                     elif line.startswith("TTS_VOICE="): voice = line.split("=", 1)[1].strip()
-        return jsonify({"bg_mode": bg_mode, "card_theme": card_theme, "voice": voice})
+        return jsonify({"layout_preset": layout_preset, "bg_mode": bg_mode, "card_theme": card_theme, "voice": voice})
 
 
 @app.route("/api/script", methods=["GET"])
@@ -1378,7 +1619,8 @@ def api_create_video_one_click():
     data = request.json or {}
     topic = data.get("topic", "").strip() or None
     sets = data.get("settings", {})
-    bg_mode = sets.get("bg_mode", "infinity")
+    layout_preset = sets.get("layout_preset", "split_screen")
+    bg_mode = sets.get("bg_mode", "split_gameplay")
     card_theme = sets.get("card_theme", "light")
 
     def _full_video_worker():
@@ -1410,7 +1652,7 @@ def api_create_video_one_click():
             tracker.finish_step("cards")
 
             # BƯỚC 3 -> 6: CHẠY TIẾP ĐỂ DỰNG VIDEO THÀNH PHẨM (TTS, AUDIO, COMPOSITE, EXPORT)
-            pipeline_mod.run_pipeline(post, bg_mode=bg_mode, card_theme=card_theme, reset_tracker=False, skip_cards_render=True)
+            pipeline_mod.run_pipeline(post, bg_mode=bg_mode, card_theme=card_theme, reset_tracker=False, skip_cards_render=True, layout_preset=layout_preset)
 
         except Exception as e:
             import traceback
@@ -1484,6 +1726,16 @@ def api_save_cards():
             )
             card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
 
+        # Dọn dẹp các ảnh comment cũ thừa nếu số lượng comment giảm
+        for old_file in glob.glob(os.path.join(CARDS_DIR, "comment_*.png")):
+            try:
+                base = os.path.basename(old_file)
+                num = int(base.replace("comment_", "").replace(".png", ""))
+                if num > len(p_data.get("comments", [])):
+                    os.remove(old_file)
+            except Exception:
+                pass
+
         return jsonify({"success": True})
     except Exception as e:
         import traceback
@@ -1501,10 +1753,35 @@ def get_meme_image(filename):
     return send_from_directory(MEMES_DIR, filename)
 
 
-def _async_render_worker(post_obj, bg_mode, card_theme):
+@app.route("/api/avatar_file/<filename>")
+def get_avatar_file(filename):
+    return send_from_directory(AVATARS_DIR, filename)
+
+
+@app.route("/api/avatar_gallery")
+def get_avatar_gallery():
+    """Danh sách 12 ảnh chân dung người thật sắc nét phân loại theo ngữ cảnh chủ đề."""
+    items = [
+        {"id": "female_office_1.jpg", "label": "Chị Trưởng Phòng", "sub": "Nữ Công Sở #1", "category": "cong_so", "url": "/api/avatar_file/female_office_1.jpg"},
+        {"id": "female_office_2.jpg", "label": "Nữ Văn Phòng", "sub": "Nữ Công Sở #2", "category": "cong_so", "url": "/api/avatar_file/female_office_2.jpg"},
+        {"id": "female_office_3.jpg", "label": "Nữ Chuyên Viên", "sub": "Nữ Công Sở #3", "category": "cong_so", "url": "/api/avatar_file/female_office_3.jpg"},
+        {"id": "male_office_1.jpg", "label": "Anh Quản Lý", "sub": "Nam Công Sở #1", "category": "cong_so", "url": "/api/avatar_file/male_office_1.jpg"},
+        {"id": "male_office_2.jpg", "label": "Nam Nhân Viên IT", "sub": "Nam Công Sở #2", "category": "cong_so", "url": "/api/avatar_file/male_office_2.jpg"},
+        {"id": "male_office_3.jpg", "label": "Nam Chuyên Viên Dự Án", "sub": "Nam Công Sở #3", "category": "cong_so", "url": "/api/avatar_file/male_office_3.jpg"},
+        {"id": "female_student_1.jpg", "label": "Bạn Nữ Gen Z", "sub": "Sinh Viên #1", "category": "sinh_vien", "url": "/api/avatar_file/female_student_1.jpg"},
+        {"id": "female_student_2.jpg", "label": "Nữ Sinh Viên", "sub": "Sinh Viên #2", "category": "sinh_vien", "url": "/api/avatar_file/female_student_2.jpg"},
+        {"id": "female_student_3.jpg", "label": "Nữ Gen Z Năng Động", "sub": "Sinh Viên #3", "category": "sinh_vien", "url": "/api/avatar_file/female_student_3.jpg"},
+        {"id": "male_student_1.jpg", "label": "Bạn Nam Gen Z", "sub": "Sinh Viên #1", "category": "sinh_vien", "url": "/api/avatar_file/male_student_1.jpg"},
+        {"id": "male_student_2.jpg", "label": "Nam Sinh Viên", "sub": "Sinh Viên #2", "category": "sinh_vien", "url": "/api/avatar_file/male_student_2.jpg"},
+        {"id": "male_student_3.jpg", "label": "Nam Gen Z Trẻ Trung", "sub": "Sinh Viên #3", "category": "sinh_vien", "url": "/api/avatar_file/male_student_3.jpg"}
+    ]
+    return jsonify({"success": True, "avatars": items})
+
+
+def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_screen"):
     """Hàm chạy nền cho pipeline để không bao giờ bị timeout trên browser."""
     try:
-        pipeline_mod.run_pipeline(post_obj, bg_mode=bg_mode, card_theme=card_theme)
+        pipeline_mod.run_pipeline(post_obj, bg_mode=bg_mode, card_theme=card_theme, layout_preset=layout_preset)
     except Exception as e:
         tracker.set_error(str(e))
 
@@ -1554,11 +1831,12 @@ def api_render_video():
             comments=comments
         )
 
-        bg_mode = sets.get("bg_mode", "infinity")
+        layout_preset = sets.get("layout_preset", "split_screen")
+        bg_mode = sets.get("bg_mode", "split_gameplay")
         card_theme = sets.get("card_theme", "light")
 
         # Khởi chạy quy trình render trong background thread
-        thread = threading.Thread(target=_async_render_worker, args=(post_obj, bg_mode, card_theme))
+        thread = threading.Thread(target=_async_render_worker, args=(post_obj, bg_mode, card_theme, layout_preset))
         thread.daemon = True
         thread.start()
 

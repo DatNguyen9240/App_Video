@@ -82,6 +82,30 @@ THEMES = {
         "action_icon":   (200, 200, 205),
         "action_text":   (190, 190, 195),
         "logo_color":    (255, 255, 255),
+    },
+    "glass": {
+        "card_bg":       (15,  23,  42),
+        "card_outline":  (99,  102, 241, 200),
+        "shadow":        (0,   0,   0,   120),
+        "text_primary":  (248, 250, 252),
+        "text_username": (255, 255, 255),
+        "text_meta":     (148, 163, 184),
+        "text_reply":    (165, 180, 252),
+        "action_icon":   (199, 210, 254),
+        "action_text":   (224, 231, 255),
+        "logo_color":    (255, 255, 255),
+    },
+    "cyber_neon": {
+        "card_bg":       (10,  10,  18),
+        "card_outline":  (236, 72,  153, 220),
+        "shadow":        (236, 72,  153, 60),
+        "text_primary":  (255, 255, 255),
+        "text_username": (34,  211, 238),
+        "text_meta":     (148, 163, 184),
+        "text_reply":    (244, 114, 182),
+        "action_icon":   (236, 72,  153),
+        "action_text":   (255, 255, 255),
+        "logo_color":    (255, 255, 255),
     }
 }
 
@@ -244,11 +268,13 @@ def get_realistic_avatar(username: str, size: int = AVATAR_SIZE, avatar_source: 
                     raw_img = Image.open(cache_path).convert("RGBA")
                 except Exception:
                     pass
-        elif os.path.exists(avatar_source):
-            try:
-                raw_img = Image.open(avatar_source).convert("RGBA")
-            except Exception:
-                pass
+        else:
+            cand_path = avatar_source if os.path.isabs(avatar_source) else os.path.join(AVATARS_DIR, avatar_source)
+            if os.path.exists(cand_path):
+                try:
+                    raw_img = Image.open(cand_path).convert("RGBA")
+                except Exception:
+                    pass
 
     # 2. Tự động chọn ảnh từ kho ảnh chân dung người thật (assets/avatars/real_*.jpg)
     if raw_img is None:
