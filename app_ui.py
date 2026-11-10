@@ -398,9 +398,9 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-table-columns text-indigo-400"></i> Bố cục khung hình:
               </label>
               <select v-model="settings.layout_preset" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="split_screen">📱 TikTok Split-Screen (Hot nhất)</option>
-                <option value="center">🎯 Center Focus (Chính giữa)</option>
-                <option value="bottom_story">📖 Storyteller (Góc dưới tối giản)</option>
+                <option value="center">🎯 Căn Giữa Chuẩn TikTok / Reels (Đẹp nhất, dễ đọc, không bị che)</option>
+                <option value="split_screen">📱 Nửa Trên Gameplay - Nửa Dưới Thẻ (TikTok Split-Screen)</option>
+                <option value="bottom_story">📖 Storyteller (Hơi thấp, tối giản)</option>
               </select>
             </div>
 
@@ -1071,7 +1071,7 @@ HTML_TEMPLATE = """
             comments: []
           },
           settings: {
-            layout_preset: 'split_screen',
+            layout_preset: 'center',
             bg_mode: 'split_gameplay',
             card_theme: 'light',
             voice: 'vi-VN-NamMinhNeural'
@@ -1278,7 +1278,7 @@ HTML_TEMPLATE = """
           try {
             const res = await fetch('/api/settings');
             const data = await res.json();
-            this.settings.layout_preset = data.layout_preset || 'split_screen';
+            this.settings.layout_preset = data.layout_preset || 'center';
             this.settings.bg_mode = data.bg_mode || 'split_gameplay';
             this.settings.card_theme = data.card_theme || 'light';
             this.settings.voice = data.voice || 'vi-VN-NamMinhNeural';
@@ -1474,7 +1474,7 @@ def api_reset_director_config():
 def api_settings():
     if request.method == "POST":
         data = request.json
-        layout_preset = data.get("layout_preset", "split_screen")
+        layout_preset = data.get("layout_preset", "center")
         bg_mode = data.get("bg_mode", "split_gameplay")
         card_theme = data.get("card_theme", "light")
         voice = data.get("voice", "vi-VN-NamMinhNeural")
@@ -1493,7 +1493,7 @@ def api_settings():
             f.writelines(lines)
         return jsonify({"success": True})
     else:
-        layout_preset = "split_screen"
+        layout_preset = "center"
         bg_mode = "split_gameplay"
         card_theme = "light"
         voice = "vi-VN-NamMinhNeural"
@@ -1648,7 +1648,7 @@ def api_create_video_one_click():
     data = request.json or {}
     topic = data.get("topic", "").strip() or None
     sets = data.get("settings", {})
-    layout_preset = sets.get("layout_preset", "split_screen")
+    layout_preset = sets.get("layout_preset", "center")
     bg_mode = sets.get("bg_mode", "split_gameplay")
     card_theme = sets.get("card_theme", "light")
 
@@ -1876,7 +1876,7 @@ def api_render_video():
             comments=comments
         )
 
-        layout_preset = sets.get("layout_preset", "split_screen")
+        layout_preset = sets.get("layout_preset", "center")
         bg_mode = sets.get("bg_mode", "split_gameplay")
         card_theme = sets.get("card_theme", "light")
 

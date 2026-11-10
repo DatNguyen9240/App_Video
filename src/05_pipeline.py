@@ -59,21 +59,53 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
     cfg = config_mod.load_config()
     layout = cfg.get("visual_layout", {})
 
-    # Tùy biến toạ độ Y theo bố cục dựng video
-    mode_str = (bg_mode or "").lower()
-    preset_str = (layout_preset or "").lower()
-
-    if preset_str == "split_screen" or mode_str in ["split", "split_gameplay", "split_screen"]:
-        post_y = 940
-    elif preset_str == "bottom_story":
-        post_y = 1040
-    else:
-        post_y = layout.get("post_card_y", 240)
-
     card_w = layout.get("card_width", 960)
     card_gap = layout.get("comment_card_gap", 24)
     sticker_sz = layout.get("sticker_size", 260)
     sticker_offset = layout.get("sticker_offset_y", 35)
+
+    # 1. Tính toán trước chiều cao thẻ để tự động căn chỉnh vào Vùng An Toàn (TikTok/Reels Safe-Zone)
+    post_path = os.path.join(CARDS_DIR, "post.png")
+    actual_post_h = 320
+    if os.path.exists(post_path):
+        try:
+            with Image.open(post_path) as p_img:
+                actual_post_h = p_img.height
+        except Exception:
+            pass
+
+    max_cmt_h = 280
+    for idx in range(1, len(post.comments) + 1):
+        c_path = os.path.join(CARDS_DIR, f"comment_{idx}.png")
+        if os.path.exists(c_path):
+            try:
+                with Image.open(c_path) as c_file:
+                    if c_file.height > max_cmt_h:
+                        max_cmt_h = c_file.height
+            except Exception:
+                pass
+
+    has_meme = any(getattr(c, "sfx", "none") != "none" for c in post.comments)
+    total_stack_h = actual_post_h + card_gap + max_cmt_h + (sticker_sz + sticker_offset if has_meme else 0)
+
+    # Đáy vùng an toàn TikTok/Reels/Shorts: tuyệt đối không vượt quá y = 1460 (tránh bị che bởi caption, username, avatar, nút like/share)
+    max_safe_bottom = 1460
+
+    mode_str = (bg_mode or "").lower()
+    preset_str = (layout_preset or "").lower()
+
+    if preset_str == "split_screen" or mode_str in ["split", "split_gameplay", "split_screen"]:
+        # Bố cục chia nửa màn hình: gameplay phía trên, thẻ phía dưới
+        target_y = 680
+        post_y = max(220, min(target_y, max_safe_bottom - total_stack_h))
+    elif preset_str == "bottom_story":
+        target_y = 750
+        post_y = max(220, min(target_y, max_safe_bottom - total_stack_h))
+    else:
+        # Bố cục Căn Giữa Chuẩn TikTok (Center Focus) - ĐẸP NHẤT, RÕ RÀNG NHẤT, DỄ ĐỌC TRÊN ĐIỆN THOẠI
+        post_y = layout.get("post_card_y", 240)
+        if post_y + total_stack_h > max_safe_bottom:
+            post_y = max(180, max_safe_bottom - total_stack_h)
 
     timeline = []
     audio_sequence = []
@@ -106,16 +138,6 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         "sfx": "none",
         "pause_ms": int(post_pause_after * 1000)
     })
-
-    # Tính chiều cao thực tế thẻ Post
-    post_path = os.path.join(CARDS_DIR, "post.png")
-    actual_post_h = 320
-    if os.path.exists(post_path):
-        try:
-            with Image.open(post_path) as p_img:
-                actual_post_h = p_img.height
-        except Exception:
-            pass
 
     actual_comment_y = post_y + actual_post_h + card_gap
     comment_cursor = cursor + post_dur + post_pause_after

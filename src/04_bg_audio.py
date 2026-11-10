@@ -249,9 +249,9 @@ def generate_split_screen_background(duration_sec: float, output_path: str) -> s
             "-f", "lavfi",
             "-i", "color=c=0x090d16:s=1080x1920:r=60",
             "-filter_complex",
-            "[0:v]scale=1080:900:force_original_aspect_ratio=increase,crop=1080:900[top];"
+            "[0:v]scale=1080:680:force_original_aspect_ratio=increase,crop=1080:680[top];"
             "[1:v][top]overlay=0:0[bg];"
-            "[bg]drawbox=y=898:color=0x6366f1@0.85:width=1080:height=4:t=fill[out]",
+            "[bg]drawbox=y=678:color=0x6366f1@0.85:width=1080:height=4:t=fill[out]",
             "-map", "[out]",
             "-t", f"{duration_sec:.2f}",
             "-c:v", "libx264",
