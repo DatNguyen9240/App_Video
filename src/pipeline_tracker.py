@@ -156,6 +156,17 @@ def set_emotional_arc(arc_data: list):
     log(f"📊 Đã cập nhật đồ thị cảm xúc ({len(arc_data)} phân đoạn).")
 
 
+def pause_for_review(message: str = "Đã chuẩn bị kịch bản & thẻ Threads hoàn tất. Sẵn sàng render video!"):
+    """Đánh dấu quy trình tạm dừng đợi người dùng duyệt kịch bản (is_running = False)."""
+    global _state
+    with _lock:
+        _state["is_running"] = False
+        _state["message"] = message
+        _state["current_step_id"] = "ready_to_render"
+        _state["current_step_title"] = "Sẵn sàng dựng video"
+    log(f"⏸️ CHỜ DUYỆT: {message}")
+
+
 def finish_pipeline(video_filename: str, caption: str, total_duration: float = 0.0):
     """Đánh dấu kết thúc toàn bộ quy trình thành công."""
     global _state

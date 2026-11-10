@@ -448,11 +448,11 @@ HTML_TEMPLATE = """
 
         <!-- Big Render Action Button: Duyệt Kịch Bản & Render Ngay -->
         <div>
-          <button @click="startRender" :disabled="pipelineState.is_running"
+          <button @click="startRender" :disabled="isRenderingVideo"
             class="w-full py-4 rounded-2xl bg-gradient-to-r from-brand-600 via-indigo-500 to-pink-500 hover:opacity-95 transition font-extrabold text-base shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-3 disabled:opacity-50 text-white cursor-pointer">
-            <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-xl"></i>
+            <i v-if="isRenderingVideo" class="fa-solid fa-spinner fa-spin text-xl"></i>
             <i v-else class="fa-solid fa-circle-check text-xl text-emerald-300"></i>
-            <span>{{ pipelineState.is_running ? '⏳ ' + pipelineState.message : '🚀 DUYỆT KỊCH BẢN & BẮT ĐẦU DỰNG VIDEO (RENDER NGAY)' }}</span>
+            <span>{{ isRenderingVideo ? ('⏳ ' + pipelineState.message) : '🚀 DUYỆT KỊCH BẢN & BẮT ĐẦU DỰNG VIDEO (RENDER NGAY)' }}</span>
           </button>
           <p class="text-center text-[11px] text-slate-500 mt-2">
             Hệ thống sẽ lấy chính xác kịch bản và phong cách dựng video bạn vừa duyệt để xuất file 60 FPS chuẩn Studio.
@@ -615,7 +615,7 @@ HTML_TEMPLATE = """
               <i class="fa-solid fa-pen-to-square text-indigo-400"></i>
               <span>Xem/Sửa Kịch Bản (Tab 1)</span>
             </button>
-            <button @click="startRender" :disabled="pipelineState.is_running"
+            <button @click="startRender" :disabled="isRenderingVideo"
               class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center gap-2 animate-pulse">
               <i class="fa-solid fa-play text-sm"></i>
               <span>BẤM RENDER VIDEO NGAY (BƯỚC 3 -> 6)</span>
@@ -631,7 +631,7 @@ HTML_TEMPLATE = """
               <span>Về Tab 1: Studio Sáng Tạo (Xem Kịch Bản & Thẻ)</span>
             </button>
           </div>
-          <button @click="startRender" :disabled="pipelineState.is_running"
+          <button @click="startRender" :disabled="isRenderingVideo"
             class="px-4 py-1.5 rounded-lg bg-gradient-to-r from-pink-600 to-indigo-600 hover:opacity-90 text-white font-bold transition flex items-center gap-2 shadow-md shadow-pink-500/20 disabled:opacity-50">
             <i class="fa-solid fa-play"></i>
             <span>Bấm Render Video Hoàn Chỉnh (60 FPS)</span>
@@ -1096,6 +1096,11 @@ HTML_TEMPLATE = """
         filteredAvatars() {
           if (this.avatarTabFilter === 'all') return this.avatarGallery;
           return this.avatarGallery.filter(a => a.category === this.avatarTabFilter);
+        },
+        isRenderingVideo() {
+          if (!this.pipelineState) return false;
+          const runningSteps = ['tts', 'audio', 'composite', 'export'];
+          return Boolean(this.pipelineState.is_running && runningSteps.includes(this.pipelineState.current_step_id));
         }
       },
       mounted() {
@@ -1538,7 +1543,7 @@ def api_generate_script():
 
         tracker.finish_step("cards")
         tracker.finish_step("script")
-        tracker.update_progress(35, "Đã tạo kịch bản & vẽ thẻ xem trước (Bước 2/6). Sẵn sàng render video!")
+        tracker.pause_for_review("Đã tạo kịch bản & vẽ thẻ xem trước (Bước 2/6). Sẵn sàng render video!")
 
         return jsonify({
             "success": True,
@@ -1604,7 +1609,7 @@ def api_crawl_trending_threads():
 
         tracker.finish_step("cards")
         tracker.finish_step("script")
-        tracker.update_progress(35, "Đã quét tin trending và ghép avatar người thật hoàn tất (Bước 2/6). Sẵn sàng render video!")
+        tracker.pause_for_review("Đã quét tin trending và ghép avatar người thật hoàn tất (Bước 2/6). Sẵn sàng render video!")
 
         return jsonify({
             "success": True,
@@ -1810,6 +1815,12 @@ def get_avatar_gallery():
         {"id": "male_student_3.jpg", "label": "Nam Gen Z Trẻ Trung", "sub": "Sinh Viên #3", "category": "sinh_vien", "url": "/api/avatar_file/male_student_3.jpg"}
     ]
     return jsonify({"success": True, "avatars": items})
+
+
+@app.route("/api/reset_tracker", methods=["POST", "GET"])
+def api_reset_tracker():
+    tracker.pause_for_review("Hệ thống đã sẵn sàng dựng video.")
+    return jsonify({"success": True})
 
 
 def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_screen"):
