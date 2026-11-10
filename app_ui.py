@@ -528,29 +528,39 @@ HTML_TEMPLATE = """
 
           <!-- Cards Preview Display -->
           <div v-show="previewMode === 'cards'" class="w-full space-y-4 max-h-[640px] overflow-y-auto pr-1">
-            <div class="flex items-center justify-between">
-              <span class="text-xs text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1.5">
-                <i class="fa-solid fa-layer-group"></i> Xem trước các thẻ Threads (PNG)
-              </span>
-              <button @click="refreshCardPreview" class="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
-                <i class="fa-solid fa-arrows-rotate"></i> Cập nhật thẻ
-              </button>
+            <div v-if="!post || !post.username || !post.content" class="text-center p-8 text-slate-500 text-xs space-y-2">
+              <i class="fa-solid fa-wand-magic-sparkles text-3xl text-indigo-400/60 mb-2"></i>
+              <div class="font-bold text-slate-300 text-sm">Chưa Có Kịch Bản</div>
+              <div class="text-slate-400 max-w-[280px] mx-auto leading-relaxed">
+                Nhập chủ đề ở khung bên trái rồi bấm <strong class="text-indigo-400">"AI Tạo Kịch Bản Để Duyệt"</strong> hoặc <strong class="text-pink-400">"Tự Động 1-Click"</strong> để tạo mới!
+              </div>
             </div>
 
-            <!-- Thẻ Post chính -->
-            <div class="space-y-1">
-              <div class="text-[11px] text-slate-400 font-medium">Thẻ bài viết của tác giả:</div>
-              <img :src="'/api/card/post.png?t=' + cardTimestamp" alt="Post Card" class="w-full rounded-xl shadow-md border border-slate-700/60">
-            </div>
-            
-            <!-- Danh sách thẻ các bình luận -->
-            <div v-for="(cmt, idx) in post.comments" :key="idx" class="space-y-1 pt-1">
-              <div class="text-[11px] text-slate-400 font-medium flex items-center justify-between">
-                <span>Thẻ bình luận #{{ idx + 1 }} (@{{ cmt.username }}):</span>
-                <span class="text-[10px] text-slate-500 font-mono">{{ cmt.emotion }} • {{ cmt.sfx }}</span>
+            <template v-else>
+              <div class="flex items-center justify-between">
+                <span class="text-xs text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                  <i class="fa-solid fa-layer-group"></i> Xem trước các thẻ Threads (PNG)
+                </span>
+                <button @click="refreshCardPreview" class="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
+                  <i class="fa-solid fa-arrows-rotate"></i> Cập nhật thẻ
+                </button>
               </div>
-              <img :src="'/api/card/comment_' + (idx + 1) + '.png?t=' + cardTimestamp" :alt="'Comment ' + (idx + 1)" class="w-full rounded-xl shadow-md border border-slate-700/60">
-            </div>
+
+              <!-- Thẻ Post chính -->
+              <div class="space-y-1">
+                <div class="text-[11px] text-slate-400 font-medium">Thẻ bài viết của tác giả:</div>
+                <img :src="'/api/card/post.png?t=' + cardTimestamp" alt="Post Card" class="w-full rounded-xl shadow-md border border-slate-700/60">
+              </div>
+              
+              <!-- Danh sách thẻ các bình luận -->
+              <div v-for="(cmt, idx) in post.comments" :key="idx" class="space-y-1 pt-1">
+                <div class="text-[11px] text-slate-400 font-medium flex items-center justify-between">
+                  <span>Thẻ bình luận #{{ idx + 1 }} (@{{ cmt.username }}):</span>
+                  <span class="text-[10px] text-slate-500 font-mono">{{ cmt.emotion }} • {{ cmt.sfx }}</span>
+                </div>
+                <img :src="'/api/card/comment_' + (idx + 1) + '.png?t=' + cardTimestamp" :alt="'Comment ' + (idx + 1)" class="w-full rounded-xl shadow-md border border-slate-700/60">
+              </div>
+            </template>
           </div>
         </div>
 
