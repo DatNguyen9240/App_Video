@@ -1,13 +1,11 @@
 """
-MODULE 1B: SINH BÀI ĐĂNG TỰ ĐỘNG BẰNG GOOGLE GEMINI AI
-======================================================
+MODULE 1B: SINH BÀI ĐĂNG TỰ ĐỘNG BẰNG GOOGLE GEMINI AI (ĐẠO DIỄN CẢM XÚC)
+==========================================================================
 Chức năng:
-  - Sử dụng Gemini API (gemini-2.5-flash trên v1beta) để sáng tạo câu chuyện hài Threads
-  - Tự động gán SFX (tiếng cười, vine boom, bruh) cho từng comment
-  - Tự động đọc và lưu API key vào file .env
-  - Trả về cấu trúc dữ liệu chuẩn để chuyển thẳng sang Pipeline làm video
-
-CÁCH DÙNG: python src/01_ai_content.py
+  - Sử dụng Gemini API (gemini-2.5-flash) để sáng tạo kịch bản Threads chuẩn đồ thị cảm xúc
+  - Tự động gán vai diễn, giọng đọc đa vai (Nam/Nữ), nhịp thở (pauses), và hiệu ứng SFX/Camera
+  - Không hardcode: Tải toàn bộ prompt, vai diễn và tham số từ src/config.py
+  - Hỗ trợ progress callback để cập nhật trực tiếp lên Tab Giám Sát Quy Trình
 """
 
 import os
@@ -15,16 +13,19 @@ import sys
 import json
 import random
 import re
-from typing import Literal
+from typing import Literal, Optional, Callable
 from pydantic import BaseModel, Field
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC_DIR  = os.path.join(BASE_DIR, "src")
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 OUT_DIR  = os.path.join(BASE_DIR, "output")
 
-sys.path.insert(0, os.path.join(BASE_DIR, "src"))
+sys.path.insert(0, SRC_DIR)
+import config as config_mod
 import importlib.util
-spec = importlib.util.spec_from_file_location("content_base", os.path.join(BASE_DIR, "src", "01_content.py"))
+
+spec = importlib.util.spec_from_file_location("content_base", os.path.join(SRC_DIR, "01_content.py"))
 content_base = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(content_base)
 
@@ -42,27 +43,38 @@ def clean_hex_color(c: str) -> str:
     return random.choice(PALETTE)
 
 
-# ─── ĐỊNH NGHĨA SCHEMA JSON CHO GEMINI ────────────────────────────────────────
+# ─── ĐỊNH NGHĨA SCHEMA JSON CHO GEMINI (CÓ METADATA ĐẠO DIỄN) ────────────────
 
 class CommentSchema(BaseModel):
     username: str = Field(description="Tên người dùng hài hước tiếng Việt hoặc Gen Z, ví dụ: hr_ngapnguoi, dev_khocnhe, an.tran99")
     content: str = Field(description="Bình luận tiếng Việt ngắn gọn, dí dỏm, bẻ lái hoặc châm chọc hài hước")
-    avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b, #ec4899)")
+    avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b)")
     likes: int = Field(default=4500, description="Lượt thích ước tính từ 1500 đến 25000")
-    sfx: Literal["laugh", "boom", "bruh", "ting"] = Field(
-        description="Hiệu ứng âm thanh phù hợp: 'laugh' cho câu buồn cười, 'boom' cho câu bẻ lái sốc, 'bruh' cho câu cạn lời bất lực, 'ting' cho câu thông minh"
+    sfx: Literal["laugh", "boom", "bruh", "ting", "none"] = Field(
+        description="SFX phù hợp: 'laugh' cho câu buồn cười, 'boom' cho cú bẻ lái sốc, 'bruh' cho cạn lời, 'ting' cho thông minh"
+    )
+    emotion: Literal["funny", "shocked", "awkward", "sarcastic", "insightful", "neutral"] = Field(
+        default="funny", description="Sắc thái cảm xúc của câu nói"
+    )
+    pause_before_ms: int = Field(default=250, description="Khoảng lặng trước khi nói tính bằng mili-giây (150-400ms)")
+    pause_after_ms: int = Field(default=350, description="Khoảng lặng sau khi dứt câu (300-600ms)")
+    camera_motion: Literal["none", "punch_in", "shake"] = Field(
+        default="none", description="Hiệu ứng chuyển động hình ảnh ('punch_in' phóng to nhẹ, 'shake' rung lắc khi sốc)"
     )
 
+
 class PostSchema(BaseModel):
-    username: str = Field(description="Tên tác giả bài viết, ví dụ: genz.tamsu, chuyen.congso, thanhmanh.dev")
-    content: str = Field(description="Câu chuyện Threads ngắn gọn 2-3 câu bằng tiếng Việt, hài hước đời thường, kết thúc có cú twist bất ngờ")
-    avatar_color: str = Field(default="#8b5cf6", description="Mã màu hex cho avatar tác giả (vd #8b5cf6)")
+    username: str = Field(description="Tên tác giả bài viết, ví dụ: genz.tamsu, chuyen.congso, dev_nghiep")
+    content: str = Field(description="Câu chuyện Threads ngắn gọn 2-3 câu, mở đầu bằng hook gây tò mò, tình huống trớ trêu có cú lừa")
+    avatar_color: str = Field(default="#8b5cf6", description="Mã màu hex cho avatar tác giả")
     is_verified: bool = Field(default=True, description="True nếu có tích xanh")
     likes: int = Field(default=35000, description="Lượt thích ước tính từ 15000 đến 85000")
-    video_title: str = Field(default="", description="Tiêu đề video ngắn gọn, giật gân hài hước, ví dụ: 'Bá khí dữ chưa bà con 😂'")
+    video_title: str = Field(default="", description="Tiêu đề video ngắn gọn, giật gân hài hước")
     video_caption: str = Field(default="", description="Đoạn caption đăng TikTok/Reels cuốn hút kèm câu hỏi kêu gọi bình luận")
-    hashtags: str = Field(default="", description="Chuỗi 5-7 hashtag viral, ví dụ: '#fyp #xuhuong #haihuoc #chuyencongso #threads #minecraftparkour'")
-    comments: list[CommentSchema] = Field(description="Danh sách chính xác 3 bình luận tiếng Việt hài hước nối tiếp câu chuyện")
+    hashtags: str = Field(default="", description="Chuỗi 5-7 hashtag viral")
+    emotional_arc: str = Field(default="Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời", description="Tóm tắt đường cong cảm xúc của video")
+    hook_energy: Literal["high", "intense", "curious"] = Field(default="high", description="Mức năng lượng mở màn")
+    comments: list[CommentSchema] = Field(description="Danh sách chính xác 3 bình luận tiếng Việt tạo thành nhịp điệu cảm xúc hoàn chỉnh")
 
 
 # ─── QUẢN LÝ GEMINI API KEY ──────────────────────────────────────────────────
@@ -126,73 +138,134 @@ def get_or_prompt_api_key() -> str:
 
 # ─── GỌI GEMINI ĐỂ SINH NỘI DUNG ──────────────────────────────────────────────
 
-def generate_story_with_gemini(topic: str = "", api_key: str = None) -> Post:
+def generate_story_with_gemini(
+    topic: str = "",
+    api_key: str = None,
+    progress_cb: Optional[Callable[[str, int], None]] = None
+) -> Post:
     """
-    Sử dụng Gemini API (gemini-2.5-flash trên v1beta) để tạo 1 bài viết Threads + 3 comments hài hước theo chủ đề.
+    Sử dụng Gemini API với cấu hình đạo diễn cảm xúc để tạo kịch bản Threads hoàn chỉnh.
+    Tự động phân vai giọng đọc (Multi-Voice Acting) và thiết lập khoảng lặng (Breathing Room).
     """
+    if progress_cb:
+        progress_cb("Khởi tạo kết nối Gemini AI...", 10)
+
     if not api_key:
         api_key = get_or_prompt_api_key()
+
+    cfg = config_mod.load_config()
+    ai_cfg = cfg.get("ai_director", {})
+    voice_cfg = cfg.get("voice_casting", {})
 
     from google import genai
     from google.genai import types
 
-    # Sử dụng api_version='v1beta' để hỗ trợ JSON Schema Mode đầy đủ
     client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
 
     if not topic:
-        topic = "tình huống hài hước đời sống ngẫu nhiên (công sở, người yêu cũ, trường học, gia đình, IT, giao thông)"
+        # Ưu tiên lấy từ danh sách trend Threads được fetch mỗi ngày
+        try:
+            radar_spec = importlib.util.spec_from_file_location("threads_radar", os.path.join(SRC_DIR, "threads_radar.py"))
+            radar_mod = importlib.util.module_from_spec(radar_spec)
+            radar_spec.loader.exec_module(radar_mod)
+            daily_res = radar_mod.get_daily_trending_topics()
+            if daily_res.get("topics"):
+                topic = random.choice(daily_res["topics"])
+        except Exception:
+            pass
 
-    system_instruction = (
-        "Bạn là một nhà sáng tạo nội dung hàng đầu trên Threads và TikTok tại Việt Nam. "
-        "Phong cách của bạn dí dỏm, châm biếm sâu cay, dùng từ ngữ tự nhiên đời thường của Gen Z và dân văn phòng Việt Nam. "
-        "Quy tắc quan trọng:\n"
-        "1. TOÀN BỘ NỘI DUNG BÀI ĐĂNG VÀ BÌNH LUẬN BẮT BUỘC BẰNG TIẾNG VIỆT.\n"
-        "2. Bài đăng: Ngắn gọn (tầm 2-3 câu), kể 1 tình huống thực tế có cú lừa hoặc kết thúc cay đắng hài hước.\n"
-        "3. Comment 1: Đùa cợt đồng cảm (sfx: 'laugh' hoặc 'ting').\n"
-        "4. Comment 2: Bẻ lái bất ngờ, châm chọc đỉnh cao (sfx: 'boom').\n"
-        "5. Comment 3: Câu chốt hạ cạn lời hoặc cười bất lực (sfx: 'bruh' hoặc 'laugh').\n"
-        "6. avatar_color phải là mã màu hex như #3b82f6, #ef4444, #10b981, #f59e0b, #8b5cf6."
+    if not topic:
+        topic = "câu chuyện thịnh hành và gây sốt nhất hôm nay trên mạng xã hội Threads"
+
+    system_instruction = ai_cfg.get("system_instruction", "")
+    model_primary = ai_cfg.get("model", "gemini-3.5-flash")
+    model_fallback = ai_cfg.get("fallback_model", "gemini-3.5-flash-lite")
+    temperature = float(ai_cfg.get("temperature", 0.88))
+
+    prompt = (
+        f"Hãy đóng vai Đạo diễn và sáng tạo 1 bài Threads bằng tiếng Việt theo Đồ thị Cảm xúc hoàn chỉnh.\n"
+        f"Chủ đề kịch bản: '{topic}'\n\n"
+        f"Yêu cầu:\n"
+        f"- Bài viết chính: Mở đầu gây tò mò, nêu tình huống có mâu thuẫn.\n"
+        f"- Bình luận 1: Đồng cảm hài hước, đẩy cao trào.\n"
+        f"- Bình luận 2: Cú bẻ lái sốc (punchline twist) không ngờ tới, gán sfx 'boom'.\n"
+        f"- Bình luận 3: Chốt hạ cạn lời hoặc dở khóc dở cười, gán sfx 'bruh' hoặc 'laugh'."
     )
 
-    prompt = f"Hãy sáng tạo 1 bài Threads bằng tiếng Việt thật hài hước, dí dỏm về chủ đề: '{topic}'"
+    if progress_cb:
+        progress_cb(f"Gemini AI ({model_primary}) đang sáng tạo kịch bản...", 30)
 
-    print(f"\n🤖 Đang gửi yêu cầu tới Gemini AI (chủ đề: {topic})...")
-
-    # Ưu tiên gemini-2.5-flash, fallback sang gemini-2.5-flash-lite
-    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    models_to_try = [model_primary, "gemini-flash-latest"]
     data = None
     last_err = None
 
+    import time
     for m in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=m,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    response_schema=PostSchema,
-                    temperature=0.9,
-                )
-            )
-            data = json.loads(response.text)
+        if data:
             break
-        except Exception as e:
-            last_err = e
-            continue
+        for attempt in range(1, 4):
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=PostSchema,
+                        temperature=temperature,
+                    )
+                )
+                data = json.loads(response.text)
+                break
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                is_transient = any(k in err_str for k in ["503", "429", "UNAVAILABLE", "high demand", "temporarily", "RESOURCE_EXHAUSTED", "overloaded"])
+                if is_transient and attempt < 3:
+                    wait_s = attempt * 2.0
+                    if progress_cb:
+                        progress_cb(f"Máy chủ AI ({m}) tải cao (503). Đang tự động thử lại sau {wait_s:.0f}s...", 35)
+                    time.sleep(wait_s)
+                else:
+                    break
 
     if not data:
         raise RuntimeError(f"Lỗi khi gọi Gemini API: {last_err}")
 
-    # Chuyển đổi sang dataclass Post & Comment của hệ thống
+    if progress_cb:
+        progress_cb("Phân bổ vai diễn & nhịp điệu cảm xúc...", 70)
+
+    # Phân bổ vai diễn giọng đọc từ cấu hình (không hardcode)
+    roles = voice_cfg.get("roles", {})
+    author_role = roles.get("author", {})
+
     comments = []
-    for c in data.get("comments", []):
+    raw_comments = data.get("comments", [])
+    for idx, c in enumerate(raw_comments, 1):
+        role_key = f"commenter_{idx}"
+        role_info = roles.get(role_key, {})
+
+        # Tự động điều chỉnh nhịp nếu cú sốc (boom)
+        sfx_val = c.get("sfx", "laugh")
+        camera_mot = c.get("camera_motion", "none")
+        if sfx_val == "boom" and camera_mot == "none":
+            camera_mot = "shake"
+        elif sfx_val in ["laugh", "bruh"] and camera_mot == "none":
+            camera_mot = "punch_in"
+
         comments.append(Comment(
-            username=c.get("username", "user"),
+            username=c.get("username", f"user_{idx}"),
             content=c.get("content", ""),
             avatar_color=clean_hex_color(c.get("avatar_color", "")),
             likes=c.get("likes", random.randint(2000, 15000)),
-            sfx=c.get("sfx", "laugh")
+            sfx=sfx_val,
+            emotion=c.get("emotion", "funny"),
+            voice_id=role_info.get("voice", voice_cfg.get("default_commenter_female_voice", "vi-VN-HoaiMyNeural")),
+            rate_offset=role_info.get("rate", "+10%"),
+            pitch_offset=role_info.get("pitch", "+0Hz"),
+            pause_before_ms=c.get("pause_before_ms", 250),
+            pause_after_ms=c.get("pause_after_ms", 350),
+            camera_motion=camera_mot
         ))
 
     post = Post(
@@ -204,37 +277,37 @@ def generate_story_with_gemini(topic: str = "", api_key: str = None) -> Post:
         video_title=data.get("video_title", ""),
         video_caption=data.get("video_caption", ""),
         hashtags=data.get("hashtags", ""),
+        emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
+        hook_energy=data.get("hook_energy", "high"),
+        voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "vi-VN-NamMinhNeural")),
+        rate_offset=author_role.get("rate", "+8%"),
+        pitch_offset=author_role.get("pitch", "+0Hz"),
+        pause_before_ms=150,
+        pause_after_ms=300,
+        camera_motion="none",
         comments=comments
     )
 
-    # Lưu kết quả ra file JSON
+    # Lưu kết quả ra file JSON mẫu
     out_json = os.path.join(OUT_DIR, "sample_post.json")
     content_base.save_to_json(post, out_json)
 
-    print("\n" + "=" * 55)
-    print("✨ GEMINI ĐÃ SÁNG TẠO XONG KỊCH BẢN!")
-    print("=" * 55)
-    print(f"📌 @{post.username}:")
+    if progress_cb:
+        progress_cb("Hoàn thành kịch bản cảm xúc!", 100)
+
+    print("\n" + "=" * 60)
+    print("✨ ĐẠO DIỄN GEMINI ĐÃ SÁNG TẠO XONG KỊCH BẢN CẢM XÚC!")
+    print("=" * 60)
+    print(f"📊 Đồ thị cảm xúc: {post.emotional_arc}")
+    print(f"📌 @{post.username} [{post.voice_id}]:")
     print(f"   {post.content}")
-    print(f"   ❤️ {post.likes:,} likes")
-    print("\n💬 Các bình luận:")
+    print("\n💬 Các bình luận phân vai:")
     for i, c in enumerate(post.comments, 1):
-        print(f"   [{i}] @{c.username} [{c.sfx.upper()}]:")
+        print(f"   [{i}] @{c.username} ({c.emotion.upper()}) [{c.voice_id} | SFX: {c.sfx.upper()} | Pause: {c.pause_after_ms}ms]:")
         print(f"       {c.content}")
 
     return post
 
 
 if __name__ == "__main__":
-    print("╔══════════════════════════════════════════════════════╗")
-    print("║      🤖 TẠO BÀI ĐĂNG HÀI HƯỚC BẰNG GEMINI AI        ║")
-    print("╚══════════════════════════════════════════════════════╝")
-    user_topic = input("\nNhập chủ đề bạn muốn (hoặc ấn Enter để AI tự nghĩ ngẫu nhiên): ").strip()
-    ai_post = generate_story_with_gemini(user_topic)
-
-    render_confirm = input("\n👉 Bạn có muốn RENDER VIDEO NGAY BÂY GIỜ không? [y/N]: ").strip().lower()
-    if render_confirm in ["y", "yes"]:
-        pipeline_spec = importlib.util.spec_from_file_location("p", os.path.join(BASE_DIR, "src", "05_pipeline.py"))
-        p_mod = importlib.util.module_from_spec(pipeline_spec)
-        pipeline_spec.loader.exec_module(p_mod)
-        p_mod.run_pipeline(ai_post)
+    ai_post = generate_story_with_gemini()

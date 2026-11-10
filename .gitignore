@@ -11,8 +11,9 @@ assets/backgrounds/*.avi
 !assets/backgrounds/.gitkeep
 
 # Thư mục xuất file sản phẩm (video render, audio tạm, ảnh card tạm)
-output/
+output/*
 !output/.gitkeep
+!output/**/.gitkeep
 
 # Python cache & virtual environment
 __pycache__/

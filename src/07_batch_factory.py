@@ -26,18 +26,11 @@ def load_mod(name, fname):
     spec.loader.exec_module(mod)
     return mod
 
+import config as config_mod
+
 ai_mod = load_mod("ai_content", "01_ai_content.py")
 pipeline_mod = load_mod("pipeline", "05_pipeline.py")
-
-DEFAULT_TOPICS = [
-    "Tình huống trớ trêu khi đi làm văn phòng và gặp sếp",
-    "Chuyện đi phỏng vấn xin việc gặp câu hỏi hóc búa của HR",
-    "Chuyện người yêu cũ đòi quay lại hoặc đòi nợ tiền ăn",
-    "Chuyện ở trọ sinh viên và chủ nhà trọ bá đạo",
-    "Lập trình viên IT và những yêu cầu vô lý của khách hàng",
-    "Chuyện đi ăn nhà hàng gặp tình huống dở khóc dở cười",
-    "Chuyện đi học đại học và những pha thi cử nhớ đời"
-]
+radar_mod = load_mod("threads_radar", "threads_radar.py")
 
 
 def run_batch_factory(num_videos: int = 3, custom_topics: list[str] = None):
@@ -47,7 +40,14 @@ def run_batch_factory(num_videos: int = 3, custom_topics: list[str] = None):
     print(f"\nSố lượng video cần sản xuất: {num_videos}")
 
     api_key = ai_mod.get_or_prompt_api_key()
-    topics = custom_topics or DEFAULT_TOPICS
+    if not custom_topics:
+        daily_res = radar_mod.get_daily_trending_topics()
+        topics = daily_res.get("topics", [])
+    else:
+        topics = custom_topics
+
+    if not topics:
+        topics = [radar_mod.crawl_trending_threads_story().content[:40]]
 
     completed_videos = []
 

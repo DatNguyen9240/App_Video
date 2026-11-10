@@ -11,14 +11,26 @@ Chức năng:
 """
 
 import os
+import sys
 import math
 import random
 import hashlib
 from PIL import Image, ImageDraw, ImageFont
 
-# ─── Cấu hình kích thước & Thư mục ─────────────────────────────────────────────
+SRC_DIR      = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SRC_DIR)
+import config as config_mod
 
-CARD_W        = 960            # Chiều rộng card (px)
+# ─── Cấu hình kích thước & Thư mục (Đọc từ config/director_config.json) ─────────
+
+def get_card_layout_cfg() -> dict:
+    try:
+        return config_mod.load_config().get("visual_layout", {})
+    except Exception:
+        return {}
+
+_layout_cfg   = get_card_layout_cfg()
+CARD_W        = _layout_cfg.get("card_width", 960)   # Chiều rộng card (px)
 PAD           = 40             # Padding viền card
 AVATAR_SIZE   = 64             # Đường kính avatar
 RADIUS        = 24             # Bán kính bo góc card
@@ -199,41 +211,107 @@ def get_verified_badge_img(size: int = 22) -> Image.Image:
     return img.resize((size, size), Image.Resampling.LANCZOS)
 
 
-# ─── Quản lý Avatar ───────────────────────────────────────────────────────────
+# ─── Quản lý Avatar Người Thật ────────────────────────────────────────────────
 
-def get_realistic_avatar(username: str, size: int = AVATAR_SIZE) -> Image.Image:
+def get_realistic_avatar(username: str, size: int = AVATAR_SIZE, avatar_source: str = None) -> Image.Image:
+    """
+    Tạo avatar người thật siêu chân thực 100% chuẩn Threads:
+    - Nếu có avatar_source (URL mạng hoặc đường dẫn file ảnh): Tải/đọc ảnh thật đó
+    - Nếu không: Tự động ánh xạ thông minh sang kho ảnh chân dung người thật (real_male / real_female)
+    - Cắt tròn siêu mịn bằng mask 4x Supersampling
+    - Bo viền nhẹ 1.5px tinh tế chuẩn Threads/Instagram.
+    """
     os.makedirs(AVATARS_DIR, exist_ok=True)
-    available_files = [
-        f for f in os.listdir(AVATARS_DIR)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
+    raw_img = None
 
-    if available_files:
-        hash_val = int(hashlib.md5(username.encode("utf-8")).hexdigest(), 16)
-        chosen = available_files[hash_val % len(available_files)]
-        try:
-            raw_img = Image.open(os.path.join(AVATARS_DIR, chosen)).convert("RGBA")
-            raw_img = raw_img.resize((size, size), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (size, size), 0)
-            ImageDraw.Draw(mask).ellipse([0, 0, size, size], fill=255)
-            raw_img.putalpha(mask)
-            return raw_img
-        except Exception:
-            pass
+    # 1. Nếu người dùng chỉ định URL mạng hoặc file ảnh cụ thể
+    if avatar_source:
+        avatar_source = str(avatar_source).strip()
+        if avatar_source.startswith(("http://", "https://")):
+            cache_name = "cache_" + hashlib.md5(avatar_source.encode("utf-8")).hexdigest()[:12] + ".jpg"
+            cache_path = os.path.join(AVATARS_DIR, cache_name)
+            if not os.path.exists(cache_path):
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(avatar_source, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=6) as resp:
+                        with open(cache_path, "wb") as f:
+                            f.write(resp.read())
+                except Exception:
+                    pass
+            if os.path.exists(cache_path):
+                try:
+                    raw_img = Image.open(cache_path).convert("RGBA")
+                except Exception:
+                    pass
+        elif os.path.exists(avatar_source):
+            try:
+                raw_img = Image.open(avatar_source).convert("RGBA")
+            except Exception:
+                pass
 
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse([0, 0, size, size], fill=(100, 149, 237, 255))
-    char = username[0].upper() if username else "T"
-    d.text((size // 2 - 10, size // 2 - 16), char, font=FONT_USERNAME, fill=(255, 255, 255))
-    return img
+    # 2. Tự động chọn ảnh từ kho ảnh chân dung người thật (assets/avatars/real_*.jpg)
+    if raw_img is None:
+        available_files = [
+            f for f in os.listdir(AVATARS_DIR)
+            if f.lower().endswith((".png", ".jpg", ".jpeg")) and f.startswith("real_")
+        ]
+        if not available_files:
+            available_files = [
+                f for f in os.listdir(AVATARS_DIR)
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+            ]
+
+        if available_files:
+            u_lower = username.lower()
+            fem_keywords = ["nu", "gai", "girl", "thotim", "my", "lan", "chi", "trang", "hoa", "linh", "ngoc", "mai", "anh", "vy"]
+            male_keywords = ["nam", "boy", "hai", "dev", "it", "sep", "boss", "duc", "tuan", "hoang", "minh", "quan", "hung", "cong"]
+
+            is_fem = any(k in u_lower for k in fem_keywords)
+            is_male = any(k in u_lower for k in male_keywords)
+
+            fem_files = [f for f in available_files if "female" in f]
+            male_files = [f for f in available_files if "male" in f]
+
+            hash_val = int(hashlib.md5(username.encode("utf-8")).hexdigest(), 16)
+            if is_fem and fem_files:
+                chosen = fem_files[hash_val % len(fem_files)]
+            elif is_male and male_files:
+                chosen = male_files[hash_val % len(male_files)]
+            else:
+                chosen = available_files[hash_val % len(available_files)]
+
+            try:
+                raw_img = Image.open(os.path.join(AVATARS_DIR, chosen)).convert("RGBA")
+            except Exception:
+                pass
+
+    # 3. Fallback dự phòng
+    if raw_img is None:
+        raw_img = Image.new("RGBA", (size, size), (59, 130, 246, 255))
+        d = ImageDraw.Draw(raw_img)
+        char = username[0].upper() if username else "T"
+        d.text((size // 2 - 8, size // 2 - 12), char, font=FONT_USERNAME, fill=(255, 255, 255))
+
+    # 4. Cắt tròn siêu mịn (Supersampling 4x) & Bo viền tinh tế
+    S = size * 4
+    raw_img = raw_img.resize((S, S), Image.Resampling.LANCZOS)
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, S - 1, S - 1], fill=255)
+    raw_img.putalpha(mask)
+
+    draw_border = ImageDraw.Draw(raw_img)
+    draw_border.ellipse([1, 1, S - 2, S - 2], outline=(200, 205, 215, 130), width=6)
+
+    return raw_img.resize((size, size), Image.Resampling.LANCZOS)
 
 
 # ─── Render Thẻ POST (Bài đăng chính) ─────────────────────────────────────────
 
 def render_post_card(username: str, content: str, avatar_color: str = None,
                      is_verified: bool = False, likes: int = 0,
-                     time_str: str = "12 giờ", theme: str = None) -> Image.Image:
+                     time_str: str = "12 giờ", theme: str = None,
+                     avatar_source: str = None) -> Image.Image:
     t_name = theme or get_card_theme()
     t = THEMES.get(t_name, THEMES["light"])
 
@@ -258,8 +336,8 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
     draw.rounded_rectangle([0, 0, CARD_W - 1, card_h - SHADOW_OFFSET - 1], radius=RADIUS,
                            fill=(*t["card_bg"], 255), outline=t["card_outline"], width=2)
 
-    # 3. Avatar tròn chân thực
-    av_img = get_realistic_avatar(username, size=AVATAR_SIZE)
+    # 3. Avatar tròn người thật chân thực
+    av_img = get_realistic_avatar(username, size=AVATAR_SIZE, avatar_source=avatar_source)
     img.paste(av_img, (PAD, PAD), av_img)
 
     # 4. Header: CĂN THẲNG TRỤC NGANG HOÀN TOÀN (Center Y = PAD + AVATAR_SIZE / 2)
@@ -332,7 +410,8 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
 def render_comment_card(username: str, content: str, avatar_color: str = None,
                         is_verified: bool = False, likes: int = 0,
                         index: int = 1, reply_to: str = None,
-                        time_str: str = None, theme: str = None) -> Image.Image:
+                        time_str: str = None, theme: str = None,
+                        avatar_source: str = None) -> Image.Image:
     t_name = theme or get_card_theme()
     t = THEMES.get(t_name, THEMES["light"])
 
@@ -362,8 +441,8 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
     draw.rounded_rectangle([0, 0, CARD_W - 1, card_h - SHADOW_OFFSET - 1], radius=RADIUS,
                            fill=(*t["card_bg"], 255), outline=t["card_outline"], width=2)
 
-    # 3. Avatar tròn
-    av_img = get_realistic_avatar(username, size=AVATAR_SIZE)
+    # 3. Avatar người thật chân thực
+    av_img = get_realistic_avatar(username, size=AVATAR_SIZE, avatar_source=avatar_source)
     img.paste(av_img, (PAD, PAD), av_img)
 
     # 4. Header: CĂN THẲNG TRỤC NGANG HOÀN TOÀN (Center Y = PAD + AVATAR_SIZE / 2)
@@ -451,15 +530,14 @@ if __name__ == "__main__":
         with open(sample_json, "r", encoding="utf-8") as f:
             post_data = json.load(f)
     else:
-        post_data = {
-            "username": "tkeoenk",
-            "content": "đàn ông mà không có bầu được thì chả có giá trị gì",
-            "likes": 21100,
-            "is_verified": False,
-            "comments": [
-                {"username": "hoangnam.dev", "content": "Tự nhiên thấy mình vô dụng ghê, chắc mai phải đăng ký khóa học sinh con cấp tốc quá 😂", "likes": 3420, "is_verified": True}
-            ]
-        }
+        print("ℹ️ Chưa có file kịch bản, đang gọi Threads Radar để lấy bài trending động...")
+        import importlib.util
+        radar_spec = importlib.util.spec_from_file_location("radar", os.path.join(SRC_DIR, "threads_radar.py"))
+        radar_mod = importlib.util.module_from_spec(radar_spec)
+        radar_spec.loader.exec_module(radar_mod)
+        p_obj = radar_mod.crawl_trending_threads_story()
+        with open(sample_json, "r", encoding="utf-8") as f:
+            post_data = json.load(f)
 
     p_img = render_post_card(
         username=post_data["username"],

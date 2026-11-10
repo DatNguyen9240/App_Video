@@ -16,12 +16,18 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 from PIL import Image, ImageDraw
 
-ASSETS_DIR   = r"d:\Dat\App_Video\assets"
+SRC_DIR      = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SRC_DIR)
+import config as config_mod
+
+BASE_DIR     = os.path.dirname(SRC_DIR)
+ASSETS_DIR   = os.path.join(BASE_DIR, "assets")
 BG_DIR       = os.path.join(ASSETS_DIR, "backgrounds")
 SFX_DIR      = os.path.join(ASSETS_DIR, "sfx")
-OUT_DIR      = r"d:\Dat\App_Video\output"
+OUT_DIR      = os.path.join(BASE_DIR, "output")
 
 INFINITY_BASE_FILE = os.path.join(BG_DIR, "infinity_base.mp4")
 
@@ -80,16 +86,20 @@ def get_media_duration(filepath: str) -> float:
 
 def ensure_infinity_base_loop(theme: str = "neon") -> str:
     """
-    Sinh video loop gốc 3D Infinity Tunnel chuẩn 1080x1920 (chỉ mất ~0.4s).
+    Sinh video loop gốc 3D Infinity Tunnel chuẩn Native 1080x1920 @ 60 FPS siêu mượt.
     Lưu vào assets/backgrounds/infinity_base.mp4 để tái sử dụng tức thì.
     """
     os.makedirs(BG_DIR, exist_ok=True)
     exe = get_ffmpeg_exe()
 
-    W, H = 540, 960
+    cfg_main = config_mod.load_config()
+    layout = cfg_main.get("visual_layout", {})
+    W = layout.get("canvas_width", 1080)
+    H = layout.get("canvas_height", 1920)
+    fps = layout.get("fps", 60)
+
     cx, cy = W // 2, H // 2
-    num_rings = 18
-    fps = 30
+    num_rings = 20
     loop_duration = 1.5
     total_frames = int(fps * loop_duration)
 
@@ -106,11 +116,13 @@ def ensure_infinity_base_loop(theme: str = "neon") -> str:
         "-pix_fmt", "rgb24",
         "-r", str(fps),
         "-i", "-",
-        "-vf", "scale=1080:1920:flags=lanczos,boxblur=1:1",
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-crf", "18",
         "-pix_fmt", "yuv420p",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
         INFINITY_BASE_FILE
     ]
 
@@ -129,8 +141,8 @@ def ensure_infinity_base_loop(theme: str = "neon") -> str:
             d = 1.0 - z
             scale = (1.0 / (d * 3.2 + 0.08)) ** 1.35
 
-            rw = int(24 * scale)
-            rh = int(38 * scale)
+            rw = int(48 * scale)
+            rh = int(76 * scale)
             if rw > W * 1.8:
                 continue
 
@@ -140,7 +152,7 @@ def ensure_infinity_base_loop(theme: str = "neon") -> str:
             g_col = int(c_g * (1 - t_col) + e_g * t_col)
             b_col = int(c_b * (1 - t_col) + e_b * t_col)
 
-            width = max(2, int(8 * (1 - d) ** 0.8))
+            width = max(3, int(14 * (1 - d) ** 0.8))
             bbox = [cx - rw, cy - rh, cx + rw, cy + rh]
             draw.rounded_rectangle(bbox, radius=int(rw * 0.28), outline=(r_col, g_col, b_col), width=width)
 
@@ -268,13 +280,15 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
     )
 
     if bg_music_path and os.path.exists(bg_music_path):
-        print(f"  🎵 Trộn nhạc nền lofi: {os.path.basename(bg_music_path)}")
+        cfg = config_mod.load_config()
+        bg_vol = cfg.get("emotional_pacing", {}).get("bgm_volume_normal", 0.08)
+        print(f"  🎵 Trộn nhạc nền lofi (volume={bg_vol}): {os.path.basename(bg_music_path)}")
         run_ffmpeg(
             "-i", voice_sfx_merged,
             "-stream_loop", "-1",
             "-i", bg_music_path,
             "-filter_complex",
-            "[1:a]volume=0.07[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]",
+            f"[1:a]volume={bg_vol}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]",
             "-map", "[out]",
             "-c:a", "libmp3lame",
             "-q:a", "2",

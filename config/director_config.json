@@ -1,0 +1,194 @@
+{
+  "project_name": "Threads Video Automation Studio",
+  "version": "2.1.0",
+  "ai_director": {
+    "model": "gemini-3.5-flash",
+    "fallback_model": "gemini-3.5-flash-lite",
+    "temperature": 0.88,
+    "system_instruction": "Bạn là Đạo diễn kiêm Nhà sáng tạo nội dung hàng đầu cho video ngắn (TikTok, Reels, Shorts) tại Việt Nam. Phong cách của bạn dí dỏm, châm biếm sâu cay, bắt trend Gen Z và dân văn phòng cực nhạy.\n\nNhiệm vụ của bạn là xây dựng kịch bản có 'ĐỒ THỊ CẢM XÚC' lôi cuốn người xem như người thật:\n1. HOOK (0-3s): Câu mở đầu của bài đăng chính phải có tính kích thích tò mò cao (Pattern Interrupt), tạo tình huống dở khóc dở cười hoặc mâu thuẫn bất ngờ.\n2. BÌNH LUẬN 1 (Đồng cảm/Tung hứng): Đùa cợt đồng cảm, đẩy sự việc lên một nấc hài hước.\n3. BÌNH LUẬN 2 (Cú bẻ lái sốc/Punchline): Bẻ lái bất ngờ 180 độ, châm chọc đỉnh cao khiến người xem bất ngờ hoặc cạn lời.\n4. BÌNH LUẬN 3 (Chốt hạ/Dư âm): Câu chốt hạ chua chát, bất lực hoặc kích thích người xem phải bấm vào phần comment để tranh luận.\n5. ĐIỀU ĐỘ CẢM XÚC: Chỉ định rõ cảm xúc (emotion), giọng đọc phù hợp (nam/nữ đan xen), và nhịp ngừng (pause) để câu nói có hồn.",
+    "daily_trending": {
+      "auto_fetch_daily": true,
+      "cache_file": "output/daily_trending_topics.json",
+      "description": "Tự động fetch danh sách chủ đề thịnh hành trên Threads mỗi ngày 1 lần; nếu trong ngày đã fetch thì đọc từ cache."
+    }
+  },
+  "audio_mastering": {
+    "enable_vocal_chain": true,
+    "target_lufs": -14,
+    "vocal_highpass_hz": 80,
+    "vocal_presence_boost_db": 2.5,
+    "enable_compression": true,
+    "audio_bitrate": "256k"
+  },
+  "emotional_pacing": {
+    "hook_speed_rate": "+10%",
+    "punchline_pre_pause_ms": 350,
+    "punchline_post_pause_ms": 500,
+    "comment_gap_ms": 280,
+    "awkward_silence_duration_ms": 400,
+    "bgm_volume_normal": 0.08,
+    "bgm_volume_duck": 0.03,
+    "enable_bgm_ducking": true,
+    "enable_camera_shake": true,
+    "enable_card_zoom": true
+  },
+  "voice_casting": {
+    "default_author_voice": "vi-VN-NamMinhNeural",
+    "default_commenter_female_voice": "vi-VN-HoaiMyNeural",
+    "default_commenter_male_voice": "vi-VN-NamMinhNeural",
+    "roles": {
+      "author": {
+        "voice": "vi-VN-NamMinhNeural",
+        "rate": "+8%",
+        "pitch": "+0Hz",
+        "description": "Giọng kể chuyện tự nhiên, hào hứng vừa phải"
+      },
+      "commenter_1": {
+        "voice": "vi-VN-HoaiMyNeural",
+        "rate": "+10%",
+        "pitch": "+4Hz",
+        "description": "Giọng nữ châm biếm nhẹ, đồng cảm hài hước"
+      },
+      "commenter_2": {
+        "voice": "vi-VN-NamMinhNeural",
+        "rate": "+12%",
+        "pitch": "-4Hz",
+        "description": "Giọng nam bẻ lái sắc sảo, dứt khoát"
+      },
+      "commenter_3": {
+        "voice": "vi-VN-HoaiMyNeural",
+        "rate": "+5%",
+        "pitch": "-2Hz",
+        "description": "Giọng chốt hạ, thở dài cạn lời"
+      }
+    }
+  },
+  "sfx_meme_registry": {
+    "laugh": {
+      "sfx_file": "laugh.mp3",
+      "meme_file": "laugh.gif",
+      "emotion": "funny",
+      "camera_motion": "punch_in",
+      "pre_delay_ms": 100,
+      "post_delay_ms": 400,
+      "volume": 1.0
+    },
+    "boom": {
+      "sfx_file": "boom.mp3",
+      "meme_file": "boom.gif",
+      "emotion": "shocked",
+      "camera_motion": "shake",
+      "pre_delay_ms": 250,
+      "post_delay_ms": 500,
+      "volume": 0.95
+    },
+    "bruh": {
+      "sfx_file": "bruh.mp3",
+      "meme_file": "bruh.gif",
+      "emotion": "awkward",
+      "camera_motion": "punch_in",
+      "pre_delay_ms": 300,
+      "post_delay_ms": 450,
+      "volume": 1.0
+    },
+    "shock": {
+      "sfx_file": "shock.mp3",
+      "meme_file": "shock.gif",
+      "emotion": "shocked",
+      "camera_motion": "shake",
+      "pre_delay_ms": 200,
+      "post_delay_ms": 450,
+      "volume": 1.0
+    },
+    "huh": {
+      "sfx_file": "huh.mp3",
+      "meme_file": "huh.gif",
+      "emotion": "awkward",
+      "camera_motion": "punch_in",
+      "pre_delay_ms": 150,
+      "post_delay_ms": 400,
+      "volume": 1.0
+    },
+    "side_eye": {
+      "sfx_file": "side_eye.mp3",
+      "meme_file": "side_eye.gif",
+      "emotion": "sarcastic",
+      "camera_motion": "punch_in",
+      "pre_delay_ms": 200,
+      "post_delay_ms": 450,
+      "volume": 1.0
+    },
+    "clown": {
+      "sfx_file": "clown.mp3",
+      "meme_file": "clown.gif",
+      "emotion": "funny",
+      "camera_motion": "punch_in",
+      "pre_delay_ms": 100,
+      "post_delay_ms": 400,
+      "volume": 1.0
+    },
+    "math": {
+      "sfx_file": "math.mp3",
+      "meme_file": "math.gif",
+      "emotion": "shocked",
+      "camera_motion": "none",
+      "pre_delay_ms": 150,
+      "post_delay_ms": 400,
+      "volume": 0.95
+    },
+    "applause": {
+      "sfx_file": "laugh.mp3",
+      "meme_file": "applause.gif",
+      "emotion": "funny",
+      "camera_motion": "punch_in",
+      "pre_delay_ms": 100,
+      "post_delay_ms": 400,
+      "volume": 1.0
+    },
+    "dancing_cat": {
+      "sfx_file": "laugh.mp3",
+      "meme_file": "dancing_cat.gif",
+      "emotion": "funny",
+      "camera_motion": "punch_in",
+      "pre_delay_ms": 100,
+      "post_delay_ms": 400,
+      "volume": 1.0
+    },
+    "ting": {
+      "sfx_file": "ting.mp3",
+      "meme_file": "ting.gif",
+      "emotion": "insightful",
+      "camera_motion": "none",
+      "pre_delay_ms": 80,
+      "post_delay_ms": 300,
+      "volume": 0.85
+    },
+    "none": {
+      "sfx_file": null,
+      "meme_file": null,
+      "emotion": "neutral",
+      "camera_motion": "none",
+      "pre_delay_ms": 0,
+      "post_delay_ms": 250,
+      "volume": 0.0
+    }
+  },
+  "visual_layout": {
+    "canvas_width": 1080,
+    "canvas_height": 1920,
+    "card_width": 960,
+    "post_card_y": 240,
+    "comment_card_gap": 24,
+    "sticker_size": 260,
+    "sticker_offset_y": 35,
+    "default_bg_mode": "infinity",
+    "default_card_theme": "light",
+    "fps": 60,
+    "video_crf": 18,
+    "video_preset": "medium",
+    "color_space": "bt709",
+    "enable_slide_up_animation": true,
+    "slide_duration_s": 0.22,
+    "slide_distance_px": 45
+  }
+}
