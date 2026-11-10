@@ -443,9 +443,10 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
 
             for i, c in enumerate(post.comments, 1):
                 c_avatar = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
+                c_reply = getattr(c, "reply_to", "") or post.username
                 c_img = card_mod.render_comment_card(
                     c.username, c.content, c.avatar_color, c.is_verified, c.likes,
-                    index=i, reply_to=post.username, theme=card_theme, avatar_source=c_avatar
+                    index=i, reply_to=c_reply, theme=card_theme, avatar_source=c_avatar
                 )
                 card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
             tracker.finish_step("cards")

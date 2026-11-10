@@ -18,6 +18,7 @@ from typing import Literal
 class Comment:
     username: str
     content: str
+    reply_to: str = ""                     # Username mà comment này trả lời (tác giả hoặc commenter khác)
     avatar_color: str = "#8b5cf6"
     avatar_path: str = ""                  # Đường dẫn ảnh thật hoặc URL avatar
     avatar_url: str = ""                   # URL ảnh đại diện trên mạng

@@ -47,7 +47,8 @@ def clean_hex_color(c: str) -> str:
 
 class CommentSchema(BaseModel):
     username: str = Field(description="Tên người dùng hài hước tiếng Việt hoặc Gen Z, ví dụ: hr_ngapnguoi, dev_khocnhe, an.tran99")
-    content: str = Field(description="Bình luận tiếng Việt ngắn gọn, dí dỏm, bẻ lái hoặc châm chọc hài hước")
+    reply_to: str = Field(default="", description="Tên username mà bình luận này đang trả lời (có thể là tên tác giả bài đăng HOẶC tên người comment trước đó)")
+    content: str = Field(description="Bình luận tiếng Việt CỰC KỲ NGẮN GỌN (chỉ 1 câu đắt giá, tối đa 20 từ), sắc sảo, dí dỏm, bẻ lái hoặc châm chọc hài hước")
     avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b)")
     likes: int = Field(default=4500, description="Lượt thích ước tính từ 1500 đến 25000")
     sfx: Literal["laugh", "boom", "bruh", "ting", "none"] = Field(
@@ -65,7 +66,7 @@ class CommentSchema(BaseModel):
 
 class PostSchema(BaseModel):
     username: str = Field(description="Tên tác giả bài viết, ví dụ: genz.tamsu, chuyen.congso, dev_nghiep")
-    content: str = Field(description="Câu chuyện Threads ngắn gọn 2-3 câu, mở đầu bằng hook gây tò mò, tình huống trớ trêu có cú lừa")
+    content: str = Field(description="Câu chuyện Threads CỰC KỲ NGẮN GỌN (chỉ từ 1 đến 2 câu ngắn, tối đa 30-35 từ). Bắt đầu bằng Hook giật mình tò mò, nêu ngay mâu thuẫn cốt lõi, không dài dòng lan man")
     avatar_color: str = Field(default="#8b5cf6", description="Mã màu hex cho avatar tác giả")
     is_verified: bool = Field(default=True, description="True nếu có tích xanh")
     likes: int = Field(default=35000, description="Lượt thích ước tính từ 15000 đến 85000")
@@ -185,11 +186,12 @@ def generate_story_with_gemini(
     prompt = (
         f"Hãy đóng vai Đạo diễn và sáng tạo 1 bài Threads bằng tiếng Việt theo Đồ thị Cảm xúc hoàn chỉnh.\n"
         f"Chủ đề kịch bản: '{topic}'\n\n"
-        f"Yêu cầu:\n"
-        f"- Bài viết chính: Mở đầu gây tò mò, nêu tình huống có mâu thuẫn.\n"
-        f"- Bình luận 1: Đồng cảm hài hước, đẩy cao trào.\n"
-        f"- Bình luận 2: Cú bẻ lái sốc (punchline twist) không ngờ tới, gán sfx 'boom'.\n"
-        f"- Bình luận 3: Chốt hạ cạn lời hoặc dở khóc dở cười, gán sfx 'bruh' hoặc 'laugh'."
+        f"QUY TẮC ĐỘ DÀI & ĐỐI THOẠI (BẮT BUỘC NGẮN GỌN CHO VIDEO TIKTOK DƯỚI 30 GIÂY):\n"
+        f"- Bài viết chính: CỰC KỲ NGẮN GỌN (chỉ 1 - 2 câu ngắn, tối đa 30-35 từ). Bắt đầu bằng Hook giật mình tò mò, nêu ngay mâu thuẫn chính, không mở bài dài dòng.\n"
+        f"- Bình luận 1: Rất ngắn (1 câu, dưới 20 từ), khơi mào tranh luận, thường trả lời tác giả (reply_to = username tác giả).\n"
+        f"- Bình luận 2: Cú bẻ lái sốc (twist punchline) cực ngắn và đanh thép (1 câu, dưới 20 từ), gán sfx 'boom'. ĐẶC BIỆT: Có thể trả lời tác giả HOẶC trả lời/bóc mẽ Bình luận 1 (reply_to = username của Bình luận 1)!\n"
+        f"- Bình luận 3: Chốt hạ cạn lời hoặc dở khóc dở cười (1 câu đắt giá, dưới 18 từ), gán sfx 'bruh' hoặc 'laugh'. Có thể trả lời tác giả hoặc người bình luận trước.\n"
+        f"- Trường 'reply_to': Bắt buộc ghi rõ username mà bình luận đó đang trực tiếp tương tác (ví dụ trả lời tác giả hoặc người bình luận trước)."
     )
 
     if progress_cb:
@@ -256,6 +258,7 @@ def generate_story_with_gemini(
         comments.append(Comment(
             username=c.get("username", f"user_{idx}"),
             content=c.get("content", ""),
+            reply_to=c.get("reply_to", "") or data.get("username", "author"),
             avatar_color=clean_hex_color(c.get("avatar_color", "")),
             likes=c.get("likes", random.randint(2000, 15000)),
             sfx=sfx_val,

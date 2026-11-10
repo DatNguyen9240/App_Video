@@ -320,10 +320,21 @@ HTML_TEMPLATE = """
             
             <div v-for="(cmt, idx) in post.comments" :key="idx"
               class="p-3.5 rounded-xl bg-slate-900/50 border border-slate-800/80 space-y-2.5">
-              <div class="flex items-center gap-2.5 flex-wrap">
+              <div class="flex items-center gap-2 flex-wrap">
                 <span class="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-300 text-xs flex items-center justify-center font-bold">#{{ idx+1 }}</span>
-                <input v-model="cmt.username" type="text" placeholder="username" class="glass-input rounded-lg px-2.5 py-1 text-xs w-32 font-semibold text-slate-200">
+                <input v-model="cmt.username" type="text" placeholder="username" class="glass-input rounded-lg px-2.5 py-1 text-xs w-28 font-semibold text-slate-200">
                 
+                <!-- Reply-To Selector (Trả lời bài đăng hoặc commenter trước) -->
+                <div class="flex items-center gap-1 text-[11px] bg-slate-800/80 px-2 py-0.5 rounded-lg border border-slate-700/60">
+                  <span class="text-slate-400"><i class="fa-solid fa-reply text-indigo-400"></i> Trả lời:</span>
+                  <select v-model="cmt.reply_to" class="bg-transparent text-indigo-300 font-semibold focus:outline-none text-[11px]">
+                    <option :value="post.username">@{{ post.username || 'tác_giả' }} (Bài đăng)</option>
+                    <option v-for="(otherCmt, cIdx) in post.comments.slice(0, idx)" :key="cIdx" :value="otherCmt.username">
+                      @{{ otherCmt.username || ('cmt_' + (cIdx+1)) }} (#{{ cIdx + 1 }})
+                    </option>
+                  </select>
+                </div>
+
                 <!-- Emotion Badge -->
                 <select v-model="cmt.emotion" class="glass-input rounded-lg px-2 py-1 text-xs bg-slate-800 text-indigo-300 font-medium">
                   <option value="funny">😂 Hài hước</option>
@@ -1216,6 +1227,7 @@ HTML_TEMPLATE = """
           const pickedSfx = sfxOptions[Math.floor(Math.random() * sfxOptions.length)];
           this.post.comments.push({
             username: `user_${Math.floor(1000 + Math.random() * 9000)}`,
+            reply_to: this.post.username || '',
             content: `Bình luận tương tác số ${idx}...`,
             likes: 1200 + idx * 350,
             avatar_path: '',
@@ -1538,7 +1550,8 @@ def api_generate_script():
         card_mod.render_post_card(post.username, post.content, likes=post.likes, is_verified=post.is_verified, avatar_source=p_av)
         for i, c in enumerate(post.comments, 1):
             c_av = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
-            c_img = card_mod.render_comment_card(c.username, c.content, likes=c.likes, index=i, reply_to=post.username, avatar_source=c_av)
+            c_reply = getattr(c, "reply_to", "") or post.username
+            c_img = card_mod.render_comment_card(c.username, c.content, likes=c.likes, index=i, reply_to=c_reply, avatar_source=c_av)
             card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
 
         tracker.finish_step("cards")
@@ -1558,6 +1571,7 @@ def api_generate_script():
                 "comments": [
                     {
                         "username": c.username,
+                        "reply_to": getattr(c, "reply_to", "") or post.username,
                         "content": c.content,
                         "likes": c.likes,
                         "avatar_path": getattr(c, "avatar_path", ""),
@@ -1601,8 +1615,9 @@ def api_crawl_trending_threads():
 
         for i, c in enumerate(post.comments, 1):
             c_av = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
+            c_reply = getattr(c, "reply_to", "") or post.username
             c_img = card_mod.render_comment_card(
-                c.username, c.content, likes=c.likes, index=i, reply_to=post.username,
+                c.username, c.content, likes=c.likes, index=i, reply_to=c_reply,
                 avatar_source=c_av
             )
             card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
@@ -1624,6 +1639,7 @@ def api_crawl_trending_threads():
                 "comments": [
                     {
                         "username": c.username,
+                        "reply_to": getattr(c, "reply_to", "") or post.username,
                         "content": c.content,
                         "likes": c.likes,
                         "avatar_path": getattr(c, "avatar_path", ""),
@@ -1673,8 +1689,9 @@ def api_create_video_one_click():
             card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
             for i, c in enumerate(post.comments, 1):
                 c_av = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
+                c_reply = getattr(c, "reply_to", "") or post.username
                 c_img = card_mod.render_comment_card(
-                    c.username, c.content, likes=c.likes, index=i, reply_to=post.username,
+                    c.username, c.content, likes=c.likes, index=i, reply_to=c_reply,
                     theme=card_theme, avatar_source=c_av
                 )
                 card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
@@ -1744,12 +1761,13 @@ def api_save_cards():
 
         for i, c in enumerate(p_data.get("comments", []), 1):
             c_av = c.get("avatar_url", "") or c.get("avatar_path", "")
+            c_reply = c.get("reply_to") or p_data.get("username", "author")
             c_img = card_mod.render_comment_card(
                 c.get("username", "user"),
                 c.get("content", ""),
                 likes=int(c.get("likes", 1500)),
                 index=i,
-                reply_to=p_data.get("username", "author"),
+                reply_to=c_reply,
                 theme=theme,
                 avatar_source=c_av
             )
@@ -1847,6 +1865,7 @@ def api_render_video():
             comments.append(content_mod.Comment(
                 username=c.get("username", "user"),
                 content=c.get("content", ""),
+                reply_to=c.get("reply_to", "") or p_data.get("username", "author"),
                 avatar_color=c.get("avatar_color", "#8b5cf6"),
                 avatar_path=c.get("avatar_path", ""),
                 avatar_url=c.get("avatar_url", ""),

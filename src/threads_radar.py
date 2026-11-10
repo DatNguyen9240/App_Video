@@ -439,13 +439,14 @@ def crawl_trending_threads_story(
 Hãy đóng vai Nhà nghiên cứu nội dung và săn tin thịnh hành trên mạng xã hội Threads (threads.net) tại Việt Nam.
 Tìm kiếm hoặc tái hiện 1 BÀI VIẾT THẬT ĐANG CỰC KỲ TRENDING VÀ VIRAL NHẤT trên Threads về chủ đề: '{topic}'.
 
-Quy tắc bắt buộc:
+Quy tắc bắt buộc (ĐẶC BIỆT CHÚ Ý ĐỘ DÀI & ĐỐI THOẠI):
 1. Tác giả: Tên username tiếng Việt đời thường của người thật (ví dụ: mai_anh.hr, tuananh.dev, linh.nguyen99, congso.confession).
-2. Nội dung bài viết: Kể 1 câu chuyện hoặc tình huống có thật, có mâu thuẫn bất ngờ, hài hước hoặc drama thu hút nghìn bình luận.
-3. Bình luận 1: Bình luận đồng cảm hài hước của bạn bè (sfx: 'laugh', 'huh', 'side_eye' hoặc 'clown').
-4. Bình luận 2: Bình luận bẻ lái sốc (punchline) không ai ngờ tới (sfx: 'boom', 'shock' hoặc 'math').
-5. Bình luận 3: Bình luận chốt hạ cạn lời hoặc dở khóc dở cười (sfx: 'bruh', 'applause' hoặc 'ting').
-6. Giới tính nhân vật (gender): Chỉ định rõ 'male' hoặc 'female' cho tác giả và từng bình luận để hệ thống ghép đúng avatar người thật!
+2. Nội dung bài viết: CỰC KỲ NGẮN GỌN (chỉ 1 đến 2 câu ngắn, tối đa 30-35 từ), vào thẳng câu chuyện mâu thuẫn/drama thu hút người xem trong 3 giây đầu, không lan man.
+3. Bình luận 1: Rất ngắn (1 câu, dưới 20 từ), đồng cảm hoặc khơi mào tranh luận, thường trả lời tác giả (reply_to = username tác giả).
+4. Bình luận 2: Rất ngắn (1 câu, dưới 20 từ), cú bẻ lái sốc (punchline) không ai ngờ tới (sfx: 'boom'). ĐẶC BIỆT: Có thể trả lời tác giả HOẶC trả lời/bóc mẽ Bình luận 1 (reply_to = username của Bình luận 1)!
+5. Bình luận 3: Rất ngắn (1 câu, dưới 18 từ), chốt hạ cạn lời hoặc dở khóc dở cười (sfx: 'bruh' hoặc 'laugh'). Có thể trả lời tác giả hoặc người bình luận trước.
+6. Trường reply_to: Bắt buộc ghi rõ username mà bình luận đó đang trực tiếp trả lời (ví dụ tên tác giả hoặc tên người comment trước).
+7. Giới tính nhân vật (gender): Chỉ định rõ 'male' hoặc 'female' cho tác giả và từng bình luận để hệ thống ghép đúng avatar người thật!
 """
 
     if progress_cb:
@@ -453,6 +454,7 @@ Quy tắc bắt buộc:
 
     class TrendingCommentSchema(ai_base.BaseModel):
         username: str
+        reply_to: str = ""
         gender: ai_base.Literal["male", "female"]
         content: str
         likes: int = 4500
@@ -528,6 +530,7 @@ Quy tắc bắt buộc:
         comments.append(Comment(
             username=c.get("username", f"user_{idx}"),
             content=c.get("content", ""),
+            reply_to=c.get("reply_to", "") or data.get("username", "author"),
             avatar_path=c_avatar,
             avatar_url="",
             likes=c.get("likes", random.randint(3000, 18000)),
