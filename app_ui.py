@@ -1168,8 +1168,10 @@ HTML_TEMPLATE = """
         },
         getAvatarThumb(av) {
           if (!av) return '/api/avatar_file/female_office_1.jpg';
-          if (av.startsWith('http://') || av.startsWith('https://')) return av;
-          const clean = av.replace(/\\/g, '/').split('/').pop();
+          const s = String(av);
+          if (s.startsWith('http://') || s.startsWith('https://')) return s;
+          const lastSlash = Math.max(s.lastIndexOf('/'), s.lastIndexOf(String.fromCharCode(92)));
+          const clean = lastSlash >= 0 ? s.slice(lastSlash + 1) : s;
           if (clean.endsWith('.jpg') || clean.endsWith('.png') || clean.endsWith('.jpeg')) {
             return '/api/avatar_file/' + clean;
           }
