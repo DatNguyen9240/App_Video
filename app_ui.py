@@ -52,6 +52,86 @@ tts_mod      = load_mod("tts", "03_tts.py")
 bg_mod       = load_mod("bg_audio", "04_bg_audio.py")
 pipeline_mod = load_mod("pipeline", "05_pipeline.py")
 
+
+def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
+    """
+    Hàm chuẩn hóa render toàn bộ bộ thẻ Threads:
+    - Thẻ Post chính (hỗ trợ tùy chọn gắn kèm ảnh hoặc để sạch gọn)
+    - Khung Ảnh Minh Họa Nổi Bên Ngoài (Popup Proof Card với viền Neon & 3D shadow)
+    - Tất cả các thẻ Comment với avatar thật và bố cục chuẩn
+    """
+    os.makedirs(CARDS_DIR, exist_ok=True)
+    cfg = config_mod.load_config()
+    illus_cfg = cfg.get("illustration_settings", {})
+
+    if isinstance(post, dict):
+        username = post.get("username", "author")
+        content = post.get("content", "")
+        avatar_color = post.get("avatar_color", None)
+        is_verified = bool(post.get("is_verified", False))
+        likes = int(post.get("likes", 0))
+        post_avatar = post.get("avatar_url", "") or post.get("avatar_path", "")
+        post_illus = post.get("illustration_path", "")
+        comments = post.get("comments", [])
+    else:
+        username = post.username
+        content = post.content
+        avatar_color = getattr(post, "avatar_color", None)
+        is_verified = getattr(post, "is_verified", False)
+        likes = getattr(post, "likes", 0)
+        post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
+        post_illus = getattr(post, "illustration_path", "")
+        comments = getattr(post, "comments", [])
+
+    if not post_illus or not os.path.exists(post_illus):
+        sample_illus = os.path.join(OUTPUT_DIR, "illustrations", "test_illus.jpg")
+        if os.path.exists(sample_illus):
+            post_illus = sample_illus
+
+    use_attached = enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False)
+    attached_arg = post_illus if (use_attached and post_illus and os.path.exists(post_illus)) else None
+
+    # 1. Thẻ bài đăng chính
+    p_img = card_mod.render_post_card(
+        username, content, avatar_color, is_verified, likes,
+        theme=theme, avatar_source=post_avatar,
+        attached_image_path=attached_arg
+    )
+    card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
+
+    # 2. Khung ảnh minh họa nổi bên ngoài (Popup Proof Card)
+    if illus_cfg.get("enable_popup_illustration", True) and post_illus and os.path.exists(post_illus):
+        popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
+        badge_lbl = illus_cfg.get("badge_text", "📸 BẰNG CHỨNG THỰC TẾ")
+        caption_lbl = (post.get("illustration_caption", "") or post.get("video_title", "")) if isinstance(post, dict) else (getattr(post, "illustration_caption", "") or getattr(post, "video_title", ""))
+        card_mod.create_popup_illustration_card(post_illus, popup_path, badge_text=badge_lbl, caption_text=caption_lbl)
+
+    # 3. Các thẻ comment
+    for i, c in enumerate(comments, 1):
+        if isinstance(c, dict):
+            c_user = c.get("username", f"user_{i}")
+            c_text = c.get("content", "")
+            c_color = c.get("avatar_color", None)
+            c_ver = bool(c.get("is_verified", False))
+            c_likes = int(c.get("likes", 0))
+            c_avatar = c.get("avatar_url", "") or c.get("avatar_path", "")
+            c_reply = c.get("reply_to") or username
+        else:
+            c_user = c.username
+            c_text = c.content
+            c_color = getattr(c, "avatar_color", None)
+            c_ver = getattr(c, "is_verified", False)
+            c_likes = getattr(c, "likes", 0)
+            c_avatar = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
+            c_reply = getattr(c, "reply_to", "") or username
+
+        c_img = card_mod.render_comment_card(
+            c_user, c_text, c_color, c_ver, c_likes,
+            index=i, reply_to=c_reply, theme=theme, avatar_source=c_avatar
+        )
+        card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
+
+
 app = Flask(__name__)
 
 HTML_TEMPLATE = """
@@ -986,10 +1066,50 @@ HTML_TEMPLATE = """
             </div>
           </div>
 
-          <!-- Nhóm 5: AI Prompt & Model -->
+          <!-- Nhóm 5: Ảnh Minh Họa & Pop-up Proof Card Nổi -->
+          <div class="space-y-3" v-if="directorConfig.illustration_settings">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-pink-400 flex items-center gap-2">
+              <i class="fa-solid fa-camera-retro"></i> 5. Ảnh Minh Họa Bằng Chứng & Pop-Up Card Nổi Bên Ngoài
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Khung ảnh nổi bên ngoài (Pop-up):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.illustration_settings.enable_popup_illustration" class="rounded bg-slate-800 border-slate-700 text-pink-500">
+                    <span class="font-bold text-pink-400">Bật Pop-Up Proof Card (Twist Beat)</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Hiện lên chốc lát với hiệu ứng Punch-in Bounce và biến mất</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Ảnh gắn kèm trong thẻ câu hỏi đầu:</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.illustration_settings.enable_post_attached_image" class="rounded bg-slate-800 border-slate-700 text-indigo-500">
+                    <span>Đính kèm ảnh trong bài đăng</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Mặc định tắt để thẻ câu hỏi gọn gàng, chữ to rõ</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Thời lượng hiển thị Pop-up:</label>
+                <select v-model.number="directorConfig.illustration_settings.popup_duration_s" class="w-full glass-input rounded-lg p-2 text-xs bg-slate-800 text-slate-200">
+                  <option :value="2.2">2.2 giây (Chớp nhoáng)</option>
+                  <option :value="2.8">2.8 giây (Khuyên dùng - Chuẩn nhịp đọc)</option>
+                  <option :value="3.5">3.5 giây (Xem kĩ chi tiết)</option>
+                </select>
+                <span class="text-[10px] text-slate-500">Đủ thời gian để người xem hiểu trò đùa / câu trả lời</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Nhóm 6: AI Prompt & Model -->
           <div class="space-y-3">
             <h3 class="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
-              <i class="fa-solid fa-brain"></i> 5. Chỉ Dẫn Đạo Diễn Gemini AI (System Instruction)
+              <i class="fa-solid fa-brain"></i> 6. Chỉ Dẫn Đạo Diễn Gemini AI (System Instruction)
             </h3>
             <textarea v-model="directorConfig.ai_director.system_instruction" rows="4"
               class="w-full glass-input rounded-xl p-3 text-xs focus:outline-none font-mono text-slate-300"></textarea>
@@ -1623,22 +1743,7 @@ def api_crawl_trending_threads():
         )
 
         tracker.start_step("cards", "Đang ghép avatar người thật và render thẻ...", 80)
-        p_av = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-        p_img = card_mod.render_post_card(
-            post.username, post.content, likes=post.likes, is_verified=post.is_verified,
-            avatar_source=p_av
-        )
-        card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
-
-        for i, c in enumerate(post.comments, 1):
-            c_av = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
-            c_reply = getattr(c, "reply_to", "") or post.username
-            c_img = card_mod.render_comment_card(
-                c.username, c.content, likes=c.likes, index=i, reply_to=c_reply,
-                avatar_source=c_av
-            )
-            card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
-
+        _render_all_cards_helper(post, theme="light")
         tracker.finish_step("cards")
         tracker.finish_step("script")
         tracker.pause_for_review("Đã quét tin trending và ghép avatar người thật hoàn tất (Bước 2/6). Sẵn sàng render video!")
@@ -1696,22 +1801,9 @@ def api_create_video_one_click():
                 progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
             )
 
-            # BƯỚC 2: RENDER BỘ THẺ THREADS CHUẨN (VỚI AVATAR THẬT TỪ THREADS)
+            # BƯỚC 2: RENDER BỘ THẺ THREADS CHUẨN (VỚI AVATAR THẬT TỪ THREADS & POPUP CARD)
             tracker.start_step("cards", "Đang ghép avatar thật từ Threads và vẽ bộ thẻ...", 30)
-            p_av = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-            p_img = card_mod.render_post_card(
-                post.username, post.content, likes=post.likes, is_verified=post.is_verified,
-                theme=card_theme, avatar_source=p_av
-            )
-            card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
-            for i, c in enumerate(post.comments, 1):
-                c_av = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
-                c_reply = getattr(c, "reply_to", "") or post.username
-                c_img = card_mod.render_comment_card(
-                    c.username, c.content, likes=c.likes, index=i, reply_to=c_reply,
-                    theme=card_theme, avatar_source=c_av
-                )
-                card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
+            _render_all_cards_helper(post, theme=card_theme)
             tracker.finish_step("cards")
 
             # BƯỚC 3 -> 6: CHẠY TIẾP ĐỂ DỰNG VIDEO THÀNH PHẨM (TTS, AUDIO, COMPOSITE, EXPORT)
@@ -1765,30 +1857,7 @@ def api_save_cards():
     p_data = data.get("post", {})
     theme = data.get("theme", "light")
     try:
-        p_av = p_data.get("avatar_url", "") or p_data.get("avatar_path", "")
-        p_img = card_mod.render_post_card(
-            p_data.get("username", "author"),
-            p_data.get("content", ""),
-            likes=int(p_data.get("likes", 20000)),
-            is_verified=bool(p_data.get("is_verified", False)),
-            theme=theme,
-            avatar_source=p_av
-        )
-        card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
-
-        for i, c in enumerate(p_data.get("comments", []), 1):
-            c_av = c.get("avatar_url", "") or c.get("avatar_path", "")
-            c_reply = c.get("reply_to") or p_data.get("username", "author")
-            c_img = card_mod.render_comment_card(
-                c.get("username", "user"),
-                c.get("content", ""),
-                likes=int(c.get("likes", 1500)),
-                index=i,
-                reply_to=c_reply,
-                theme=theme,
-                avatar_source=c_av
-            )
-            card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
+        _render_all_cards_helper(p_data, theme=theme)
 
         # Dọn dẹp các ảnh comment cũ thừa nếu số lượng comment giảm
         for old_file in glob.glob(os.path.join(CARDS_DIR, "comment_*.png")):

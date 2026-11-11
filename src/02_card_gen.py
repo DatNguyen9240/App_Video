@@ -337,7 +337,8 @@ def get_realistic_avatar(username: str, size: int = AVATAR_SIZE, avatar_source: 
 def render_post_card(username: str, content: str, avatar_color: str = None,
                      is_verified: bool = False, likes: int = 0,
                      time_str: str = "12 giờ", theme: str = None,
-                     avatar_source: str = None) -> Image.Image:
+                     avatar_source: str = None,
+                     attached_image_path: str = None) -> Image.Image:
     t_name = theme or get_card_theme()
     t = THEMES.get(t_name, THEMES["light"])
 
@@ -349,7 +350,30 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
     line_h = 46
     text_h = len(lines) * line_h
 
-    card_h = PAD + AVATAR_SIZE + 22 + text_h + 26 + ICON_SIZE + PAD
+    # Xử lý ảnh minh họa đính kèm bên trong thẻ (nếu được bật)
+    att_resized = None
+    att_mask = None
+    att_h = 0
+    if attached_image_path and os.path.exists(attached_image_path):
+        try:
+            with Image.open(attached_image_path) as att_raw:
+                raw_w, raw_h = att_raw.size
+                target_w = max_text_w
+                aspect = raw_h / max(1, raw_w)
+                target_h = int(target_w * aspect)
+                target_h = max(240, min(420, target_h))
+
+                att_resized = att_raw.convert("RGBA").resize((target_w, target_h), Image.Resampling.LANCZOS)
+                att_mask = Image.new("L", (target_w, target_h), 0)
+                ImageDraw.Draw(att_mask).rounded_rectangle([0, 0, target_w - 1, target_h - 1], radius=18, fill=255)
+
+                draw_border = ImageDraw.Draw(att_resized)
+                draw_border.rounded_rectangle([0, 0, target_w - 1, target_h - 1], radius=18, outline=t["card_outline"], width=1)
+                att_h = target_h + 16
+        except Exception as e:
+            print(f"  ⚠️ Lỗi xử lý ảnh minh họa đính kèm: {e}")
+
+    card_h = PAD + AVATAR_SIZE + 22 + text_h + att_h + 26 + ICON_SIZE + PAD
     card_h = max(card_h, 240)
 
     img = Image.new("RGBA", (CARD_W, card_h), (0, 0, 0, 0))
@@ -397,8 +421,15 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
     for i, line in enumerate(lines):
         draw.text((PAD, content_y + i * line_h), line, font=FONT_BODY, fill=t["text_primary"])
 
+    # 6.1. Dán ảnh minh họa câu chuyện (nếu có)
+    current_bottom_y = content_y + text_h
+    if att_resized and att_mask:
+        img_paste_y = current_bottom_y + 14
+        img.paste(att_resized, (PAD, img_paste_y), att_mask)
+        current_bottom_y = img_paste_y + att_resized.height
+
     # 7. Action Bar: CĂN THẲNG TRỤC NGANG 100% GIỮA ICON VÀ SỐ LIỆU
-    action_center_y = content_y + text_h + 20 + ICON_SIZE // 2
+    action_center_y = current_bottom_y + 20 + ICON_SIZE // 2
 
     likes_val = likes if likes > 0 else random.randint(12000, 35000)
     comments_cnt = max(18, likes_val // 55)
@@ -429,6 +460,93 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
         act_x += ICON_SIZE + 8 + int(val_w) + gap
 
     return img
+
+
+def create_popup_illustration_card(image_path: str, output_path: str,
+                                   badge_text: str = "",
+                                   caption_text: str = None) -> str:
+    """
+    Tạo khung ảnh minh họa nổi bên ngoài (Popup Cutaway Card) cực kỳ sắc nét:
+    - Bo góc mềm mại (26px)
+    - Viền trắng thanh lịch (Sleek modern border), đổ bóng 3D sâu
+    - Nếu không truyền badge_text hoặc caption_text -> KHÔNG vẽ chữ, giữ ảnh thuần túy 100%
+    """
+    if not image_path or not os.path.exists(image_path):
+        return ""
+    try:
+        w, h = 940, 620
+        canvas = Image.new("RGBA", (w + 40, h + 40), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+
+        # 1. Đổ bóng 3D sâu
+        draw.rounded_rectangle([15, 20, w + 25, h + 30], radius=28, fill=(0, 0, 0, 180))
+
+        # 2. Khung viền trắng thanh lịch sang trọng
+        draw.rounded_rectangle([18, 18, w + 22, h + 22], radius=26, fill=(20, 20, 25, 255),
+                               outline=(255, 255, 255, 220), width=3)
+
+        # 3. Dán ảnh minh họa bo góc lớn sắc nét (Center-crop giữ đúng tỷ lệ không bị méo ảnh)
+        with Image.open(image_path) as raw_im:
+            raw_w, raw_h = raw_im.size
+            target_ratio = w / h
+            im_ratio = raw_w / raw_h
+            if im_ratio > target_ratio:
+                crop_w = int(raw_h * target_ratio)
+                crop_h = raw_h
+                crop_x = (raw_w - crop_w) // 2
+                crop_y = 0
+            else:
+                crop_w = raw_w
+                crop_h = int(raw_w / target_ratio)
+                crop_x = 0
+                crop_y = (raw_h - crop_h) // 2
+            
+            cropped = raw_im.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
+            im = cropped.convert("RGBA").resize((w, h), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=24, fill=255)
+            canvas.paste(im, (20, 20), mask)
+
+        # Lọc bỏ emoji để tránh hiện ô vuông font chữ []
+        import re
+        emoji_pattern = re.compile(
+            "[\U00010000-\U0010ffff]|[\u2600-\u27bf]|[\u2300-\u23ff]|[\u2b50-\u2b55]",
+            flags=re.UNICODE
+        )
+        clean_caption = emoji_pattern.sub("", caption_text).strip() if caption_text else ""
+        clean_badge = emoji_pattern.sub("", badge_text).strip() if badge_text else ""
+
+        # 4. Banner giải thích ngữ cảnh trò đùa ở đáy ảnh (chỉ vẽ khi có clean_caption)
+        if clean_caption:
+            banner_h = 74
+            banner = Image.new("RGBA", (w, banner_h), (10, 15, 30, 235))
+            b_draw = ImageDraw.Draw(banner)
+            b_draw.line([(0, 0), (w, 0)], fill=(255, 255, 255, 120), width=1)
+            cap_w = b_draw.textlength(clean_caption, font=FONT_BODY)
+            cap_x = max(20, (w - int(cap_w)) // 2)
+            b_draw.text((cap_x, 18), clean_caption, font=FONT_BODY, fill=(255, 255, 255))
+            canvas.paste(banner, (20, 20 + h - banner_h), banner)
+
+        # 5. Huy hiệu góc trên (chỉ vẽ khi có clean_badge)
+        if clean_badge:
+            badge_w = max(180, int(draw.textlength(clean_badge, font=FONT_TIME)) + 36)
+            badge = Image.new("RGBA", (badge_w, 42), (0, 0, 0, 0))
+            bg_draw = ImageDraw.Draw(badge)
+            bg_draw.rounded_rectangle([0, 0, badge_w - 1, 41], radius=14, fill=(15, 23, 42, 240),
+                                      outline=(255, 255, 255, 200), width=2)
+            bg_draw.text((18, 10), clean_badge, fill=(255, 255, 255), font=FONT_TIME)
+            canvas.paste(badge, (38, 38), badge)
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        canvas.save(output_path)
+        return output_path
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        canvas.save(output_path)
+        return output_path
+    except Exception as e:
+        print(f"  ⚠️ Lỗi tạo khung ảnh minh họa nổi: {e}")
+        return ""
 
 
 # ─── Render Thẻ COMMENT (Bình luận như thật) ──────────────────────────────────

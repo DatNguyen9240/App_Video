@@ -46,18 +46,19 @@ def clean_hex_color(c: str) -> str:
 # ─── ĐỊNH NGHĨA SCHEMA JSON CHO GEMINI (CÓ METADATA ĐẠO DIỄN) ────────────────
 
 class CommentSchema(BaseModel):
-    username: str = Field(description="Tên người dùng hài hước tiếng Việt hoặc Gen Z, ví dụ: hr_ngapnguoi, dev_khocnhe, an.tran99")
-    reply_to: str = Field(default="", description="Tên username mà bình luận này đang trả lời (có thể là tên tác giả bài đăng HOẶC tên người comment trước đó)")
+    username: str = Field(description="Tên người dùng hài hước tiếng Việt hoặc Gen Z, ví dụ: hr_ngapnguoi, dev_khocnhe, linh.cute03, tuan_it_98")
+    reply_to: str = Field(default="", description="Tên username mà bình luận này đang trả lời (có thể là tác giả HOẶC username của bình luận trước để tạo hội thoại cãi nhau/đối đáp)")
     content: str = Field(description="Bình luận tiếng Việt CỰC KỲ NGẮN GỌN (chỉ 1 câu đắt giá, tối đa 20 từ), sắc sảo, dí dỏm, bẻ lái hoặc châm chọc hài hước")
     avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b)")
     likes: int = Field(default=4500, description="Lượt thích ước tính từ 1500 đến 25000")
-    sfx: Literal["laugh", "boom", "bruh", "ting", "none"] = Field(
-        description="SFX phù hợp: 'laugh' cho câu buồn cười, 'boom' cho cú bẻ lái sốc, 'bruh' cho cạn lời, 'ting' cho thông minh"
+    sfx: Literal["laugh", "boom", "bruh", "ting", "applause", "huh", "side_eye", "clown", "none"] = Field(
+        default="laugh",
+        description="SFX phù hợp: 'laugh' cho câu buồn cười, 'boom' cho cú bẻ lái sốc, 'bruh' cho cạn lời, 'ting' cho thông minh, 'huh' cho khó hiểu, 'side_eye' cho mỉa mai, 'clown' cho hề hước"
     )
     emotion: Literal["funny", "shocked", "awkward", "sarcastic", "insightful", "neutral"] = Field(
         default="funny", description="Sắc thái cảm xúc của câu nói"
     )
-    pause_before_ms: int = Field(default=250, description="Khoảng lặng trước khi nói tính bằng mili-giây (150-400ms)")
+    pause_before_ms: int = Field(default=250, description="Khoảng lặng trước khi nói tính bằng mili-giây (150-500ms)")
     pause_after_ms: int = Field(default=350, description="Khoảng lặng sau khi dứt câu (300-600ms)")
     camera_motion: Literal["none", "punch_in", "shake"] = Field(
         default="none", description="Hiệu ứng chuyển động hình ảnh ('punch_in' phóng to nhẹ, 'shake' rung lắc khi sốc)"
@@ -73,9 +74,19 @@ class PostSchema(BaseModel):
     video_title: str = Field(default="", description="Tiêu đề video ngắn gọn, giật gân hài hước")
     video_caption: str = Field(default="", description="Đoạn caption đăng TikTok/Reels cuốn hút kèm câu hỏi kêu gọi bình luận")
     hashtags: str = Field(default="", description="Chuỗi 5-7 hashtag viral")
+    illustration_prompt: str = Field(
+        default="",
+        description="Mô tả hình ảnh bằng tiếng Anh chi tiết (10-15 từ) để AI vẽ ảnh minh họa hài hước chuẩn xác tình huống/trò đùa của bài, ví dụ: 'funny man in bed wearing sunglasses at midnight blinded by bright light funny meme'"
+    )
+    illustration_caption: str = Field(
+        default="",
+        description="Câu chú thích hài hước tiếng Việt ngắn (dưới 10 từ) gắn lên ảnh minh họa để người xem hiểu ngay trò đùa, ví dụ: 'Đèn ngủ lúc 2h sáng: Sáng như sân Mỹ Đình!'"
+    )
     emotional_arc: str = Field(default="Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời", description="Tóm tắt đường cong cảm xúc của video")
     hook_energy: Literal["high", "intense", "curious"] = Field(default="high", description="Mức năng lượng mở màn")
-    comments: list[CommentSchema] = Field(description="Danh sách chính xác 3 bình luận tiếng Việt tạo thành nhịp điệu cảm xúc hoàn chỉnh")
+    comments: list[CommentSchema] = Field(
+        description="Danh sách từ 3 đến 6 bình luận tiếng Việt tạo thành chuỗi drama/hội thoại cuốn hút, đối đáp qua lại hoặc plot twist liên hoàn"
+    )
 
 
 # ─── QUẢN LÝ GEMINI API KEY ──────────────────────────────────────────────────
@@ -141,11 +152,13 @@ def get_or_prompt_api_key() -> str:
 
 def generate_story_with_gemini(
     topic: str = "",
+    duration_mode: str = None,
     api_key: str = None,
     progress_cb: Optional[Callable[[str, int], None]] = None
 ) -> Post:
     """
     Sử dụng Gemini API với cấu hình đạo diễn cảm xúc để tạo kịch bản Threads hoàn chỉnh.
+    Hỗ trợ linh hoạt thời lượng (30s, 60s, 90s, auto) và đa dạng hóa đồ thị drama.
     Tự động phân vai giọng đọc (Multi-Voice Acting) và thiết lập khoảng lặng (Breathing Room).
     """
     if progress_cb:
@@ -181,17 +194,58 @@ def generate_story_with_gemini(
     system_instruction = ai_cfg.get("system_instruction", "")
     model_primary = ai_cfg.get("model", "gemini-3.5-flash")
     model_fallback = ai_cfg.get("fallback_model", "gemini-3.5-flash-lite")
-    temperature = float(ai_cfg.get("temperature", 0.88))
+    temperature = float(ai_cfg.get("temperature", 0.92))
+    dur_mode = duration_mode or ai_cfg.get("duration_mode", "auto")
+
+    if dur_mode == "fast_30s":
+        cmt_guide = (
+            "SỐ LƯỢNG BÌNH LUẬN: ĐÚNG 3 BÌNH LUẬN (Thời lượng ngắn 25-30s):\n"
+            "- C1: Đồng cảm / reaction hài hước (reply_to username tác giả).\n"
+            "- C2: BẺ LÁI 180° sốc hoặc bóc phốt đau điếng (sfx='boom').\n"
+            "- C3: Chốt hạ cạn lời / meme reaction bất hủ (sfx='bruh' hoặc 'laugh')."
+        )
+    elif dur_mode == "deep_60s":
+        cmt_guide = (
+            "SỐ LƯỢNG BÌNH LUẬN: TỪ 4 ĐẾN 5 BÌNH LUẬN (Thời lượng drama 45-60s):\n"
+            "- C1: Reaction mở đầu châm ngòi drama (reply_to tác giả).\n"
+            "- C2: Tranh cãi hoặc phản bác gay gắt (reply_to username C1, sfx='huh' hoặc 'side_eye').\n"
+            "- C3: Tác giả hoặc người trong cuộc vào bóc thêm chi tiết éo le (sfx='boom' hoặc 'laugh').\n"
+            "- C4: Cú bẻ lái sốc lần 2 đảo lộn sự thật (sfx='boom' hoặc 'shock').\n"
+            "- C5: Chốt hạ cạn lời / meme bất hủ (sfx='bruh' hoặc 'clown')."
+        )
+    elif dur_mode == "viral_story_90s":
+        cmt_guide = (
+            "SỐ LƯỢNG BÌNH LUẬN: TỪ 5 ĐẾN 7 BÌNH LUẬN (Thời lượng viral dài 70-90s):\n"
+            "- Tạo một chuỗi drama hoàn chỉnh: khẩu chiến nhiều phe, bóc phốt liên hoàn, các cú twist dồn dập khiến người xem không thể rời mắt."
+        )
+    else:  # "auto"
+        cmt_guide = (
+            "SỐ LƯỢNG BÌNH LUẬN: TỰ DO TỪ 3 ĐẾN 6 BÌNH LUẬN (Dựa theo độ sâu của chủ đề để tối ưu độ cuốn hút):\n"
+            "- Nếu câu chuyện dí dỏm đơn giản -> 3-4 bình luận.\n"
+            "- Nếu câu chuyện có drama nhiều tầng, khẩu chiến hoặc cú twist kép -> 4-6 bình luận.\n"
+            "- Các bình luận CÓ THỂ reply_to lẫn nhau để tạo cảm giác hội thoại cãi nhau/đối đáp thực tế trên Threads!"
+        )
 
     prompt = (
-        f"Hãy đóng vai Đạo diễn và sáng tạo 1 bài Threads bằng tiếng Việt theo Đồ thị Cảm xúc hoàn chỉnh.\n"
-        f"Chủ đề kịch bản: '{topic}'\n\n"
-        f"QUY TẮC ĐỘ DÀI & ĐỐI THOẠI (BẮT BUỘC NGẮN GỌN CHO VIDEO TIKTOK DƯỚI 30 GIÂY):\n"
-        f"- Bài viết chính: CỰC KỲ NGẮN GỌN (chỉ 1 - 2 câu ngắn, tối đa 30-35 từ). Bắt đầu bằng Hook giật mình tò mò, nêu ngay mâu thuẫn chính, không mở bài dài dòng.\n"
-        f"- Bình luận 1: Rất ngắn (1 câu, dưới 20 từ), khơi mào tranh luận, thường trả lời tác giả (reply_to = username tác giả).\n"
-        f"- Bình luận 2: Cú bẻ lái sốc (twist punchline) cực ngắn và đanh thép (1 câu, dưới 20 từ), gán sfx 'boom'. ĐẶC BIỆT: Có thể trả lời tác giả HOẶC trả lời/bóc mẽ Bình luận 1 (reply_to = username của Bình luận 1)!\n"
-        f"- Bình luận 3: Chốt hạ cạn lời hoặc dở khóc dở cười (1 câu đắt giá, dưới 18 từ), gán sfx 'bruh' hoặc 'laugh'. Có thể trả lời tác giả hoặc người bình luận trước.\n"
-        f"- Trường 'reply_to': Bắt buộc ghi rõ username mà bình luận đó đang trực tiếp tương tác (ví dụ trả lời tác giả hoặc người bình luận trước)."
+        f"Tạo 1 kịch bản Threads/Twitter drama bằng tiếng Việt GenZ.\n"
+        f"Chủ đề: '{topic}'\n"
+        f"Chế độ kịch bản: {dur_mode}\n\n"
+        f"QUY TẮC CẤU TRÚC KỊCH BẢN:\n"
+        f"- Bài viết chính: CỰC KỲ NGẮN GỌN (1-2 câu, tối đa 30-35 từ). "
+        f"Hook giật mình tò mò, kể tình huống dở khóc dở cười CỤ THỂ, "
+        f"dùng ngôn ngữ đời thường GenZ (không formal).\n"
+        f"{cmt_guide}\n"
+        f"- Mỗi bình luận: Chỉ 1 câu ngắn gọn, tối đa 20 từ, sắc sảo, tự nhiên.\n"
+        f"- Username PHẢI GenZ: viết thường, dùng dấu chấm/gạch dưới/số. "
+        f"VD: 'linh.cute03', 'nam_dep_trai99', 'toi.la.mot.con.meo', 'hr_ngap_nguoi', 'dev_nho_nha'\n"
+        f"- reply_to: Ghi rõ username đang trả lời (có thể là tác giả hoặc username commenter phía trước).\n"
+        f"- TUYỆT ĐỐI KHÔNG viết formal/báo chí, KHÔNG viết đúng ngữ pháp quá chỉn chu.\n\n"
+        f"VÍ DỤ TONE THAM KHẢO:\n"
+        f"Bài: 'chồng tui bảo mua đèn ngủ thông minh cho lãng mạn, giờ đêm đập muỗi 1 cái là sáng như sân Mỹ Đình 💀'\n"
+        f"- C1: 'rồi lúc hai vợ chồng quẩy tới bến thì cái đèn chớp tắt như vũ trường à? 😂' (reply tác giả)\n"
+        f"- C2: 'nhà tui mua đèn giọng nói nè, đêm chồng ngáy 1 cái đổi 7 màu rực rỡ 🤡' (reply C1)\n"
+        f"- C3: 'ê rồi lỡ nói mớ tên người yêu cũ thì nó bật còi cứu hỏa không? 😭' (reply C2)\n"
+        f"- C4: 'thôi xin vĩnh biệt cụ... combo ly hôn tự động à 💀' (reply tác giả)\n"
     )
 
     if progress_cb:
@@ -237,39 +291,105 @@ def generate_story_with_gemini(
     if progress_cb:
         progress_cb("Phân bổ vai diễn & nhịp điệu cảm xúc...", 70)
 
-    # Phân bổ vai diễn giọng đọc từ cấu hình (không hardcode)
+    # Phân bổ vai diễn giọng đọc từ cấu hình (Dynamic Multi-Voice Casting)
     roles = voice_cfg.get("roles", {})
     author_role = roles.get("author", {})
+    female_presets = voice_cfg.get("female_voice_presets", [
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+10Hz", "style": "cheerful"},
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+4Hz",  "style": "chat"},
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+14Hz", "style": "excited"},
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "-6%",  "pitch": "-6Hz",  "style": "sad"}
+    ])
+    male_presets = voice_cfg.get("male_voice_presets", [
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+25%", "pitch": "-10Hz", "style": "angry"},
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+16%", "pitch": "+6Hz",  "style": "cheerful"},
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+0Hz",  "style": "chat"},
+        {"voice": "vi-VN-NamMinhNeural", "rate": "-8%",  "pitch": "-8Hz",  "style": "sad"}
+    ])
+
+    female_keywords = {"linh", "trang", "mai", "be", "hoa", "ngoc", "lan", "anh", "girl", "cute", "thao", "vy", "my", "phuong", "giang", "nhung", "quynh", "huyen", "nga"}
+    male_keywords = {"nam", "tuan", "duc", "boy", "dev", "minh", "hoang", "khoa", "huy", "kien", "dat", "quan", "hung", "long", "thanh", "hai", "son", "dung"}
 
     comments = []
     raw_comments = data.get("comments", [])
     for idx, c in enumerate(raw_comments, 1):
+        u_name = c.get("username", f"user_{idx}").lower()
         role_key = f"commenter_{idx}"
         role_info = roles.get(role_key, {})
 
-        # Tự động điều chỉnh nhịp nếu cú sốc (boom)
+        # Tự động nhận diện giới tính theo username hoặc xen kẽ tự nhiên
+        is_female = any(k in u_name for k in female_keywords)
+        if not is_female and not any(k in u_name for k in male_keywords):
+            is_female = (idx % 2 == 1)
+
+        preset_list = female_presets if is_female else male_presets
+        preset = preset_list[((idx - 1) // 2) % len(preset_list)]
+
         sfx_val = c.get("sfx", "laugh")
         camera_mot = c.get("camera_motion", "none")
-        if sfx_val == "boom" and camera_mot == "none":
+        if sfx_val in ["boom", "shock"] and camera_mot == "none":
             camera_mot = "shake"
-        elif sfx_val in ["laugh", "bruh"] and camera_mot == "none":
+        elif sfx_val in ["laugh", "bruh", "applause"] and camera_mot == "none":
             camera_mot = "punch_in"
+
+        emotion_val = c.get("emotion", "funny")
+        emotion_map = voice_cfg.get("emotion_style_map", {})
+        emo_style_cfg = emotion_map.get(emotion_val, {})
+
+        # Tự động tính khoảng lặng kịch tính (Breathing Room)
+        default_pause_before = c.get("pause_before_ms", 250)
+        default_pause_after = c.get("pause_after_ms", 350)
+        if sfx_val in ["boom", "shock"]:
+            # Cú twist bẻ lái cần suspense rõ rệt
+            default_pause_before = max(default_pause_before, 650)
+            default_pause_after = max(default_pause_after, 600)
+        elif idx == len(raw_comments):
+            # Câu chốt hạ cuối cùng có khoảng lặng kết
+            default_pause_after = max(default_pause_after, 700)
+
+        assigned_voice = role_info.get("voice") or preset.get("voice", "vi-VN-HoaiMyNeural" if is_female else "vi-VN-NamMinhNeural")
+        assigned_rate = role_info.get("rate") or emo_style_cfg.get("rate_boost") or preset.get("rate", "+16%")
+        assigned_pitch = role_info.get("pitch") or emo_style_cfg.get("pitch_boost") or preset.get("pitch", "+0Hz")
 
         comments.append(Comment(
             username=c.get("username", f"user_{idx}"),
             content=c.get("content", ""),
             reply_to=c.get("reply_to", "") or data.get("username", "author"),
             avatar_color=clean_hex_color(c.get("avatar_color", "")),
-            likes=c.get("likes", random.randint(2000, 15000)),
+            likes=c.get("likes", random.randint(2000, 25000)),
             sfx=sfx_val,
-            emotion=c.get("emotion", "funny"),
-            voice_id=role_info.get("voice", voice_cfg.get("default_commenter_female_voice", "vi-VN-HoaiMyNeural")),
-            rate_offset=role_info.get("rate", "+10%"),
-            pitch_offset=role_info.get("pitch", "+0Hz"),
-            pause_before_ms=c.get("pause_before_ms", 250),
-            pause_after_ms=c.get("pause_after_ms", 350),
+            emotion=emotion_val,
+            voice_id=assigned_voice,
+            rate_offset=assigned_rate,
+            pitch_offset=assigned_pitch,
+            pause_before_ms=default_pause_before,
+            pause_after_ms=default_pause_after,
             camera_motion=camera_mot
         ))
+
+    # Tự động tải hoặc tạo ảnh minh họa câu chuyện nếu có illustration_prompt
+    illus_prompt = data.get("illustration_prompt", "")
+    illus_path = ""
+    if illus_prompt:
+        try:
+            import urllib.request
+            import urllib.parse
+            illus_dir = os.path.join(OUT_DIR, "illustrations")
+            os.makedirs(illus_dir, exist_ok=True)
+            illus_filename = f"story_{int(time.time())}.jpg"
+            target_file = os.path.join(illus_dir, illus_filename)
+            encoded = urllib.parse.quote(f"funny relatable comedy photograph, real life meme, {illus_prompt}, bright clean lighting, realistic funny moment, no uncanny clay, no horror")
+            url = f"https://image.pollinations.ai/prompt/{encoded}?width=940&height=600&nologo=true&seed=42"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data_bytes = resp.read()
+                if len(data_bytes) > 1000:
+                    with open(target_file, "wb") as f:
+                        f.write(data_bytes)
+                    illus_path = target_file
+                    print(f"  [✓] Đã tạo thành công ảnh minh họa câu chuyện: {illus_path}")
+        except Exception as e:
+            print(f"  ⚠️ Không tải được ảnh minh họa ({e}), tiếp tục dùng card chữ chuẩn.")
 
     post = Post(
         username=data.get("username", "threads.user"),
@@ -280,10 +400,13 @@ def generate_story_with_gemini(
         video_title=data.get("video_title", ""),
         video_caption=data.get("video_caption", ""),
         hashtags=data.get("hashtags", ""),
+        illustration_prompt=illus_prompt,
+        illustration_path=illus_path,
+        illustration_caption=data.get("illustration_caption", ""),
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         hook_energy=data.get("hook_energy", "high"),
         voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "vi-VN-NamMinhNeural")),
-        rate_offset=author_role.get("rate", "+8%"),
+        rate_offset=author_role.get("rate", "+5%"),
         pitch_offset=author_role.get("pitch", "+0Hz"),
         pause_before_ms=150,
         pause_after_ms=300,

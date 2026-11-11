@@ -207,11 +207,11 @@ def cut_background_video(duration_sec: float, output_path: str, bg_video_path: s
             "-ss", str(start_sec),
             "-t", str(duration_sec),
             "-i", bg_video_path,
-            "-vf", "crop=ih*9/16:ih:(iw-ow)/2:0,scale=1080:1920:flags=lanczos",
+            "-vf", "crop=ih*9/16:ih:(iw-ow)/2:0,scale=1080:1920:flags=lanczos,eq=brightness=-0.04:contrast=1.05",
             "-an",
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "20",
+            "-preset", "ultrafast",
+            "-crf", "18",
             "-pix_fmt", "yuv420p",
             output_path
         )
@@ -247,11 +247,11 @@ def generate_split_screen_background(duration_sec: float, output_path: str) -> s
             "-t", f"{duration_sec:.2f}",
             "-i", bg_video_path,
             "-f", "lavfi",
-            "-i", "color=c=0x090d16:s=1080x1920:r=60",
+            "-i", "color=c=0x0a0e17:s=1080x1920:r=60",
             "-filter_complex",
-            "[0:v]scale=1080:680:force_original_aspect_ratio=increase,crop=1080:680[top];"
+            "[0:v]scale=1080:720:force_original_aspect_ratio=increase,crop=1080:720[top];"
             "[1:v][top]overlay=0:0[bg];"
-            "[bg]drawbox=y=678:color=0x6366f1@0.85:width=1080:height=4:t=fill[out]",
+            "[bg]drawbox=y=716:color=0x6366f1@0.95:width=1080:height=4:t=fill[out]",
             "-map", "[out]",
             "-t", f"{duration_sec:.2f}",
             "-c:v", "libx264",
@@ -302,8 +302,10 @@ def prepare_background(duration_sec: float, output_path: str, mode: str = "infin
     - gradient_cyber: Nền tối Neon tĩnh cao cấp
     - gradient_lofi: Nền cà phê Lofi ấm cúng
     """
-    m = (mode or "infinity").lower()
-    if m in ["split", "split_gameplay", "split_screen"]:
+    m = (mode or "minecraft").lower()
+    if m in ["minecraft", "video", "parkour", "gameplay", "full_gameplay"]:
+        return cut_background_video(duration_sec, output_path)
+    elif m in ["split", "split_gameplay", "split_screen"]:
         return generate_split_screen_background(duration_sec, output_path)
     elif m in ["gradient_cyber", "cyber"]:
         return generate_gradient_background(duration_sec, output_path, "cyber")
@@ -372,14 +374,28 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
 
     if bg_music_path and os.path.exists(bg_music_path):
         cfg = config_mod.load_config()
-        bg_vol = cfg.get("emotional_pacing", {}).get("bgm_volume_normal", 0.08)
-        print(f"  🎵 Trộn nhạc nền lofi (volume={bg_vol}): {os.path.basename(bg_music_path)}")
+        pacing = cfg.get("emotional_pacing", {})
+        bg_vol = pacing.get("bgm_volume_normal", 0.16)
+        duck_enabled = pacing.get("enable_bgm_ducking", True)
+        print(f"  🎵 Trộn nhạc nền TikTok (volume={bg_vol}, ducking={duck_enabled}): {os.path.basename(bg_music_path)}")
+
+        if duck_enabled:
+            # Dynamic ducking qua sidechaincompress:
+            # Nhạc nền tự hạ khi có giọng nói, tự động trồi lên khi dừng câu hoặc có khoảng lặng
+            filter_str = (
+                f"[1:a]volume={bg_vol}[bg];"
+                f"[0:a]asplit=2[v_main][v_side];"
+                f"[bg][v_side]sidechaincompress=threshold=0.03:ratio=4:attack=50:release=350[ducked_bg];"
+                f"[v_main][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2[out]"
+            )
+        else:
+            filter_str = f"[1:a]volume={bg_vol}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]"
+
         run_ffmpeg(
             "-i", voice_sfx_merged,
             "-stream_loop", "-1",
             "-i", bg_music_path,
-            "-filter_complex",
-            f"[1:a]volume={bg_vol}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]",
+            "-filter_complex", filter_str,
             "-map", "[out]",
             "-c:a", "libmp3lame",
             "-q:a", "2",

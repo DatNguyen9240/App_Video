@@ -1,16 +1,20 @@
 {
   "project_name": "Threads Video Automation Studio",
-  "version": "2.1.0",
+  "version": "2.0.0",
   "ai_director": {
     "model": "gemini-3.5-flash",
     "fallback_model": "gemini-3.5-flash-lite",
-    "temperature": 0.88,
-    "system_instruction": "Bạn là Đạo diễn kiêm Nhà sáng tạo nội dung hàng đầu cho video ngắn (TikTok, Reels, Shorts) tại Việt Nam. Phong cách của bạn dí dỏm, châm biếm sâu cay, bắt trend Gen Z và dân văn phòng cực nhạy.\n\nNhiệm vụ của bạn là xây dựng kịch bản có 'ĐỒ THỊ CẢM XÚC' lôi cuốn người xem như người thật:\n1. HOOK (0-3s): Câu mở đầu của bài đăng chính phải có tính kích thích tò mò cao (Pattern Interrupt), tạo tình huống dở khóc dở cười hoặc mâu thuẫn bất ngờ.\n2. BÌNH LUẬN 1 (Đồng cảm/Tung hứng): Đùa cợt đồng cảm, đẩy sự việc lên một nấc hài hước.\n3. BÌNH LUẬN 2 (Cú bẻ lái sốc/Punchline): Bẻ lái bất ngờ 180 độ, châm chọc đỉnh cao khiến người xem bất ngờ hoặc cạn lời.\n4. BÌNH LUẬN 3 (Chốt hạ/Dư âm): Câu chốt hạ chua chát, bất lực hoặc kích thích người xem phải bấm vào phần comment để tranh luận.\n5. ĐIỀU ĐỘ CẢM XÚC: Chỉ định rõ cảm xúc (emotion), giọng đọc phù hợp (nam/nữ đan xen), và nhịp ngừng (pause) để câu nói có hồn.",
-    "daily_trending": {
-      "auto_fetch_daily": true,
-      "cache_file": "output/daily_trending_topics.json",
-      "description": "Tự động fetch danh sách chủ đề thịnh hành trên Threads mỗi ngày 1 lần; nếu trong ngày đã fetch thì đọc từ cache."
-    }
+    "temperature": 0.92,
+    "duration_mode": "auto",
+    "min_comments": 3,
+    "max_comments": 6,
+    "drama_archetypes": [
+      "double_twist",
+      "thread_war",
+      "chain_exposure",
+      "confession_roast"
+    ],
+    "system_instruction": "Mày là đạo diễn nội dung viral đỉnh nhất TikTok Việt Nam, chuyên tạo kịch bản video mô phỏng drama THẬT trên Threads/Twitter. Mày hiểu rõ GenZ Việt nói chuyện như thế nào.\n\nPHONG CÁCH VIẾT BẮT BUỘC:\n- Dùng ngôn ngữ GenZ Việt THẬT: 'ủa', 'wtf', 'slay', 'real', 'fr fr', 'no cap', 'vl', 'chs', 'lol', 'bruh', 'era nào rồi', 'tui uninstall cuộc đời', 'same bro', 'đỉnh nóc kịch trần', 'rồi sao nữa...', '???', 'alo 115', 'skill issue', 'it's giving', 'sến', 'xỉu', 'tui đây nè'\n- Bình luận PHẢI chaotic tự nhiên: viết thường hết HOẶC viết hoa la hét, dùng '...' '????' nhiều, reaction emoji (💀🤡😭☠️🔥)\n- Self-deprecating humor: GenZ thích tự chê bản thân ('tui đây nè', 'skill issue', 'thôi tui xin', 'cho tui xin 1 vé đi tu')\n- Toxic nhẹ kiểu bạn bè: bóc mẽ nhau hài hước ('ê mày ơi', 'found the 🤡', 'ai hỏi đâu nhưng flex hoài')\n- TUYỆT ĐỐI KHÔNG viết formal, KHÔNG dùng ngôn ngữ báo chí, KHÔNG viết như người lớn, KHÔNG viết đúng ngữ pháp quá chỉn chu\n\nCÁC ĐỒ THỊ CẢM XÚC SÁNG TẠO (CHỌN 1 ARCHETYPE PHÙ HỢP NHẤT VỚI CHỦ ĐỀ):\n1. DOUBLE TWIST (CÚ LẬT KÈO KÉP): Hook -> C1 đồng cảm -> C2 twist sốc lần 1 -> C3 đẩy cao trào -> Cmt cuối twist lần 2 lật ngược toàn bộ sự thật!\n2. THREAD WAR (KHẨU CHIẾN QUA LẠI): Hook -> C1 nêu ý kiến -> C2 reply_to C1 cãi gay gắt -> C3 tác giả phân trần -> C4 thánh phán bóc mẽ cả hội cạn lời.\n3. CHAIN EXPOSURE (BÓC PHỐT LIÊN HOÀN): Mỗi bình luận bóc thêm một chi tiết éo le của tác giả, càng về sau tình huống càng bung bét hài hước.\n4. CONFESSION & ROAST: Tác giả kể một bí mật/sai lầm ngớ ngẩn, các bình luận bên dưới thi nhau cà khịa hoặc hiến kế bá đạo."
   },
   "audio_mastering": {
     "enable_vocal_chain": true,
@@ -26,8 +30,8 @@
     "punchline_post_pause_ms": 500,
     "comment_gap_ms": 280,
     "awkward_silence_duration_ms": 400,
-    "bgm_volume_normal": 0.08,
-    "bgm_volume_duck": 0.03,
+    "bgm_volume_normal": 0.16,
+    "bgm_volume_duck": 0.05,
     "enable_bgm_ducking": true,
     "enable_camera_shake": true,
     "enable_card_zoom": true
@@ -36,30 +40,115 @@
     "default_author_voice": "vi-VN-NamMinhNeural",
     "default_commenter_female_voice": "vi-VN-HoaiMyNeural",
     "default_commenter_male_voice": "vi-VN-NamMinhNeural",
+    "dynamic_casting": true,
+    "female_voice_presets": [
+      {
+        "voice": "vi-VN-HoaiMyNeural",
+        "rate": "+18%",
+        "pitch": "+10Hz",
+        "style": "cheerful"
+      },
+      {
+        "voice": "vi-VN-HoaiMyNeural",
+        "rate": "+12%",
+        "pitch": "+4Hz",
+        "style": "chat"
+      },
+      {
+        "voice": "vi-VN-HoaiMyNeural",
+        "rate": "+24%",
+        "pitch": "+14Hz",
+        "style": "excited"
+      },
+      {
+        "voice": "vi-VN-HoaiMyNeural",
+        "rate": "-6%",
+        "pitch": "-6Hz",
+        "style": "sad"
+      }
+    ],
+    "male_voice_presets": [
+      {
+        "voice": "vi-VN-NamMinhNeural",
+        "rate": "+25%",
+        "pitch": "-10Hz",
+        "style": "angry"
+      },
+      {
+        "voice": "vi-VN-NamMinhNeural",
+        "rate": "+16%",
+        "pitch": "+6Hz",
+        "style": "cheerful"
+      },
+      {
+        "voice": "vi-VN-NamMinhNeural",
+        "rate": "+22%",
+        "pitch": "+0Hz",
+        "style": "chat"
+      },
+      {
+        "voice": "vi-VN-NamMinhNeural",
+        "rate": "-8%",
+        "pitch": "-8Hz",
+        "style": "sad"
+      }
+    ],
     "roles": {
       "author": {
         "voice": "vi-VN-NamMinhNeural",
-        "rate": "+8%",
+        "rate": "+5%",
         "pitch": "+0Hz",
-        "description": "Giọng kể chuyện tự nhiên, hào hứng vừa phải"
+        "style": ""
       },
       "commenter_1": {
         "voice": "vi-VN-HoaiMyNeural",
-        "rate": "+10%",
-        "pitch": "+4Hz",
-        "description": "Giọng nữ châm biếm nhẹ, đồng cảm hài hước"
+        "rate": "+18%",
+        "pitch": "+10Hz",
+        "style": "cheerful"
       },
       "commenter_2": {
         "voice": "vi-VN-NamMinhNeural",
-        "rate": "+12%",
-        "pitch": "-4Hz",
-        "description": "Giọng nam bẻ lái sắc sảo, dứt khoát"
+        "rate": "+25%",
+        "pitch": "-10Hz",
+        "style": "angry"
       },
       "commenter_3": {
         "voice": "vi-VN-HoaiMyNeural",
-        "rate": "+5%",
-        "pitch": "-2Hz",
-        "description": "Giọng chốt hạ, thở dài cạn lời"
+        "rate": "-8%",
+        "pitch": "-6Hz",
+        "style": "sad"
+      }
+    },
+    "emotion_style_map": {
+      "funny": {
+        "style": "cheerful",
+        "rate_boost": "+5%",
+        "pitch_boost": "+3Hz"
+      },
+      "shocked": {
+        "style": "shouting",
+        "rate_boost": "+15%",
+        "pitch_boost": "+6Hz"
+      },
+      "awkward": {
+        "style": "embarrassed",
+        "rate_boost": "-5%",
+        "pitch_boost": "-2Hz"
+      },
+      "sarcastic": {
+        "style": "disgruntled",
+        "rate_boost": "+8%",
+        "pitch_boost": "-4Hz"
+      },
+      "insightful": {
+        "style": "calm",
+        "rate_boost": "+0%",
+        "pitch_boost": "+0Hz"
+      },
+      "neutral": {
+        "style": "",
+        "rate_boost": "+0%",
+        "pitch_boost": "+0Hz"
       }
     }
   },
@@ -68,120 +157,92 @@
       "sfx_file": "laugh.mp3",
       "meme_file": "laugh.gif",
       "emotion": "funny",
-      "camera_motion": "punch_in",
-      "pre_delay_ms": 100,
-      "post_delay_ms": 400,
-      "volume": 1.0
+      "camera_motion": "punch_in"
     },
     "boom": {
       "sfx_file": "boom.mp3",
       "meme_file": "boom.gif",
       "emotion": "shocked",
-      "camera_motion": "shake",
-      "pre_delay_ms": 250,
-      "post_delay_ms": 500,
-      "volume": 0.95
+      "camera_motion": "shake"
     },
     "bruh": {
       "sfx_file": "bruh.mp3",
       "meme_file": "bruh.gif",
       "emotion": "awkward",
-      "camera_motion": "punch_in",
-      "pre_delay_ms": 300,
-      "post_delay_ms": 450,
-      "volume": 1.0
+      "camera_motion": "punch_in"
     },
     "shock": {
       "sfx_file": "shock.mp3",
       "meme_file": "shock.gif",
       "emotion": "shocked",
-      "camera_motion": "shake",
-      "pre_delay_ms": 200,
-      "post_delay_ms": 450,
-      "volume": 1.0
+      "camera_motion": "shake"
     },
     "huh": {
       "sfx_file": "huh.mp3",
       "meme_file": "huh.gif",
       "emotion": "awkward",
-      "camera_motion": "punch_in",
-      "pre_delay_ms": 150,
-      "post_delay_ms": 400,
-      "volume": 1.0
+      "camera_motion": "punch_in"
     },
     "side_eye": {
       "sfx_file": "side_eye.mp3",
       "meme_file": "side_eye.gif",
       "emotion": "sarcastic",
-      "camera_motion": "punch_in",
-      "pre_delay_ms": 200,
-      "post_delay_ms": 450,
-      "volume": 1.0
+      "camera_motion": "punch_in"
     },
     "clown": {
       "sfx_file": "clown.mp3",
       "meme_file": "clown.gif",
       "emotion": "funny",
-      "camera_motion": "punch_in",
-      "pre_delay_ms": 100,
-      "post_delay_ms": 400,
-      "volume": 1.0
+      "camera_motion": "punch_in"
     },
     "math": {
       "sfx_file": "math.mp3",
       "meme_file": "math.gif",
       "emotion": "shocked",
-      "camera_motion": "none",
-      "pre_delay_ms": 150,
-      "post_delay_ms": 400,
-      "volume": 0.95
+      "camera_motion": "none"
     },
     "applause": {
       "sfx_file": "laugh.mp3",
       "meme_file": "applause.gif",
       "emotion": "funny",
-      "camera_motion": "punch_in",
-      "pre_delay_ms": 100,
-      "post_delay_ms": 400,
-      "volume": 1.0
+      "camera_motion": "punch_in"
     },
     "dancing_cat": {
       "sfx_file": "laugh.mp3",
       "meme_file": "dancing_cat.gif",
       "emotion": "funny",
-      "camera_motion": "punch_in",
-      "pre_delay_ms": 100,
-      "post_delay_ms": 400,
-      "volume": 1.0
+      "camera_motion": "punch_in"
     },
     "ting": {
       "sfx_file": "ting.mp3",
       "meme_file": "ting.gif",
       "emotion": "insightful",
-      "camera_motion": "none",
-      "pre_delay_ms": 80,
-      "post_delay_ms": 300,
-      "volume": 0.85
+      "camera_motion": "none"
     },
     "none": {
       "sfx_file": null,
       "meme_file": null,
       "emotion": "neutral",
-      "camera_motion": "none",
-      "pre_delay_ms": 0,
-      "post_delay_ms": 250,
-      "volume": 0.0
+      "camera_motion": "none"
     }
   },
   "visual_layout": {
     "canvas_width": 1080,
     "canvas_height": 1920,
     "card_width": 960,
-    "post_card_y": 240,
+    "post_card_y": 280,
     "comment_card_gap": 24,
-    "sticker_size": 260,
-    "sticker_offset_y": 35,
-    "default_bg_mode": "infinity",
+    "sticker_size": 440,
+    "sticker_offset_y": 28,
+    "anchor_memes_pool": [
+      "dancing_cat.gif",
+      "shocked_cat.gif",
+      "huh.gif",
+      "clown.gif",
+      "math.gif",
+      "applause.gif"
+    ],
+    "default_bg_mode": "minecraft",
     "default_card_theme": "light",
     "fps": 60,
     "video_crf": 18,
@@ -190,5 +251,13 @@
     "enable_slide_up_animation": true,
     "slide_duration_s": 0.22,
     "slide_distance_px": 45
+  },
+  "illustration_settings": {
+    "enable_post_attached_image": false,
+    "enable_popup_illustration": true,
+    "popup_trigger": "twist",
+    "popup_duration_s": 2.2,
+    "popup_animation": "punch_in_bounce",
+    "badge_text": ""
   }
 }

@@ -142,20 +142,26 @@ def generate_silence_mp3(duration_sec: float, output_path: str) -> str:
     return output_path
 
 
-async def _run_edge_tts_async(text: str, output_path: str, voice: str, rate: str, pitch: str = "+0Hz"):
+async def _run_edge_tts_async(text: str, output_path: str, voice: str, rate: str, pitch: str = "+0Hz", style: str = ""):
+    """
+    Tạo audio Edge TTS.
+    Lưu ý: Voice tiếng Việt (vi-VN-HoaiMyNeural, vi-VN-NamMinhNeural) không hỗ trợ thẻ
+    mstts:express-as (sẽ khiến TTS đọc cả thẻ XML gây dài 30s). Cảm xúc được điều chỉnh
+    hoàn hảo và tự nhiên qua biến thiên tốc độ (Rate) và cao độ (Pitch).
+    """
     import edge_tts
     comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     await comm.save(output_path)
 
 
-def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str, pitch: str = "+0Hz") -> bool:
-    """Tạo audio qua Edge TTS với hỗ trợ rate và pitch điều độ cảm xúc."""
+def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str, pitch: str = "+0Hz", style: str = "") -> bool:
+    """Tạo audio qua Edge TTS với biến thiên rate và pitch điều độ cảm xúc."""
     try:
         if os.path.exists(output_path):
             try: os.remove(output_path)
             except OSError: pass
 
-        asyncio.run(_run_edge_tts_async(text, output_path, voice, rate, pitch))
+        asyncio.run(_run_edge_tts_async(text, output_path, voice, rate, pitch, style))
         return verify_and_standardize_mp3(output_path)
     except Exception:
         if os.path.exists(output_path):
@@ -232,10 +238,11 @@ def text_to_speech(text: str, output_path: str,
                    voice: str = DEFAULT_VOICE,
                    rate: str = DEFAULT_RATE,
                    pitch: str = "+0Hz",
+                   style: str = "",
                    max_retries: int = 2) -> str:
     """
     Quy trình chuyển văn bản thành tiếng Việt đa tầng tự động phục hồi:
-    1. Thử Edge TTS (kèm cảm xúc rate và pitch).
+    1. Thử Edge TTS (kèm cảm xúc rate, pitch và emotion style SSML).
     2. Fallback sang Google Translate TTS.
     3. Fallback sang Windows Speech SAPI5 offline.
     4. Fallback tone an toàn tuyệt đối.
@@ -243,9 +250,9 @@ def text_to_speech(text: str, output_path: str,
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     cleaned = clean_for_tts(text)
 
-    # 1. Thử Edge TTS
+    # 1. Thử Edge TTS (với emotion style nếu có)
     for attempt in range(1, max_retries + 1):
-        if synthesize_edge_tts(cleaned, output_path, voice, rate, pitch):
+        if synthesize_edge_tts(cleaned, output_path, voice, rate, pitch, style):
             return output_path
         time.sleep(0.5 * attempt)
 
@@ -288,11 +295,12 @@ def generate_all_audio(
     progress_cb: Optional[Callable[[str, int], None]] = None
 ) -> dict:
     """
-    Tạo audio cho bài đăng và từng comment với phân vai đa giọng đọc và cảm xúc riêng biệt.
+    Tạo audio cho bài đăng và từng comment với phân vai đa giọng đọc, cảm xúc và SSML style riêng biệt.
     """
     os.makedirs(out_dir, exist_ok=True)
     cfg = config_mod.load_config()
     voice_cfg = cfg.get("voice_casting", {})
+    emotion_map = voice_cfg.get("emotion_style_map", {})
 
     if not default_voice:
         default_voice = voice_cfg.get("default_author_voice", "vi-VN-NamMinhNeural")
@@ -305,15 +313,16 @@ def generate_all_audio(
 
     # 1. Diễn xuất bài đăng tác giả
     post_voice = getattr(post, "voice_id", "") or default_voice
-    post_rate = getattr(post, "rate_offset", "") or "+8%"
+    post_rate = getattr(post, "rate_offset", "") or "+5%"
     post_pitch = getattr(post, "pitch_offset", "") or "+0Hz"
+    post_style = ""  # Tác giả kể chuyện bình thường, không cần style đặc biệt
 
     if progress_cb:
         progress_cb(f"Tạo giọng đọc bài viết chính [{post_voice}]...", 15)
 
     print(f"  🎙️ Đang tạo audio bài đăng ({post_voice}, rate={post_rate}, pitch={post_pitch})...")
     post_path = os.path.join(out_dir, "post.mp3")
-    text_to_speech(post.content, post_path, voice=post_voice, rate=post_rate, pitch=post_pitch)
+    text_to_speech(post.content, post_path, voice=post_voice, rate=post_rate, pitch=post_pitch, style=post_style)
     dur = get_mp3_duration_ms(post_path)
     result["post"] = {
         "path": post_path,
@@ -325,21 +334,31 @@ def generate_all_audio(
     print(f"     → {dur/1000:.2f}s")
     time.sleep(0.3)
 
-    # 2. Diễn xuất từng bình luận
+    # 2. Diễn xuất từng bình luận (với SSML emotion style)
     total_cmt = len(post.comments)
     for i, comment in enumerate(post.comments, 1):
         pct = 20 + int((i / max(1, total_cmt)) * 60)
         c_voice = getattr(comment, "voice_id", "") or voice_cfg.get("default_commenter_female_voice", "vi-VN-HoaiMyNeural")
-        c_rate = getattr(comment, "rate_offset", "") or "+10%"
+        c_rate = getattr(comment, "rate_offset", "") or "+18%"
         c_pitch = getattr(comment, "pitch_offset", "") or "+0Hz"
         emotion = getattr(comment, "emotion", "funny")
 
-        if progress_cb:
-            progress_cb(f"Diễn xuất comment {i}/{total_cmt} ({emotion.upper()}) [{c_voice}]...", pct)
+        # Lấy style từ role config trước, nếu không có thì lấy từ emotion map
+        role_key = f"commenter_{i}"
+        role_info = voice_cfg.get("roles", {}).get(role_key, {})
+        c_style = role_info.get("style", "")
 
-        print(f"  🎙️ Đang tạo audio comment {i} ({c_voice}, emotion={emotion}, rate={c_rate}, pitch={c_pitch})...")
+        # Nếu role không có style riêng, áp dụng emotion → style mapping
+        if not c_style and emotion in emotion_map:
+            emo_cfg = emotion_map[emotion]
+            c_style = emo_cfg.get("style", "")
+
+        if progress_cb:
+            progress_cb(f"Diễn xuất comment {i}/{total_cmt} ({emotion.upper()}) [{c_voice}] style={c_style or 'default'}...", pct)
+
+        print(f"  🎙️ Đang tạo audio comment {i} ({c_voice}, emotion={emotion}, rate={c_rate}, pitch={c_pitch}, style={c_style or 'none'})...")
         cmt_path = os.path.join(out_dir, f"comment_{i}.mp3")
-        text_to_speech(comment.content, cmt_path, voice=c_voice, rate=c_rate, pitch=c_pitch)
+        text_to_speech(comment.content, cmt_path, voice=c_voice, rate=c_rate, pitch=c_pitch, style=c_style)
         c_dur = get_mp3_duration_ms(cmt_path)
         result["comments"].append({
             "path": cmt_path,
@@ -348,6 +367,7 @@ def generate_all_audio(
             "emotion": emotion,
             "rate": c_rate,
             "pitch": c_pitch,
+            "style": c_style,
             "sfx": getattr(comment, "sfx", "none")
         })
         print(f"     → {c_dur/1000:.2f}s")
