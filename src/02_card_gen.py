@@ -657,6 +657,121 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
     return img
 
 
+def render_outro_cta_card(question_text: str = None, output_path: str = None) -> Image.Image:
+    """
+    Render thẻ Outro Call-To-Action (Kích thích bình luận & tương tác cuối video).
+    """
+    q_str = question_text or "Còn bạn thì sao? Đã bao giờ gặp tình huống này chưa? 👇"
+    w, h = 960, 310
+    card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(card)
+
+    # Đổ bóng 3D
+    draw.rounded_rectangle([2, 10, w - 3, h - 1], radius=28, fill=(0, 0, 0, 160))
+
+    # Nền Acrylic tối sang trọng
+    draw.rounded_rectangle([0, 0, w - 1, h - 11], radius=28, fill=(15, 20, 32, 248),
+                           outline=(99, 102, 241, 255), width=3)
+
+    # Header badge: GÓC BÀN LUẬN DRAMA
+    badge_title = "GÓC BÀN LUẬN DRAMA"
+    bw = int(draw.textlength(badge_title, font=FONT_TIME)) + 48
+    draw.rounded_rectangle([(w - bw)//2, 22, (w + bw)//2, 64], radius=16,
+                           fill=(236, 72, 153, 235))
+    draw.text(((w - int(draw.textlength(badge_title, font=FONT_TIME)))//2, 30),
+              badge_title, fill=(255, 255, 255), font=FONT_TIME)
+
+    # Câu hỏi kích thích tương tác
+    lines = wrap_text(q_str, FONT_BODY, w - 80, draw)
+    line_y = 95
+    for l in lines[:2]:
+        lw = draw.textlength(l, font=FONT_BODY)
+        draw.text(((w - int(lw))//2, line_y), l, fill=(255, 255, 255), font=FONT_BODY)
+        line_y += 42
+
+    # 2 Nút tương tác kêu gọi hành động
+    btn1_w = 260
+    btn2_w = 520
+    total_btns_w = btn1_w + 24 + btn2_w
+    start_bx = (w - total_btns_w) // 2
+
+    # Nút 1: Thả tim
+    draw.rounded_rectangle([start_bx, 208, start_bx + btn1_w, 268], radius=18,
+                           fill=(30, 41, 59, 230), outline=(255, 255, 255, 120), width=1)
+    b1_txt = "Thả tim ❤️"
+    b1_w = draw.textlength(b1_txt, font=FONT_ACTION)
+    draw.text((start_bx + (btn1_w - int(b1_w))//2, 224), b1_txt, fill=(241, 245, 249), font=FONT_ACTION)
+
+    # Nút 2: Để lại bình luận
+    b2_x = start_bx + btn1_w + 24
+    draw.rounded_rectangle([b2_x, 208, b2_x + btn2_w, 268], radius=18,
+                           fill=(99, 102, 241, 220), outline=(255, 255, 255, 160), width=1)
+    b2_txt = "Bình luận câu chuyện của bạn 👇"
+    b2_w = draw.textlength(b2_txt, font=FONT_ACTION)
+    draw.text((b2_x + (btn2_w - int(b2_w))//2, 224), b2_txt, fill=(255, 255, 255), font=FONT_ACTION)
+
+    if output_path:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        card.save(output_path)
+    return card
+
+
+def render_video_thumbnail(post, bg_frame_path: str, output_path: str) -> str:
+    """
+    Tự động render ảnh bìa Thumbnail TikTok/Reels sắc nét 1080x1920 (Clickbait Cover Maker).
+    """
+    from PIL import ImageFilter
+    try:
+        # 1. Nền video làm mờ nhẹ để tôn nội dung
+        if bg_frame_path and os.path.exists(bg_frame_path):
+            bg = Image.open(bg_frame_path).convert("RGBA").resize((1080, 1920), Image.Resampling.LANCZOS)
+            bg = bg.filter(ImageFilter.GaussianBlur(12))
+        else:
+            bg = Image.new("RGBA", (1080, 1920), (10, 15, 28, 255))
+
+        # Phủ lớp tối nhẹ
+        darken = Image.new("RGBA", (1080, 1920), (0, 0, 0, 100))
+        bg.paste(darken, (0, 0), darken)
+
+        # 2. Render thẻ bài viết chính đặt ở giữa
+        p_av = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
+        post_img = render_post_card(
+            post.username, post.content, post.avatar_color, post.is_verified, post.likes,
+            theme="light", avatar_source=p_av
+        )
+        post_y = 480
+        bg.paste(post_img, ((1080 - post_img.width)//2, post_y), post_img)
+
+        # 3. Huy hiệu giật gân (Clickbait Hook Sticker) phía trên thẻ
+        draw = ImageDraw.Draw(bg)
+        hook_text = "CÁI KẾT BẤT NGỜ! 😱"
+        hw = int(draw.textlength(hook_text, font=FONT_TIME)) + 60
+        hh = 60
+        hx = (1080 - hw) // 2
+        hy = post_y - 85
+        draw.rounded_rectangle([hx, hy, hx + hw, hy + hh], radius=20,
+                               fill=(255, 215, 0, 255), outline=(0, 0, 0, 255), width=3)
+        draw.text((hx + 30, hy + 14), hook_text, fill=(0, 0, 0), font=FONT_TIME)
+
+        # 4. Tiêu đề lớn dưới đáy
+        title = getattr(post, "video_title", "") or "Drama Cuộc Sống"
+        tw = int(draw.textlength(title, font=FONT_BODY))
+        if tw > 0:
+            bx = (1080 - tw - 48) // 2
+            by = post_y + post_img.height + 60
+            draw.rounded_rectangle([bx, by, bx + tw + 48, by + 68], radius=22,
+                                   fill=(15, 23, 42, 240), outline=(99, 102, 241, 255), width=2)
+            draw.text((bx + 24, by + 14), title, fill=(255, 255, 255), font=FONT_BODY)
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        bg.convert("RGB").save(output_path, quality=95)
+        print(f"  [✓] Đã tạo ảnh bìa Thumbnail: {output_path}")
+        return output_path
+    except Exception as e:
+        print(f"  ⚠️ Lỗi tạo ảnh bìa Thumbnail: {e}")
+        return ""
+
+
 # ─── Lưu ảnh ──────────────────────────────────────────────────────────────────
 
 def save_card(img: Image.Image, path: str):

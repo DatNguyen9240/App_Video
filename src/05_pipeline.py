@@ -101,12 +101,41 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
     mode_str = (bg_mode or "").lower()
     preset_str = (layout_preset or "").lower()
 
-    if preset_str == "split_screen" or mode_str in ["split", "split_gameplay", "split_screen"]:
+    # TÙY CHỌN BỐ CỤC SANDWICH ĐỈNH CAO TIKTOK:
+    # 1. Thẻ bài viết ở trên (140px)
+    # 2. VIDEO THỎA MÃN (Ghép hình puzzle, Ăn uống mukbang, ASMR cắt xà phòng) Ở CHÍNH GIỮA (560px)
+    # 3. Thẻ bình luận đối đáp ở dưới (1050px)
+    enable_center_sat = layout.get("enable_center_satisfying_video", True)
+    sat_cat = layout.get("center_satisfying_category", "puzzle")
+    if "puzzle" in mode_str:
+        sat_cat = "puzzle"
+        enable_center_sat = True
+    elif "food" in mode_str or "mukbang" in mode_str:
+        sat_cat = "food"
+        enable_center_sat = True
+    elif "asmr" in mode_str:
+        sat_cat = "asmr"
+        enable_center_sat = True
+    elif preset_str in ["sandwich", "center_satisfying"]:
+        enable_center_sat = True
+
+    center_vid_file = None
+    if enable_center_sat:
+        post_y = 140
+        center_video_w = layout.get("center_satisfying_width", 960)
+        center_video_h = layout.get("center_satisfying_height", 560)
+        center_video_y = post_y + actual_post_h + 20
+        actual_comment_y = center_video_y + center_video_h + 24
+        center_vid_file = bg_mod.get_satisfying_video_path(sat_cat)
+        print(f"  ✨ [BỐ CỤC SANDWICH TIKTOK]: Video thỏa mãn ({sat_cat}) ở chính giữa 960x{center_video_h}px (y={center_video_y})!")
+    elif preset_str == "split_screen" or mode_str in ["split", "split_gameplay", "split_screen"]:
         # Bố cục chia nửa màn hình: gameplay 60FPS phía trên (0-720px), thẻ Threads phía dưới (từ 740px)
         post_y = 740
+        actual_comment_y = post_y + actual_post_h + card_gap
     elif preset_str == "bottom_story":
         target_y = 750
         post_y = max(220, min(target_y, max_safe_bottom - total_stack_h))
+        actual_comment_y = post_y + actual_post_h + card_gap
     else:
         # Bố cục Toàn Màn Hình Chuẩn TikTok (Center Focus / Full Minecraft)
         if actual_post_h > 450:
@@ -115,13 +144,24 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             post_y = layout.get("post_card_y", 280)
         if post_y + total_stack_h > max_safe_bottom:
             post_y = max(160, max_safe_bottom - total_stack_h)
+        actual_comment_y = post_y + actual_post_h + card_gap
 
     timeline = []
     audio_sequence = []
     emotional_arc_data = []
+    overlay_sfx = []
 
     cursor = 0.2
     silence_idx = 0
+
+    whoosh_sfx = os.path.join(SFX_DIR, "whoosh.mp3")
+    pop_sfx = os.path.join(SFX_DIR, "pop.mp3")
+    camera_sfx = os.path.join(SFX_DIR, "camera.mp3")
+    enable_foley = layout.get("enable_foley_sfx", True)
+
+    # Foley Whoosh khi thẻ bài viết chính lướt vào
+    if enable_foley and os.path.exists(whoosh_sfx):
+        overlay_sfx.append({"time": cursor, "file": whoosh_sfx, "vol": 0.4})
 
     # 1. Thẻ bài đăng (Hook & Context)
     post_dur = timing["post"]["duration_ms"] / 1000.0
@@ -148,37 +188,42 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         "pause_ms": int(post_pause_after * 1000)
     })
 
-    actual_comment_y = post_y + actual_post_h + card_gap
+    if not enable_center_sat:
+        actual_comment_y = post_y + actual_post_h + card_gap
     comment_cursor = cursor + post_dur + post_pause_after
 
     # Vị trí cố định của Hộp Video Meme phía dưới thẻ comment (phóng to 440px)
     meme_anchor_y = actual_comment_y + max_cmt_h + sticker_offset
+    enable_anchor_meme = layout.get("enable_continuous_anchor_meme", False)
+    punchline_center = layout.get("punchline_meme_popup_center", True)
+    punchline_sz = layout.get("punchline_meme_popup_size", 780)
 
-    # BỘ SƯU TẬP MEME ĐA PHÂN ĐOẠN (Mỗi phân đoạn trong 1 video tự đổi mới meme liên tục):
+    # BỘ SƯU TẬP MEME ĐA PHÂN ĐOẠN:
     # 1. Hook (Mở màn): tò mò, ngơ ngác, bất ngờ
     hook_meme_pool = ["huh.gif", "shocked_cat.gif", "math.gif", "dancing_cat.gif"]
     hook_choices = [m for m in hook_meme_pool if os.path.exists(os.path.join(MEME_DIR, m))]
     hook_meme = random.choice(hook_choices) if hook_choices else "dancing_cat.gif"
     hook_img_path = os.path.join(MEME_DIR, hook_meme)
 
-    print(f"  🎬 Đa dạng hóa Meme trong 1 video (Kích thước {sticker_sz}px):")
-    print(f"     [Hook Mở Màn] -> {hook_meme}")
-
-    # 1.1. Hiện Meme mở màn theo câu chuyện Hook
-    if os.path.exists(hook_img_path):
-        timeline.append({
-            "type": "anchor_meme",
-            "start": cursor,
-            "end": comment_cursor,
-            "x": "(W-w)/2",
-            "y": str(meme_anchor_y),
-            "width": sticker_sz,
-            "camera_motion": "none",
-            "image": hook_img_path,
-            "is_video": hook_meme.endswith(".mp4"),
-            "is_gif": hook_meme.endswith(".gif"),
-            "enable_slide": True
-        })
+    if enable_anchor_meme:
+        print(f"  🎬 Hiển thị Meme đồng hành liên tục (Kích thước {sticker_sz}px):")
+        print(f"     [Hook Mở Màn] -> {hook_meme}")
+        if os.path.exists(hook_img_path):
+            timeline.append({
+                "type": "anchor_meme",
+                "start": cursor,
+                "end": comment_cursor,
+                "x": "(W-w)/2",
+                "y": str(meme_anchor_y),
+                "width": sticker_sz,
+                "camera_motion": "none",
+                "image": hook_img_path,
+                "is_video": hook_meme.endswith(".mp4"),
+                "is_gif": hook_meme.endswith(".gif"),
+                "enable_slide": True
+            })
+    else:
+        print(f"  ✨ Chế độ Tinh Gọn & Thỏa Mãn Thị Giác: Tắt meme chạy nền liên tục, nhường toàn bộ spotlight cho video thỏa mãn người xem!")
 
     # Kho meme theo từng vai trò bình luận để tự đổi mới liên tục:
     cmt_speaking_pools = {
@@ -266,6 +311,10 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "enable_slide": True
         })
 
+        # Foley Pop khi thẻ bình luận trượt lên
+        if enable_foley and os.path.exists(pop_sfx):
+            overlay_sfx.append({"time": c_start, "file": pop_sfx, "vol": 0.35})
+
         # CHỌN MEME HOẶC POPUP ẢNH MINH HỌA NỔI CHO TỪNG PHÂN ĐOẠN CỦA BÌNH LUẬN:
         illus_cfg = cfg.get("illustration_settings", {})
         popup_card_path = os.path.join(CARDS_DIR, "popup_proof.png")
@@ -315,32 +364,42 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                 "is_gif": False,
                 "enable_slide": False
             })
+
+            # Foley Camera Shutter khi ảnh minh họa nảy ra giữa màn hình
+            if enable_foley:
+                if os.path.exists(camera_sfx):
+                    overlay_sfx.append({"time": popup_start, "file": camera_sfx, "vol": 0.5})
+                elif os.path.exists(pop_sfx):
+                    overlay_sfx.append({"time": popup_start, "file": pop_sfx, "vol": 0.4})
             # Trong thời gian Cutaway Gag (2.2s), hình ảnh chiếm trọn spotlight
             # Sau khi Cutaway biến mất, nếu còn thời gian thì reaction meme punchline sẽ xuất hiện
             if react_start > popup_end and os.path.exists(meme_file_cand):
+                m_x = "(W-w)/2"
+                m_y = "(H-h)/2" if punchline_center else str(actual_comment_y + max_cmt_h + 16)
+                m_w = punchline_sz if punchline_center else sticker_sz
+                m_motion = "shake" if sfx_name == "boom" else "punch_in_bounce"
+
                 timeline.append({
                     "type": "meme_reaction",
                     "start": react_start,
                     "end": c_end,
-                    "x": "(W-w)/2",
-                    "y": str(actual_comment_y + max_cmt_h + 16),
-                    "width": sticker_sz,
-                    "camera_motion": "punch_in",
+                    "x": m_x,
+                    "y": m_y,
+                    "width": m_w,
+                    "camera_motion": m_motion,
                     "image": meme_file_cand,
                     "is_video": is_meme_video,
                     "is_gif": is_meme_gif,
                     "enable_slide": False
                 })
         else:
-            # A. Trong lúc người đó đang nói (c_start đến react_start): đổi sang meme đồng hành mới của comment i
+            # A. Trong lúc người đó đang nói (c_start đến react_start): chỉ hiện nếu bật enable_anchor_meme
             pool_i = cmt_speaking_pools.get(i, ["dancing_cat.gif", "huh.gif"])
             valid_pool_i = [m for m in pool_i if os.path.exists(os.path.join(MEME_DIR, m))]
             speak_meme_name = random.choice(valid_pool_i) if valid_pool_i else "dancing_cat.gif"
             speak_meme_path = os.path.join(MEME_DIR, speak_meme_name)
 
-            print(f"     [Comment {i} Đang Nói] -> {speak_meme_name}")
-
-            if os.path.exists(speak_meme_path) and react_start > c_start + 0.1:
+            if enable_anchor_meme and os.path.exists(speak_meme_path) and react_start > c_start + 0.1:
                 timeline.append({
                     "type": "anchor_meme",
                     "start": c_start,
@@ -355,23 +414,29 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                     "enable_slide": False
                 })
 
-            # B. Tại điểm rơi Punchline / Bẻ lái (react_start đến c_end): Biến hình thành Reaction Meme!
+            # B. Tại điểm rơi Punchline / Bẻ lái (react_start đến c_end):
+            # TỰ ĐỘNG ĐÈ RA GIỮA MÀN HÌNH VÀ PHÓNG TO NẢY LÒ XO (780px PUNCH-IN BOUNCE)!
             if meme_file_cand and sfx_dur > 0:
-                print(f"     [Comment {i} Punchline] -> {os.path.basename(meme_file_cand)} (Reaction SFX: {sfx_name})")
+                m_x = "(W-w)/2"
+                m_y = "(H-h)/2" if punchline_center else str(meme_anchor_y)
+                m_w = punchline_sz if punchline_center else sticker_sz
+                m_motion = "shake" if sfx_name == "boom" else "punch_in_bounce"
+
+                print(f"     🎬 [PUNCHLINE REACTION ĐÈ RA GIỮA PHÓNG TO {m_w}px] -> {os.path.basename(meme_file_cand)} (SFX: {sfx_name})")
                 timeline.append({
                     "type": "meme_reaction",
                     "start": react_start,
                     "end": c_end,
-                    "x": "(W-w)/2",
-                    "y": str(meme_anchor_y),
-                    "width": sticker_sz,
-                    "camera_motion": "shake" if sfx_name == "boom" else "punch_in",
+                    "x": m_x,
+                    "y": m_y,
+                    "width": m_w,
+                    "camera_motion": m_motion,
                     "image": meme_file_cand,
                     "is_video": is_meme_video,
                     "is_gif": is_meme_gif,
                     "enable_slide": False
                 })
-            elif os.path.exists(speak_meme_path):
+            elif enable_anchor_meme and os.path.exists(speak_meme_path):
                 timeline.append({
                     "type": "anchor_meme",
                     "start": react_start,
@@ -403,14 +468,56 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
 
         comment_cursor = c_end
 
-    total_duration = comment_cursor + 0.5
+    # 3. Thẻ Outro Call-To-Action (Kêu gọi bình luận & thả tim tương tác)
+    enable_outro = layout.get("enable_outro_cta", True)
+    outro_card_path = os.path.join(CARDS_DIR, "outro_cta.png")
+    if enable_outro and os.path.exists(outro_card_path):
+        outro_dur = float(layout.get("outro_cta_duration_s", 2.4))
+        outro_start = comment_cursor
+        outro_end = comment_cursor + outro_dur
+        timeline.append({
+            "type": "outro_cta",
+            "start": outro_start,
+            "end": outro_end,
+            "x": "(W-w)/2",
+            "y": str(actual_comment_y),
+            "width": card_w,
+            "camera_motion": "punch_in_bounce",
+            "image": outro_card_path,
+            "is_video": False,
+            "is_gif": False,
+            "enable_slide": True
+        })
+        if enable_foley and os.path.exists(whoosh_sfx):
+            overlay_sfx.append({"time": outro_start, "file": whoosh_sfx, "vol": 0.45})
 
-    # Outro anchor meme đến hết video (chọn 1 meme chào kết vui vẻ)
+        silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+        silence_idx += 1
+        tts_mod.generate_silence_mp3(outro_dur, silence_file)
+        audio_sequence.append(silence_file)
+
+        emotional_arc_data.append({
+            "beat": "Kết Thúc / Outro Call-To-Action",
+            "role": "Studio CTA",
+            "emotion": "interactive",
+            "energy_level": 90,
+            "voice": "Music Swell",
+            "text": "Kêu gọi tương tác, thả tim và thảo luận drama",
+            "duration_s": outro_dur,
+            "sfx": "whoosh",
+            "camera": "punch_in_bounce",
+            "pause_ms": 0
+        })
+        comment_cursor = outro_end
+
+    total_duration = comment_cursor + 0.3
+
+    # Outro anchor meme đến hết video (chỉ hiện nếu bật enable_continuous_anchor_meme)
     outro_meme = os.path.join(MEME_DIR, "dancing_cat.gif")
-    if os.path.exists(outro_meme) and total_duration > comment_cursor:
+    if enable_anchor_meme and os.path.exists(outro_meme) and total_duration > comment_cursor - 0.2:
         timeline.append({
             "type": "anchor_meme",
-            "start": comment_cursor,
+            "start": comment_cursor - 0.2,
             "end": total_duration,
             "x": "(W-w)/2",
             "y": str(meme_anchor_y),
@@ -420,6 +527,23 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "is_video": False,
             "is_gif": True,
             "enable_slide": False
+        })
+
+    # Chèn video thỏa mãn người xem ở chính giữa (Ghép hình, Ăn uống/Mukbang, ASMR)
+    if enable_center_sat and center_vid_file and os.path.exists(center_vid_file):
+        timeline.insert(0, {
+            "type": "center_satisfying_video",
+            "start": cursor,
+            "end": total_duration,
+            "x": "(W-w)/2",
+            "y": str(center_video_y),
+            "width": center_video_w,
+            "height": center_video_h,
+            "camera_motion": "none",
+            "image": center_vid_file,
+            "is_video": True,
+            "is_gif": False,
+            "enable_slide": True
         })
 
     # Thẻ Post ghim từ đầu đến hết video (slide-up mượt lúc mở màn)
@@ -436,11 +560,57 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         "enable_slide": True
     })
 
-    return timeline, audio_sequence, total_duration, emotional_arc_data
+    return timeline, audio_sequence, overlay_sfx, total_duration, emotional_arc_data
+
+
+def generate_kinetic_subtitles_ass(post, timing: dict, timeline: list[dict], output_ass_path: str):
+    """
+    Tạo phụ đề động Kinetic Subtitles phong cách Shorts/TikTok (chữ vàng/trắng viền đen đậm, pop-in).
+    """
+    ass_header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Kinetic,Arial,52,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3.5,2,2,40,40,230,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    dialogues = []
+
+    def format_ass_time(sec: float) -> str:
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = sec % 60
+        return f"{h}:{m:02d}:{s:05.2f}"
+
+    # Lấy các đoạn nói từ timeline
+    for item in timeline:
+        itype = item.get("type")
+        if itype == "comment":
+            idx = item.get("index", 1) - 1
+            if idx < len(post.comments):
+                cmt = post.comments[idx]
+                text = cmt.content.strip().replace("\n", " ")
+                start_t = format_ass_time(item["start"])
+                end_t = format_ass_time(item["end"])
+                dialogues.append(f"Dialogue: 0,{start_t},{end_t},Kinetic,,0,0,0,,{text}")
+        elif itype == "post":
+            post_dur = timing.get("post", {}).get("duration_ms", 3000) / 1000.0
+            start_t = format_ass_time(item["start"])
+            end_t = format_ass_time(item["start"] + post_dur)
+            text = post.content.strip()[:100].replace("\n", " ")
+            dialogues.append(f"Dialogue: 0,{start_t},{end_t},Kinetic,,0,0,0,,{text}")
+
+    with open(output_ass_path, "w", encoding="utf-8") as f:
+        f.write(ass_header + "\n".join(dialogues) + "\n")
 
 
 def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
-                  total_duration: float, output_path: str):
+                  total_duration: float, output_path: str, ass_subtitle_path: str = None):
     """
     Dựng phim chuyên nghiệp: 60 FPS, CRF 18, Color Space BT.709,
     Hiệu ứng trượt thẻ Ease-Out mượt mà & Camera Shake tự động.
@@ -480,8 +650,12 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
         cam_motion = item.get("camera_motion", "none")
         base_y = str(item["y"])
 
-        # Luôn scale tĩnh theo độ rộng w đã chỉ định (980px), không scale động bằng eval=frame vì still image có t=0
-        filter_chains.append(f"[{img_idx}:v]scale={w}:-1:flags=lanczos{layer_label}")
+        # Scale tĩnh theo kích thước chỉ định: nếu có height thì crop vừa vặn, ngược lại giữ aspect ratio
+        h_val = item.get("height")
+        if h_val:
+            filter_chains.append(f"[{img_idx}:v]scale={w}:{h_val}:force_original_aspect_ratio=increase,crop={w}:{h_val}{layer_label}")
+        else:
+            filter_chains.append(f"[{img_idx}:v]scale={w}:-1:flags=lanczos{layer_label}")
 
         # Hiệu ứng chuyển động (Bounce / Punch-in / Slide-Up / Shake) được xử lý hoàn toàn trong overlay
         if cam_motion == "punch_in_bounce":
@@ -513,6 +687,12 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
             f"{prev_stream}{layer_label}overlay=x='{x_pos}':y='{y_pos}':enable='between(t,{start_t},{end_t})'{out_stream}"
         )
         prev_stream = out_stream
+
+    if ass_subtitle_path and os.path.exists(ass_subtitle_path):
+        clean_ass = os.path.abspath(ass_subtitle_path).replace("\\", "/").replace(":", "\\:")
+        out_sub_stream = "[v_subbed]"
+        filter_chains.append(f"{prev_stream}ass='{clean_ass}'{out_sub_stream}")
+        prev_stream = out_sub_stream
 
     filter_complex = ";".join(filter_chains)
 
@@ -628,6 +808,14 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                     index=i, reply_to=c_reply, theme=card_theme, avatar_source=c_avatar
                 )
                 card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
+
+            # Tạo thẻ Outro Call-To-Action nếu được bật
+            if layout.get("enable_outro_cta", True):
+                outro_card_path = os.path.join(CARDS_DIR, "outro_cta.png")
+                cta_q = getattr(post, "cta_question", "") or "Còn bạn thì sao? Đã từng gặp tình huống éo le tương tự chưa?"
+                card_mod.render_outro_cta_card(question_text=cta_q, output_path=outro_card_path)
+                tracker.log(f"  📢 Đã tạo thẻ Outro Call-To-Action: {outro_card_path}")
+
             tracker.finish_step("cards")
 
         # BƯỚC 3: DIỄN XUẤT GIỌNG ĐỌC ĐA VAI (TTS + VOCAL MASTERING)
@@ -640,7 +828,7 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
 
         # BƯỚC 4: THIẾT KẾ ÂM THANH & NHỊP THỞ
         tracker.start_step("audio", "Đang đồng bộ timeline, chèn khoảng lặng kịch tính & mix nhạc nền...", 70)
-        timeline, audio_sequence, total_duration, emotional_arc_data = build_timeline_with_emotional_pacing(post, timing, layout_preset=layout_preset, bg_mode=bg_mode)
+        timeline, audio_sequence, overlay_sfx, total_duration, emotional_arc_data = build_timeline_with_emotional_pacing(post, timing, layout_preset=layout_preset, bg_mode=bg_mode)
         tracker.set_emotional_arc(emotional_arc_data)
 
         bg_video_out = os.path.join(FINAL_DIR, "_bg_temp.mp4")
@@ -659,7 +847,8 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
         selected_bgm = random.choice(bgm_candidates) if bgm_candidates else None
         bg_mod.build_mixed_audio_with_sfx(
             audio_sequence, mixed_audio_out,
-            bg_music_path=selected_bgm
+            bg_music_path=selected_bgm,
+            overlay_sfx=overlay_sfx
         )
         tracker.finish_step("audio")
 
@@ -667,7 +856,14 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
         tracker.start_step("composite", "FFmpeg dựng phim 60 FPS, hiệu ứng trượt thẻ Slide-Up & Camera Shake...", 85)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         final_video = os.path.join(FINAL_DIR, f"final_meme_pro_{timestamp}.mp4")
-        compose_video(bg_video_out, mixed_audio_out, timeline, total_duration, final_video)
+
+        ass_sub_path = None
+        if layout.get("enable_kinetic_subtitles", False):
+            ass_sub_path = os.path.join(OUT_DIR, "subtitles.ass")
+            generate_kinetic_subtitles_ass(post, timing, timeline, ass_sub_path)
+            tracker.log(f"  ✨ Đã tạo phụ đề động Kinetic Subtitles: {ass_sub_path}")
+
+        compose_video(bg_video_out, mixed_audio_out, timeline, total_duration, final_video, ass_subtitle_path=ass_sub_path)
         tracker.finish_step("composite")
 
         # BƯỚC 6: ĐÓNG GÓI & TỐI ƯU VIRAL
@@ -684,6 +880,19 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
         )
         with open(caption_txt_path, "w", encoding="utf-8") as f:
             f.write(caption_full)
+
+        # Tự động render ảnh bìa Thumbnail tỉ lệ 9:16 chuẩn viral (Auto Clickbait Cover Maker)
+        if layout.get("enable_auto_thumbnail", True):
+            thumb_bg_path = os.path.join(FINAL_DIR, "_thumb_frame.jpg")
+            thumb_out_path = final_video.replace(".mp4", "_thumbnail.jpg")
+            exe = bg_mod.get_ffmpeg_exe()
+            subprocess.run([
+                exe, "-y", "-ss", "1.5", "-i", final_video,
+                "-vframes", "1", "-q:v", "2", thumb_bg_path
+            ], capture_output=True)
+            if os.path.exists(thumb_bg_path):
+                card_mod.render_video_thumbnail(post, thumb_bg_path, thumb_out_path)
+                tracker.log(f"  🖼️ Đã tạo ảnh bìa Thumbnail chuẩn tỉ lệ 9:16: {thumb_out_path}")
 
         tracker.finish_step("export")
         tracker.finish_pipeline(os.path.basename(final_video), caption_full, total_duration)

@@ -250,7 +250,19 @@
     "color_space": "bt709",
     "enable_slide_up_animation": true,
     "slide_duration_s": 0.22,
-    "slide_distance_px": 45
+    "slide_distance_px": 45,
+    "enable_foley_sfx": true,
+    "enable_outro_cta": true,
+    "outro_cta_duration_s": 2.4,
+    "enable_auto_thumbnail": true,
+    "enable_kinetic_subtitles": false,
+    "enable_continuous_anchor_meme": false,
+    "punchline_meme_popup_center": true,
+    "punchline_meme_popup_size": 780,
+    "enable_center_satisfying_video": true,
+    "center_satisfying_category": "puzzle",
+    "center_satisfying_height": 560,
+    "center_satisfying_width": 960
   },
   "illustration_settings": {
     "enable_post_attached_image": false,

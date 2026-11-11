@@ -508,8 +508,15 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-film text-pink-400"></i> Chế độ nền video:
               </label>
               <select v-model="settings.bg_mode" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="split_gameplay">🔥 Split (Gameplay 60FPS + Thẻ dưới)</option>
+                <option value="sandwich_puzzle">🧩 Sandwich: Ghép Hình Puzzle Thỏa Mãn Ở Giữa (Khuyên Dùng)</option>
+                <option value="sandwich_food">🍰 Sandwich: Ăn Uống Mukbang / Bánh Ngọt Ở Giữa</option>
+                <option value="sandwich_asmr">🧼 Sandwich: Cắt Xà Phòng ASMR Ở Giữa</option>
                 <option value="minecraft">🎮 Minecraft Parkour Full 9:16</option>
+                <option value="gta5">🚗 GTA 5 Mega Ramp Stunt 9:16</option>
+                <option value="subway">🏃 Subway Surfers High Speed 9:16</option>
+                <option value="asmr">🧼 Satisfying ASMR Cắt Xà Phòng Full 9:16</option>
+                <option value="split_gameplay">🔥 Split (Gameplay 60FPS + Thẻ dưới)</option>
+                <option value="random_gameplay">🎲 Ngẫu Nhiên Kho Gameplay (GTA / Minecraft / Subway / ASMR)</option>
                 <option value="infinity_neon">🌀 3D Infinity Cyberpunk (Neon)</option>
                 <option value="infinity_dark">🌑 3D Infinity Dark Luxury (Kim loại)</option>
                 <option value="infinity_gold">✨ 3D Infinity Golden Matrix (Vàng)</option>
@@ -1106,10 +1113,101 @@ HTML_TEMPLATE = """
             </div>
           </div>
 
-          <!-- Nhóm 6: AI Prompt & Model -->
+          <!-- Nhóm 6: Bộ Công Cụ Tối Ưu Viral & Giữ Chân Triệu View -->
+          <div class="space-y-3" v-if="directorConfig.visual_layout">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-2">
+              <i class="fa-solid fa-fire text-amber-400"></i> 6. Bộ Công Cụ Tối Ưu Viral Triệu View (Viral Growth Suite)
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Thẻ Outro Kêu Gọi Tương Tác:</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_outro_cta" class="rounded bg-slate-800 border-slate-700 text-purple-500">
+                    <span class="font-bold text-purple-300">Bật Outro CTA Cuối Video</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Kêu gọi thả tim, bình luận & follow tăng tương tác 300%</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Âm Thanh Foley Chuyển Cảnh:</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_foley_sfx" class="rounded bg-slate-800 border-slate-700 text-amber-500">
+                    <span class="font-bold text-amber-300">Bật Foley SFX (Whoosh/Pop/Camera)</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Tiếng vút gió, bong bóng và màn trập máy ảnh sống động</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Tự Động Tạo Ảnh Bìa (Thumbnail):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_auto_thumbnail" class="rounded bg-slate-800 border-slate-700 text-emerald-500">
+                    <span class="font-bold text-emerald-300">Bật Auto Clickbait Cover (9:16)</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Render ảnh bìa sắc nét kèm nhãn giật gân tăng CTR</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Phụ Đề Động (Kinetic Subtitles):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_kinetic_subtitles" class="rounded bg-slate-800 border-slate-700 text-cyan-500">
+                    <span class="font-bold text-cyan-300">Bật Phụ Đề Nổi Đậm Nét</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Phụ đề vàng/trắng nổi bật phong cách Reels/TikTok</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Meme Đè Ra Giữa Phóng To:</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.punchline_meme_popup_center" class="rounded bg-slate-800 border-slate-700 text-pink-500">
+                    <span class="font-bold text-pink-300">Đè Ra Giữa Phóng To 780px</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Khi có cú Twist/Reaction, meme nảy đè ra giữa màn hình</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Video Thỏa Mãn Ở Giữa (Sandwich):</label>
+                <div class="pt-1">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_center_satisfying_video" class="rounded bg-slate-800 border-slate-700 text-teal-500">
+                    <span class="font-bold text-teal-300">Bật Video Thỏa Mãn Ở Giữa</span>
+                  </label>
+                </div>
+                <select v-if="directorConfig.visual_layout.enable_center_satisfying_video" v-model="directorConfig.visual_layout.center_satisfying_category" class="w-full glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200 mt-1">
+                  <option value="puzzle">🧩 Ghép Hình Puzzle (Xếp gạch/Lego)</option>
+                  <option value="food">🍰 Ăn Uống Mukbang / Bánh Ngọt</option>
+                  <option value="asmr">🧼 Cắt Xà Phòng / Cát ASMR</option>
+                  <option value="gameplay">🎮 Minecraft Parkour</option>
+                </select>
+                <span class="text-[10px] text-slate-500">Bố cục Sandwich kẹp video cuốn hút ở giữa</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Meme Chạy Xuyên Suốt (Anchor):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_continuous_anchor_meme" class="rounded bg-slate-800 border-slate-700 text-indigo-500">
+                    <span class="text-slate-300">Meme loop liên tục ở góc</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Khuyên tắt để không gian sạch, tối đa độ thỏa mãn thị giác</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Nhóm 7: AI Prompt & Model -->
           <div class="space-y-3">
             <h3 class="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
-              <i class="fa-solid fa-brain"></i> 6. Cấu Hình Đạo Diễn & Thời Lượng Kịch Bản
+              <i class="fa-solid fa-brain"></i> 7. Cấu Hình Đạo Diễn & Thời Lượng Kịch Bản
             </h3>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div class="space-y-1">

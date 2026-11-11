@@ -187,17 +187,34 @@ def generate_infinity_background(duration_sec: float, output_path: str, theme: s
     return output_path
 
 
-def cut_background_video(duration_sec: float, output_path: str, bg_video_path: str = None) -> str:
-    """Cắt ngẫu nhiên 1 đoạn Minecraft Parkour chuẩn 9:16 (1080x1920) tắt tiếng."""
+def cut_background_video(duration_sec: float, output_path: str, bg_video_path: str = None, category: str = None) -> str:
+    """Cắt ngẫu nhiên 1 đoạn gameplay (Minecraft, GTA5, Subway Surfers, ASMR) chuẩn 9:16 (1080x1920) tắt tiếng."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     if bg_video_path is None:
-        videos = [f for f in os.listdir(BG_DIR) if f.lower().endswith((".mp4", ".mkv", ".mov")) and "base" not in f]
-        if videos:
-            bg_video_path = os.path.join(BG_DIR, random.choice(videos))
+        cand_dirs = []
+        if category:
+            cat_dir = os.path.join(BG_DIR, category)
+            if os.path.exists(cat_dir):
+                cand_dirs.append(cat_dir)
+        # Quét các thư mục con và thư mục gốc
+        for sub in ["minecraft", "gta5", "subway", "asmr"]:
+            p = os.path.join(BG_DIR, sub)
+            if os.path.exists(p) and p not in cand_dirs:
+                cand_dirs.append(p)
+        cand_dirs.append(BG_DIR)
+
+        all_videos = []
+        for d in cand_dirs:
+            if os.path.exists(d):
+                all_videos.extend([os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith((".mp4", ".mkv", ".mov")) and "base" not in f])
+
+        if all_videos:
+            bg_video_path = random.choice(all_videos)
 
     if bg_video_path and os.path.exists(bg_video_path):
-        print(f"  🎬 Dùng video Minecraft: {os.path.basename(bg_video_path)}")
+        cat_label = os.path.basename(os.path.dirname(bg_video_path))
+        print(f"  🎬 Dùng gameplay ({cat_label}): {os.path.basename(bg_video_path)}")
         total_duration = get_media_duration(bg_video_path)
         max_start = max(0.0, total_duration - duration_sec - 1.0)
         start_sec = random.uniform(0.0, max_start) if max_start > 0 else 0.0
@@ -303,7 +320,15 @@ def prepare_background(duration_sec: float, output_path: str, mode: str = "infin
     - gradient_lofi: Nền cà phê Lofi ấm cúng
     """
     m = (mode or "minecraft").lower()
-    if m in ["minecraft", "video", "parkour", "gameplay", "full_gameplay"]:
+    if m in ["minecraft", "mc"]:
+        return cut_background_video(duration_sec, output_path, category="minecraft")
+    elif m in ["gta", "gta5"]:
+        return cut_background_video(duration_sec, output_path, category="gta5")
+    elif m in ["subway", "subway_surfers"]:
+        return cut_background_video(duration_sec, output_path, category="subway")
+    elif m in ["asmr", "satisfying"]:
+        return cut_background_video(duration_sec, output_path, category="asmr")
+    elif m in ["random_gameplay", "gameplay", "video", "parkour"]:
         return cut_background_video(duration_sec, output_path)
     elif m in ["split", "split_gameplay", "split_screen"]:
         return generate_split_screen_background(duration_sec, output_path)
@@ -317,16 +342,15 @@ def prepare_background(duration_sec: float, output_path: str, mode: str = "infin
         return generate_infinity_background(duration_sec, output_path, "gold")
     elif m in ["infinity_neon", "infinity", "tunnel", "wormhole"]:
         return generate_infinity_background(duration_sec, output_path, "neon")
-    elif m in ["minecraft", "video", "parkour"]:
-        return cut_background_video(duration_sec, output_path)
     else:
-        return generate_infinity_background(duration_sec, output_path, theme)
+        return cut_background_video(duration_sec, output_path)
 
 
-def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_music_path: str = None) -> str:
+def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_music_path: str = None, overlay_sfx: list[dict] = None) -> str:
     """
     Nối tuần tự các file âm thanh (giọng đọc + hiệu ứng âm thanh meme SFX)
     và trộn nhạc nền lofi nhẹ. Đảm bảo an toàn 100% trước file hỏng.
+    Hỗ trợ lồng ghép hiệu ứng âm thanh Foley chuyển cảnh (Whoosh, Pop, Camera shutter) đồng bộ timeline.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     audio_dir = os.path.join(OUT_DIR, "audio")
@@ -372,6 +396,26 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
         voice_sfx_merged
     )
 
+    # Chèn hiệu ứng âm thanh chuyển cảnh Foley (Whoosh, Pop, Camera shutter) đồng bộ với visual animation
+    if overlay_sfx:
+        valid_overlays = [item for item in overlay_sfx if item.get("file") and os.path.exists(item["file"])]
+        if valid_overlays:
+            foley_cmd = [exe, "-y", "-i", voice_sfx_merged]
+            foley_filters = []
+            for j, item in enumerate(valid_overlays):
+                foley_cmd.extend(["-i", item["file"]])
+                delay_ms = max(0, int(item.get("time", 0.0) * 1000))
+                vol = item.get("vol", 0.4)
+                foley_filters.append(f"[{j+1}:a]volume={vol},adelay={delay_ms}|{delay_ms},aformat=sample_rates=44100:channel_layouts=stereo[ov{j}]")
+            ov_streams = "".join(f"[ov{j}]" for j in range(len(valid_overlays)))
+            foley_filters.append(f"[0:a]{ov_streams}amix=inputs={1+len(valid_overlays)}:duration=first:dropout_transition=0[v_foley]")
+            foley_out = os.path.join(audio_dir, "_voice_foley_merged.mp3")
+            foley_cmd.extend(["-filter_complex", ";".join(foley_filters), "-map", "[v_foley]", "-c:a", "libmp3lame", "-q:a", "2", foley_out])
+            res_foley = subprocess.run(foley_cmd, capture_output=True)
+            if res_foley.returncode == 0 and os.path.exists(foley_out):
+                voice_sfx_merged = foley_out
+                print(f"  ✨ Đã lồng ghép {len(valid_overlays)} hiệu ứng âm thanh Foley (Whoosh/Pop/Camera) chuyển cảnh cực sống động!")
+
     if bg_music_path and os.path.exists(bg_music_path):
         cfg = config_mod.load_config()
         pacing = cfg.get("emotional_pacing", {})
@@ -406,6 +450,37 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
 
     print(f"  [✓] Audio tổng (đã có SFX meme): {output_path}")
     return output_path
+
+
+def get_satisfying_video_path(category: str = "puzzle") -> str:
+    """
+    Lấy video thỏa mãn thị giác (Ghép hình, Ăn uống/Mukbang, Cắt xà phòng ASMR, Gameplay).
+    Tự động quét thư mục assets/satisfying/<category>/ và chọn ngẫu nhiên file video bên trong.
+    """
+    sat_dir = os.path.join(ASSETS_DIR, "satisfying")
+    cat = (category or "puzzle").lower()
+    if cat == "random":
+        valid_cats = ["puzzle", "food", "asmr"]
+        cat = random.choice(valid_cats)
+
+    target_dir = os.path.join(sat_dir, cat)
+    if os.path.exists(target_dir):
+        files = [os.path.join(target_dir, f) for f in os.listdir(target_dir) if f.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))]
+        if files:
+            return random.choice(files)
+
+    # Fallback kiểm tra assets/backgrounds/<cat>
+    bg_cand = os.path.join(BG_DIR, cat)
+    if os.path.exists(bg_cand):
+        files = [os.path.join(bg_cand, f) for f in os.listdir(bg_cand) if f.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))]
+        if files:
+            return random.choice(files)
+
+    # Fallback mặc định
+    puzzle_sample = os.path.join(sat_dir, "puzzle", "sample_puzzle.mp4")
+    if os.path.exists(puzzle_sample):
+        return puzzle_sample
+    return os.path.join(BG_DIR, "input.mp4")
 
 
 if __name__ == "__main__":

@@ -4,11 +4,25 @@
 !.env.example
 
 # Video nền nặng (GitHub chặn file > 100MB, file gameplay thường hàng GB)
+assets/backgrounds/**/*.mp4
+assets/backgrounds/**/*.mkv
+assets/backgrounds/**/*.mov
+assets/backgrounds/**/*.avi
 assets/backgrounds/*.mp4
 assets/backgrounds/*.mkv
 assets/backgrounds/*.mov
 assets/backgrounds/*.avi
 !assets/backgrounds/.gitkeep
+!assets/backgrounds/infinity_base*.mp4
+
+# Video satisfying mẫu tải về ngoài máy (chỉ giữ lại script/sample nhẹ dưới 100KB)
+assets/satisfying/**/*.mp4
+assets/satisfying/**/*.mkv
+assets/satisfying/**/*.mov
+assets/satisfying/**/*.avi
+!assets/satisfying/**/.gitkeep
+!assets/satisfying/food/sample_food.mp4
+!assets/satisfying/puzzle/sample_puzzle.mp4
 
 # Thư mục xuất file sản phẩm (video render, audio tạm, ảnh card tạm)
 output/*
