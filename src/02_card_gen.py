@@ -130,9 +130,78 @@ FONT_BODY     = _load_font("segoeui.ttf",  34)   # Nội dung bài viết
 FONT_BODY_CMT = _load_font("segoeui.ttf",  33)   # Nội dung bình luận
 FONT_ACTION   = _load_font("segoeui.ttf",  23)   # Số đếm tương tác
 FONT_REPLY    = _load_font("segoeui.ttf",  22)   # "Trả lời @tác_giả"
+FONT_EMOJI_BODY = _load_font("seguiemj.ttf", 31) # Font Emoji màu cho Post
+FONT_EMOJI_CMT  = _load_font("seguiemj.ttf", 30) # Font Emoji màu cho Comment
 
 
 # ─── Hàm tiện ích xử lý text & số liệu ────────────────────────────────────────
+
+def is_emoji_char(ch: str) -> bool:
+    """Kiểm tra ký tự có thuộc dải Unicode Emoji không."""
+    cp = ord(ch)
+    return (
+        0x1F300 <= cp <= 0x1FAFF or
+        0x2600 <= cp <= 0x27BF or
+        0xFE00 <= cp <= 0xFE0F or
+        cp == 0x200D
+    )
+
+
+def split_text_emojis(text: str) -> list[tuple[str, bool]]:
+    """Tách xâu thành các phân đoạn văn bản thường và phân đoạn Emoji màu."""
+    segments = []
+    curr = ""
+    curr_is_emo = False
+    for ch in text:
+        emo = is_emoji_char(ch)
+        if emo != curr_is_emo:
+            if curr:
+                segments.append((curr, curr_is_emo))
+            curr = ch
+            curr_is_emo = emo
+        else:
+            curr += ch
+    if curr:
+        segments.append((curr, curr_is_emo))
+    return segments
+
+
+def measure_text_with_emojis(draw: ImageDraw.Draw, text: str, font_text, font_emoji=None) -> float:
+    """Đo chiều rộng thực tế khi kết hợp font chữ thường và font Emoji màu."""
+    if not font_emoji:
+        return draw.textlength(text, font=font_text)
+    segments = split_text_emojis(text)
+    total_w = 0.0
+    for seg, is_emo in segments:
+        f = font_emoji if is_emo else font_text
+        total_w += draw.textlength(seg, font=f)
+    return total_w
+
+
+def draw_text_with_emojis(draw: ImageDraw.Draw, xy: tuple[int, int], text: str,
+                           font_text, font_emoji, fill: tuple) -> float:
+    """
+    Vẽ văn bản kết hợp Emoji đa sắc màu siêu chân thực (True Color Emojis):
+    - Chữ cái tiếng Việt vẽ bằng Segoe UI sắc nét
+    - Icon emoji (😂, 💀, 🤡, 🤣...) vẽ bằng Segoe UI Emoji có màu sắc nguyên bản,
+      tuyệt đối không bị lỗi ô vuông tofu [ ] [ ]!
+    """
+    x, y = xy
+    segments = split_text_emojis(text)
+    for seg, is_emo in segments:
+        if is_emo and font_emoji:
+            try:
+                draw.text((x, y + 2), seg, font=font_emoji, embedded_color=True)
+                w = draw.textlength(seg, font=font_emoji)
+            except Exception:
+                draw.text((x, y), seg, font=font_text, fill=fill)
+                w = draw.textlength(seg, font=font_text)
+        else:
+            draw.text((x, y), seg, font=font_text, fill=fill)
+            w = draw.textlength(seg, font=font_text)
+        x += w
+    return x
+
 
 def format_metric(n: int) -> str:
     """Format số lượng tương tác kiểu Threads: 21,1K | 4,2K | 850"""
@@ -142,13 +211,14 @@ def format_metric(n: int) -> str:
     return str(max(1, n))
 
 
-def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.Draw) -> list[str]:
+def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.Draw, font_emoji=None) -> list[str]:
     words = text.split()
     lines = []
     current = ""
     for w in words:
         test = (current + " " + w).strip()
-        if draw.textlength(test, font=font) <= max_width:
+        length = measure_text_with_emojis(draw, test, font, font_emoji)
+        if length <= max_width:
             current = test
         else:
             if current:
@@ -359,7 +429,7 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
     d_dummy = ImageDraw.Draw(dummy)
 
     max_text_w = CARD_W - PAD * 2
-    lines = wrap_text(content, FONT_BODY, max_text_w, d_dummy)
+    lines = wrap_text(content, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
     line_h = 46
     text_h = len(lines) * line_h
 
@@ -429,10 +499,10 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
     logo_y = int(header_center_y - (l_bbox[1] + l_bbox[3]) / 2)
     draw.text((int(CARD_W - PAD - logo_w), logo_y), "@threads", font=FONT_LOGO, fill=t["logo_color"])
 
-    # 6. Nội dung bài viết
+    # 6. Nội dung bài viết (Hỗ trợ Emoji màu sắc thực thụ 100%)
     content_y = PAD + AVATAR_SIZE + 22
     for i, line in enumerate(lines):
-        draw.text((PAD, content_y + i * line_h), line, font=FONT_BODY, fill=t["text_primary"])
+        draw_text_with_emojis(draw, (PAD, content_y + i * line_h), line, FONT_BODY, FONT_EMOJI_BODY, t["text_primary"])
 
     # 6.1. Dán ảnh minh họa câu chuyện (nếu có)
     current_bottom_y = content_y + text_h
@@ -576,7 +646,7 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
     d_dummy = ImageDraw.Draw(dummy)
 
     max_text_w = CARD_W - PAD * 2
-    lines = wrap_text(content, FONT_BODY_CMT, max_text_w, d_dummy)
+    lines = wrap_text(content, FONT_BODY_CMT, max_text_w, d_dummy, FONT_EMOJI_CMT)
     line_h = 44
     text_h = len(lines) * line_h
 
@@ -635,9 +705,9 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
         draw.text((PAD, cur_y), f"Trả lời @{clean_reply}", font=FONT_REPLY, fill=t["text_reply"])
         cur_y += reply_h
 
-    # 7. Nội dung bình luận
+    # 7. Nội dung bình luận (Hỗ trợ Emoji màu sắc thực thụ 100%)
     for i, line in enumerate(lines):
-        draw.text((PAD, cur_y + i * line_h), line, font=FONT_BODY_CMT, fill=t["text_primary"])
+        draw_text_with_emojis(draw, (PAD, cur_y + i * line_h), line, FONT_BODY_CMT, FONT_EMOJI_CMT, t["text_primary"])
 
     # 8. Action Bar: CĂN THẲNG TRỤC NGANG 100%
     action_center_y = cur_y + text_h + 18 + ICON_SIZE // 2
@@ -737,11 +807,6 @@ def render_outro_cta_card(question_text: str = None, output_path: str = None) ->
     b2_content_x = b2_x + (btn2_w - b2_content_w) // 2
     card.paste(comment_icon, (b2_content_x, btn_y + (btn_h - 26)//2), comment_icon)
     draw.text((b2_content_x + 26 + 12, btn_y + 19), b2_txt, fill=(255, 255, 255), font=FONT_ACTION)
-
-    if output_path:
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        card.save(output_path)
-    return card
 
     if output_path:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
