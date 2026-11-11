@@ -1109,8 +1109,32 @@ HTML_TEMPLATE = """
           <!-- Nhóm 6: AI Prompt & Model -->
           <div class="space-y-3">
             <h3 class="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
-              <i class="fa-solid fa-brain"></i> 6. Chỉ Dẫn Đạo Diễn Gemini AI (System Instruction)
+              <i class="fa-solid fa-brain"></i> 6. Cấu Hình Đạo Diễn & Thời Lượng Kịch Bản
             </h3>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="space-y-1">
+                <label class="text-xs font-semibold text-slate-300">Chế độ thời lượng kịch bản</label>
+                <select v-model="directorConfig.ai_director.duration_mode"
+                  class="w-full glass-input rounded-xl px-3 py-2 text-xs focus:outline-none">
+                  <option value="auto">Tự động (3-6 bình luận theo độ sâu chủ đề)</option>
+                  <option value="fast_30s">Nhanh 30s (Đúng 3 bình luận - Chuẩn TikTok ngắn)</option>
+                  <option value="deep_60s">Kể chuyện 60s (4-5 bình luận - Drama đối đáp & Twist kép)</option>
+                  <option value="viral_story_90s">Viral Story 90s (6-7 bình luận - Phốt dài liên hoàn)</option>
+                </select>
+                <span class="text-[10px] text-slate-500">Quyết định số lượng bình luận và cấu trúc đồ thị cảm xúc</span>
+              </div>
+              <div class="space-y-1">
+                <label class="text-xs font-semibold text-slate-300">Model Gemini AI</label>
+                <select v-model="directorConfig.ai_director.model"
+                  class="w-full glass-input rounded-xl px-3 py-2 text-xs focus:outline-none">
+                  <option value="gemini-3.5-flash">gemini-3.5-flash (Khuyên dùng - Nhanh & Sáng tạo)</option>
+                  <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Siêu nhẹ)</option>
+                  <option value="gemini-flash-latest">gemini-flash-latest (Bản mới nhất)</option>
+                </select>
+                <span class="text-[10px] text-slate-500">Động cơ trí tuệ nhân tạo đạo diễn kịch bản</span>
+              </div>
+            </div>
+            <label class="text-xs font-semibold text-slate-300 block">System Instruction (Chỉ dẫn phong cách)</label>
             <textarea v-model="directorConfig.ai_director.system_instruction" rows="4"
               class="w-full glass-input rounded-xl p-3 text-xs focus:outline-none font-mono text-slate-300"></textarea>
           </div>
@@ -1674,8 +1698,10 @@ def api_generate_script():
         tracker.reset()
         tracker.start_step("script", f"Gemini AI đang sáng tạo kịch bản theo chủ đề: '{topic or 'ngẫu nhiên'}'...", 20)
 
+        duration_mode = data.get("duration_mode") or None
         post = ai_mod.generate_story_with_gemini(
             topic,
+            duration_mode=duration_mode,
             progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
         )
         sample_file = os.path.join(OUTPUT_DIR, "sample_post.json")

@@ -590,10 +590,15 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
             post_illus = getattr(post, "illustration_path", "")
             if not post_illus or not os.path.exists(post_illus):
-                # Kiểm tra xem có ảnh minh họa sẵn trong output/illustrations
-                sample_illus = os.path.join(OUT_DIR, "illustrations", "test_illus.jpg")
-                if os.path.exists(sample_illus):
-                    post_illus = sample_illus
+                # Kiểm tra kho ảnh minh họa chất lượng cao trong output/illustrations
+                candidate_pool = [
+                    os.path.join(OUT_DIR, "illustrations", "my_eyes_angle.jpg"),
+                    os.path.join(OUT_DIR, "illustrations", "cat_lightmode.jpg"),
+                    os.path.join(OUT_DIR, "illustrations", "sunglasses_bed.jpg")
+                ]
+                valid_cand = [p for p in candidate_pool if os.path.exists(p)]
+                if valid_cand:
+                    post_illus = random.choice(valid_cand)
 
             # Tùy chọn gắn ảnh vào câu hỏi bài đăng (có thể có hoặc không):
             illus_cfg = cfg.get("illustration_settings", {})
@@ -642,10 +647,19 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
         bg_mod.prepare_background(total_duration, bg_video_out, mode=bg_mode)
 
         mixed_audio_out = os.path.join(AUDIO_DIR, "_audio_final.mp3")
-        bg_music_sample = os.path.join(ASSETS_DIR, "sfx", "lofi_bg.mp3")
+        # Tự động chọn nhạc nền ngẫu nhiên từ kho assets/bgm hoặc file mặc định
+        bgm_candidates = []
+        bgm_dir = os.path.join(ASSETS_DIR, "bgm")
+        if os.path.exists(bgm_dir):
+            bgm_candidates += [os.path.join(bgm_dir, f) for f in os.listdir(bgm_dir) if f.lower().endswith((".mp3", ".wav", ".m4a"))]
+        default_lofi = os.path.join(ASSETS_DIR, "sfx", "lofi_bg.mp3")
+        if os.path.exists(default_lofi) and default_lofi not in bgm_candidates:
+            bgm_candidates.append(default_lofi)
+
+        selected_bgm = random.choice(bgm_candidates) if bgm_candidates else None
         bg_mod.build_mixed_audio_with_sfx(
             audio_sequence, mixed_audio_out,
-            bg_music_path=bg_music_sample if os.path.exists(bg_music_sample) else None
+            bg_music_path=selected_bgm
         )
         tracker.finish_step("audio")
 

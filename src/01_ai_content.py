@@ -367,7 +367,7 @@ def generate_story_with_gemini(
             camera_motion=camera_mot
         ))
 
-    # Tự động tải hoặc tạo ảnh minh họa câu chuyện nếu có illustration_prompt
+    # Tự động tải hoặc tạo ảnh minh họa câu chuyện mới hoàn toàn cho mỗi video
     illus_prompt = data.get("illustration_prompt", "")
     illus_path = ""
     if illus_prompt:
@@ -376,20 +376,34 @@ def generate_story_with_gemini(
             import urllib.parse
             illus_dir = os.path.join(OUT_DIR, "illustrations")
             os.makedirs(illus_dir, exist_ok=True)
-            illus_filename = f"story_{int(time.time())}.jpg"
+            illus_filename = f"story_{int(time.time())}_{random.randint(100, 999)}.jpg"
             target_file = os.path.join(illus_dir, illus_filename)
-            encoded = urllib.parse.quote(f"funny relatable comedy photograph, real life meme, {illus_prompt}, bright clean lighting, realistic funny moment, no uncanny clay, no horror")
-            url = f"https://image.pollinations.ai/prompt/{encoded}?width=940&height=600&nologo=true&seed=42"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            rand_seed = random.randint(1, 999999)
+            clean_prompt = f"hilarious viral comedy meme photo, {illus_prompt}, realistic funny moment, high quality photography, sharp clean lighting, no uncanny clay, no horror"
+            encoded = urllib.parse.quote(clean_prompt)
+            url = f"https://image.pollinations.ai/prompt/{encoded}?width=940&height=620&nologo=true&seed={rand_seed}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=12) as resp:
                 data_bytes = resp.read()
                 if len(data_bytes) > 1000:
                     with open(target_file, "wb") as f:
                         f.write(data_bytes)
                     illus_path = target_file
-                    print(f"  [✓] Đã tạo thành công ảnh minh họa câu chuyện: {illus_path}")
+                    print(f"  [✓] Đã tạo thành công ảnh minh họa câu chuyện mới hoàn toàn: {illus_path}")
         except Exception as e:
-            print(f"  ⚠️ Không tải được ảnh minh họa ({e}), tiếp tục dùng card chữ chuẩn.")
+            print(f"  ⚠️ Không tạo được ảnh AI trực tuyến ({e}), tự động chọn meme phản ứng thích hợp.")
+
+    # Fallback tự động chọn meme phản ứng hài hước nếu không có ảnh AI (Zero Crash & Đa dạng 100%)
+    if not illus_path or not os.path.exists(illus_path):
+        fallback_pool = [
+            os.path.join(OUT_DIR, "illustrations", "my_eyes_angle.jpg"),
+            os.path.join(OUT_DIR, "illustrations", "cat_lightmode.jpg"),
+            os.path.join(OUT_DIR, "illustrations", "sunglasses_bed.jpg")
+        ]
+        valid_fallbacks = [p for p in fallback_pool if os.path.exists(p)]
+        if valid_fallbacks:
+            illus_path = random.choice(valid_fallbacks)
+            print(f"  [✓] Đã chọn meme phản ứng hài hước từ kho: {os.path.basename(illus_path)}")
 
     post = Post(
         username=data.get("username", "threads.user"),
