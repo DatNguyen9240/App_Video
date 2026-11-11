@@ -227,25 +227,27 @@ def generate_story_with_gemini(
         )
 
     prompt = (
-        f"Tạo 1 kịch bản Threads/Twitter drama bằng tiếng Việt GenZ.\n"
+        f"Bạn là người viết Threads chuyên nghiệp (SKILL: THREADS HUMAN GEN Z WRITER).\n"
+        f"Hãy tạo 1 kịch bản bài đăng Threads và các bình luận bằng tiếng Việt thật tự nhiên, trau chuốt như người thật đang chia sẻ trải nghiệm với bạn bè.\n"
         f"Chủ đề: '{topic}'\n"
         f"Chế độ kịch bản: {dur_mode}\n\n"
-        f"QUY TẮC CẤU TRÚC KỊCH BẢN:\n"
-        f"- Bài viết chính: CỰC KỲ NGẮN GỌN (1-2 câu, tối đa 30-35 từ). "
-        f"Hook giật mình tò mò, kể tình huống dở khóc dở cười CỤ THỂ, "
-        f"dùng ngôn ngữ đời thường GenZ (không formal).\n"
+        f"QUY TẮC CỐT LÕI (PHẢI GIỐNG 100% NGƯỜI THẬT KỂ CHUYỆN):\n"
+        f"- BÀI VIẾT CHÍNH: Ngắn gọn (1-2 câu, tối đa 30-35 từ). Mở đầu bằng một tình huống rất đời, rất cụ thể, câu chữ trau chuốt, nhịp điệu mềm mại, khiến người đọc cảm thấy 'sao giống mình vậy' và muốn dừng lại đọc tiếp.\n"
         f"{cmt_guide}\n"
-        f"- Mỗi bình luận: Chỉ 1 câu ngắn gọn, tối đa 20 từ, sắc sảo, tự nhiên, BẮT BUỘC KÈM 1-2 EMOJI/ICON BIỂU CẢM HÀI HƯỚC (😂, 💀, 🤡, 😭, 🤣, 😱, v.v.) Ở CUỐI CÂU ĐỂ TĂNG TƯƠNG TÁC.\n"
-        f"- Username PHẢI GenZ: viết thường, dùng dấu chấm/gạch dưới/số. "
-        f"VD: 'linh.cute03', 'nam_dep_trai99', 'toi.la.mot.con.meo', 'hr_ngap_nguoi', 'dev_nho_nha'\n"
-        f"- reply_to: Ghi rõ username đang trả lời (có thể là tác giả hoặc username commenter phía trước).\n"
-        f"- TUYỆT ĐỐI KHÔNG viết formal/báo chí, KHÔNG viết đúng ngữ pháp quá chỉn chu.\n\n"
+        f"- CÁC BÌNH LUẬN: Mỗi bình luận chỉ 1 câu ngắn gọn (dưới 20 từ), mang góc nhìn chân thật của bạn bè mạng xã hội: người đồng cảm góp thêm tình huống dở khóc dở cười, người bắt thóp chi tiết để cà khịa dí dỏm, người tranh luận phản biện qua lại.\n"
+        f"- NGÔN NGỮ GENZ TINH TẾ: Dùng từ ngữ tự nhiên của giới trẻ nhưng VỪA ĐỦ, tuyệt đối KHÔNG nhồi nhét tiếng lóng gượng ép, KHÔNG cố tỏ ra hài hước rẻ tiền.\n"
+        f"- EMOJI VỪA PHẢI: Tối đa 0-1 emoji mỗi câu khi thật sự cần thiết (tránh spam emoji).\n"
+        f"- USERNAME: Tên username tiếng Việt đời thường tự nhiên (ví dụ: 'linh.nguyen99', 'minh.triet01', 'hoang_anh.hr', 'be_meo_ngu_ngay').\n"
+        f"- REPLY_TO: Ghi rõ username đang trả lời để tạo sự đối đáp sống động.\n"
+        f"- TUYỆT ĐỐI TRÁNH: Không viết như AI giải thích, không mở đầu sáo rỗng, không kết bài bằng đạo lý rập khuôn.\n\n"
+        f"TIÊU CHUẨN KIỂM DUYỆT:\n"
+        f"Trước khi trả kết quả, tự hỏi: 'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và truyền cảm không?'\n\n"
         f"VÍ DỤ TONE THAM KHẢO:\n"
-        f"Bài: 'chồng tui bảo mua đèn ngủ thông minh cho lãng mạn, giờ đêm đập muỗi 1 cái là sáng như sân Mỹ Đình 💀'\n"
-        f"- C1: 'rồi lúc hai vợ chồng quẩy tới bến thì cái đèn chớp tắt như vũ trường à? 😂' (reply tác giả)\n"
-        f"- C2: 'nhà tui mua đèn giọng nói nè, đêm chồng ngáy 1 cái đổi 7 màu rực rỡ 🤡' (reply C1)\n"
-        f"- C3: 'ê rồi lỡ nói mớ tên người yêu cũ thì nó bật còi cứu hỏa không? 😭' (reply C2)\n"
-        f"- C4: 'thôi xin vĩnh biệt cụ... combo ly hôn tự động à 💀' (reply tác giả)\n"
+        f"Bài: 'Chồng tui bảo mua đèn ngủ thông minh cho lãng mạn, giờ đêm trở mình đập muỗi một cái là phòng sáng rực như sân bóng 😭'\n"
+        f"- C1: 'Rồi lúc hai vợ chồng cãi nhau cái đèn có chớp tắt báo động không bà? 😂' (reply tác giả)\n"
+        f"- C2: 'Nhà tui mua đèn cảm biến giọng nói nè, đêm ổng ngáy một tiếng là nó tự đổi bảy màu lộng lẫy' (reply C1)\n"
+        f"- C3: 'Ủa rồi lỡ nói mớ gọi tên nyc thì đèn có hú còi cứu hỏa không?' (reply C2)\n"
+        f"- C4: 'Tính năng tự động hóa hôn nhân phiên bản cảm lạnh dữ dằn 💀' (reply tác giả)\n"
     )
 
     if progress_cb:
@@ -295,16 +297,16 @@ def generate_story_with_gemini(
     roles = voice_cfg.get("roles", {})
     author_role = roles.get("author", {})
     female_presets = voice_cfg.get("female_voice_presets", [
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+10Hz", "style": "cheerful"},
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+4Hz",  "style": "chat"},
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+14Hz", "style": "excited"},
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "-6%",  "pitch": "-6Hz",  "style": "sad"}
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz",  "style": "chat"},
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+10Hz", "style": "excited"},
+        {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+2Hz",  "style": "sad"}
     ])
     male_presets = voice_cfg.get("male_voice_presets", [
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+25%", "pitch": "-10Hz", "style": "angry"},
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+16%", "pitch": "+6Hz",  "style": "cheerful"},
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+0Hz",  "style": "chat"},
-        {"voice": "vi-VN-NamMinhNeural", "rate": "-8%",  "pitch": "-8Hz",  "style": "sad"}
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+24%", "pitch": "-2Hz", "style": "angry"},
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+20%", "pitch": "+4Hz",  "style": "cheerful"},
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "chat"},
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+14%", "pitch": "+0Hz",  "style": "sad"}
     ])
 
     female_keywords = {"linh", "trang", "mai", "be", "hoa", "ngoc", "lan", "anh", "girl", "cute", "thao", "vy", "my", "phuong", "giang", "nhung", "quynh", "huyen", "nga"}
@@ -348,8 +350,8 @@ def generate_story_with_gemini(
             default_pause_after = max(default_pause_after, 700)
 
         assigned_voice = role_info.get("voice") or preset.get("voice", "vi-VN-HoaiMyNeural" if is_female else "vi-VN-NamMinhNeural")
-        assigned_rate = role_info.get("rate") or emo_style_cfg.get("rate_boost") or preset.get("rate", "+16%")
-        assigned_pitch = role_info.get("pitch") or emo_style_cfg.get("pitch_boost") or preset.get("pitch", "+0Hz")
+        assigned_rate = role_info.get("rate") or emo_style_cfg.get("rate_boost") or preset.get("rate", "+20%")
+        assigned_pitch = role_info.get("pitch") or emo_style_cfg.get("pitch_boost") or preset.get("pitch", "+2Hz")
 
         comments.append(Comment(
             username=c.get("username", f"user_{idx}"),
@@ -419,9 +421,9 @@ def generate_story_with_gemini(
         illustration_caption=data.get("illustration_caption", ""),
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         hook_energy=data.get("hook_energy", "high"),
-        voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "vi-VN-NamMinhNeural")),
-        rate_offset=author_role.get("rate", "+5%"),
-        pitch_offset=author_role.get("pitch", "+0Hz"),
+        voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "vi-VN-HoaiMyNeural")),
+        rate_offset=author_role.get("rate", "+18%"),
+        pitch_offset=author_role.get("pitch", "+4Hz"),
         pause_before_ms=150,
         pause_after_ms=300,
         camera_motion="none",

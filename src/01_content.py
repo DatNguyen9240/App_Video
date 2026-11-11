@@ -55,8 +55,8 @@ class Post:
     emotional_arc: str = "curiosity -> tension -> fake_relief -> punchline"
     hook_energy: str = "high"
     voice_id: str = ""
-    rate_offset: str = "+8%"
-    pitch_offset: str = "+0Hz"
+    rate_offset: str = "+18%"
+    pitch_offset: str = "+4Hz"
     pause_before_ms: int = 150
     pause_after_ms: int = 300
     camera_motion: str = "none"

@@ -45,8 +45,8 @@ def get_ffmpeg_exe() -> str:
 def get_configured_voice_and_rate() -> tuple[str, str]:
     cfg = config_mod.load_config()
     voice_cfg = cfg.get("voice_casting", {})
-    voice = voice_cfg.get("default_author_voice", "vi-VN-NamMinhNeural")
-    rate = "+10%"
+    voice = voice_cfg.get("default_author_voice", "vi-VN-HoaiMyNeural")
+    rate = voice_cfg.get("roles", {}).get("author", {}).get("rate", "+18%")
     if os.path.exists(ENV_PATH):
         try:
             with open(ENV_PATH, "r", encoding="utf-8") as f:
@@ -303,7 +303,7 @@ def generate_all_audio(
     emotion_map = voice_cfg.get("emotion_style_map", {})
 
     if not default_voice:
-        default_voice = voice_cfg.get("default_author_voice", "vi-VN-NamMinhNeural")
+        default_voice = voice_cfg.get("default_author_voice", "vi-VN-HoaiMyNeural")
 
     result = {
         "post": None,
@@ -313,9 +313,9 @@ def generate_all_audio(
 
     # 1. Diễn xuất bài đăng tác giả
     post_voice = getattr(post, "voice_id", "") or default_voice
-    post_rate = getattr(post, "rate_offset", "") or "+5%"
-    post_pitch = getattr(post, "pitch_offset", "") or "+0Hz"
-    post_style = ""  # Tác giả kể chuyện bình thường, không cần style đặc biệt
+    post_rate = getattr(post, "rate_offset", "") or voice_cfg.get("roles", {}).get("author", {}).get("rate", "+18%")
+    post_pitch = getattr(post, "pitch_offset", "") or voice_cfg.get("roles", {}).get("author", {}).get("pitch", "+4Hz")
+    post_style = ""  # Tác giả kể chuyện tự nhiên
 
     if progress_cb:
         progress_cb(f"Tạo giọng đọc bài viết chính [{post_voice}]...", 15)
@@ -339,8 +339,8 @@ def generate_all_audio(
     for i, comment in enumerate(post.comments, 1):
         pct = 20 + int((i / max(1, total_cmt)) * 60)
         c_voice = getattr(comment, "voice_id", "") or voice_cfg.get("default_commenter_female_voice", "vi-VN-HoaiMyNeural")
-        c_rate = getattr(comment, "rate_offset", "") or "+18%"
-        c_pitch = getattr(comment, "pitch_offset", "") or "+0Hz"
+        c_rate = getattr(comment, "rate_offset", "") or "+20%"
+        c_pitch = getattr(comment, "pitch_offset", "") or "+2Hz"
         emotion = getattr(comment, "emotion", "funny")
 
         # Lấy style từ role config trước, nếu không có thì lấy từ emotion map

@@ -436,17 +436,19 @@ def crawl_trending_threads_story(
             topic = "bài viết đang được thảo luận nhiều nhất hôm nay trên Threads"
 
     prompt_radar = f"""
-Hãy đóng vai Nhà nghiên cứu nội dung và săn tin thịnh hành trên mạng xã hội Threads (threads.net) tại Việt Nam.
+Hãy đóng vai Người viết và săn tin thịnh hành trên Threads (threads.net) Việt Nam (SKILL: THREADS HUMAN GEN Z WRITER).
 Tìm kiếm hoặc tái hiện 1 BÀI VIẾT THẬT ĐANG CỰC KỲ TRENDING VÀ VIRAL NHẤT trên Threads về chủ đề: '{topic}'.
+Giọng văn phải tự nhiên như một người thật đang chia sẻ trải nghiệm đời thường cho bạn bè thân thiết nghe.
 
-Quy tắc bắt buộc (ĐẶC BIỆT CHÚ Ý ĐỘ DÀI & ĐỐI THOẠI):
+Quy tắc bắt buộc:
 1. Tác giả: Tên username tiếng Việt đời thường của người thật (ví dụ: mai_anh.hr, tuananh.dev, linh.nguyen99, congso.confession).
-2. Nội dung bài viết: CỰC KỲ NGẮN GỌN (chỉ 1 đến 2 câu ngắn, tối đa 30-35 từ), vào thẳng câu chuyện mâu thuẫn/drama thu hút người xem trong 3 giây đầu, không lan man.
-3. Bình luận 1: Rất ngắn (1 câu, dưới 20 từ), đồng cảm hoặc khơi mào tranh luận, thường trả lời tác giả (reply_to = username tác giả).
-4. Bình luận 2: Rất ngắn (1 câu, dưới 20 từ), cú bẻ lái sốc (punchline) không ai ngờ tới (sfx: 'boom'). ĐẶC BIỆT: Có thể trả lời tác giả HOẶC trả lời/bóc mẽ Bình luận 1 (reply_to = username của Bình luận 1)!
-5. Bình luận 3: Rất ngắn (1 câu, dưới 18 từ), chốt hạ cạn lời hoặc dở khóc dở cười (sfx: 'bruh' hoặc 'laugh'). Có thể trả lời tác giả hoặc người bình luận trước.
-6. Trường reply_to: Bắt buộc ghi rõ username mà bình luận đó đang trực tiếp trả lời (ví dụ tên tác giả hoặc tên người comment trước).
-7. Giới tính nhân vật (gender): Chỉ định rõ 'male' hoặc 'female' cho tác giả và từng bình luận để hệ thống ghép đúng avatar người thật!
+2. Nội dung bài viết: CỰC KỲ NGẮN GỌN (1 đến 2 câu ngắn, tối đa 30-35 từ), mở đầu bằng tình huống rất đời, trau chuốt, nhịp điệu mềm mại, thu hút người đọc trong 3 giây đầu.
+3. Bình luận 1: Rất ngắn (1 câu, dưới 20 từ), chia sẻ đồng cảm hoặc góp thêm chi tiết dở khóc dở cười (reply_to = username tác giả).
+4. Bình luận 2: Rất ngắn (1 câu, dưới 20 từ), cú bẻ lái tinh tế (punchline) hoặc cà khịa dí dỏm (sfx: 'boom'). Có thể trả lời tác giả hoặc bình luận 1.
+5. Bình luận 3: Rất ngắn (1 câu, dưới 18 từ), góc nhìn chốt hạ dí dỏm hoặc cạn lời (sfx: 'bruh' hoặc 'laugh').
+6. Ngôn ngữ: Dùng tiếng Việt Gen Z đời thường tinh tế, không gượng ép nhồi nhét từ lóng, dùng emoji có chừng mực (0-1 emoji/câu), tuyệt đối không để lộ văn phong AI giải thích.
+7. Trường reply_to: Bắt buộc ghi rõ username mà bình luận đó đang trực tiếp trả lời.
+8. Giới tính nhân vật (gender): Chỉ định rõ 'male' hoặc 'female' cho tác giả và từng bình luận để hệ thống ghép đúng avatar người thật!
 """
 
     if progress_cb:
@@ -509,7 +511,7 @@ Quy tắc bắt buộc (ĐẶC BIỆT CHÚ Ý ĐỘ DÀI & ĐỐI THOẠI):
         used_avatars.add(author_avatar_path)
 
     author_role = roles.get("author", {})
-    post_voice = author_role.get("voice", "vi-VN-NamMinhNeural" if author_gender == "male" else "vi-VN-HoaiMyNeural")
+    post_voice = author_role.get("voice", "vi-VN-HoaiMyNeural" if author_gender != "male" else "vi-VN-NamMinhNeural")
 
     # 2. Lấy Avatar THẬT từ Threads cho từng bình luận (Đúng ngữ cảnh chủ đề)
     comments = []
@@ -537,8 +539,8 @@ Quy tắc bắt buộc (ĐẶC BIỆT CHÚ Ý ĐỘ DÀI & ĐỐI THOẠI):
             sfx=sfx_val,
             emotion=c.get("emotion", "funny"),
             voice_id=c_voice,
-            rate_offset=role_info.get("rate", "+10%"),
-            pitch_offset=role_info.get("pitch", "+0Hz"),
+            rate_offset=role_info.get("rate", "+20%"),
+            pitch_offset=role_info.get("pitch", "+2Hz"),
             pause_before_ms=c.get("pause_before_ms", 250),
             pause_after_ms=c.get("pause_after_ms", 350),
             camera_motion=cam_motion
@@ -556,8 +558,8 @@ Quy tắc bắt buộc (ĐẶC BIỆT CHÚ Ý ĐỘ DÀI & ĐỐI THOẠI):
         hashtags=data.get("hashtags", "#threads #trending #xuhuong #chuyencongso"),
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         voice_id=post_voice,
-        rate_offset=author_role.get("rate", "+8%"),
-        pitch_offset=author_role.get("pitch", "+0Hz"),
+        rate_offset=author_role.get("rate", "+18%"),
+        pitch_offset=author_role.get("pitch", "+4Hz"),
         comments=comments
     )
 

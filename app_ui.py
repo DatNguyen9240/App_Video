@@ -489,7 +489,7 @@ HTML_TEMPLATE = """
             <span class="text-xs text-slate-400">Tùy biến chuẩn TikTok & Reels</span>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3.5">
             <!-- Bố cục video (Layout Presets) -->
             <div class="space-y-1.5">
               <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
@@ -544,8 +544,23 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc dẫn chuyện:
               </label>
               <select v-model="settings.voice" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="vi-VN-NamMinhNeural">🎙️ Nam Minh (Nam trầm ấm)</option>
-                <option value="vi-VN-HoaiMyNeural">🎙️ Hoài My (Nữ truyền cảm)</option>
+                <option value="vi-VN-HoaiMyNeural">🎙️ Hoài My (Nữ truyền cảm, siêu cuốn hút - Hot TikTok)</option>
+                <option value="vi-VN-NamMinhNeural">🎙️ Nam Minh (Nam năng động, trẻ trung)</option>
+              </select>
+            </div>
+
+            <!-- Tốc độ đọc (Reading Speed) -->
+            <div class="space-y-1.5">
+              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-gauge-high text-amber-400"></i> Tốc độ đọc:
+              </label>
+              <select v-model="settings.rate" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                <option value="+25%">⚡ Rất nhanh (+25% - Chuẩn TikTok Drama)</option>
+                <option value="+20%">🔥 Nhanh cuốn hút (+20% - Khuyên dùng)</option>
+                <option value="+18%">🚀 Nhanh mượt mà (+18%)</option>
+                <option value="+15%">✨ Nhanh vừa (+15%)</option>
+                <option value="+10%">🌟 Tự nhiên (+10%)</option>
+                <option value="+0%">🐢 Bình thường (+0%)</option>
               </select>
             </div>
           </div>
@@ -923,8 +938,8 @@ HTML_TEMPLATE = """
                 </div>
                 <div class="grid grid-cols-3 gap-2">
                   <select v-model="r.voice" class="col-span-2 glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200">
-                    <option value="vi-VN-NamMinhNeural">Nam Minh (Trầm)</option>
-                    <option value="vi-VN-HoaiMyNeural">Hoài My (Truyền cảm)</option>
+                    <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ truyền cảm, cuốn hút)</option>
+                    <option value="vi-VN-NamMinhNeural">Nam Minh (Nam năng động, trẻ trung)</option>
                   </select>
                   <input v-model="r.rate" type="text" placeholder="+10%" class="glass-input rounded-lg p-1.5 text-xs font-mono text-center">
                 </div>
@@ -1344,7 +1359,8 @@ HTML_TEMPLATE = """
             layout_preset: 'center',
             bg_mode: 'split_gameplay',
             card_theme: 'light',
-            voice: 'vi-VN-NamMinhNeural'
+            voice: 'vi-VN-HoaiMyNeural',
+            rate: '+20%'
           },
           pipelineState: {
             is_running: false,
@@ -1552,7 +1568,8 @@ HTML_TEMPLATE = """
             this.settings.layout_preset = data.layout_preset || 'center';
             this.settings.bg_mode = data.bg_mode || 'split_gameplay';
             this.settings.card_theme = data.card_theme || 'light';
-            this.settings.voice = data.voice || 'vi-VN-NamMinhNeural';
+            this.settings.voice = data.voice || 'vi-VN-HoaiMyNeural';
+            this.settings.rate = data.rate || '+20%';
           } catch(e) {}
         },
         async saveSettings() {
@@ -1748,18 +1765,20 @@ def api_settings():
         layout_preset = data.get("layout_preset", "center")
         bg_mode = data.get("bg_mode", "split_gameplay")
         card_theme = data.get("card_theme", "light")
-        voice = data.get("voice", "vi-VN-NamMinhNeural")
+        voice = data.get("voice", "vi-VN-HoaiMyNeural")
+        rate = data.get("rate", "+20%")
 
         lines = []
         if os.path.exists(ENV_PATH):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
-                    if not any(line.strip().startswith(k + "=") for k in ["LAYOUT_PRESET", "BG_MODE", "CARD_THEME", "TTS_VOICE"]):
+                    if not any(line.strip().startswith(k + "=") for k in ["LAYOUT_PRESET", "BG_MODE", "CARD_THEME", "TTS_VOICE", "TTS_RATE"]):
                         lines.append(line)
         lines.append(f"LAYOUT_PRESET={layout_preset}\n")
         lines.append(f"BG_MODE={bg_mode}\n")
         lines.append(f"CARD_THEME={card_theme}\n")
         lines.append(f"TTS_VOICE={voice}\n")
+        lines.append(f"TTS_RATE={rate}\n")
         with open(ENV_PATH, "w", encoding="utf-8") as f:
             f.writelines(lines)
         return jsonify({"success": True})
@@ -1767,7 +1786,8 @@ def api_settings():
         layout_preset = "center"
         bg_mode = "split_gameplay"
         card_theme = "light"
-        voice = "vi-VN-NamMinhNeural"
+        voice = "vi-VN-HoaiMyNeural"
+        rate = "+20%"
         if os.path.exists(ENV_PATH):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
@@ -1776,7 +1796,8 @@ def api_settings():
                     elif line.startswith("BG_MODE="): bg_mode = line.split("=", 1)[1].strip()
                     elif line.startswith("CARD_THEME="): card_theme = line.split("=", 1)[1].strip()
                     elif line.startswith("TTS_VOICE="): voice = line.split("=", 1)[1].strip()
-        return jsonify({"layout_preset": layout_preset, "bg_mode": bg_mode, "card_theme": card_theme, "voice": voice})
+                    elif line.startswith("TTS_RATE="): rate = line.split("=", 1)[1].strip()
+        return jsonify({"layout_preset": layout_preset, "bg_mode": bg_mode, "card_theme": card_theme, "voice": voice, "rate": rate})
 
 
 @app.route("/api/script", methods=["GET"])
@@ -2068,10 +2089,13 @@ def api_render_video():
     try:
         cfg = config_mod.load_config()
         roles = cfg.get("voice_casting", {}).get("roles", {})
+        chosen_rate = sets.get("rate")
+        chosen_voice = sets.get("voice")
 
         comments = []
         for idx, c in enumerate(p_data.get("comments", []), 1):
             r_info = roles.get(f"commenter_{idx}", {})
+            cmt_rate = chosen_rate if chosen_rate else r_info.get("rate", "+20%")
             comments.append(content_mod.Comment(
                 username=c.get("username", "user"),
                 content=c.get("content", ""),
@@ -2083,13 +2107,15 @@ def api_render_video():
                 sfx=c.get("sfx", "none"),
                 emotion=c.get("emotion", "funny"),
                 voice_id=r_info.get("voice", "vi-VN-HoaiMyNeural"),
-                rate_offset=r_info.get("rate", "+10%"),
-                pitch_offset=r_info.get("pitch", "+0Hz"),
+                rate_offset=cmt_rate,
+                pitch_offset=r_info.get("pitch", "+2Hz"),
                 pause_before_ms=int(c.get("pause_before_ms", 200)),
                 pause_after_ms=int(c.get("pause_after_ms", 350))
             ))
 
         author_role = roles.get("author", {})
+        post_rate = chosen_rate or author_role.get("rate", "+18%")
+        post_voice = chosen_voice or author_role.get("voice", "vi-VN-HoaiMyNeural")
         post_obj = content_mod.Post(
             username=p_data.get("username", "author"),
             content=p_data.get("content", ""),
@@ -2098,9 +2124,9 @@ def api_render_video():
             avatar_url=p_data.get("avatar_url", ""),
             likes=int(p_data.get("likes", 25000)),
             is_verified=bool(p_data.get("is_verified", True)),
-            voice_id=sets.get("voice") or author_role.get("voice", "vi-VN-NamMinhNeural"),
-            rate_offset=author_role.get("rate", "+8%"),
-            pitch_offset=author_role.get("pitch", "+0Hz"),
+            voice_id=post_voice,
+            rate_offset=post_rate,
+            pitch_offset=author_role.get("pitch", "+4Hz"),
             emotional_arc=p_data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
             comments=comments
         )

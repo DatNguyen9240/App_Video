@@ -35,26 +35,27 @@ DEFAULT_CONFIG = {
             "confession_roast"  # Hội đồng mạng xâu xé: Tác giả kể chuyện khó đỡ, dân mạng thi nhau cà khịa
         ],
         "system_instruction": (
-            "Mày là đạo diễn nội dung viral đỉnh nhất TikTok Việt Nam, chuyên tạo kịch bản video "
-            "mô phỏng drama THẬT trên Threads/Twitter. Mày hiểu rõ GenZ Việt nói chuyện như thế nào.\n\n"
-            "PHONG CÁCH VIẾT BẮT BUỘC:\n"
-            "- Dùng ngôn ngữ GenZ Việt THẬT: 'ủa', 'wtf', 'slay', 'real', 'fr fr', 'no cap', "
-            "'vl', 'chs', 'lol', 'bruh', 'era nào rồi', 'tui uninstall cuộc đời', "
-            "'same bro', 'đỉnh nóc kịch trần', 'rồi sao nữa...', '???', 'alo 115', "
-            "'skill issue', 'it's giving', 'sến', 'xỉu', 'tui đây nè'\n"
-            "- Bình luận PHẢI chaotic tự nhiên: viết thường hết HOẶC viết hoa la hét, "
-            "dùng '...' '????' nhiều, reaction emoji (💀🤡😭☠️🔥)\n"
-            "- Self-deprecating humor: GenZ thích tự chê bản thân ('tui đây nè', 'skill issue', "
-            "'thôi tui xin', 'cho tui xin 1 vé đi tu')\n"
-            "- Toxic nhẹ kiểu bạn bè: bóc mẽ nhau hài hước ('ê mày ơi', 'found the 🤡', "
-            "'ai hỏi đâu nhưng flex hoài')\n"
-            "- TUYỆT ĐỐI KHÔNG viết formal, KHÔNG dùng ngôn ngữ báo chí, "
-            "KHÔNG viết như người lớn, KHÔNG viết đúng ngữ pháp quá chỉn chu\n\n"
-            "CÁC ĐỒ THỊ CẢM XÚC SÁNG TẠO (CHỌN 1 ARCHETYPE PHÙ HỢP NHẤT VỚI CHỦ ĐỀ):\n"
-            "1. DOUBLE TWIST (CÚ LẬT KÈO KÉP): Hook -> C1 đồng cảm -> C2 twist sốc lần 1 -> C3 đẩy cao trào -> Cmt cuối twist lần 2 lật ngược toàn bộ sự thật!\n"
-            "2. THREAD WAR (KHẨU CHIẾN QUA LẠI): Hook -> C1 nêu ý kiến -> C2 reply_to C1 cãi gay gắt -> C3 tác giả phân trần -> C4 thánh phán bóc mẽ cả hội cạn lời.\n"
-            "3. CHAIN EXPOSURE (BÓC PHỐT LIÊN HOÀN): Mỗi bình luận bóc thêm một chi tiết éo le của tác giả, càng về sau tình huống càng bung bét hài hước.\n"
-            "4. CONFESSION & ROAST: Tác giả kể một bí mật/sai lầm ngớ ngẩn, các bình luận bên dưới thi nhau cà khịa hoặc hiến kế bá đạo."
+            "Bạn là người viết Threads chuyên nghiệp, am hiểu sâu sắc văn hóa Gen Z, tâm lý giới trẻ Việt Nam "
+            "và nghệ thuật kể chuyện đời thường.\n\n"
+            "NHIỆM VỤ:\n"
+            "Tạo kịch bản bài đăng Threads và chuỗi bình luận đối đáp chân thật 100%, "
+            "như một người thật đang ngồi cà phê kể chuyện cho bạn thân nghe.\n\n"
+            "NGUYÊN TẮC CỐT LÕI (THREADS HUMAN GEN Z WRITER):\n"
+            "1. VIẾT NHƯ NGƯỜI THẬT NÓI CHUYỆN: Câu chữ trau chuốt, mềm mại, có nhịp điệu và giàu cảm xúc. "
+            "Tuyệt đối không giống bài văn nghị luận hay AI giải thích.\n"
+            "2. NGÔN NGỮ GEN Z ĐỜI THƯỜNG & TINH TẾ: Dùng từ ngữ tự nhiên của giới trẻ nhưng vừa đủ, "
+            "TUYỆT ĐỐI KHÔNG gượng ép nhồi nhét từ lóng hay cố tỏ ra hài hước.\n"
+            "3. CHI TIẾT ĐỜI THƯỜNG ĐẮC GIÁ: Luôn gắn với các tình huống cụ thể, quen thuộc (công sở, tình yêu, gia đình, bạn bè) "
+            "khiến người đọc cảm thấy 'sao giống mình vậy'.\n"
+            "4. CHUỖI BÌNH LUẬN SỐNG ĐỘNG: Bình luận là những người dùng thật vào góp chuyện — có người đồng cảm kể thêm chuyện éo le, "
+            "có người bắt thóp chi tiết để cà khịa dí dỏm, có người reply_to tranh luận sôi nổi.\n"
+            "5. ĐIỀU TUYỆT ĐỐI TRÁNH:\n"
+            "- Không viết văn mẫu hay mở đầu sáo rỗng.\n"
+            "- Không dùng quá nhiều emoji (tối đa 0-1 emoji tinh tế mỗi câu).\n"
+            "- Không kết bài bằng đạo lý hay bài học nhân sinh ép uổng.\n"
+            "- Không để lộ bất kỳ dấu vết nào của văn phong AI.\n\n"
+            "TIÊU CHUẨN TỰ KIỂM DUYỆT:\n"
+            "'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và lôi cuốn không? Có tạo cảm giác bạn bè đang kể chuyện cho nhau không?'"
         )
     },
     "audio_mastering": {
@@ -66,11 +67,11 @@ DEFAULT_CONFIG = {
         "audio_bitrate": "256k"
     },
     "emotional_pacing": {
-        "hook_speed_rate": "+10%",
-        "punchline_pre_pause_ms": 350,
-        "punchline_post_pause_ms": 500,
-        "comment_gap_ms": 280,
-        "awkward_silence_duration_ms": 400,
+        "hook_speed_rate": "+20%",
+        "punchline_pre_pause_ms": 250,
+        "punchline_post_pause_ms": 380,
+        "comment_gap_ms": 220,
+        "awkward_silence_duration_ms": 350,
         "bgm_volume_normal": 0.16,
         "bgm_volume_duck": 0.05,
         "enable_bgm_ducking": True,
@@ -78,35 +79,35 @@ DEFAULT_CONFIG = {
         "enable_card_zoom": True
     },
     "voice_casting": {
-        "default_author_voice": "vi-VN-NamMinhNeural",
+        "default_author_voice": "vi-VN-HoaiMyNeural",
         "default_commenter_female_voice": "vi-VN-HoaiMyNeural",
         "default_commenter_male_voice": "vi-VN-NamMinhNeural",
         "dynamic_casting": True,
         "female_voice_presets": [
-            {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+10Hz", "style": "cheerful"},
-            {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+4Hz",  "style": "chat"},
-            {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+14Hz", "style": "excited"},
-            {"voice": "vi-VN-HoaiMyNeural", "rate": "-6%",  "pitch": "-6Hz",  "style": "sad"}
+            {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
+            {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz",  "style": "chat"},
+            {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+10Hz", "style": "excited"},
+            {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+2Hz",  "style": "sad"}
         ],
         "male_voice_presets": [
-            {"voice": "vi-VN-NamMinhNeural", "rate": "+25%", "pitch": "-10Hz", "style": "angry"},
-            {"voice": "vi-VN-NamMinhNeural", "rate": "+16%", "pitch": "+6Hz",  "style": "cheerful"},
-            {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+0Hz",  "style": "chat"},
-            {"voice": "vi-VN-NamMinhNeural", "rate": "-8%",  "pitch": "-8Hz",  "style": "sad"}
+            {"voice": "vi-VN-NamMinhNeural", "rate": "+24%", "pitch": "-2Hz", "style": "angry"},
+            {"voice": "vi-VN-NamMinhNeural", "rate": "+20%", "pitch": "+4Hz",  "style": "cheerful"},
+            {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "chat"},
+            {"voice": "vi-VN-NamMinhNeural", "rate": "+14%", "pitch": "+0Hz",  "style": "sad"}
         ],
         "roles": {
-            "author": {"voice": "vi-VN-NamMinhNeural", "rate": "+5%", "pitch": "+0Hz", "style": ""},
-            "commenter_1": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+10Hz", "style": "cheerful"},
-            "commenter_2": {"voice": "vi-VN-NamMinhNeural", "rate": "+25%", "pitch": "-10Hz", "style": "angry"},
-            "commenter_3": {"voice": "vi-VN-HoaiMyNeural", "rate": "-8%", "pitch": "-6Hz", "style": "sad"}
+            "author": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz", "style": "cheerful"},
+            "commenter_1": {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
+            "commenter_2": {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz", "style": "angry"},
+            "commenter_3": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+2Hz", "style": "chat"}
         },
         "emotion_style_map": {
-            "funny":      {"style": "cheerful",    "rate_boost": "+5%",  "pitch_boost": "+3Hz"},
-            "shocked":    {"style": "shouting",    "rate_boost": "+15%", "pitch_boost": "+6Hz"},
-            "awkward":    {"style": "embarrassed", "rate_boost": "-5%",  "pitch_boost": "-2Hz"},
-            "sarcastic":  {"style": "disgruntled", "rate_boost": "+8%",  "pitch_boost": "-4Hz"},
-            "insightful": {"style": "calm",        "rate_boost": "+0%",  "pitch_boost": "+0Hz"},
-            "neutral":    {"style": "",            "rate_boost": "+0%",  "pitch_boost": "+0Hz"}
+            "funny":      {"style": "cheerful",    "rate_boost": "+8%",  "pitch_boost": "+4Hz"},
+            "shocked":    {"style": "shouting",    "rate_boost": "+20%", "pitch_boost": "+6Hz"},
+            "awkward":    {"style": "embarrassed", "rate_boost": "+8%",  "pitch_boost": "-2Hz"},
+            "sarcastic":  {"style": "disgruntled", "rate_boost": "+14%", "pitch_boost": "+0Hz"},
+            "insightful": {"style": "calm",        "rate_boost": "+10%", "pitch_boost": "+2Hz"},
+            "neutral":    {"style": "",            "rate_boost": "+15%", "pitch_boost": "+2Hz"}
         }
     },
     "sfx_meme_registry": {
@@ -209,7 +210,7 @@ def get_voice_for_role(role_name: str) -> dict:
     if role_name in roles:
         return roles[role_name]
     # Fallback mặc định
-    return {"voice": "vi-VN-NamMinhNeural", "rate": "+10%", "pitch": "+0Hz"}
+    return {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz"}
 
 
 def get_sfx_info(sfx_key: str) -> dict:

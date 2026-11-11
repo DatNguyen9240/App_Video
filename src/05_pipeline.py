@@ -482,7 +482,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         outro_voice_file = os.path.join(AUDIO_DIR, "outro_cta.mp3")
         try:
             # Dùng giọng nữ ngọt ngào hoặc giọng chính để kêu gọi hành động
-            tts_mod.text_to_speech(cta_q, outro_voice_file, voice="vi-VN-HoaiMyNeural", rate="+12%")
+            tts_mod.text_to_speech(cta_q, outro_voice_file, voice="vi-VN-HoaiMyNeural", rate="+18%")
             actual_outro_dur = bg_mod.get_media_duration(outro_voice_file)
             if actual_outro_dur > 0.5:
                 outro_dur = max(outro_dur, actual_outro_dur + 0.3)

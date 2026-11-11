@@ -24,7 +24,8 @@ def clear_screen():
 
 def get_current_settings():
     bg_mode = "infinity"
-    voice = "vi-VN-NamMinhNeural"
+    voice = "vi-VN-HoaiMyNeural"
+    rate = "+20%"
     card_theme = "light"
     if os.path.exists(ENV_PATH):
         with open(ENV_PATH, "r", encoding="utf-8") as f:
@@ -36,10 +37,13 @@ def get_current_settings():
                 elif line.startswith("TTS_VOICE="):
                     val = line.split("=", 1)[1].strip()
                     if val: voice = val
+                elif line.startswith("TTS_RATE="):
+                    val = line.split("=", 1)[1].strip()
+                    if val: rate = val
                 elif line.startswith("CARD_THEME="):
                     val = line.split("=", 1)[1].strip()
                     if val: card_theme = val
-    return bg_mode, voice, card_theme
+    return bg_mode, voice, rate, card_theme
 
 
 def set_env_value(key, value):
@@ -60,7 +64,7 @@ def set_env_value(key, value):
 
 
 def print_banner():
-    bg_mode, voice, card_theme = get_current_settings()
+    bg_mode, voice, rate, card_theme = get_current_settings()
     if bg_mode == "infinity":
         bg_label = "🌀 3D Infinity Tunnel (Đường hầm vô cực)"
     elif bg_mode == "gradient":
@@ -68,7 +72,7 @@ def print_banner():
     else:
         bg_label = "🎮 Video Minecraft Parkour"
 
-    voice_label = "Nam Minh (Nam)" if "NamMinh" in voice else "Hoài My (Nữ)"
+    voice_label = "Hoài My (Nữ truyền cảm, siêu cuốn hút)" if "HoaiMy" in voice else "Nam Minh (Nam năng động)"
     theme_label = "☀️ Sáng (Light - Chuẩn Threads thật)" if card_theme == "light" else "🌙 Tối (Dark Mode)"
 
     print(f"""
@@ -79,11 +83,12 @@ def print_banner():
   ⚙️ Chế độ nền hiện tại : {bg_label}
   🎨 Giao diện thẻ Threads: {theme_label}
   🎙️ Giọng đọc hiện tại  : {voice_label}
+  ⚡ Tốc độ đọc hiện tại : {rate}
     """)
 
 
 def toggle_settings():
-    bg_mode, voice, card_theme = get_current_settings()
+    bg_mode, voice, rate, card_theme = get_current_settings()
     print("\n--- CÀI ĐẶT HỆ THỐNG ---")
     print(f"[1] Đổi chế độ nền (Hiện tại: {bg_mode})")
     print("    -> 1: 🌀 3D Infinity Tunnel (Vô cực 3D - Siêu cuốn hút, mặc định)")
@@ -92,11 +97,18 @@ def toggle_settings():
     print(f"[2] Đổi giao diện thẻ Threads (Hiện tại: {card_theme.upper()})")
     print("    -> 1: Sáng (Light Theme - Chuẩn ảnh mẫu 100%)")
     print("    -> 2: Tối (Dark Theme)")
-    print(f"[3] Đổi giọng đọc (Hiện tại: {'Nam' if 'NamMinh' in voice else 'Nữ'})")
-    print("    -> 1: Giọng Nam (Nam Minh)")
-    print("    -> 2: Giọng Nữ (Hoài My)")
+    print(f"[3] Đổi giọng đọc (Hiện tại: {'Nữ (Hoài My)' if 'HoaiMy' in voice else 'Nam (Nam Minh)'})")
+    print("    -> 1: Giọng Nữ (Hoài My - Truyền cảm, cuốn hút, chuẩn TikTok)")
+    print("    -> 2: Giọng Nam (Nam Minh - Năng động, rõ ràng)")
+    print(f"[4] Đổi tốc độ đọc (Hiện tại: {rate})")
+    print("    -> 1: +25% (Rất nhanh - Chuẩn drama dồn dập)")
+    print("    -> 2: +20% (Nhanh cuốn hút - Đề xuất)")
+    print("    -> 3: +18% (Nhanh mượt)")
+    print("    -> 4: +15% (Nhanh vừa)")
+    print("    -> 5: +10% (Tự nhiên)")
+    print("    -> 6: +0% (Bình thường)")
 
-    sub = input("\nChọn mục [1/2/3]: ").strip()
+    sub = input("\nChọn mục [1/2/3/4]: ").strip()
     if sub == "1":
         print("  1: infinity | 2: minecraft | 3: gradient")
         m = input("  Chọn chế độ nền [1-3]: ").strip()
@@ -109,9 +121,15 @@ def toggle_settings():
         set_env_value("CARD_THEME", new_theme)
         print(f"[✓] Đã đổi giao diện thẻ sang: {new_theme.upper()}")
     elif sub == "3":
-        new_voice = "vi-VN-HoaiMyNeural" if "NamMinh" in voice else "vi-VN-NamMinhNeural"
+        new_voice = "vi-VN-NamMinhNeural" if "HoaiMy" in voice else "vi-VN-HoaiMyNeural"
         set_env_value("TTS_VOICE", new_voice)
         print(f"[✓] Đã đổi giọng sang: {'Nữ (Hoài My)' if 'HoaiMy' in new_voice else 'Nam (Nam Minh)'}")
+    elif sub == "4":
+        rate_map = {"1": "+25%", "2": "+20%", "3": "+18%", "4": "+15%", "5": "+10%", "6": "+0%"}
+        r_choice = input("  Chọn tốc độ [1-6]: ").strip()
+        new_rate = rate_map.get(r_choice, "+20%")
+        set_env_value("TTS_RATE", new_rate)
+        print(f"[✓] Đã đổi tốc độ đọc sang: {new_rate}")
 
 
 def main():
