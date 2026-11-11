@@ -184,14 +184,27 @@ def draw_text_with_emojis(draw: ImageDraw.Draw, xy: tuple[int, int], text: str,
     Vẽ văn bản kết hợp Emoji đa sắc màu siêu chân thực (True Color Emojis):
     - Chữ cái tiếng Việt vẽ bằng Segoe UI sắc nét
     - Icon emoji (😂, 💀, 🤡, 🤣...) vẽ bằng Segoe UI Emoji có màu sắc nguyên bản,
-      tuyệt đối không bị lỗi ô vuông tofu [ ] [ ]!
+      căn THẲNG TUYỆT ĐỐI trên cùng trục ngang tâm điểm chữ (Pixel-Perfect Centerline).
     """
     x, y = xy
     segments = split_text_emojis(text)
+
+    # Tính toán chính xác độ lệch tâm điểm dọc giữa font chữ và font emoji
+    offset_y = 15.0
+    if font_emoji:
+        try:
+            bbox_t = draw.textbbox((0, 0), "Agđy", font=font_text)
+            center_t = (bbox_t[1] + bbox_t[3]) / 2.0
+            bbox_e = draw.textbbox((0, 0), "😂", font=font_emoji)
+            center_e = (bbox_e[1] + bbox_e[3]) / 2.0
+            offset_y = center_t - center_e
+        except Exception:
+            offset_y = 15.0
+
     for seg, is_emo in segments:
         if is_emo and font_emoji:
             try:
-                draw.text((x, y + 2), seg, font=font_emoji, embedded_color=True)
+                draw.text((x, y + offset_y), seg, font=font_emoji, embedded_color=True)
                 w = draw.textlength(seg, font=font_emoji)
             except Exception:
                 draw.text((x, y), seg, font=font_text, fill=fill)
