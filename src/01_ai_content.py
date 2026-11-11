@@ -235,7 +235,7 @@ def generate_story_with_gemini(
         f"Hook giật mình tò mò, kể tình huống dở khóc dở cười CỤ THỂ, "
         f"dùng ngôn ngữ đời thường GenZ (không formal).\n"
         f"{cmt_guide}\n"
-        f"- Mỗi bình luận: Chỉ 1 câu ngắn gọn, tối đa 20 từ, sắc sảo, tự nhiên.\n"
+        f"- Mỗi bình luận: Chỉ 1 câu ngắn gọn, tối đa 20 từ, sắc sảo, tự nhiên, BẮT BUỘC KÈM 1-2 EMOJI/ICON BIỂU CẢM HÀI HƯỚC (😂, 💀, 🤡, 😭, 🤣, 😱, v.v.) Ở CUỐI CÂU ĐỂ TĂNG TƯƠNG TÁC.\n"
         f"- Username PHẢI GenZ: viết thường, dùng dấu chấm/gạch dưới/số. "
         f"VD: 'linh.cute03', 'nam_dep_trai99', 'toi.la.mot.con.meo', 'hr_ngap_nguoi', 'dev_nho_nha'\n"
         f"- reply_to: Ghi rõ username đang trả lời (có thể là tác giả hoặc username commenter phía trước).\n"

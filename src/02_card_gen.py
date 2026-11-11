@@ -163,7 +163,8 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: Ima
 
 def get_action_icon_img(kind: str, size: int = ICON_SIZE,
                         color: tuple = (40, 40, 40),
-                        bg_fill: tuple = (255, 255, 255)) -> Image.Image:
+                        bg_fill: tuple = (255, 255, 255),
+                        fill_solid: bool = False) -> Image.Image:
     """
     Vẽ icon vector siêu sắc nét (supersampled 2x) và căn đúng tâm (size x size).
     Đảm bảo 100% không lệch pixel so với văn bản bên cạnh.
@@ -190,18 +191,30 @@ def get_action_icon_img(kind: str, size: int = ICON_SIZE,
             (cx + (hx - (min_x + max_x) / 2) * scale, cy + (hy - (min_y + max_y) / 2) * scale)
             for hx, hy in pts
         ]
-        d.polygon(norm_pts, outline=color, width=w)
+        if fill_solid:
+            d.polygon(norm_pts, fill=color, outline=color, width=w)
+        else:
+            d.polygon(norm_pts, outline=color, width=w)
 
     elif kind == "comment":
         bx1, by1 = S * 0.10, S * 0.12
         bx2, by2 = S * 0.90, S * 0.78
-        d.ellipse([bx1, by1, bx2, by2], outline=color, width=w)
-        tail = [
-            (S * 0.28, S * 0.70),
-            (S * 0.10, S * 0.90),
-            (S * 0.46, S * 0.76)
-        ]
-        d.polygon(tail, fill=bg_fill, outline=color, width=w)
+        if fill_solid:
+            d.ellipse([bx1, by1, bx2, by2], fill=color, outline=color, width=w)
+            tail = [
+                (S * 0.28, S * 0.70),
+                (S * 0.10, S * 0.90),
+                (S * 0.46, S * 0.76)
+            ]
+            d.polygon(tail, fill=color, outline=color, width=w)
+        else:
+            d.ellipse([bx1, by1, bx2, by2], outline=color, width=w)
+            tail = [
+                (S * 0.28, S * 0.70),
+                (S * 0.10, S * 0.90),
+                (S * 0.46, S * 0.76)
+            ]
+            d.polygon(tail, fill=bg_fill, outline=color, width=w)
 
     elif kind == "repost":
         cx, cy = S / 2, S / 2
@@ -660,8 +673,13 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
 def render_outro_cta_card(question_text: str = None, output_path: str = None) -> Image.Image:
     """
     Render thẻ Outro Call-To-Action (Kích thích bình luận & tương tác cuối video).
+    Tích hợp Vector Icon chuẩn xịn (Trái tim đỏ & Bong bóng bình luận) 100% không bị lỗi ô vuông font chữ!
     """
-    q_str = question_text or "Còn bạn thì sao? Đã bao giờ gặp tình huống này chưa? 👇"
+    q_str = question_text or "Còn bạn thì sao? Đã bao giờ gặp tình huống này chưa?"
+    # Lọc bỏ emoji ký tự để tránh lỗi font ô vuông (tofu box)
+    for emo in ["👇", "❤️", "😱", "😂", "💀", "🔥", "✨", "🗨️", "👉"]:
+        q_str = q_str.replace(emo, "").strip()
+
     w, h = 960, 310
     card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(card)
@@ -673,12 +691,12 @@ def render_outro_cta_card(question_text: str = None, output_path: str = None) ->
     draw.rounded_rectangle([0, 0, w - 1, h - 11], radius=28, fill=(15, 20, 32, 248),
                            outline=(99, 102, 241, 255), width=3)
 
-    # Header badge: GÓC BÀN LUẬN DRAMA
+    # Header badge: GÓC BÀN LUẬN DRAMA (Có icon vector micro/chat mini)
     badge_title = "GÓC BÀN LUẬN DRAMA"
-    bw = int(draw.textlength(badge_title, font=FONT_TIME)) + 48
-    draw.rounded_rectangle([(w - bw)//2, 22, (w + bw)//2, 64], radius=16,
+    bw = int(draw.textlength(badge_title, font=FONT_TIME)) + 56
+    draw.rounded_rectangle([(w - bw)//2, 22, (w + bw)//2, 66], radius=16,
                            fill=(236, 72, 153, 235))
-    draw.text(((w - int(draw.textlength(badge_title, font=FONT_TIME)))//2, 30),
+    draw.text(((w - int(draw.textlength(badge_title, font=FONT_TIME)))//2, 32),
               badge_title, fill=(255, 255, 255), font=FONT_TIME)
 
     # Câu hỏi kích thích tương tác
@@ -689,26 +707,41 @@ def render_outro_cta_card(question_text: str = None, output_path: str = None) ->
         draw.text(((w - int(lw))//2, line_y), l, fill=(255, 255, 255), font=FONT_BODY)
         line_y += 42
 
-    # 2 Nút tương tác kêu gọi hành động
-    btn1_w = 260
-    btn2_w = 520
+    # 2 Nút tương tác kêu gọi hành động (CÓ ICON VECTOR CHUẨN XỊN 100%)
+    btn_h = 60
+    btn_y = 208
+    btn1_w = 340
+    btn2_w = 440
     total_btns_w = btn1_w + 24 + btn2_w
     start_bx = (w - total_btns_w) // 2
 
-    # Nút 1: Thả tim
-    draw.rounded_rectangle([start_bx, 208, start_bx + btn1_w, 268], radius=18,
-                           fill=(30, 41, 59, 230), outline=(255, 255, 255, 120), width=1)
-    b1_txt = "Thả tim ❤️"
-    b1_w = draw.textlength(b1_txt, font=FONT_ACTION)
-    draw.text((start_bx + (btn1_w - int(b1_w))//2, 224), b1_txt, fill=(241, 245, 249), font=FONT_ACTION)
+    # Nút 1: Thả tim (Có Icon Trái Tim Đỏ Vector)
+    draw.rounded_rectangle([start_bx, btn_y, start_bx + btn1_w, btn_y + btn_h], radius=18,
+                           fill=(30, 41, 59, 230), outline=(239, 68, 68, 180), width=2)
+    heart_icon = get_action_icon_img("heart", size=26, color=(239, 68, 68), fill_solid=True)
+    b1_txt = "Thả tim tương tác"
+    b1_tw = draw.textlength(b1_txt, font=FONT_ACTION)
+    b1_content_w = 26 + 12 + int(b1_tw)
+    b1_content_x = start_bx + (btn1_w - b1_content_w) // 2
+    card.paste(heart_icon, (b1_content_x, btn_y + (btn_h - 26)//2), heart_icon)
+    draw.text((b1_content_x + 26 + 12, btn_y + 19), b1_txt, fill=(255, 255, 255), font=FONT_ACTION)
 
-    # Nút 2: Để lại bình luận
+    # Nút 2: Để lại bình luận (Có Icon Bong Bóng Chat Vector)
     b2_x = start_bx + btn1_w + 24
-    draw.rounded_rectangle([b2_x, 208, b2_x + btn2_w, 268], radius=18,
-                           fill=(99, 102, 241, 220), outline=(255, 255, 255, 160), width=1)
-    b2_txt = "Bình luận câu chuyện của bạn 👇"
-    b2_w = draw.textlength(b2_txt, font=FONT_ACTION)
-    draw.text((b2_x + (btn2_w - int(b2_w))//2, 224), b2_txt, fill=(255, 255, 255), font=FONT_ACTION)
+    draw.rounded_rectangle([b2_x, btn_y, b2_x + btn2_w, btn_y + btn_h], radius=18,
+                           fill=(99, 102, 241, 230), outline=(199, 210, 254, 200), width=2)
+    comment_icon = get_action_icon_img("comment", size=26, color=(255, 255, 255), fill_solid=True)
+    b2_txt = "Bình luận câu chuyện của bạn"
+    b2_tw = draw.textlength(b2_txt, font=FONT_ACTION)
+    b2_content_w = 26 + 12 + int(b2_tw)
+    b2_content_x = b2_x + (btn2_w - b2_content_w) // 2
+    card.paste(comment_icon, (b2_content_x, btn_y + (btn_h - 26)//2), comment_icon)
+    draw.text((b2_content_x + 26 + 12, btn_y + 19), b2_txt, fill=(255, 255, 255), font=FONT_ACTION)
+
+    if output_path:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        card.save(output_path)
+    return card
 
     if output_path:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)

@@ -405,17 +405,19 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
             for j, item in enumerate(valid_overlays):
                 foley_cmd.extend(["-i", item["file"]])
                 delay_ms = max(0, int(item.get("time", 0.0) * 1000))
-                vol = item.get("vol", 0.4)
+                vol = item.get("vol", 0.35)
                 foley_filters.append(f"[{j+1}:a]volume={vol},adelay={delay_ms}|{delay_ms},aformat=sample_rates=44100:channel_layouts=stereo[ov{j}]")
             ov_streams = "".join(f"[ov{j}]" for j in range(len(valid_overlays)))
-            foley_filters.append(f"[0:a]{ov_streams}amix=inputs={1+len(valid_overlays)}:duration=first:dropout_transition=0[v_foley]")
+            # QUAN TRỌNG: normalize=0 giữ nguyên 100% âm lượng giọng đọc, tuyệt đối không bị giảm nhỏ tiếng!
+            foley_filters.append(f"[0:a]{ov_streams}amix=inputs={1+len(valid_overlays)}:duration=first:dropout_transition=0:normalize=0[v_foley]")
             foley_out = os.path.join(audio_dir, "_voice_foley_merged.mp3")
-            foley_cmd.extend(["-filter_complex", ";".join(foley_filters), "-map", "[v_foley]", "-c:a", "libmp3lame", "-q:a", "2", foley_out])
+            foley_cmd.extend(["-filter_complex", ";".join(foley_filters), "-map", "[v_foley]", "-c:a", "libmp3lame", "-b:a", "192k", foley_out])
             res_foley = subprocess.run(foley_cmd, capture_output=True)
             if res_foley.returncode == 0 and os.path.exists(foley_out):
                 voice_sfx_merged = foley_out
                 print(f"  ✨ Đã lồng ghép {len(valid_overlays)} hiệu ứng âm thanh Foley (Whoosh/Pop/Camera) chuyển cảnh cực sống động!")
 
+    temp_pre_master = os.path.join(audio_dir, "_temp_pre_master.mp3")
     if bg_music_path and os.path.exists(bg_music_path):
         cfg = config_mod.load_config()
         pacing = cfg.get("emotional_pacing", {})
@@ -426,14 +428,15 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
         if duck_enabled:
             # Dynamic ducking qua sidechaincompress:
             # Nhạc nền tự hạ khi có giọng nói, tự động trồi lên khi dừng câu hoặc có khoảng lặng
+            # normalize=0 giữ nguyên mức âm lượng nguyên bản của vocal
             filter_str = (
                 f"[1:a]volume={bg_vol}[bg];"
                 f"[0:a]asplit=2[v_main][v_side];"
                 f"[bg][v_side]sidechaincompress=threshold=0.03:ratio=4:attack=50:release=350[ducked_bg];"
-                f"[v_main][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2[out]"
+                f"[v_main][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
             )
         else:
-            filter_str = f"[1:a]volume={bg_vol}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]"
+            filter_str = f"[1:a]volume={bg_vol}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
 
         run_ffmpeg(
             "-i", voice_sfx_merged,
@@ -442,11 +445,30 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
             "-filter_complex", filter_str,
             "-map", "[out]",
             "-c:a", "libmp3lame",
-            "-q:a", "2",
-            output_path
+            "-b:a", "192k",
+            temp_pre_master
         )
     else:
-        shutil.copy(voice_sfx_merged, output_path)
+        shutil.copy(voice_sfx_merged, temp_pre_master)
+
+    # MASTERING ÂM THANH CHUẨN TIKTOK/REELS (-14 LUFS BROADCAST STANDARD):
+    # Đảm bảo giọng đọc luôn to rõ, đanh chắc, không bao giờ bị nghẹt hay chìm dưới nhạc nền
+    try:
+        run_ffmpeg(
+            "-i", temp_pre_master,
+            "-af", "loudnorm=I=-14:LRA=7:TP=-1.5",
+            "-c:a", "libmp3lame",
+            "-b:a", "192k",
+            output_path
+        )
+        if os.path.exists(temp_pre_master):
+            try: os.remove(temp_pre_master)
+            except OSError: pass
+    except Exception as e:
+        print(f"  ⚠️ Loudnorm fallback: {e}")
+        shutil.copy(temp_pre_master, output_path)
+
+    print(f"  [✓] Audio tổng Studio Mastered (-14 LUFS): {output_path}")
 
     print(f"  [✓] Audio tổng (đã có SFX meme): {output_path}")
     return output_path

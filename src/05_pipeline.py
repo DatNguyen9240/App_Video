@@ -260,7 +260,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
 
         audio_sequence.append(c_audio_path)
 
-        # Xử lý SFX & Meme Reaction
+        # Xử lý SFX & Meme Reaction (Tối thiểu 1.8s - 2.2s để khán giả kịp xem icon reaction / meme)
         sfx_dur = 0.0
         sfx_file = None
         sfx_filename = sfx_info.get("sfx_file")
@@ -268,7 +268,8 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             candidate = os.path.join(SFX_DIR, sfx_filename)
             if os.path.exists(candidate):
                 sfx_file = candidate
-                sfx_dur = min(bg_mod.get_media_duration(sfx_file), 1.8)
+                raw_sfx_dur = bg_mod.get_media_duration(sfx_file)
+                sfx_dur = max(1.8, min(raw_sfx_dur, 2.5))
 
         # Khoảng ngắt kịch tính (dramatic micro-pause) trước khi SFX nổ ra
         if sfx_file and pre_delay_ms > 0.05:
@@ -472,7 +473,28 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
     enable_outro = layout.get("enable_outro_cta", True)
     outro_card_path = os.path.join(CARDS_DIR, "outro_cta.png")
     if enable_outro and os.path.exists(outro_card_path):
-        outro_dur = float(layout.get("outro_cta_duration_s", 2.4))
+        # Tạo giọng đọc kêu gọi tương tác (TTS Outro) để câu cuối có giọng nói lôi cuốn thay vì im lặng
+        cta_q = getattr(post, "cta_question", "") or "Còn bạn thì sao? Hãy thả tim và để lại bình luận câu chuyện của bạn nhé!"
+        for emo in ["👇", "❤️", "😱", "😂", "💀", "🔥", "✨"]:
+            cta_q = cta_q.replace(emo, "").strip()
+
+        outro_dur = float(layout.get("outro_cta_duration_s", 2.6))
+        outro_voice_file = os.path.join(AUDIO_DIR, "outro_cta.mp3")
+        try:
+            # Dùng giọng nữ ngọt ngào hoặc giọng chính để kêu gọi hành động
+            tts_mod.text_to_speech(cta_q, outro_voice_file, voice="vi-VN-HoaiMyNeural", rate="+12%")
+            actual_outro_dur = bg_mod.get_media_duration(outro_voice_file)
+            if actual_outro_dur > 0.5:
+                outro_dur = max(outro_dur, actual_outro_dur + 0.3)
+                audio_sequence.append(outro_voice_file)
+            else:
+                raise ValueError("Outro voice duration too short")
+        except Exception:
+            silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+            silence_idx += 1
+            tts_mod.generate_silence_mp3(outro_dur, silence_file)
+            audio_sequence.append(silence_file)
+
         outro_start = comment_cursor
         outro_end = comment_cursor + outro_dur
         timeline.append({
@@ -491,18 +513,31 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         if enable_foley and os.path.exists(whoosh_sfx):
             overlay_sfx.append({"time": outro_start, "file": whoosh_sfx, "vol": 0.45})
 
-        silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
-        silence_idx += 1
-        tts_mod.generate_silence_mp3(outro_dur, silence_file)
-        audio_sequence.append(silence_file)
+        # Icon sticker / Reaction GIF sống động cho câu cuối (Outro Celebration Reaction)
+        outro_stickers = [m for m in ["applause.gif", "dancing_cat.gif", "ting.gif"] if os.path.exists(os.path.join(MEME_DIR, m))]
+        if outro_stickers:
+            outro_stk = os.path.join(MEME_DIR, outro_stickers[0])
+            timeline.append({
+                "type": "outro_sticker",
+                "start": outro_start + 0.15,
+                "end": outro_end,
+                "x": "(W-w)/2",
+                "y": str(max(200, actual_comment_y - 200)),
+                "width": 240,
+                "camera_motion": "punch_in_bounce",
+                "image": outro_stk,
+                "is_video": False,
+                "is_gif": True,
+                "enable_slide": False
+            })
 
         emotional_arc_data.append({
             "beat": "Kết Thúc / Outro Call-To-Action",
             "role": "Studio CTA",
             "emotion": "interactive",
             "energy_level": 90,
-            "voice": "Music Swell",
-            "text": "Kêu gọi tương tác, thả tim và thảo luận drama",
+            "voice": "vi-VN-HoaiMyNeural",
+            "text": cta_q,
             "duration_s": outro_dur,
             "sfx": "whoosh",
             "camera": "punch_in_bounce",
