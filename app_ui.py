@@ -435,9 +435,13 @@ HTML_TEMPLATE = """
                 <div class="flex items-center gap-1.5 ml-auto flex-wrap">
                   <span class="text-xs text-slate-500">Meme/SFX:</span>
                   <select v-model="cmt.sfx" class="glass-input rounded-lg px-2 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
-                    <option value="none">Không SFX</option>
-                    <option value="laugh">😂 Cười nghiêng ngả (laugh.gif)</option>
+                    <option value="none">✨ Không SFX (Tự nhiên / Lofi)</option>
+                    <option value="sub_drop">🔥 Sub Bass Drop (Bẻ lái sốc đĩnh đạc)</option>
+                    <option value="scratch">💿 Vinyl Scratch (Quay xe / Cạn lời)</option>
+                    <option value="ting">🔔 Crystal Chime (Điểm sáng / Nảy số)</option>
+                    <option value="pop">🫧 Bubble Pop (Nhẹ nhàng)</option>
                     <option value="boom">💥 Mind Blown bẻ lái (boom.gif)</option>
+                    <option value="laugh">😂 Cười nghiêng ngả (laugh.gif)</option>
                     <option value="bruh">💀 Cạn lời Facepalm (bruh.gif)</option>
                     <option value="shock">🙀 Sốc hoảng loạn (shock.gif)</option>
                     <option value="huh">🐱 Mèo "Huh?" ngơ ngác (huh.gif)</option>
@@ -445,10 +449,6 @@ HTML_TEMPLATE = """
                     <option value="clown">🤡 Tự hóa chú hề (clown.gif)</option>
                     <option value="math">📐 Tính toán hoang mang (math.gif)</option>
                     <option value="applause">👏 Vỗ tay / Nâng ly (applause.gif)</option>
-                    <option value="ting">✨ Ting nảy số thông minh (ting.gif)</option>
-                    <option value="awkward">😬 Ngại ngùng bối rối (awkward.gif)</option>
-                    <option value="facepalm">🤦 Đập trán bất lực (facepalm.gif)</option>
-                    <option value="shocked_cat">🙀 Mèo há hốc sốc (shocked_cat.gif)</option>
                     <option value="dancing_cat">💃 Mèo nhảy ăn mừng (dancing_cat.gif)</option>
                   </select>
 
@@ -1197,13 +1197,27 @@ HTML_TEMPLATE = """
                     <span class="font-bold text-teal-300">Bật Video Thỏa Mãn Ở Giữa</span>
                   </label>
                 </div>
-                <select v-if="directorConfig.visual_layout.enable_center_satisfying_video" v-model="directorConfig.visual_layout.center_satisfying_category" class="w-full glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200 mt-1">
-                  <option value="puzzle">🧩 Ghép Hình Puzzle (Xếp gạch/Lego)</option>
-                  <option value="food">🍰 Ăn Uống Mukbang / Bánh Ngọt</option>
-                  <option value="asmr">🧼 Cắt Xà Phòng / Cát ASMR</option>
-                  <option value="gameplay">🎮 Minecraft Parkour</option>
+                <select v-if="directorConfig.visual_layout.enable_center_satisfying_video" v-model="directorConfig.visual_layout.center_satisfying_category" class="w-full glass-input rounded-lg p-2 text-xs bg-slate-800 text-slate-200 mt-1">
+                  <option value="random">🎲 Tự Động Trộn Ngẫu Nhiên (Viral Sandwich)</option>
+                  <option value="puzzle">🧩 3D Puzzle & Ghép Hình Thông Minh</option>
+                  <option value="gameplay">🏃 Gameplay Parkour & Stunt 60FPS</option>
+                  <option value="asmr">🫧 ASMR Bọt Mịn & Thư Giãn Thị Giác</option>
+                  <option value="hypnotic">🌀 Hypnotic Geometry & Neon Matrix</option>
+                  <option value="kinetic_sand">⏳ Cát Động Lực & Cắt Khuôn</option>
+                  <option value="food">🍰 Food Prep & Nghệ Thuật Ẩm Thực</option>
                 </select>
-                <span class="text-[10px] text-slate-500">Bố cục Sandwich kẹp video cuốn hút ở giữa</span>
+                <span class="text-[10px] text-slate-500">Bố cục Sandwich kẹp video cuốn hút ở giữa bo góc 26px mềm mại</span>
+              </div>
+
+              <!-- Bộ Chuyển Cảnh Đa Dạng (Dynamic Motion Transitions) -->
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Hiệu Ứng Chuyển Cảnh Thẻ (Transitions):</label>
+                <select v-model="directorConfig.visual_layout.transition_style" class="w-full glass-input rounded-lg p-2 text-xs bg-slate-800 text-slate-200 mt-1">
+                  <option value="dynamic_conversational">⚡ Đối thoại thông minh (Spring Pop + Trượt trái/phải)</option>
+                  <option value="spring_pop">🎾 Nảy lò xo nhún giảm chấn (iOS Spring Curve)</option>
+                  <option value="slide_up">⬆️ Trượt lên êm dịu (Ease-Out Slide-Up)</option>
+                </select>
+                <span class="text-[10px] text-slate-500">Mô phỏng chuyển động vật lý nảy nhún và đối đáp chat chân thực</span>
               </div>
 
               <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
@@ -1498,8 +1512,6 @@ HTML_TEMPLATE = """
         addComment() {
           if (!this.post.comments) this.post.comments = [];
           const idx = this.post.comments.length + 1;
-          const sfxOptions = ['laugh', 'boom', 'bruh', 'shock', 'huh', 'side_eye', 'clown', 'math', 'applause', 'ting'];
-          const pickedSfx = sfxOptions[Math.floor(Math.random() * sfxOptions.length)];
           this.post.comments.push({
             username: `user_${Math.floor(1000 + Math.random() * 9000)}`,
             reply_to: this.post.username || '',
@@ -1507,7 +1519,7 @@ HTML_TEMPLATE = """
             likes: 1200 + idx * 350,
             avatar_path: '',
             avatar_url: '',
-            sfx: pickedSfx,
+            sfx: 'none',
             emotion: 'funny'
           });
           this.refreshCardPreview();
@@ -1858,7 +1870,7 @@ def api_generate_script():
                         "likes": c.likes,
                         "avatar_path": getattr(c, "avatar_path", ""),
                         "avatar_url": getattr(c, "avatar_url", ""),
-                        "sfx": getattr(c, "sfx", "laugh"),
+                        "sfx": getattr(c, "sfx", "none"),
                         "emotion": getattr(c, "emotion", "funny")
                     }
                     for c in post.comments
@@ -1911,7 +1923,7 @@ def api_crawl_trending_threads():
                         "likes": c.likes,
                         "avatar_path": getattr(c, "avatar_path", ""),
                         "avatar_url": getattr(c, "avatar_url", ""),
-                        "sfx": getattr(c, "sfx", "laugh"),
+                        "sfx": getattr(c, "sfx", "none"),
                         "emotion": getattr(c, "emotion", "funny")
                     }
                     for c in post.comments

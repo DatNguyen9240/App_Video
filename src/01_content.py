@@ -25,14 +25,14 @@ class Comment:
     is_verified: bool = False
     likes: int = 0
     # Âm thanh hiệu ứng
-    sfx: Literal["laugh", "boom", "ting", "bruh", "none"] = "none"
+    sfx: str = "none"
     # Metadata đạo diễn cảm xúc (Human-like pacing)
     emotion: str = "neutral"               # funny, shocked, awkward, sarcastic, insightful, neutral
     voice_id: str = ""                     # Nếu để trống sẽ tự lấy theo vai diễn trong config
     rate_offset: str = ""                  # Điều chỉnh tốc độ riêng (ví dụ: "+10%", "-5%")
     pitch_offset: str = ""                 # Điều chỉnh cao độ riêng (ví dụ: "+4Hz", "-4Hz")
-    pause_before_ms: int = 200             # Khoảng lặng trước khi đọc câu (nhịp thở)
-    pause_after_ms: int = 350              # Khoảng lặng sau khi đọc xong câu
+    pause_before_ms: int = 180             # Khoảng lặng trước khi đọc câu (nhịp thở)
+    pause_after_ms: int = 220              # Khoảng lặng sau khi đọc xong câu
     camera_motion: str = "none"            # none, punch_in, shake
 
 

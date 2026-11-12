@@ -51,15 +51,15 @@ class CommentSchema(BaseModel):
     content: str = Field(description="Bình luận tiếng Việt CỰC KỲ NGẮN GỌN (chỉ 1 câu đắt giá, tối đa 20 từ), sắc sảo, dí dỏm, bẻ lái hoặc châm chọc hài hước")
     avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b)")
     likes: int = Field(default=4500, description="Lượt thích ước tính từ 1500 đến 25000")
-    sfx: Literal["laugh", "boom", "bruh", "ting", "applause", "huh", "side_eye", "clown", "none"] = Field(
-        default="laugh",
-        description="SFX phù hợp: 'laugh' cho câu buồn cười, 'boom' cho cú bẻ lái sốc, 'bruh' cho cạn lời, 'ting' cho thông minh, 'huh' cho khó hiểu, 'side_eye' cho mỉa mai, 'clown' cho hề hước"
+    sfx: Literal["none", "sub_drop", "scratch", "ting", "boom", "laugh", "bruh", "pop"] = Field(
+        default="none",
+        description="Hiệu ứng âm thanh điểm nhấn. QUAN TRỌNG: 80% bình luận phải để 'none'! Toàn video chỉ tối đa 1-2 comment có SFX để tạo điểm nhấn bất ngờ (sub_drop cho bẻ lái sốc, scratch cho cạn lời/quay xe, ting cho điểm sáng đắt giá). Tuyệt đối không gắn SFX cho mọi comment!"
     )
     emotion: Literal["funny", "shocked", "awkward", "sarcastic", "insightful", "neutral"] = Field(
         default="funny", description="Sắc thái cảm xúc của câu nói"
     )
-    pause_before_ms: int = Field(default=250, description="Khoảng lặng trước khi nói tính bằng mili-giây (150-500ms)")
-    pause_after_ms: int = Field(default=350, description="Khoảng lặng sau khi dứt câu (300-600ms)")
+    pause_before_ms: int = Field(default=180, description="Khoảng lặng tự nhiên trước khi nói (120-250ms)")
+    pause_after_ms: int = Field(default=220, description="Khoảng lặng tự nhiên sau khi dứt câu (150-300ms)")
     camera_motion: Literal["none", "punch_in", "shake"] = Field(
         default="none", description="Hiệu ứng chuyển động hình ảnh ('punch_in' phóng to nhẹ, 'shake' rung lắc khi sốc)"
     )
@@ -200,30 +200,32 @@ def generate_story_with_gemini(
     if dur_mode == "fast_30s":
         cmt_guide = (
             "SỐ LƯỢNG BÌNH LUẬN: ĐÚNG 3 BÌNH LUẬN (Thời lượng ngắn 25-30s):\n"
-            "- C1: Đồng cảm / reaction hài hước (reply_to username tác giả).\n"
-            "- C2: BẺ LÁI 180° sốc hoặc bóc phốt đau điếng (sfx='boom').\n"
-            "- C3: Chốt hạ cạn lời / meme reaction bất hủ (sfx='bruh' hoặc 'laugh')."
+            "- C1: Đồng cảm / reaction hài hước (reply_to username tác giả, sfx='none').\n"
+            "- C2: BẺ LÁI 180° sốc hoặc bóc phốt đau điếng (sfx='sub_drop').\n"
+            "- C3: Chốt hạ cạn lời dí dỏm (sfx='none' hoặc 'scratch')."
         )
     elif dur_mode == "deep_60s":
         cmt_guide = (
             "SỐ LƯỢNG BÌNH LUẬN: TỪ 4 ĐẾN 5 BÌNH LUẬN (Thời lượng drama 45-60s):\n"
-            "- C1: Reaction mở đầu châm ngòi drama (reply_to tác giả).\n"
-            "- C2: Tranh cãi hoặc phản bác gay gắt (reply_to username C1, sfx='huh' hoặc 'side_eye').\n"
-            "- C3: Tác giả hoặc người trong cuộc vào bóc thêm chi tiết éo le (sfx='boom' hoặc 'laugh').\n"
-            "- C4: Cú bẻ lái sốc lần 2 đảo lộn sự thật (sfx='boom' hoặc 'shock').\n"
-            "- C5: Chốt hạ cạn lời / meme bất hủ (sfx='bruh' hoặc 'clown')."
+            "- C1: Reaction mở đầu châm ngòi drama (reply_to tác giả, sfx='none').\n"
+            "- C2: Tranh cãi hoặc phản bác gay gắt (reply_to username C1, sfx='none').\n"
+            "- C3: Tác giả hoặc người trong cuộc vào bóc thêm chi tiết éo le (sfx='none').\n"
+            "- C4: Cú bẻ lái sốc lần 2 đảo lộn sự thật (sfx='sub_drop').\n"
+            "- C5: Chốt hạ cạn lời / đúc kết dí dỏm (sfx='scratch' hoặc 'none')."
         )
     elif dur_mode == "viral_story_90s":
         cmt_guide = (
             "SỐ LƯỢNG BÌNH LUẬN: TỪ 5 ĐẾN 7 BÌNH LUẬN (Thời lượng viral dài 70-90s):\n"
-            "- Tạo một chuỗi drama hoàn chỉnh: khẩu chiến nhiều phe, bóc phốt liên hoàn, các cú twist dồn dập khiến người xem không thể rời mắt."
+            "- Tạo một chuỗi drama hoàn chỉnh: khẩu chiến nhiều phe, bóc phốt liên hoàn, các cú twist dồn dập khiến người xem không thể rời mắt.\n"
+            "- QUY TẮC SFX: Tối đa 2 bình luận có sfx (chỉ gắn ở điểm twist đỉnh cao), các bình luận còn lại để sfx='none'."
         )
     else:  # "auto"
         cmt_guide = (
             "SỐ LƯỢNG BÌNH LUẬN: TỰ DO TỪ 3 ĐẾN 6 BÌNH LUẬN (Dựa theo độ sâu của chủ đề để tối ưu độ cuốn hút):\n"
             "- Nếu câu chuyện dí dỏm đơn giản -> 3-4 bình luận.\n"
             "- Nếu câu chuyện có drama nhiều tầng, khẩu chiến hoặc cú twist kép -> 4-6 bình luận.\n"
-            "- Các bình luận CÓ THỂ reply_to lẫn nhau để tạo cảm giác hội thoại cãi nhau/đối đáp thực tế trên Threads!"
+            "- Các bình luận CÓ THỂ reply_to lẫn nhau để tạo cảm giác hội thoại cãi nhau/đối đáp thực tế trên Threads!\n"
+            "- QUY TẮC SFX: 80% bình luận để sfx='none'. Chỉ 1 comment bẻ lái bất ngờ nhất mới gắn sfx='sub_drop' hoặc 'scratch'."
         )
 
     prompt = (

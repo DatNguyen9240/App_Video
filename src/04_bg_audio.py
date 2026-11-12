@@ -406,7 +406,7 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
                 foley_cmd.extend(["-i", item["file"]])
                 delay_ms = max(0, int(item.get("time", 0.0) * 1000))
                 vol = item.get("vol", 0.35)
-                foley_filters.append(f"[{j+1}:a]volume={vol},adelay={delay_ms}|{delay_ms},aformat=sample_rates=44100:channel_layouts=stereo[ov{j}]")
+                foley_filters.append(f"[{j+1}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={vol},adelay={delay_ms}|{delay_ms}[ov{j}]")
             ov_streams = "".join(f"[ov{j}]" for j in range(len(valid_overlays)))
             # QUAN TRỌNG: normalize=0 giữ nguyên 100% âm lượng giọng đọc, tuyệt đối không bị giảm nhỏ tiếng!
             foley_filters.append(f"[0:a]{ov_streams}amix=inputs={1+len(valid_overlays)}:duration=first:dropout_transition=0:normalize=0[v_foley]")
@@ -477,17 +477,23 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
 def get_satisfying_video_path(category: str = "puzzle") -> str:
     """
     Lấy video thỏa mãn thị giác (Ghép hình, Ăn uống/Mukbang, Cắt xà phòng ASMR, Gameplay).
-    Tự động quét thư mục assets/satisfying/<category>/ và chọn ngẫu nhiên file video bên trong.
+    Ủy quyền cho satisfying_manager xử lý thư viện chuyên sâu và tự động đổi mới liên tục.
     """
+    try:
+        import satisfying_manager
+        return satisfying_manager.get_satisfying_video_path(category)
+    except Exception:
+        pass
+
     sat_dir = os.path.join(ASSETS_DIR, "satisfying")
     cat = (category or "puzzle").lower()
     if cat == "random":
-        valid_cats = ["puzzle", "food", "asmr"]
+        valid_cats = ["puzzle", "food", "asmr", "gameplay", "hypnotic"]
         cat = random.choice(valid_cats)
 
     target_dir = os.path.join(sat_dir, cat)
     if os.path.exists(target_dir):
-        files = [os.path.join(target_dir, f) for f in os.listdir(target_dir) if f.lower().endswith((".mp4", ".mov", ".mkv", ".webm"))]
+        files = [os.path.join(target_dir, f) for f in os.listdir(target_dir) if f.lower().endswith((".mp4", ".mov", ".mkv", ".webm")) and os.path.getsize(os.path.join(target_dir, f)) > 100000]
         if files:
             return random.choice(files)
 
@@ -498,10 +504,6 @@ def get_satisfying_video_path(category: str = "puzzle") -> str:
         if files:
             return random.choice(files)
 
-    # Fallback mặc định
-    puzzle_sample = os.path.join(sat_dir, "puzzle", "sample_puzzle.mp4")
-    if os.path.exists(puzzle_sample):
-        return puzzle_sample
     return os.path.join(BG_DIR, "input.mp4")
 
 

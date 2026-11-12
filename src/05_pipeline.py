@@ -27,6 +27,7 @@ sys.path.insert(0, SRC_DIR)
 
 import config as config_mod
 import pipeline_tracker as tracker
+import satisfying_manager
 
 OUT_DIR    = os.path.join(BASE_DIR, "output")
 CARDS_DIR  = os.path.join(OUT_DIR, "cards")
@@ -106,7 +107,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
     # 2. VIDEO THỎA MÃN (Ghép hình puzzle, Ăn uống mukbang, ASMR cắt xà phòng) Ở CHÍNH GIỮA (560px)
     # 3. Thẻ bình luận đối đáp ở dưới (1050px)
     enable_center_sat = layout.get("enable_center_satisfying_video", True)
-    sat_cat = layout.get("center_satisfying_category", "puzzle")
+    sat_cat = layout.get("center_satisfying_category", "random")
     if "puzzle" in mode_str:
         sat_cat = "puzzle"
         enable_center_sat = True
@@ -115,6 +116,15 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         enable_center_sat = True
     elif "asmr" in mode_str:
         sat_cat = "asmr"
+        enable_center_sat = True
+    elif "gameplay" in mode_str or "parkour" in mode_str:
+        sat_cat = "gameplay"
+        enable_center_sat = True
+    elif "hypnotic" in mode_str or "spiral" in mode_str or "geometry" in mode_str:
+        sat_cat = "hypnotic"
+        enable_center_sat = True
+    elif "sand" in mode_str or "kinetic" in mode_str:
+        sat_cat = "kinetic_sand"
         enable_center_sat = True
     elif preset_str in ["sandwich", "center_satisfying"]:
         enable_center_sat = True
@@ -159,13 +169,19 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
     camera_sfx = os.path.join(SFX_DIR, "camera.mp3")
     enable_foley = layout.get("enable_foley_sfx", True)
 
+    # Đồng bộ audio_sequence với cursor khởi đầu (0.2s)
+    silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+    silence_idx += 1
+    tts_mod.generate_silence_mp3(cursor, silence_file)
+    audio_sequence.append(silence_file)
+
     # Foley Whoosh khi thẻ bài viết chính lướt vào
     if enable_foley and os.path.exists(whoosh_sfx):
-        overlay_sfx.append({"time": cursor, "file": whoosh_sfx, "vol": 0.4})
+        overlay_sfx.append({"time": cursor, "file": whoosh_sfx, "vol": 0.35})
 
     # 1. Thẻ bài đăng (Hook & Context)
     post_dur = timing["post"]["duration_ms"] / 1000.0
-    post_pause_after = getattr(post, "pause_after_ms", 300) / 1000.0
+    post_pause_after = min(0.30, getattr(post, "pause_after_ms", 250) / 1000.0)
 
     audio_sequence.append(timing["post"]["path"])
 
@@ -246,10 +262,9 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         cam_motion = getattr(c, "camera_motion", "none")
         sfx_info = config_mod.get_sfx_info(sfx_name)
 
-        pause_before = getattr(c, "pause_before_ms", 200) / 1000.0
-        pause_after = getattr(c, "pause_after_ms", 350) / 1000.0
-        pre_delay_ms = sfx_info.get("pre_delay_ms", 200) / 1000.0
-        post_delay_ms = sfx_info.get("post_delay_ms", 350) / 1000.0
+        # Khoảng lặng tự nhiên giữa các câu nói (nhịp thở người thật 120ms - 220ms)
+        pause_before = min(0.22, max(0.12, getattr(c, "pause_before_ms", 180) / 1000.0))
+        pause_after = min(0.28, max(0.15, getattr(c, "pause_after_ms", 220) / 1000.0))
 
         # Khoảng lặng trước câu nói (nhịp thở tự nhiên)
         if pause_before > 0.05:
@@ -260,42 +275,65 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
 
         audio_sequence.append(c_audio_path)
 
-        # Xử lý SFX & Meme Reaction (Tối thiểu 1.8s - 2.2s để khán giả kịp xem icon reaction / meme)
-        sfx_dur = 0.0
+        c_start = comment_cursor + pause_before
+        react_start = c_start + c_dur
+
+        # XỬ LÝ SFX ĐIỂM RƠI: LỒNG ĐÈ (OVERLAY) CHUYÊN NGHIỆP, KHÔNG NỐI TUẦN TỰ GÂY CHẾT NHỊP!
         sfx_file = None
         sfx_filename = sfx_info.get("sfx_file")
-        if sfx_filename:
+        if sfx_filename and sfx_name != "none":
             candidate = os.path.join(SFX_DIR, sfx_filename)
             if os.path.exists(candidate):
                 sfx_file = candidate
-                raw_sfx_dur = bg_mod.get_media_duration(sfx_file)
-                sfx_dur = max(1.8, min(raw_sfx_dur, 2.5))
+                sfx_vol = sfx_info.get("vol", 0.40)
+                # Đánh trúng điểm rơi punchline ngay khi câu nói vừa dứt (-0.05s)
+                overlay_sfx.append({
+                    "time": max(0.0, react_start - 0.05),
+                    "file": sfx_file,
+                    "vol": sfx_vol
+                })
+                print(f"     🔊 [SFX OVERLAY PUNCHLINE]: {sfx_name} (vol={sfx_vol}) tại t={react_start:.2f}s")
 
-        # Khoảng ngắt kịch tính (dramatic micro-pause) trước khi SFX nổ ra
-        if sfx_file and pre_delay_ms > 0.05:
-            silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
-            silence_idx += 1
-            tts_mod.generate_silence_mp3(pre_delay_ms, silence_file)
-            audio_sequence.append(silence_file)
+        # Foley Pop giòn tan khi thẻ bình luận trượt lên
+        if enable_foley and os.path.exists(pop_sfx):
+            overlay_sfx.append({"time": c_start, "file": pop_sfx, "vol": 0.35})
 
-        if sfx_file:
-            audio_sequence.append(sfx_file)
+        # Thời lượng phản ứng visual (meme popup hoặc dừng nhẹ)
+        has_meme_sticker = (sfx_name != "none" and sfx_info.get("meme_file"))
+        if has_meme_sticker:
+            extra_react_time = 0.85 # Snappy 0.85s reaction, vừa kịp xem visual, không gây dead air!
+        else:
+            extra_react_time = pause_after
 
-        # Khoảng đệm sau khi SFX dứt
-        if post_delay_ms > 0.05:
-            silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
-            silence_idx += 1
-            tts_mod.generate_silence_mp3(post_delay_ms, silence_file)
-            audio_sequence.append(silence_file)
+        c_end = react_start + extra_react_time
 
-        c_start = comment_cursor + pause_before
-        react_start = c_start + c_dur + pre_delay_ms
-        c_end = react_start + sfx_dur + post_delay_ms
+        # Đồng bộ audio_sequence với c_end
+        silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+        silence_idx += 1
+        tts_mod.generate_silence_mp3(extra_react_time, silence_file)
+        audio_sequence.append(silence_file)
 
-        if sfx_name == "boom" and cam_motion == "none":
+        if sfx_name in ["boom", "sub_drop"] and cam_motion == "none":
             cam_motion = "shake"
 
-        # Đưa thẻ bình luận vào timeline với hiệu ứng Slide-Up mượt mà
+        # Hiệu ứng chuyển động thông minh theo vai trò (Spring Pop, Conversational Slide Left/Right)
+        cmt_reply_to = getattr(c, "reply_to", "")
+        global_trans_style = layout.get("transition_style", "dynamic_conversational")
+        if global_trans_style == "spring_pop":
+            cmt_transition = "spring_pop"
+        elif global_trans_style == "slide_up":
+            cmt_transition = "slide_up"
+        else:  # "dynamic_conversational"
+            if sfx_name in ["boom", "sub_drop"]:
+                cmt_transition = "spring_pop"
+            elif cmt_reply_to and cmt_reply_to != post.username:
+                cmt_transition = "slide_right"
+            elif i % 2 == 1:
+                cmt_transition = "spring_pop"
+            else:
+                cmt_transition = "slide_left"
+
+        # Đưa thẻ bình luận vào timeline với hiệu ứng chuyển cảnh sống động
         timeline.append({
             "type": "comment",
             "index": i,
@@ -305,16 +343,13 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "y": actual_comment_y,
             "width": card_w,
             "camera_motion": cam_motion,
+            "transition": cmt_transition,
             "shake_start": react_start if cam_motion == "shake" else 0,
-            "shake_end": react_start + min(0.6, sfx_dur) if cam_motion == "shake" else 0,
+            "shake_end": react_start + min(0.6, extra_react_time) if cam_motion == "shake" else 0,
             "image": os.path.join(CARDS_DIR, f"comment_{i}.png"),
             "is_video": False,
             "enable_slide": True
         })
-
-        # Foley Pop khi thẻ bình luận trượt lên
-        if enable_foley and os.path.exists(pop_sfx):
-            overlay_sfx.append({"time": c_start, "file": pop_sfx, "vol": 0.35})
 
         # CHỌN MEME HOẶC POPUP ẢNH MINH HỌA NỔI CHO TỪNG PHÂN ĐOẠN CỦA BÌNH LUẬN:
         illus_cfg = cfg.get("illustration_settings", {})
@@ -417,11 +452,11 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
 
             # B. Tại điểm rơi Punchline / Bẻ lái (react_start đến c_end):
             # TỰ ĐỘNG ĐÈ RA GIỮA MÀN HÌNH VÀ PHÓNG TO NẢY LÒ XO (780px PUNCH-IN BOUNCE)!
-            if meme_file_cand and sfx_dur > 0:
+            if meme_file_cand and extra_react_time >= 0.5:
                 m_x = "(W-w)/2"
                 m_y = "(H-h)/2" if punchline_center else str(meme_anchor_y)
                 m_w = punchline_sz if punchline_center else sticker_sz
-                m_motion = "shake" if sfx_name == "boom" else "punch_in_bounce"
+                m_motion = "shake" if sfx_name in ["boom", "sub_drop"] else "punch_in_bounce"
 
                 print(f"     🎬 [PUNCHLINE REACTION ĐÈ RA GIỮA PHÓNG TO {m_w}px] -> {os.path.basename(meme_file_cand)} (SFX: {sfx_name})")
                 timeline.append({
@@ -455,16 +490,16 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         # Ghi nhận dữ liệu nhịp cảm xúc
         energy_map = {"funny": 70, "shocked": 98, "awkward": 65, "sarcastic": 80, "neutral": 50}
         emotional_arc_data.append({
-            "beat": f"{i+1}. Bình luận {i}" + (" (Bẻ lái sốc)" if sfx_name == "boom" else (" (Chốt hạ)" if i == len(post.comments) else "")),
+            "beat": f"{i+1}. Bình luận {i}" + (" (Bẻ lái sốc)" if sfx_name in ["boom", "sub_drop"] else (" (Chốt hạ)" if i == len(post.comments) else "")),
             "role": f"@{c.username}",
             "emotion": emotion,
             "energy_level": energy_map.get(emotion, 75),
             "voice": timing["comments"][i-1].get("voice", "N/A"),
             "text": c.content[:70] + ("..." if len(c.content) > 70 else ""),
-            "duration_s": round(c_dur + sfx_dur, 2),
+            "duration_s": round(c_dur + extra_react_time, 2),
             "sfx": sfx_name,
             "camera": cam_motion,
-            "pause_ms": int((pre_delay_ms + post_delay_ms) * 1000)
+            "pause_ms": int((pause_before + extra_react_time) * 1000)
         })
 
         comment_cursor = c_end
@@ -671,6 +706,13 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
         else:
             inputs.extend(["-i", item["image"]])
 
+    # Input mask bo tròn góc cho Center Satisfying Video
+    mask_file = os.path.join(ASSETS_DIR, "satisfying", "rounded_mask_960x560.png")
+    has_rounded_mask = os.path.exists(mask_file)
+    mask_input_idx = len(timeline) + 2 if has_rounded_mask else None
+    if has_rounded_mask:
+        inputs.extend(["-i", mask_file])
+
     filter_chains = []
     prev_stream = "[0:v]"
 
@@ -684,42 +726,42 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
         end_t = f"{item['end']:.2f}"
         cam_motion = item.get("camera_motion", "none")
         base_y = str(item["y"])
+        itype = item.get("type", "")
+        h_val = item.get("height")
 
         # Scale tĩnh theo kích thước chỉ định: nếu có height thì crop vừa vặn, ngược lại giữ aspect ratio
-        h_val = item.get("height")
-        if h_val:
+        if itype == "center_satisfying_video" and h_val and mask_input_idx is not None:
+            # Bo góc 26px mềm mại cho video ở giữa
+            filter_chains.append(
+                f"[{img_idx}:v]scale={w}:{h_val}:force_original_aspect_ratio=increase,crop={w}:{h_val},format=yuva420p[c_raw{idx}];"
+                f"[{mask_input_idx}:v]scale={w}:{h_val}[m_scale{idx}];"
+                f"[c_raw{idx}][m_scale{idx}]alphamerge{layer_label}"
+            )
+        elif h_val:
             filter_chains.append(f"[{img_idx}:v]scale={w}:{h_val}:force_original_aspect_ratio=increase,crop={w}:{h_val}{layer_label}")
         else:
             filter_chains.append(f"[{img_idx}:v]scale={w}:-1:flags=lanczos{layer_label}")
 
-        # Hiệu ứng chuyển động (Bounce / Punch-in / Slide-Up / Shake) được xử lý hoàn toàn trong overlay
+        # Tính toán hiệu ứng chuyển cảnh đa dạng (Spring Pop, Conversational Slide Left/Right, Punch-in Bounce, Shake)
+        trans_type = item.get("transition", "slide_up" if (enable_slide and item.get("enable_slide")) else "none")
         if cam_motion == "punch_in_bounce":
-            # Nảy lò xo từ dưới lên 90px trong 0.25s đầu + Rung nhẹ hiệu ứng đập vào mắt người xem
-            x_pos = f"(W-w)/2 + if(lt(t, {start_t} + 0.35), 8*sin(60*(t-{start_t})), 0)"
-            y_pos = f"{base_y} + if(lt(t, {start_t} + 0.25), pow(1 - (t - {start_t})/0.25, 2)*90, 0)"
-        else:
-            # Hiệu ứng Ease-Out Slide-Up khi xuất hiện
-            slide_expr = ""
-            if enable_slide and item.get("enable_slide", False):
-                slide_expr = f"if(lt(t, {start_t} + {slide_dur:.2f}), pow(1 - (t - {start_t})/{slide_dur:.2f}, 2)*{slide_dist}, 0)"
+            trans_type = "punch_in_bounce"
 
-            if cam_motion == "shake" and "shake_start" in item:
-                s_start = f"{item['shake_start']:.2f}"
-                s_end = f"{item['shake_end']:.2f}"
-                x_pos = f"(W-w)/2 + if(between(t,{s_start},{s_end}), 8*sin(60*t), 0)"
-                if slide_expr:
-                    y_pos = f"{base_y} + if(between(t,{s_start},{s_end}), 6*cos(60*t), {slide_expr})"
-                else:
-                    y_pos = f"{base_y} + if(between(t,{s_start},{s_end}), 6*cos(60*t), 0)"
-            else:
-                x_pos = item.get("x", "(W-w)/2")
-                if slide_expr:
-                    y_pos = f"{base_y} + {slide_expr}"
-                else:
-                    y_pos = base_y
+        base_x = item.get("x", "(W-w)/2")
+        x_pos, y_pos = satisfying_manager.build_transition_expression(
+            trans_type=trans_type,
+            base_x=base_x,
+            base_y=base_y,
+            start_t=item["start"],
+            dur=slide_dur,
+            dist=slide_dist,
+            cam_motion=cam_motion,
+            shake_start=item.get("shake_start", 0),
+            shake_end=item.get("shake_end", 0)
+        )
 
         filter_chains.append(
-            f"{prev_stream}{layer_label}overlay=x='{x_pos}':y='{y_pos}':enable='between(t,{start_t},{end_t})'{out_stream}"
+            f"{prev_stream}{layer_label}overlay=x='{x_pos}':y='{y_pos}':enable='between(t,{start_t},{end_t})':format=auto{out_stream}"
         )
         prev_stream = out_stream
 

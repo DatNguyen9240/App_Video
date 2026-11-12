@@ -26,8 +26,8 @@ DEFAULT_CONFIG = {
         "fallback_model": "gemini-3.5-flash-lite",
         "temperature": 0.92,
         "duration_mode": "auto",  # "auto" (3-6 cmt), "fast_30s" (3 cmt), "deep_60s" (4-5 cmt), "viral_story_90s" (6-7 cmt)
-        "min_comments": 3,
-        "max_comments": 6,
+        "min_comments": 5,
+        "max_comments": 8,
         "drama_archetypes": [
             "double_twist",     # Cú lật kèo kép: twist ở cmt 2, cú twist sốc hơn ở cmt cuối
             "thread_war",       # Khẩu chiến qua lại: C1 cãi C2, tác giả thanh minh, cmt cuối bóc phốt cả hội
@@ -68,21 +68,30 @@ DEFAULT_CONFIG = {
     },
     "emotional_pacing": {
         "hook_speed_rate": "+20%",
-        "punchline_pre_pause_ms": 250,
-        "punchline_post_pause_ms": 380,
-        "comment_gap_ms": 220,
-        "awkward_silence_duration_ms": 350,
-        "bgm_volume_normal": 0.16,
-        "bgm_volume_duck": 0.05,
+        "punchline_pre_pause_ms": 50,
+        "punchline_post_pause_ms": 250,
+        "comment_gap_ms": 180,
+        "awkward_silence_duration_ms": 250,
+        "bgm_volume_normal": 0.18,
+        "bgm_volume_duck": 0.06,
         "enable_bgm_ducking": True,
         "enable_camera_shake": True,
         "enable_card_zoom": True
     },
     "voice_casting": {
-        "default_author_voice": "vi-VN-HoaiMyNeural",
+        "default_author_voice": "adam",
         "default_commenter_female_voice": "vi-VN-HoaiMyNeural",
         "default_commenter_male_voice": "vi-VN-NamMinhNeural",
         "dynamic_casting": True,
+        "available_voices": [
+            {"id": "adam", "name": "🎙️ Adam (Trầm ấm / Đọc truyện triệu view - Khuyên dùng)"},
+            {"id": "vi-VN-HoaiMyNeural", "name": "🌸 Hoài My (Nữ ngọt ngào / Tâm sự đời thường)"},
+            {"id": "vi-VN-NamMinhNeural", "name": "☕ Nam Minh (Nam tự nhiên / Đời thường)"},
+            {"id": "khanh_linh", "name": "💅 Khánh Linh (Nữ sắc sảo / Cà khịa dí dỏm)"},
+            {"id": "minh_quan", "name": "⚡ Minh Quân (Nam trẻ trung / Sôi nổi Gen Z)"},
+            {"id": "bao_long", "name": "🔥 Bảo Long (Nam kịch tính / Bẻ lái sốc)"},
+            {"id": "rachel", "name": "✨ Rachel (Nữ truyền cảm hứng)"}
+        ],
         "female_voice_presets": [
             {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
             {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz",  "style": "chat"},
@@ -90,16 +99,21 @@ DEFAULT_CONFIG = {
             {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+2Hz",  "style": "sad"}
         ],
         "male_voice_presets": [
-            {"voice": "vi-VN-NamMinhNeural", "rate": "+24%", "pitch": "-2Hz", "style": "angry"},
+            {"voice": "adam", "rate": "+12%", "pitch": "-4Hz", "style": "narrative"},
             {"voice": "vi-VN-NamMinhNeural", "rate": "+20%", "pitch": "+4Hz",  "style": "cheerful"},
             {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "chat"},
             {"voice": "vi-VN-NamMinhNeural", "rate": "+14%", "pitch": "+0Hz",  "style": "sad"}
         ],
         "roles": {
-            "author": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz", "style": "cheerful"},
-            "commenter_1": {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
-            "commenter_2": {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz", "style": "angry"},
-            "commenter_3": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+2Hz", "style": "chat"}
+            "author": {"voice": "adam", "rate": "+12%", "pitch": "-4Hz", "style": "narrative"},
+            "commenter_1": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz", "style": "cheerful"},
+            "commenter_2": {"voice": "minh_quan", "rate": "+20%", "pitch": "+2Hz", "style": "chat"},
+            "commenter_3": {"voice": "khanh_linh", "rate": "+22%", "pitch": "+5Hz", "style": "sarcastic"},
+            "commenter_4": {"voice": "adam", "rate": "+14%", "pitch": "-4Hz", "style": "dramatic"},
+            "commenter_5": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+3Hz", "style": "cheerful"},
+            "commenter_6": {"voice": "bao_long", "rate": "+24%", "pitch": "-1Hz", "style": "angry"},
+            "commenter_7": {"voice": "khanh_linh", "rate": "+22%", "pitch": "+4Hz", "style": "sarcastic"},
+            "commenter_8": {"voice": "minh_quan", "rate": "+20%", "pitch": "+2Hz", "style": "chat"}
         },
         "emotion_style_map": {
             "funny":      {"style": "cheerful",    "rate_boost": "+8%",  "pitch_boost": "+4Hz"},
@@ -111,18 +125,23 @@ DEFAULT_CONFIG = {
         }
     },
     "sfx_meme_registry": {
-        "laugh": {"sfx_file": "laugh.mp3", "meme_file": "laugh.gif", "emotion": "funny", "camera_motion": "punch_in"},
-        "boom": {"sfx_file": "boom.mp3", "meme_file": "boom.gif", "emotion": "shocked", "camera_motion": "shake"},
-        "bruh": {"sfx_file": "bruh.mp3", "meme_file": "bruh.gif", "emotion": "awkward", "camera_motion": "punch_in"},
-        "shock": {"sfx_file": "shock.mp3", "meme_file": "shock.gif", "emotion": "shocked", "camera_motion": "shake"},
-        "huh": {"sfx_file": "huh.mp3", "meme_file": "huh.gif", "emotion": "awkward", "camera_motion": "punch_in"},
-        "side_eye": {"sfx_file": "side_eye.mp3", "meme_file": "side_eye.gif", "emotion": "sarcastic", "camera_motion": "punch_in"},
-        "clown": {"sfx_file": "clown.mp3", "meme_file": "clown.gif", "emotion": "funny", "camera_motion": "punch_in"},
-        "math": {"sfx_file": "math.mp3", "meme_file": "math.gif", "emotion": "shocked", "camera_motion": "none"},
-        "applause": {"sfx_file": "laugh.mp3", "meme_file": "applause.gif", "emotion": "funny", "camera_motion": "punch_in"},
-        "dancing_cat": {"sfx_file": "laugh.mp3", "meme_file": "dancing_cat.gif", "emotion": "funny", "camera_motion": "punch_in"},
-        "ting": {"sfx_file": "ting.mp3", "meme_file": "ting.gif", "emotion": "insightful", "camera_motion": "none"},
-        "none": {"sfx_file": None, "meme_file": None, "emotion": "neutral", "camera_motion": "none"}
+        "sub_drop": {"sfx_file": "sub_drop.mp3", "meme_file": "boom.gif", "emotion": "shocked", "camera_motion": "shake", "vol": 0.45},
+        "scratch": {"sfx_file": "scratch.mp3", "meme_file": "awkward.gif", "emotion": "awkward", "camera_motion": "punch_in", "vol": 0.40},
+        "pop": {"sfx_file": "pop.mp3", "meme_file": None, "emotion": "funny", "camera_motion": "none", "vol": 0.35},
+        "ting": {"sfx_file": "ting.mp3", "meme_file": "ting.gif", "emotion": "insightful", "camera_motion": "none", "vol": 0.35},
+        "whoosh": {"sfx_file": "whoosh.mp3", "meme_file": None, "emotion": "neutral", "camera_motion": "none", "vol": 0.35},
+        "camera": {"sfx_file": "camera.mp3", "meme_file": None, "emotion": "neutral", "camera_motion": "none", "vol": 0.40},
+        "boom": {"sfx_file": "sub_drop.mp3", "meme_file": "boom.gif", "emotion": "shocked", "camera_motion": "shake", "vol": 0.45},
+        "laugh": {"sfx_file": "pop.mp3", "meme_file": "laugh.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.35},
+        "bruh": {"sfx_file": "scratch.mp3", "meme_file": "bruh.gif", "emotion": "awkward", "camera_motion": "punch_in", "vol": 0.40},
+        "shock": {"sfx_file": "sub_drop.mp3", "meme_file": "shock.gif", "emotion": "shocked", "camera_motion": "shake", "vol": 0.45},
+        "huh": {"sfx_file": "huh.mp3", "meme_file": "huh.gif", "emotion": "awkward", "camera_motion": "punch_in", "vol": 0.35},
+        "side_eye": {"sfx_file": "scratch.mp3", "meme_file": "side_eye.gif", "emotion": "sarcastic", "camera_motion": "punch_in", "vol": 0.40},
+        "clown": {"sfx_file": "scratch.mp3", "meme_file": "clown.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.35},
+        "math": {"sfx_file": "ting.mp3", "meme_file": "math.gif", "emotion": "shocked", "camera_motion": "none", "vol": 0.35},
+        "applause": {"sfx_file": "ting.mp3", "meme_file": "applause.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.35},
+        "dancing_cat": {"sfx_file": "pop.mp3", "meme_file": "dancing_cat.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.35},
+        "none": {"sfx_file": None, "meme_file": None, "emotion": "neutral", "camera_motion": "none", "vol": 0.0}
     },
     "visual_layout": {
         "canvas_width": 1080,
