@@ -693,8 +693,6 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                 "is_video": False,
                 "enable_slide": (step_idx == 1)
             })
-            if enable_foley and os.path.exists(pop_sfx):
-                overlay_sfx.append({"time": step_end, "file": pop_sfx, "vol": 0.30})
             step_cursor = step_end
 
         # Câu cuối mở full bài và ghim tới hết video
