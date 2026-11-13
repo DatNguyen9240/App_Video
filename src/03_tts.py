@@ -75,6 +75,36 @@ def clean_for_tts(text: str) -> str:
     return cleaned
 
 
+def apply_spatial_panning(filepath: str, direction: str = "center") -> bool:
+    """
+    Tạo hiệu ứng âm thanh không gian 3D (Spatial Stereo Panning):
+    - Tác giả: Center (cân bằng trực diện)
+    - Comment lẻ: Lệch nhẹ sang trái 20%
+    - Comment chẵn: Lệch nhẹ sang phải 20%
+    Tạo cảm giác chân thực như đang ngồi giữa bàn cà phê nghe bạn bè đối đáp qua lại.
+    """
+    if direction == "center" or not os.path.exists(filepath):
+        return True
+    exe = get_ffmpeg_exe()
+    temp_pan = filepath + ".pan.mp3"
+    if direction == "left":
+        pan_filter = "pan=stereo|c0=0.92*c0+0.08*c1|c1=0.08*c0+0.72*c1"
+    elif direction == "right":
+        pan_filter = "pan=stereo|c0=0.72*c0+0.08*c1|c1=0.08*c0+0.92*c1"
+    else:
+        return True
+
+    cmd = [exe, "-y", "-i", filepath, "-af", pan_filter, "-c:a", "libmp3lame", "-b:a", "256k", temp_pan]
+    res = subprocess.run(cmd, capture_output=True)
+    if res.returncode == 0 and os.path.exists(temp_pan):
+        shutil.move(temp_pan, filepath)
+        return True
+    if os.path.exists(temp_pan):
+        try: os.remove(temp_pan)
+        except OSError: pass
+    return False
+
+
 def verify_and_standardize_mp3(filepath: str, apply_mastering: bool = True) -> bool:
     """
     Dùng FFmpeg kiểm tra và chuẩn hóa file MP3 về 44100Hz Stereo.
@@ -441,6 +471,13 @@ def generate_all_audio(
         print(f"  🎙️ Đang tạo audio comment {i} ({c_voice}, emotion={emotion}, rate={c_rate}, pitch={c_pitch}, style={c_style or 'none'})...")
         cmt_path = os.path.join(out_dir, f"comment_{i}.mp3")
         text_to_speech(comment.content, cmt_path, voice=c_voice, rate=c_rate, pitch=c_pitch, style=c_style)
+
+        # Tạo không gian âm thanh nổi 3D (Spatial Stereo Panning)
+        layout_cfg = cfg.get("visual_layout", {})
+        if layout_cfg.get("enable_spatial_audio_panning", True):
+            pan_dir = "left" if i % 2 == 1 else "right"
+            apply_spatial_panning(cmt_path, direction=pan_dir)
+
         c_dur = get_mp3_duration_ms(cmt_path)
         result["comments"].append({
             "path": cmt_path,

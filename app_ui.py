@@ -1244,6 +1244,54 @@ HTML_TEMPLATE = """
                 <span class="text-[10px] text-slate-500">Phụ đề vàng/trắng nổi bật phong cách Reels/TikTok</span>
               </div>
 
+              <!-- Thanh tiến trình Completion Progress Bar -->
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Thanh Tiến Trình Chạy Đáy (Retention):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_completion_progress_bar" class="rounded bg-slate-800 border-slate-700 text-rose-500">
+                    <span class="font-bold text-rose-300">Bật Progress Bar Đáy Video</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Kích thích tâm lý xem hết 100% video (Completion Rate)</span>
+              </div>
+
+              <!-- Vignette Điện Ảnh -->
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Vignette Điện Ảnh (Tối 4 Góc):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_cinematic_vignette" class="rounded bg-slate-800 border-slate-700 text-indigo-500">
+                    <span class="font-bold text-indigo-300">Bật Cinematic Vignette</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Làm tối dịu 4 góc, hút mắt người xem vào trung tâm</span>
+              </div>
+
+              <!-- Âm Thanh Không Gian 3D (Spatial Panning) -->
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Âm Thanh Nổi 3D (Spatial Audio):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_spatial_audio_panning" class="rounded bg-slate-800 border-slate-700 text-emerald-500">
+                    <span class="font-bold text-emerald-300">Bật Stereo Panning Trái/Phải</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Tác giả ở giữa, các bình luận đối đáp lệch trái/phải như thật</span>
+              </div>
+
+              <!-- Tension Riser Swell -->
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Gió Rít Trước Cú Twist (Tension Riser):</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_tension_riser" class="rounded bg-slate-800 border-slate-700 text-amber-500">
+                    <span class="font-bold text-amber-300">Bật Tension Riser Swell</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Âm thanh căng thẳng tăng dần 1.1s trước khi nổ bẻ lái</span>
+              </div>
+
               <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
                 <label class="text-xs text-slate-400 font-semibold">Meme Đè Ra Giữa Phóng To:</label>
                 <div class="pt-2">

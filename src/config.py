@@ -158,7 +158,14 @@ DEFAULT_CONFIG = {
         "color_space": "bt709",
         "enable_slide_up_animation": True,
         "slide_duration_s": 0.22,
-        "slide_distance_px": 45
+        "slide_distance_px": 45,
+        "enable_kinetic_subtitles": True,
+        "enable_completion_progress_bar": True,
+        "progress_bar_color": "#F43F5E",
+        "progress_bar_height": 6,
+        "enable_cinematic_vignette": True,
+        "enable_spatial_audio_panning": True,
+        "enable_tension_riser": True
     },
     "illustration_settings": {
         "enable_post_attached_image": False,

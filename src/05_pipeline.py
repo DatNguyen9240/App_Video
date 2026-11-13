@@ -294,6 +294,18 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                 })
                 print(f"     🔊 [SFX OVERLAY PUNCHLINE]: {sfx_name} (vol={sfx_vol}) tại t={react_start:.2f}s")
 
+                # Tension Riser Swell (Gió rít căng thẳng tăng dần 1.1s trước khi cú bẻ lái nổ tung)
+                enable_riser = layout.get("enable_tension_riser", True)
+                riser_path = os.path.join(SFX_DIR, "riser.mp3")
+                if enable_riser and os.path.exists(riser_path) and sfx_name in ["sub_drop", "boom"]:
+                    riser_time = max(0.0, react_start - 1.2)
+                    overlay_sfx.append({
+                        "time": riser_time,
+                        "file": riser_path,
+                        "vol": 0.32
+                    })
+                    print(f"     🔥 [TENSION RISER SWELL]: Gió rít căng thẳng tăng dần tại t={riser_time:.2f}s trước cú Twist!")
+
         # Foley Pop giòn tan khi thẻ bình luận trượt lên
         if enable_foley and os.path.exists(pop_sfx):
             overlay_sfx.append({"time": c_start, "file": pop_sfx, "vol": 0.35})
@@ -409,7 +421,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                     overlay_sfx.append({"time": popup_start, "file": pop_sfx, "vol": 0.4})
             # Trong thời gian Cutaway Gag (2.2s), hình ảnh chiếm trọn spotlight
             # Sau khi Cutaway biến mất, nếu còn thời gian thì reaction meme punchline sẽ xuất hiện
-            if react_start > popup_end and os.path.exists(meme_file_cand):
+            if react_start > popup_end and meme_file_cand and os.path.exists(meme_file_cand):
                 m_x = "(W-w)/2"
                 m_y = "(H-h)/2" if punchline_center else str(actual_comment_y + max_cmt_h + 16)
                 m_w = punchline_sz if punchline_center else sticker_sz
@@ -635,7 +647,11 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
 
 def generate_kinetic_subtitles_ass(post, timing: dict, timeline: list[dict], output_ass_path: str):
     """
-    Tạo phụ đề động Kinetic Subtitles phong cách Shorts/TikTok (chữ vàng/trắng viền đen đậm, pop-in).
+    Tạo phụ đề động Kinetic Subtitles phong cách Shorts/TikTok (Hormozi word-chunk pop-in):
+    - Font Arial đậm nét, viền đen dày 4.5px, nổi bật trên mọi nền video.
+    - Màu vàng neon (&H0000FFFF) hoặc trắng (&H00FFFFFF) bắt mắt.
+    - Chia nhỏ câu thành từng cụm 3-4 từ nảy nhịp (Word-chunk pop-in) theo đúng nhịp nói,
+      không hiện cả khối dài gây rối mắt, tối đa hóa tỉ lệ giữ chân người xem (Retention).
     """
     ass_header = """[Script Info]
 ScriptType: v4.00+
@@ -644,7 +660,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Kinetic,Arial,52,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3.5,2,2,40,40,230,1
+Style: Kinetic,Arial,56,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4.2,2,2,40,40,240,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -652,10 +668,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     dialogues = []
 
     def format_ass_time(sec: float) -> str:
+        sec = max(0.0, sec)
         h = int(sec // 3600)
         m = int((sec % 3600) // 60)
         s = sec % 60
         return f"{h}:{m:02d}:{s:05.2f}"
+
+    def chunk_text_by_words(text: str, start_sec: float, end_sec: float, words_per_chunk: int = 4):
+        clean_t = text.strip().replace("\n", " ")
+        words = clean_t.split()
+        if not words:
+            return
+        total_words = len(words)
+        dur = max(0.5, end_sec - start_sec)
+
+        chunks = []
+        for i in range(0, total_words, words_per_chunk):
+            chunks.append(" ".join(words[i:i + words_per_chunk]))
+
+        chunk_dur = dur / len(chunks)
+        for idx, chunk in enumerate(chunks):
+            c_start = start_sec + idx * chunk_dur
+            c_end = min(end_sec, c_start + chunk_dur)
+            dialogues.append(
+                f"Dialogue: 0,{format_ass_time(c_start)},{format_ass_time(c_end)},Kinetic,,0,0,0,,{{\\fscx106\\fscy106\\t(0,70,\\fscx100\\fscy100)}}{chunk.upper()}"
+            )
 
     # Lấy các đoạn nói từ timeline
     for item in timeline:
@@ -664,16 +701,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             idx = item.get("index", 1) - 1
             if idx < len(post.comments):
                 cmt = post.comments[idx]
-                text = cmt.content.strip().replace("\n", " ")
-                start_t = format_ass_time(item["start"])
-                end_t = format_ass_time(item["end"])
-                dialogues.append(f"Dialogue: 0,{start_t},{end_t},Kinetic,,0,0,0,,{text}")
+                chunk_text_by_words(cmt.content, item["start"], item["end"] - 0.35, words_per_chunk=4)
         elif itype == "post":
             post_dur = timing.get("post", {}).get("duration_ms", 3000) / 1000.0
-            start_t = format_ass_time(item["start"])
-            end_t = format_ass_time(item["start"] + post_dur)
-            text = post.content.strip()[:100].replace("\n", " ")
-            dialogues.append(f"Dialogue: 0,{start_t},{end_t},Kinetic,,0,0,0,,{text}")
+            chunk_text_by_words(post.content[:100], item["start"], item["start"] + post_dur, words_per_chunk=4)
 
     with open(output_ass_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(dialogues) + "\n")
@@ -765,11 +796,33 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
         )
         prev_stream = out_stream
 
+    # 1. Hiệu ứng Vignette Điện Ảnh (Làm tối nhẹ 4 góc để hướng sự chú ý tuyệt đối vào nội dung giữa màn hình)
+    enable_vignette = layout.get("enable_cinematic_vignette", True)
+    if enable_vignette:
+        out_vig = "[v_vignette]"
+        filter_chains.append(f"{prev_stream}vignette=PI/4:eval=init{out_vig}")
+        prev_stream = out_vig
+
+    # 2. Phụ đề động Kinetic Subtitles (nảy chữ theo nhịp nói kiểu Shorts/TikTok)
     if ass_subtitle_path and os.path.exists(ass_subtitle_path):
         clean_ass = os.path.abspath(ass_subtitle_path).replace("\\", "/").replace(":", "\\:")
         out_sub_stream = "[v_subbed]"
         filter_chains.append(f"{prev_stream}ass='{clean_ass}'{out_sub_stream}")
         prev_stream = out_sub_stream
+
+    # 3. Thanh tiến trình video (Completion Progress Bar) chạy ngầm ở đáy màn hình
+    enable_prog_bar = layout.get("enable_completion_progress_bar", True)
+    if enable_prog_bar:
+        bar_h = int(layout.get("progress_bar_height", 6))
+        bar_color = layout.get("progress_bar_color", "#F43F5E")
+        bar_y = 1920 - bar_h
+        out_bar_bg = "[v_bar_bg]"
+        out_bar_fill = "[v_bar_fill]"
+        # Dải ray nền đen mờ 40%
+        filter_chains.append(f"{prev_stream}drawbox=x=0:y={bar_y}:w=1080:h={bar_h}:color=black@0.4:t=fill{out_bar_bg}")
+        # Dải thanh tiến trình gradient hồng tím chạy từ 0 đến 100% video
+        filter_chains.append(f"{out_bar_bg}drawbox=x=0:y={bar_y}:w='1080*(t/{max(0.1, total_duration):.3f})':h={bar_h}:color={bar_color}@0.95:t=fill{out_bar_fill}")
+        prev_stream = out_bar_fill
 
     filter_complex = ";".join(filter_chains)
 
@@ -935,7 +988,7 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
         final_video = os.path.join(FINAL_DIR, f"final_meme_pro_{timestamp}.mp4")
 
         ass_sub_path = None
-        if layout.get("enable_kinetic_subtitles", False):
+        if layout.get("enable_kinetic_subtitles", True):
             ass_sub_path = os.path.join(OUT_DIR, "subtitles.ass")
             generate_kinetic_subtitles_ass(post, timing, timeline, ass_sub_path)
             tracker.log(f"  ✨ Đã tạo phụ đề động Kinetic Subtitles: {ass_sub_path}")
