@@ -52,7 +52,9 @@ class Post:
     illustration_path: str = ""            # Đường dẫn ảnh minh họa đính kèm
     illustration_caption: str = ""         # Câu chú thích ngắn (dưới 10 từ) gắn lên ảnh để hiểu trò đùa
     illustration_category: str = "general_life"  # Danh mục ngữ cảnh: couple_photo_fail, cafe_lifestyle, food_cooking, office_work, shopping_tech, student_exam, general_life
-    enable_illustration: bool = True       # Bật hoặc tắt ảnh minh họa trong video
+    enable_illustration: bool = False      # Bật hoặc tắt ảnh minh họa trong video (mặc định False để ưu tiên tự nhiên)
+    has_visual_proof: bool = False         # AI đánh giá câu chuyện có cần ảnh bằng chứng thực tế không
+    visual_proof_placement: str = "none"   # none, attached_in_post, popup_at_twist
     # Metadata đạo diễn cảm xúc
     emotional_arc: str = "curiosity -> tension -> fake_relief -> punchline"
     hook_energy: str = "high"

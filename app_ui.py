@@ -71,7 +71,11 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         is_verified = bool(post.get("is_verified", False))
         likes = int(post.get("likes", 0))
         post_avatar = post.get("avatar_url", "") or post.get("avatar_path", "")
+        has_proof = post.get("has_visual_proof", None)
+        placement = post.get("visual_proof_placement", "none")
         enable_illus = bool(post.get("enable_illustration", True))
+        if has_proof is False or placement == "none":
+            enable_illus = False
         post_illus = post.get("illustration_path", "") if enable_illus else ""
         illus_cat = post.get("illustration_category", "general_life")
         comments = post.get("comments", [])
@@ -82,7 +86,11 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         is_verified = getattr(post, "is_verified", False)
         likes = getattr(post, "likes", 0)
         post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
+        has_proof = getattr(post, "has_visual_proof", None)
+        placement = getattr(post, "visual_proof_placement", "none")
         enable_illus = bool(getattr(post, "enable_illustration", True))
+        if has_proof is False or placement == "none":
+            enable_illus = False
         post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
         illus_cat = getattr(post, "illustration_category", "general_life")
         comments = getattr(post, "comments", [])
@@ -96,7 +104,7 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
             if os.path.exists(gen_asset):
                 post_illus = gen_asset
 
-    use_attached = enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False)
+    use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
     attached_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
     # 1. Thẻ bài đăng chính
@@ -107,9 +115,10 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
     )
     card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
 
-    # 2. Khung ảnh minh họa nổi bên ngoài (Popup Proof Card)
+    # 2. Khung ảnh minh họa nổi bên ngoài: CHỈ khi không gắn trong bài và được bật
     popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
-    if enable_illus and illus_cfg.get("enable_popup_illustration", True) and post_illus and os.path.exists(post_illus):
+    allow_popup = enable_illus and (placement != "attached_in_post") and illus_cfg.get("enable_popup_illustration", True)
+    if allow_popup and post_illus and os.path.exists(post_illus):
         badge_lbl = illus_cfg.get("badge_text", "📸 BẰNG CHỨNG THỰC TẾ")
         caption_lbl = (post.get("illustration_caption", "") or post.get("video_title", "")) if isinstance(post, dict) else (getattr(post, "illustration_caption", "") or getattr(post, "video_title", ""))
         card_mod.create_popup_illustration_card(post_illus, popup_path, badge_text=badge_lbl, caption_text=caption_lbl)
@@ -448,19 +457,48 @@ HTML_TEMPLATE = """
             </div>
           </div>
 
-          <!-- Story Proof & Illustration Cutaway Box -->
+          <!-- Story Visual Format & Proof Box -->
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
             <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
-              <span class="text-xs font-bold text-pink-400 flex items-center gap-1.5">
-                <i class="fa-solid fa-camera-retro"></i> ẢNH MINH HỌA BẰNG CHỨNG THỰC TẾ (CUTAWAY PROOF CARD)
-              </span>
+              <div class="flex items-center gap-2">
+                <span v-if="post.enable_illustration" class="text-xs font-bold text-pink-400 flex items-center gap-1.5">
+                  <i class="fa-solid fa-camera-retro"></i> ĐỊNH DẠNG: CÓ ẢNH BẰNG CHỨNG THỰC TẾ
+                </span>
+                <span v-else class="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                  <i class="fa-solid fa-comments"></i> ĐỊNH DẠNG TỰ NHIÊN: THUẦN HỘI THOẠI & ĐỐI ĐÁP (KHÔNG SPAM ẢNH)
+                </span>
+              </div>
               <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
-                <input type="checkbox" v-model="post.enable_illustration" class="rounded bg-slate-800 border-slate-700 text-pink-500 focus:ring-0">
-                <span class="font-semibold text-pink-400">Hiển thị ảnh này trong video</span>
+                <input type="checkbox" v-model="post.enable_illustration" @change="refreshCardPreview"
+                  class="rounded bg-slate-800 border-slate-700 text-pink-500 focus:ring-0">
+                <span class="font-semibold" :class="post.enable_illustration ? 'text-pink-400' : 'text-slate-400'">
+                  {{ post.enable_illustration ? 'Đang bật ảnh' : '+ Bật ảnh cho bài này' }}
+                </span>
               </label>
             </div>
 
-            <div v-if="post.enable_illustration" class="space-y-3">
+            <!-- Khi Tắt Ảnh: Thông báo nhịp dựng tự nhiên -->
+            <div v-if="!post.enable_illustration" class="flex items-center justify-between text-xs text-slate-400 p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/60">
+              <div class="flex items-center gap-2">
+                <i class="fa-solid fa-sparkles text-emerald-400 text-sm"></i>
+                <span>Video sẽ chạy theo <strong>phong cách thuần thoại tự nhiên</strong>: tập trung 100% vào sự đối đáp nhịp nhàng của các bình luận, chuyển động camera và âm thanh SFX kịch tính, không bị dập khuôn chèn ảnh gượng ép.</span>
+              </div>
+            </div>
+
+            <!-- Khi Bật Ảnh: Điều khiển chi tiết -->
+            <div v-else class="space-y-3">
+              <div class="flex items-center gap-4 text-xs bg-slate-950/50 p-2 rounded-lg border border-slate-800/70 flex-wrap">
+                <span class="font-semibold text-slate-400">Cách xuất hiện:</span>
+                <label class="flex items-center gap-1.5 cursor-pointer text-slate-200">
+                  <input type="radio" value="popup_at_twist" v-model="post.visual_proof_placement" @change="refreshCardPreview" class="text-pink-500">
+                  <span>Bung thẻ ảnh nổi ở đoạn bẻ lái (Cutaway Pop-up)</span>
+                </label>
+                <label class="flex items-center gap-1.5 cursor-pointer text-slate-200">
+                  <input type="radio" value="attached_in_post" v-model="post.visual_proof_placement" @change="refreshCardPreview" class="text-indigo-400">
+                  <span>Gắn trực tiếp trong bài tác giả (như Threads thật)</span>
+                </label>
+              </div>
+
               <div class="flex flex-col sm:flex-row gap-4 items-start">
                 <!-- Thumbnail -->
                 <div class="relative w-full sm:w-44 h-28 rounded-lg overflow-hidden border border-slate-700 bg-slate-950 flex-shrink-0 group">
@@ -518,9 +556,6 @@ HTML_TEMPLATE = """
                   </div>
                 </div>
               </div>
-            </div>
-            <div v-else class="text-xs text-slate-500 italic">
-              Đã tắt ảnh minh họa. Video sẽ chỉ tập trung vào câu chuyện chữ và đối đáp của các bình luận.
             </div>
           </div>
 
@@ -1589,7 +1624,9 @@ HTML_TEMPLATE = """
             illustration_path: '',
             illustration_caption: '',
             illustration_category: 'general_life',
-            enable_illustration: true,
+            has_visual_proof: false,
+            visual_proof_placement: 'none',
+            enable_illustration: false,
             comments: []
           },
           customImageQuery: '',
@@ -2170,7 +2207,9 @@ def api_generate_script():
                 "illustration_path": getattr(post, "illustration_path", ""),
                 "illustration_caption": getattr(post, "illustration_caption", ""),
                 "illustration_category": getattr(post, "illustration_category", "general_life"),
-                "enable_illustration": getattr(post, "enable_illustration", True),
+                "has_visual_proof": getattr(post, "has_visual_proof", False),
+                "visual_proof_placement": getattr(post, "visual_proof_placement", "none"),
+                "enable_illustration": getattr(post, "enable_illustration", False),
                 "emotional_arc": getattr(post, "emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
                 "comments": [
                     {
@@ -2529,7 +2568,9 @@ def api_render_video():
             illustration_path=p_data.get("illustration_path", ""),
             illustration_caption=p_data.get("illustration_caption", ""),
             illustration_category=p_data.get("illustration_category", "general_life"),
-            enable_illustration=bool(p_data.get("enable_illustration", True)),
+            has_visual_proof=bool(p_data.get("has_visual_proof", False)),
+            visual_proof_placement=p_data.get("visual_proof_placement", "none"),
+            enable_illustration=bool(p_data.get("enable_illustration", False)),
             emotional_arc=p_data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
             comments=comments
         )

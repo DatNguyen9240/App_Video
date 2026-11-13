@@ -86,6 +86,14 @@ class PostSchema(BaseModel):
         default="general_life",
         description="Phân loại ngữ cảnh chính xác của câu chuyện"
     )
+    has_visual_proof: bool = Field(
+        default=False,
+        description="ĐÁNH GIÁ TỰ NHIÊN: Câu chuyện này có thật sự cần một bức ảnh bằng chứng thực tế để người xem tin và bật cười không? (Ví dụ: chụp ảnh dìm, nấu ăn cháy nồi, mua đồ shopee giao sai hàng, vết trầy xước, hóa đơn đắt đỏ -> true). NẾU là tâm sự tình cảm, chuyện cãi nhau ở công sở, mâu thuẫn gia đình, triết lý hài hước hoặc drama đối đáp thuần lời nói -> BẮT BUỘC để FALSE (khoảng 60% video)! Đừng ép mọi câu chuyện đều có ảnh vì sẽ làm video bị spam dập khuôn!"
+    )
+    visual_proof_placement: Literal["none", "attached_in_post", "popup_at_twist"] = Field(
+        default="none",
+        description="Vị trí hiển thị ảnh: 'none' (không cần ảnh), 'attached_in_post' (gắn trong thẻ bài viết tác giả như Threads thật), hoặc 'popup_at_twist' (bung thẻ ảnh nổi ở đoạn bẻ lái)"
+    )
     illustration_caption: str = Field(
         default="",
         description="Câu chú thích hài hước tiếng Việt ngắn (dưới 8 từ) làm điểm nhấn cho bức ảnh bằng chứng (ví dụ: 'Thành quả bạn trai chụp', 'Bữa tối định mệnh', 'Hóa đơn tháng này')"
@@ -251,6 +259,9 @@ def generate_story_with_gemini(
         f"- EMOJI VỪA PHẢI: Tối đa 0-1 emoji mỗi câu khi thật sự cần thiết (tránh spam emoji).\n"
         f"- USERNAME: Tên username tiếng Việt đời thường tự nhiên (ví dụ: 'linh.nguyen99', 'minh.triet01', 'hoang_anh.hr', 'be_meo_ngu_ngay').\n"
         f"- REPLY_TO: Ghi rõ username đang trả lời để tạo sự đối đáp sống động.\n"
+        f"- QUY TẮC ĐỊNH DẠNG TỰ NHIÊN (PHÁ VỠ DẬP KHUÔN, KHÔNG SPAM ẢNH):\n"
+        f"  + Hơn 60% các câu chuyện Threads viral nhất là drama đối đáp chữ thuần túy (tâm sự, cãi nhau, bóc mẽ hài hước). Với các câu chuyện này, BẮT BUỘC để has_visual_proof = false và visual_proof_placement = 'none'!\n"
+        f"  + Chỉ khi câu chuyện trực tiếp nói về một vật thể hoặc bức ảnh thực tế cụ thể (chụp ảnh dìm, nấu ăn cháy, giao sai hàng) mới để has_visual_proof = true và visual_proof_placement = 'popup_at_twist' hoặc 'attached_in_post'.\n"
         f"- TUYỆT ĐỐI TRÁNH: Không viết như AI giải thích, không mở đầu sáo rỗng, không kết bài bằng đạo lý rập khuôn.\n\n"
         f"TIÊU CHUẨN KIỂM DUYỆT:\n"
         f"Trước khi trả kết quả, tự hỏi: 'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và truyền cảm không? Thời lượng có đủ dài trên 1 phút không?'\n\n"
@@ -384,14 +395,19 @@ def generate_story_with_gemini(
             camera_motion=camera_mot
         ))
 
-    # Tự động tìm kiếm & tải ảnh THẬT từ web chuẩn xác theo cốt truyện
-    illus_prompt = data.get("illustration_prompt", "")
-    illus_vn = data.get("illustration_vietnamese_query", "")
+    # Đánh giá tự nhiên: Chỉ tìm kiếm ảnh khi câu chuyện thật sự có bằng chứng thực tế
+    has_proof = bool(data.get("has_visual_proof", False))
+    placement = data.get("visual_proof_placement", "none")
+    if not has_proof:
+        placement = "none"
+
+    illus_prompt = data.get("illustration_prompt", "") if has_proof else ""
+    illus_vn = data.get("illustration_vietnamese_query", "") if has_proof else ""
     illus_cat = data.get("illustration_category", "general_life")
     illus_path = ""
 
     candidate_queries = [q for q in [illus_vn, illus_prompt] if q]
-    if candidate_queries:
+    if has_proof and candidate_queries:
         try:
             import importlib.util
             real_img_spec = importlib.util.spec_from_file_location("real_image_search", os.path.join(SRC_DIR, "real_image_search.py"))
@@ -429,7 +445,9 @@ def generate_story_with_gemini(
         illustration_path=illus_path,
         illustration_caption=data.get("illustration_caption", ""),
         illustration_category=illus_cat,
-        enable_illustration=bool(illus_path),
+        enable_illustration=bool(illus_path and has_proof and placement != "none"),
+        has_visual_proof=has_proof,
+        visual_proof_placement=placement,
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         hook_energy=data.get("hook_energy", "high"),
         voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "adam")),

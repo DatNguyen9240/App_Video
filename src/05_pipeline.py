@@ -367,7 +367,11 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         illus_cfg = cfg.get("illustration_settings", {})
         popup_card_path = os.path.join(CARDS_DIR, "popup_proof.png")
         has_popup = illus_cfg.get("enable_popup_illustration", True) and os.path.exists(popup_card_path)
-        is_popup_target = has_popup and not popup_shown and (i == 2 or sfx_name in ["boom", "shock"])
+        # Kích hoạt tự nhiên: Không spam cứng ở comment 2, chỉ bung khi câu thoại nhắc đến bằng chứng hoặc đoạn bẻ lái
+        c_text_lower = c.content.lower()
+        has_evidence_cue = any(kw in c_text_lower for kw in ["ảnh", "hình", "nhìn", "xem", "bằng chứng", "đây nè", "chụp", "hóa đơn", "kết quả", "out nét"])
+        is_twist_beat = (sfx_name in ["sub_drop", "shock", "boom"]) or (i >= max(2, len(post.comments) - 1))
+        is_popup_target = has_popup and not popup_shown and (has_evidence_cue or is_twist_beat)
         if is_popup_target:
             popup_shown = True
 
@@ -911,7 +915,12 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             tracker.start_step("cards", "Đang render bộ thẻ Threads chuẩn (Avatar người thật)...", 25)
             os.makedirs(CARDS_DIR, exist_ok=True)
             post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
+            has_proof = getattr(post, "has_visual_proof", None)
+            placement = getattr(post, "visual_proof_placement", "none")
             enable_illus = getattr(post, "enable_illustration", True)
+            if has_proof is False or placement == "none":
+                enable_illus = False
+
             post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
             illus_cat = getattr(post, "illustration_category", "general_life")
 
@@ -925,9 +934,9 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                     if os.path.exists(gen_candidate):
                         post_illus = gen_candidate
 
-            # Tùy chọn gắn ảnh vào câu hỏi bài đăng (có thể có hoặc không):
+            # Quyết định ảnh gắn kèm bài đăng (Attached in Post):
             illus_cfg = cfg.get("illustration_settings", {})
-            use_attached = enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False)
+            use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
             attached_img_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
             post_img = card_mod.render_post_card(
@@ -937,9 +946,10 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             )
             card_mod.save_card(post_img, os.path.join(CARDS_DIR, "post.png"))
 
-            # Tạo thẻ ảnh minh họa nổi bên ngoài (Popup Proof Card) nếu được bật
+            # Tạo thẻ ảnh minh họa nổi bên ngoài: CHỈ khi không đính kèm trong bài và được bật
             popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
-            if enable_illus and illus_cfg.get("enable_popup_illustration", True) and post_illus and os.path.exists(post_illus):
+            allow_popup = enable_illus and (placement != "attached_in_post") and illus_cfg.get("enable_popup_illustration", True)
+            if allow_popup and post_illus and os.path.exists(post_illus):
                 badge_lbl = illus_cfg.get("badge_text", "")
                 caption_lbl = getattr(post, "illustration_caption", "")
                 card_mod.create_popup_illustration_card(post_illus, popup_path, badge_text=badge_lbl, caption_text=caption_lbl)
