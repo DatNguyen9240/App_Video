@@ -264,6 +264,41 @@ HTML_TEMPLATE = """
                 class="w-full glass-input rounded-xl pl-11 pr-4 py-3 text-sm focus:outline-none placeholder-slate-500 font-medium border border-slate-700/80 focus:border-indigo-500 transition">
             </div>
 
+            <!-- Tùy chỉnh nhanh: Số lượng bình luận & Giọng đọc Adam / Brian -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-xl bg-slate-900/60 border border-slate-800">
+              <div class="space-y-1">
+                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-list-ol text-cyan-400"></i>
+                  <span>Số lượng câu trả lời / bình luận:</span>
+                </label>
+                <select v-model="commentCountInput" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="auto">🎲 Tự động tối ưu (5 - 7 câu đối đáp)</option>
+                  <option value="4">💬 Đúng 4 câu bình luận</option>
+                  <option value="5">💬 Đúng 5 câu bình luận</option>
+                  <option value="6">⭐ Đúng 6 câu (Khuyên dùng - Đầy đủ cao trào & twist)</option>
+                  <option value="7">🔥 Đúng 7 câu (Drama khẩu chiến nhiều phe)</option>
+                  <option value="8">🚀 Đúng 8 câu (Đại chiến Threads kịch tính)</option>
+                </select>
+                <span class="text-[10px] text-slate-500">Không bị giới hạn 4 câu - Tự do mở rộng đến 8+ câu</span>
+              </div>
+
+              <div class="space-y-1">
+                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-microphone-lines text-pink-400"></i>
+                  <span>Giọng đọc dẫn chuyện chính:</span>
+                </label>
+                <select v-model="authorVoiceInput" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="adam">🎙️ Adam (Trầm ấm, nam tính, cuốn hút như Podcast - Khuyên dùng)</option>
+                  <option value="brian">🎬 Brian (Nam điện ảnh, truyền cảm sâu lắng)</option>
+                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn truyền cảm)</option>
+                  <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn biểu cảm, TikTok viral)</option>
+                  <option value="ava">🌸 Ava (Nữ hiện đại, sôi nổi)</option>
+                  <option value="emma">🌷 Emma (Nữ dịu dàng)</option>
+                </select>
+                <span class="text-[10px] text-slate-500">Giọng Adam & Brian lồng tiếng nam châm cực cuốn hút</span>
+              </div>
+            </div>
+
             <!-- Đúng 2 nút bấm hành động chính rõ ràng, cân đối -->
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <!-- Nút 1: Tạo kịch bản để duyệt và sửa trước -->
@@ -368,9 +403,19 @@ HTML_TEMPLATE = """
               </div>
             </div>
 
-            <div class="flex items-center gap-2.5">
+            <div class="flex items-center gap-2.5 flex-wrap">
               <span class="text-xs text-slate-400 font-medium">Tên tác giả:</span>
-              <input v-model="post.username" type="text" class="glass-input rounded-lg px-2.5 py-1 text-xs w-44 font-semibold text-slate-200">
+              <input v-model="post.username" type="text" class="glass-input rounded-lg px-2.5 py-1 text-xs w-40 font-semibold text-slate-200">
+
+              <span class="text-xs text-slate-400 font-medium ml-1">Giọng đọc bài chính:</span>
+              <select v-model="post.voice_id" class="glass-input rounded-lg px-2.5 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
+                <option value="adam">🎙️ Adam (Trầm ấm podcast)</option>
+                <option value="brian">🎬 Brian (Nam điện ảnh)</option>
+                <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn)</option>
+                <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn)</option>
+                <option value="ava">🌸 Ava (Nữ hiện đại)</option>
+                <option value="emma">🌷 Emma (Nữ)</option>
+              </select>
             </div>
 
             <textarea v-model="post.content" rows="3"
@@ -430,6 +475,19 @@ HTML_TEMPLATE = """
                   <option value="sarcastic">😏 Châm biếm</option>
                   <option value="insightful">✨ Thông minh</option>
                 </select>
+
+                <!-- Voice Selector for this Comment -->
+                <div class="flex items-center gap-1 text-[11px] bg-slate-800/80 px-2 py-0.5 rounded-lg border border-slate-700/60">
+                  <span class="text-slate-400"><i class="fa-solid fa-microphone text-emerald-400"></i> Giọng:</span>
+                  <select v-model="cmt.voice_id" class="bg-transparent text-slate-200 font-medium focus:outline-none text-[11px]">
+                    <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ)</option>
+                    <option value="vi-VN-NamMinhNeural">Nam Minh (Nam)</option>
+                    <option value="adam">Adam (Nam trầm)</option>
+                    <option value="brian">Brian (Nam)</option>
+                    <option value="ava">Ava (Nữ)</option>
+                    <option value="emma">Emma (Nữ)</option>
+                  </select>
+                </div>
 
                 <!-- SFX & Meme selector (14 Gifs) -->
                 <div class="flex items-center gap-1.5 ml-auto flex-wrap">
@@ -544,8 +602,12 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc dẫn chuyện:
               </label>
               <select v-model="settings.voice" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="vi-VN-HoaiMyNeural">🎙️ Hoài My (Nữ truyền cảm, siêu cuốn hút - Hot TikTok)</option>
-                <option value="vi-VN-NamMinhNeural">🎙️ Nam Minh (Nam năng động, trẻ trung)</option>
+                <option value="adam">🎙️ Adam (Trầm ấm, nam tính, cuốn hút như Podcast - Khuyên dùng)</option>
+                <option value="brian">🎬 Brian (Nam điện ảnh, truyền cảm sâu lắng)</option>
+                <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn truyền cảm)</option>
+                <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn biểu cảm, TikTok viral)</option>
+                <option value="ava">🌸 Ava (Nữ hiện đại, sôi nổi)</option>
+                <option value="emma">🌷 Emma (Nữ dịu dàng)</option>
               </select>
             </div>
 
@@ -938,8 +1000,12 @@ HTML_TEMPLATE = """
                 </div>
                 <div class="grid grid-cols-3 gap-2">
                   <select v-model="r.voice" class="col-span-2 glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200">
-                    <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ truyền cảm, cuốn hút)</option>
-                    <option value="vi-VN-NamMinhNeural">Nam Minh (Nam năng động, trẻ trung)</option>
+                    <option value="adam">🎙️ Adam (Trầm ấm, nam tính - Podcast)</option>
+                    <option value="brian">🎬 Brian (Nam điện ảnh truyền cảm)</option>
+                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn truyền cảm)</option>
+                    <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ truyền cảm, cuốn hút)</option>
+                    <option value="ava">🌸 Ava (Nữ hiện đại)</option>
+                    <option value="emma">🌷 Emma (Nữ dịu dàng)</option>
                   </select>
                   <input v-model="r.rate" type="text" placeholder="+10%" class="glass-input rounded-lg p-1.5 text-xs font-mono text-center">
                 </div>
@@ -1330,6 +1396,8 @@ HTML_TEMPLATE = """
         return {
           currentTab: 'studio',
           topicInput: '',
+          commentCountInput: 'auto',
+          authorVoiceInput: 'adam',
           isGeneratingScript: false,
           isCrawlingTrending: false,
           previewMode: 'cards',
@@ -1460,6 +1528,8 @@ HTML_TEMPLATE = """
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 topic: this.topicInput,
+                comment_count: this.commentCountInput,
+                voice: this.authorVoiceInput,
                 settings: this.settings
               })
             });
@@ -1647,7 +1717,12 @@ HTML_TEMPLATE = """
             const res = await fetch('/api/generate_script', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ topic: this.topicInput })
+              body: JSON.stringify({
+                topic: this.topicInput,
+                comment_count: this.commentCountInput,
+                voice: this.authorVoiceInput,
+                duration_mode: this.directorConfig?.ai_director?.duration_mode
+              })
             });
             const data = await res.json();
             if (data.success) {
@@ -1823,18 +1898,32 @@ def api_get_script():
 
 @app.route("/api/generate_script", methods=["POST"])
 def api_generate_script():
-    data = request.json
+    data = request.json or {}
     topic = data.get("topic", "").strip() or None
+    raw_c_count = data.get("comment_count") or data.get("target_comment_count") or None
+    target_comment_count = None
+    if raw_c_count and str(raw_c_count).lower() not in ["auto", "", "none", "0"]:
+        try:
+            target_comment_count = int(raw_c_count)
+        except (ValueError, TypeError):
+            target_comment_count = None
+
+    author_voice = data.get("voice") or None
+    duration_mode = data.get("duration_mode") or None
+
     try:
         tracker.reset()
         tracker.start_step("script", f"Gemini AI đang sáng tạo kịch bản theo chủ đề: '{topic or 'ngẫu nhiên'}'...", 20)
 
-        duration_mode = data.get("duration_mode") or None
         post = ai_mod.generate_story_with_gemini(
             topic,
             duration_mode=duration_mode,
+            target_comment_count=target_comment_count,
             progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
         )
+        if author_voice:
+            post.voice_id = author_voice
+
         sample_file = os.path.join(OUTPUT_DIR, "sample_post.json")
         content_mod.save_post_to_json(post, sample_file)
 
@@ -1850,7 +1939,7 @@ def api_generate_script():
 
         tracker.finish_step("cards")
         tracker.finish_step("script")
-        tracker.pause_for_review("Đã tạo kịch bản & vẽ thẻ xem trước (Bước 2/6). Sẵn sàng render video!")
+        tracker.pause_for_review(f"Đã tạo kịch bản {len(post.comments)} bình luận & vẽ thẻ xem trước (Bước 2/6). Sẵn sàng render video!")
 
         return jsonify({
             "success": True,
@@ -1861,6 +1950,7 @@ def api_generate_script():
                 "is_verified": post.is_verified,
                 "avatar_path": getattr(post, "avatar_path", ""),
                 "avatar_url": getattr(post, "avatar_url", ""),
+                "voice_id": getattr(post, "voice_id", "adam"),
                 "emotional_arc": getattr(post, "emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
                 "comments": [
                     {
@@ -1871,7 +1961,8 @@ def api_generate_script():
                         "avatar_path": getattr(c, "avatar_path", ""),
                         "avatar_url": getattr(c, "avatar_url", ""),
                         "sfx": getattr(c, "sfx", "none"),
-                        "emotion": getattr(c, "emotion", "funny")
+                        "emotion": getattr(c, "emotion", "funny"),
+                        "voice_id": getattr(c, "voice_id", "vi-VN-HoaiMyNeural")
                     }
                     for c in post.comments
                 ]
@@ -1947,6 +2038,8 @@ def api_create_video_one_click():
     bg_mode = sets.get("bg_mode", "split_gameplay")
     card_theme = sets.get("card_theme", "light")
 
+    author_voice = data.get("voice") or sets.get("voice") or "adam"
+
     def _full_video_worker():
         try:
             tracker.reset()
@@ -1957,6 +2050,8 @@ def api_create_video_one_click():
                 topic=topic,
                 progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
             )
+            if author_voice:
+                post.voice_id = author_voice
 
             # BƯỚC 2: RENDER BỘ THẺ THREADS CHUẨN (VỚI AVATAR THẬT TỪ THREADS & POPUP CARD)
             tracker.start_step("cards", "Đang ghép avatar thật từ Threads và vẽ bộ thẻ...", 30)
@@ -2108,6 +2203,7 @@ def api_render_video():
         for idx, c in enumerate(p_data.get("comments", []), 1):
             r_info = roles.get(f"commenter_{idx}", {})
             cmt_rate = chosen_rate if chosen_rate else r_info.get("rate", "+20%")
+            cmt_voice = c.get("voice_id") or r_info.get("voice", "vi-VN-HoaiMyNeural")
             comments.append(content_mod.Comment(
                 username=c.get("username", "user"),
                 content=c.get("content", ""),
@@ -2118,7 +2214,7 @@ def api_render_video():
                 likes=int(c.get("likes", 1200)),
                 sfx=c.get("sfx", "none"),
                 emotion=c.get("emotion", "funny"),
-                voice_id=r_info.get("voice", "vi-VN-HoaiMyNeural"),
+                voice_id=cmt_voice,
                 rate_offset=cmt_rate,
                 pitch_offset=r_info.get("pitch", "+2Hz"),
                 pause_before_ms=int(c.get("pause_before_ms", 200)),
@@ -2127,7 +2223,7 @@ def api_render_video():
 
         author_role = roles.get("author", {})
         post_rate = chosen_rate or author_role.get("rate", "+18%")
-        post_voice = chosen_voice or author_role.get("voice", "vi-VN-HoaiMyNeural")
+        post_voice = p_data.get("voice_id") or chosen_voice or author_role.get("voice", "adam")
         post_obj = content_mod.Post(
             username=p_data.get("username", "author"),
             content=p_data.get("content", ""),

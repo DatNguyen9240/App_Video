@@ -26,8 +26,8 @@ DEFAULT_CONFIG = {
         "fallback_model": "gemini-3.5-flash-lite",
         "temperature": 0.92,
         "duration_mode": "auto",  # "auto" (3-6 cmt), "fast_30s" (3 cmt), "deep_60s" (4-5 cmt), "viral_story_90s" (6-7 cmt)
-        "min_comments": 5,
-        "max_comments": 8,
+        "min_comments": 3,
+        "max_comments": 6,
         "drama_archetypes": [
             "double_twist",     # Cú lật kèo kép: twist ở cmt 2, cú twist sốc hơn ở cmt cuối
             "thread_war",       # Khẩu chiến qua lại: C1 cãi C2, tác giả thanh minh, cmt cuối bóc phốt cả hội
@@ -83,37 +83,28 @@ DEFAULT_CONFIG = {
         "default_commenter_female_voice": "vi-VN-HoaiMyNeural",
         "default_commenter_male_voice": "vi-VN-NamMinhNeural",
         "dynamic_casting": True,
-        "available_voices": [
-            {"id": "adam", "name": "🎙️ Adam (Trầm ấm / Đọc truyện triệu view - Khuyên dùng)"},
-            {"id": "vi-VN-HoaiMyNeural", "name": "🌸 Hoài My (Nữ ngọt ngào / Tâm sự đời thường)"},
-            {"id": "vi-VN-NamMinhNeural", "name": "☕ Nam Minh (Nam tự nhiên / Đời thường)"},
-            {"id": "khanh_linh", "name": "💅 Khánh Linh (Nữ sắc sảo / Cà khịa dí dỏm)"},
-            {"id": "minh_quan", "name": "⚡ Minh Quân (Nam trẻ trung / Sôi nổi Gen Z)"},
-            {"id": "bao_long", "name": "🔥 Bảo Long (Nam kịch tính / Bẻ lái sốc)"},
-            {"id": "rachel", "name": "✨ Rachel (Nữ truyền cảm hứng)"}
-        ],
         "female_voice_presets": [
             {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
-            {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz",  "style": "chat"},
+            {"voice": "ava", "rate": "+16%", "pitch": "+4Hz",  "style": "chat"},
             {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+10Hz", "style": "excited"},
-            {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+2Hz",  "style": "sad"}
+            {"voice": "emma", "rate": "+14%", "pitch": "+2Hz",  "style": "sad"}
         ],
         "male_voice_presets": [
-            {"voice": "adam", "rate": "+12%", "pitch": "-4Hz", "style": "narrative"},
+            {"voice": "adam", "rate": "+14%", "pitch": "-4Hz", "style": "dramatic"},
             {"voice": "vi-VN-NamMinhNeural", "rate": "+20%", "pitch": "+4Hz",  "style": "cheerful"},
-            {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "chat"},
-            {"voice": "vi-VN-NamMinhNeural", "rate": "+14%", "pitch": "+0Hz",  "style": "sad"}
+            {"voice": "brian", "rate": "+16%", "pitch": "-2Hz",  "style": "chat"},
+            {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "angry"}
         ],
         "roles": {
             "author": {"voice": "adam", "rate": "+12%", "pitch": "-4Hz", "style": "narrative"},
-            "commenter_1": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz", "style": "cheerful"},
-            "commenter_2": {"voice": "minh_quan", "rate": "+20%", "pitch": "+2Hz", "style": "chat"},
-            "commenter_3": {"voice": "khanh_linh", "rate": "+22%", "pitch": "+5Hz", "style": "sarcastic"},
+            "commenter_1": {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
+            "commenter_2": {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz", "style": "chat"},
+            "commenter_3": {"voice": "ava", "rate": "+16%", "pitch": "+4Hz", "style": "sarcastic"},
             "commenter_4": {"voice": "adam", "rate": "+14%", "pitch": "-4Hz", "style": "dramatic"},
             "commenter_5": {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+3Hz", "style": "cheerful"},
-            "commenter_6": {"voice": "bao_long", "rate": "+24%", "pitch": "-1Hz", "style": "angry"},
-            "commenter_7": {"voice": "khanh_linh", "rate": "+22%", "pitch": "+4Hz", "style": "sarcastic"},
-            "commenter_8": {"voice": "minh_quan", "rate": "+20%", "pitch": "+2Hz", "style": "chat"}
+            "commenter_6": {"voice": "brian", "rate": "+16%", "pitch": "-2Hz", "style": "chat"},
+            "commenter_7": {"voice": "emma", "rate": "+14%", "pitch": "+2Hz", "style": "sad"},
+            "commenter_8": {"voice": "vi-VN-NamMinhNeural", "rate": "+20%", "pitch": "+2Hz", "style": "chat"}
         },
         "emotion_style_map": {
             "funny":      {"style": "cheerful",    "rate_boost": "+8%",  "pitch_boost": "+4Hz"},

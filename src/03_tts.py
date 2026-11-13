@@ -142,15 +142,84 @@ def generate_silence_mp3(duration_sec: float, output_path: str) -> str:
     return output_path
 
 
+# ─── BỘ ÁNH XẠ GIỌNG ĐỌC THU HÚT & NỔI TIẾNG (ADAM, BRIAN, AVA, NAM MINH, HOÀI MY) ─
+VOICE_MAP = {
+    "adam": "en-US-AndrewMultilingualNeural",         # Giọng Adam phong cách podcast trầm ấm, cực cuốn hút
+    "andrew": "en-US-AndrewMultilingualNeural",       # Giọng nam trầm đĩnh đạc
+    "brian": "en-US-BrianMultilingualNeural",         # Giọng nam điện ảnh truyền cảm
+    "ava": "en-US-AvaMultilingualNeural",             # Giọng nữ hiện đại sôi nổi
+    "emma": "en-US-EmmaMultilingualNeural",           # Giọng nữ dịu dàng
+    "nam_minh": "vi-VN-NamMinhNeural",                 # Giọng nam chuẩn Việt
+    "hoai_my": "vi-VN-HoaiMyNeural",                  # Giọng nữ chuẩn Việt
+    "minh_quan": "vi-VN-NamMinhNeural",
+    "bao_long": "vi-VN-NamMinhNeural",
+    "khanh_linh": "vi-VN-HoaiMyNeural",
+    "thu_quynh": "vi-VN-HoaiMyNeural",
+}
+
+
+def resolve_voice_id(voice: str) -> str:
+    """Chuyển đổi tên voice thân thiện (adam, brian, ava...) sang mã voice Edge-TTS chuẩn."""
+    if not voice:
+        return "en-US-AndrewMultilingualNeural"
+    v_clean = voice.lower().strip()
+    return VOICE_MAP.get(v_clean, voice)
+
+
+def synthesize_elevenlabs(text: str, output_path: str, voice_id: str = "pNInz6obpgDQGcFmaJgB") -> bool:
+    """Tạo giọng đọc cao cấp qua ElevenLabs API (Giọng Adam gốc ID: pNInz6obpgDQGcFmaJgB)."""
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if not api_key and os.path.exists(ENV_PATH):
+        try:
+            with open(ENV_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("ELEVENLABS_API_KEY="):
+                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+
+    if not api_key:
+        return False
+
+    try:
+        import urllib.request
+        import json
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        headers = {
+            "xi-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.45,
+                "similarity_boost": 0.85
+            }
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=18) as resp:
+            raw_audio = resp.read()
+        if len(raw_audio) > 1000:
+            with open(output_path, "wb") as f:
+                f.write(raw_audio)
+            print(f"  🎙️ [ELEVENLABS TTS]: Đã tạo giọng Adam gốc đỉnh cao cho {os.path.basename(output_path)}")
+            return verify_and_standardize_mp3(output_path)
+    except Exception as e:
+        print(f"  ⚠️ ElevenLabs TTS ({voice_id}) lỗi hoặc hết quota: {e}")
+    return False
+
+
 async def _run_edge_tts_async(text: str, output_path: str, voice: str, rate: str, pitch: str = "+0Hz", style: str = ""):
     """
     Tạo audio Edge TTS.
-    Lưu ý: Voice tiếng Việt (vi-VN-HoaiMyNeural, vi-VN-NamMinhNeural) không hỗ trợ thẻ
-    mstts:express-as (sẽ khiến TTS đọc cả thẻ XML gây dài 30s). Cảm xúc được điều chỉnh
-    hoàn hảo và tự nhiên qua biến thiên tốc độ (Rate) và cao độ (Pitch).
+    Hỗ trợ cả giọng tiếng Việt gốc (Nam Minh, Hoài My) và các giọng quốc tế đa ngôn ngữ
+    (Andrew/Adam Multilingual, Brian Multilingual, Ava...) đọc tiếng Việt siêu truyền cảm!
     """
     import edge_tts
-    comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    actual_voice = resolve_voice_id(voice)
+    comm = edge_tts.Communicate(text, actual_voice, rate=rate, pitch=pitch)
     await comm.save(output_path)
 
 
@@ -242,7 +311,8 @@ def text_to_speech(text: str, output_path: str,
                    max_retries: int = 2) -> str:
     """
     Quy trình chuyển văn bản thành tiếng Việt đa tầng tự động phục hồi:
-    1. Thử Edge TTS (kèm cảm xúc rate, pitch và emotion style SSML).
+    0. Thử ElevenLabs (Giọng Adam gốc đỉnh cao) nếu có cấu hình API Key.
+    1. Thử Edge TTS (Giọng Adam/Andrew Multilingual, Brian, Hoài My, Nam Minh).
     2. Fallback sang Google Translate TTS.
     3. Fallback sang Windows Speech SAPI5 offline.
     4. Fallback tone an toàn tuyệt đối.
@@ -250,9 +320,21 @@ def text_to_speech(text: str, output_path: str,
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     cleaned = clean_for_tts(text)
 
-    # 1. Thử Edge TTS (với emotion style nếu có)
+    # 0. Thử ElevenLabs nếu yêu cầu giọng Adam hoặc chỉ định elevenlabs
+    v_lower = voice.lower().strip()
+    if v_lower in ["adam", "elevenlabs:adam"] or v_lower.startswith("elevenlabs:"):
+        eleven_id = "pNInz6obpgDQGcFmaJgB"  # Adam voice ID
+        if ":" in voice:
+            parts = voice.split(":", 1)
+            if len(parts) > 1 and parts[1].strip() != "adam":
+                eleven_id = parts[1].strip()
+        if synthesize_elevenlabs(cleaned, output_path, eleven_id):
+            return output_path
+
+    # 1. Thử Edge TTS (hỗ trợ Adam/Andrew Multilingual, Brian, Nam Minh, Hoài My)
+    actual_voice = resolve_voice_id(voice)
     for attempt in range(1, max_retries + 1):
-        if synthesize_edge_tts(cleaned, output_path, voice, rate, pitch, style):
+        if synthesize_edge_tts(cleaned, output_path, actual_voice, rate, pitch, style):
             return output_path
         time.sleep(0.5 * attempt)
 

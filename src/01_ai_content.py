@@ -153,13 +153,14 @@ def get_or_prompt_api_key() -> str:
 def generate_story_with_gemini(
     topic: str = "",
     duration_mode: str = None,
+    target_comment_count: Optional[int] = None,
     api_key: str = None,
     progress_cb: Optional[Callable[[str, int], None]] = None
 ) -> Post:
     """
     Sử dụng Gemini API với cấu hình đạo diễn cảm xúc để tạo kịch bản Threads hoàn chỉnh.
-    Hỗ trợ linh hoạt thời lượng (30s, 60s, 90s, auto) và đa dạng hóa đồ thị drama.
-    Tự động phân vai giọng đọc (Multi-Voice Acting) và thiết lập khoảng lặng (Breathing Room).
+    Hỗ trợ linh hoạt số lượng bình luận (4-8+ câu) và đa dạng hóa đồ thị drama.
+    Tự động phân vai giọng đọc (Adam, Brian, Nam Minh, Hoài My...) và thiết lập khoảng lặng.
     """
     if progress_cb:
         progress_cb("Khởi tạo kết nối Gemini AI...", 10)
@@ -197,7 +198,16 @@ def generate_story_with_gemini(
     temperature = float(ai_cfg.get("temperature", 0.92))
     dur_mode = duration_mode or ai_cfg.get("duration_mode", "auto")
 
-    if dur_mode == "fast_30s":
+    if target_comment_count and int(target_comment_count) > 0:
+        c_count = int(target_comment_count)
+        cmt_guide = (
+            f"SỐ LƯỢNG BÌNH LUẬN: BẮT BUỘC TẠO CHÍNH XÁC {c_count} BÌNH LUẬN (từ C1 đến C{c_count}). Tuyệt đối không được ít hơn hay nhiều hơn!\n"
+            f"- C1: Reaction mở đầu châm ngòi (reply_to username tác giả, sfx='none').\n"
+            f"- C2 đến C{max(2, c_count - 2)}: Đối đáp, tranh cãi, bóc phốt hoặc kể thêm tình huống éo le (hãy dùng reply_to để các comment đối đáp lẫn nhau sống động).\n"
+            f"- C{max(2, c_count - 1)}: Cú bẻ lái sốc 180° hoặc bóc mẽ đau điếng (gắn sfx='sub_drop').\n"
+            f"- C{c_count}: Câu chốt hạ cạn lời / dí dỏm (sfx='scratch' hoặc 'none')."
+        )
+    elif dur_mode == "fast_30s":
         cmt_guide = (
             "SỐ LƯỢNG BÌNH LUẬN: ĐÚNG 3 BÌNH LUẬN (Thời lượng ngắn 25-30s):\n"
             "- C1: Đồng cảm / reaction hài hước (reply_to username tác giả, sfx='none').\n"
@@ -206,26 +216,30 @@ def generate_story_with_gemini(
         )
     elif dur_mode == "deep_60s":
         cmt_guide = (
-            "SỐ LƯỢNG BÌNH LUẬN: TỪ 4 ĐẾN 5 BÌNH LUẬN (Thời lượng drama 45-60s):\n"
+            "SỐ LƯỢNG BÌNH LUẬN: TỪ 5 ĐẾN 6 BÌNH LUẬN (Thời lượng drama 45-60s):\n"
             "- C1: Reaction mở đầu châm ngòi drama (reply_to tác giả, sfx='none').\n"
             "- C2: Tranh cãi hoặc phản bác gay gắt (reply_to username C1, sfx='none').\n"
             "- C3: Tác giả hoặc người trong cuộc vào bóc thêm chi tiết éo le (sfx='none').\n"
-            "- C4: Cú bẻ lái sốc lần 2 đảo lộn sự thật (sfx='sub_drop').\n"
-            "- C5: Chốt hạ cạn lời / đúc kết dí dỏm (sfx='scratch' hoặc 'none')."
+            "- C4: Bạn bè hoặc người ngoài bắt thóp chi tiết buồn cười (sfx='none').\n"
+            "- C5: Cú bẻ lái sốc lần 2 đảo lộn sự thật (sfx='sub_drop').\n"
+            "- C6: Chốt hạ cạn lời / đúc kết dí dỏm (sfx='scratch' hoặc 'none')."
         )
     elif dur_mode == "viral_story_90s":
         cmt_guide = (
-            "SỐ LƯỢNG BÌNH LUẬN: TỪ 5 ĐẾN 7 BÌNH LUẬN (Thời lượng viral dài 70-90s):\n"
+            "SỐ LƯỢNG BÌNH LUẬN: TỪ 6 ĐẾN 8 BÌNH LUẬN (Thời lượng viral dài 70-90s):\n"
             "- Tạo một chuỗi drama hoàn chỉnh: khẩu chiến nhiều phe, bóc phốt liên hoàn, các cú twist dồn dập khiến người xem không thể rời mắt.\n"
             "- QUY TẮC SFX: Tối đa 2 bình luận có sfx (chỉ gắn ở điểm twist đỉnh cao), các bình luận còn lại để sfx='none'."
         )
     else:  # "auto"
         cmt_guide = (
-            "SỐ LƯỢNG BÌNH LUẬN: TỰ DO TỪ 3 ĐẾN 6 BÌNH LUẬN (Dựa theo độ sâu của chủ đề để tối ưu độ cuốn hút):\n"
-            "- Nếu câu chuyện dí dỏm đơn giản -> 3-4 bình luận.\n"
-            "- Nếu câu chuyện có drama nhiều tầng, khẩu chiến hoặc cú twist kép -> 4-6 bình luận.\n"
-            "- Các bình luận CÓ THỂ reply_to lẫn nhau để tạo cảm giác hội thoại cãi nhau/đối đáp thực tế trên Threads!\n"
-            "- QUY TẮC SFX: 80% bình luận để sfx='none'. Chỉ 1 comment bẻ lái bất ngờ nhất mới gắn sfx='sub_drop' hoặc 'scratch'."
+            "SỐ LƯỢNG BÌNH LUẬN: TỪ 5 ĐẾN 7 BÌNH LUẬN (KHÔNG ĐƯỢC GIỚI HẠN Ở 4 BÌNH LUẬN! Hãy tạo chuỗi hội thoại đa tầng nhiều người đối đáp):\n"
+            "- C1: Reaction mở đầu đồng cảm / ngạc nhiên (reply tác giả).\n"
+            "- C2: Tranh cãi, phản biện hoặc kể thêm trải nghiệm éo le của bản thân (reply C1).\n"
+            "- C3: Bắt thóp chi tiết sơ hở để cà khịa (reply C2 hoặc tác giả).\n"
+            "- C4: Người thứ 4 nhảy vào tiếp lời tạo không khí rôm rả (reply C1 hoặc C3).\n"
+            "- C5: Cú bẻ lái bất ngờ 180° đảo ngược tình huống (sfx='sub_drop').\n"
+            "- C6/C7: Chốt hạ cạn lời, meme đối đáp hài hước.\n"
+            "- QUY TẮC SFX: 80% bình luận để sfx='none'. Chỉ 1-2 comment bẻ lái bất ngờ nhất mới gắn sfx='sub_drop' hoặc 'scratch'."
         )
 
     prompt = (
@@ -244,12 +258,14 @@ def generate_story_with_gemini(
         f"- TUYỆT ĐỐI TRÁNH: Không viết như AI giải thích, không mở đầu sáo rỗng, không kết bài bằng đạo lý rập khuôn.\n\n"
         f"TIÊU CHUẨN KIỂM DUYỆT:\n"
         f"Trước khi trả kết quả, tự hỏi: 'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và truyền cảm không?'\n\n"
-        f"VÍ DỤ TONE THAM KHẢO:\n"
+        f"VÍ DỤ TONE THAM KHẢO (Đầy đủ 6 bình luận đối đáp nhiều tầng):\n"
         f"Bài: 'Chồng tui bảo mua đèn ngủ thông minh cho lãng mạn, giờ đêm trở mình đập muỗi một cái là phòng sáng rực như sân bóng 😭'\n"
         f"- C1: 'Rồi lúc hai vợ chồng cãi nhau cái đèn có chớp tắt báo động không bà? 😂' (reply tác giả)\n"
         f"- C2: 'Nhà tui mua đèn cảm biến giọng nói nè, đêm ổng ngáy một tiếng là nó tự đổi bảy màu lộng lẫy' (reply C1)\n"
         f"- C3: 'Ủa rồi lỡ nói mớ gọi tên nyc thì đèn có hú còi cứu hỏa không?' (reply C2)\n"
-        f"- C4: 'Tính năng tự động hóa hôn nhân phiên bản cảm lạnh dữ dằn 💀' (reply tác giả)\n"
+        f"- C4: 'Cười xỉu, tính năng tự động hóa hôn nhân phiên bản cảm lạnh dữ dằn 💀' (reply C1)\n"
+        f"- C5: 'Review xin nhẹ link shop đi bà, tui mua tặng con bạn thân sắp cưới cho sáng mắt ra' (reply tác giả)\n"
+        f"- C6: 'Ác vừa thôi bà, cưới xong block nhau nghỉ chơi luôn không chừng' (reply C5)\n"
     )
 
     if progress_cb:
@@ -300,15 +316,15 @@ def generate_story_with_gemini(
     author_role = roles.get("author", {})
     female_presets = voice_cfg.get("female_voice_presets", [
         {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "+18%", "pitch": "+4Hz",  "style": "chat"},
+        {"voice": "ava", "rate": "+16%", "pitch": "+4Hz",  "style": "chat"},
         {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+10Hz", "style": "excited"},
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "+12%", "pitch": "+2Hz",  "style": "sad"}
+        {"voice": "emma", "rate": "+14%", "pitch": "+2Hz",  "style": "sad"}
     ])
     male_presets = voice_cfg.get("male_voice_presets", [
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+24%", "pitch": "-2Hz", "style": "angry"},
+        {"voice": "adam", "rate": "+14%", "pitch": "-4Hz", "style": "dramatic"},
         {"voice": "vi-VN-NamMinhNeural", "rate": "+20%", "pitch": "+4Hz",  "style": "cheerful"},
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "chat"},
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+14%", "pitch": "+0Hz",  "style": "sad"}
+        {"voice": "brian", "rate": "+16%", "pitch": "-2Hz",  "style": "chat"},
+        {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "angry"}
     ])
 
     female_keywords = {"linh", "trang", "mai", "be", "hoa", "ngoc", "lan", "anh", "girl", "cute", "thao", "vy", "my", "phuong", "giang", "nhung", "quynh", "huyen", "nga"}
@@ -351,7 +367,7 @@ def generate_story_with_gemini(
             # Câu chốt hạ cuối cùng có khoảng lặng kết
             default_pause_after = max(default_pause_after, 700)
 
-        assigned_voice = role_info.get("voice") or preset.get("voice", "vi-VN-HoaiMyNeural" if is_female else "vi-VN-NamMinhNeural")
+        assigned_voice = c.get("voice_id") or role_info.get("voice") or preset.get("voice", "vi-VN-HoaiMyNeural" if is_female else "vi-VN-NamMinhNeural")
         assigned_rate = role_info.get("rate") or emo_style_cfg.get("rate_boost") or preset.get("rate", "+20%")
         assigned_pitch = role_info.get("pitch") or emo_style_cfg.get("pitch_boost") or preset.get("pitch", "+2Hz")
 
@@ -371,43 +387,44 @@ def generate_story_with_gemini(
             camera_motion=camera_mot
         ))
 
-    # Tự động tải hoặc tạo ảnh minh họa câu chuyện mới hoàn toàn cho mỗi video
+    # Tự động tìm kiếm & tải ảnh THẬT từ web (Bing Images / Web photography) - KHÔNG dùng AI tự sinh méo mó & watermark
     illus_prompt = data.get("illustration_prompt", "")
     illus_path = ""
     if illus_prompt:
         try:
-            import urllib.request
-            import urllib.parse
+            import importlib.util
+            real_img_spec = importlib.util.spec_from_file_location("real_image_search", os.path.join(SRC_DIR, "real_image_search.py"))
+            real_img_mod = importlib.util.module_from_spec(real_img_spec)
+            real_img_spec.loader.exec_module(real_img_mod)
+
             illus_dir = os.path.join(OUT_DIR, "illustrations")
             os.makedirs(illus_dir, exist_ok=True)
-            illus_filename = f"story_{int(time.time())}_{random.randint(100, 999)}.jpg"
+            illus_filename = f"real_web_{int(time.time())}_{random.randint(100, 999)}.jpg"
             target_file = os.path.join(illus_dir, illus_filename)
-            rand_seed = random.randint(1, 999999)
-            clean_prompt = f"hilarious viral comedy meme photo, {illus_prompt}, realistic funny moment, high quality photography, sharp clean lighting, no uncanny clay, no horror"
-            encoded = urllib.parse.quote(clean_prompt)
-            url = f"https://image.pollinations.ai/prompt/{encoded}?width=940&height=620&nologo=true&seed={rand_seed}"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                data_bytes = resp.read()
-                if len(data_bytes) > 1000:
-                    with open(target_file, "wb") as f:
-                        f.write(data_bytes)
-                    illus_path = target_file
-                    print(f"  [✓] Đã tạo thành công ảnh minh họa câu chuyện mới hoàn toàn: {illus_path}")
-        except Exception as e:
-            print(f"  ⚠️ Không tạo được ảnh AI trực tuyến ({e}), tự động chọn meme phản ứng thích hợp.")
 
-    # Fallback tự động chọn meme phản ứng hài hước nếu không có ảnh AI (Zero Crash & Đa dạng 100%)
+            found_img = real_img_mod.search_and_download_real_image(
+                query=illus_prompt,
+                output_path=target_file,
+                target_width=940,
+                target_height=620
+            )
+            if found_img and os.path.exists(found_img):
+                illus_path = found_img
+                print(f"  [✓] Đã tải thành công ảnh thật từ mạng (940x620, không watermark): {illus_path}")
+        except Exception as e:
+            print(f"  ⚠️ Không tải được ảnh thật trực tuyến ({e}), tự động chọn ảnh thật từ kho dự phòng.")
+
+    # Fallback tự động chọn ảnh thật từ kho dự phòng (Zero AI watermark & sắc nét)
     if not illus_path or not os.path.exists(illus_path):
         fallback_pool = [
+            os.path.join(OUT_DIR, "illustrations", "sunglasses_bed.jpg"),
             os.path.join(OUT_DIR, "illustrations", "my_eyes_angle.jpg"),
-            os.path.join(OUT_DIR, "illustrations", "cat_lightmode.jpg"),
-            os.path.join(OUT_DIR, "illustrations", "sunglasses_bed.jpg")
+            os.path.join(OUT_DIR, "illustrations", "cat_lightmode.jpg")
         ]
         valid_fallbacks = [p for p in fallback_pool if os.path.exists(p)]
         if valid_fallbacks:
             illus_path = random.choice(valid_fallbacks)
-            print(f"  [✓] Đã chọn meme phản ứng hài hước từ kho: {os.path.basename(illus_path)}")
+            print(f"  [✓] Đã chọn ảnh chụp thật từ kho dự phòng: {os.path.basename(illus_path)}")
 
     post = Post(
         username=data.get("username", "threads.user"),
@@ -423,7 +440,7 @@ def generate_story_with_gemini(
         illustration_caption=data.get("illustration_caption", ""),
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         hook_energy=data.get("hook_energy", "high"),
-        voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "vi-VN-HoaiMyNeural")),
+        voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "adam")),
         rate_offset=author_role.get("rate", "+18%"),
         pitch_offset=author_role.get("pitch", "+4Hz"),
         pause_before_ms=150,
