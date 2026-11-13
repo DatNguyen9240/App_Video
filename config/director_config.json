@@ -6,7 +6,7 @@
     "fallback_model": "gemini-2.0-flash",
     "temperature": 0.92,
     "duration_mode": "auto",
-    "min_comments": 6,
+    "min_comments": 7,
     "max_comments": 8,
     "default_comment_count": 7,
     "drama_archetypes": [

@@ -982,17 +982,16 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             tracker.start_step("cards", "Đang render bộ thẻ Threads chuẩn (Avatar người thật)...", 25)
             os.makedirs(CARDS_DIR, exist_ok=True)
             post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-            has_proof = getattr(post, "has_visual_proof", None)
-            placement = getattr(post, "visual_proof_placement", "none")
-            enable_illus = getattr(post, "enable_illustration", True)
-            if has_proof is False or placement == "none":
-                enable_illus = False
-
-            post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
+            has_proof = getattr(post, "has_visual_proof", True)
+            placement = getattr(post, "visual_proof_placement", "attached_in_post")
+            if not placement or placement == "none":
+                placement = "attached_in_post"
+            enable_illus = bool(getattr(post, "enable_illustration", True))
+            post_illus = getattr(post, "illustration_path", "")
             illus_cat = getattr(post, "illustration_category", "general_life")
 
-            # Nếu chưa có ảnh và bật tính năng, lấy từ kho ảnh thật theo đúng danh mục ngữ cảnh
-            if enable_illus and (not post_illus or not os.path.exists(post_illus)):
+            # Luôn đảm bảo có ảnh minh họa thật theo đúng danh mục ngữ cảnh
+            if not post_illus or not os.path.exists(post_illus):
                 cat_candidate = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
                 if os.path.exists(cat_candidate):
                     post_illus = cat_candidate
@@ -1003,7 +1002,7 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
 
             # Quyết định ảnh gắn kèm bài đăng (Attached in Post):
             illus_cfg = cfg.get("illustration_settings", {})
-            use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
+            use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", True))
             attached_img_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
             post_img = card_mod.render_post_card(

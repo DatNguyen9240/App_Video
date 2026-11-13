@@ -48,7 +48,9 @@ def clean_hex_color(c: str) -> str:
 class CommentSchema(BaseModel):
     username: str = Field(description="Tên người dùng hài hước tiếng Việt hoặc Gen Z, ví dụ: hr_ngapnguoi, dev_khocnhe, linh.cute03, tuan_it_98")
     reply_to: str = Field(default="", description="Tên username mà bình luận này đang trả lời (có thể là tác giả HOẶC username của bình luận trước để tạo hội thoại cãi nhau/đối đáp)")
-    content: str = Field(description="Bình luận tiếng Việt CỰC KỲ NGẮN GỌN (chỉ 1 câu đắt giá, tối đa 20 từ), sắc sảo, dí dỏm, bẻ lái hoặc châm chọc hài hước")
+    content: str = Field(
+        description="Nội dung bình luận tiếng Việt: DÀI TỪ 18 ĐẾN 28 TỪ (từ 1 đến 2 câu tự nhiên có ngữ cảnh). Người đồng cảm kể thêm tình huống dở khóc dở cười tương tự, người bắt bẻ chi tiết hoặc bóc phốt sâu cay, tuyệt đối KHÔNG viết cộc lốc vài từ!"
+    )
     avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b)")
     likes: int = Field(default=4500, description="Lượt thích ước tính từ 1500 đến 25000")
     sfx: Literal["none", "sub_drop", "scratch", "ting", "boom", "laugh", "bruh", "pop"] = Field(
@@ -67,7 +69,7 @@ class CommentSchema(BaseModel):
 
 class PostSchema(BaseModel):
     username: str = Field(description="Tên tác giả bài viết, ví dụ: genz.tamsu, chuyen.congso, dev_nghiep")
-    content: str = Field(description="Câu chuyện Threads CỰC KỲ NGẮN GỌN (chỉ từ 1 đến 2 câu ngắn, tối đa 30-35 từ). Bắt đầu bằng Hook giật mình tò mò, nêu ngay mâu thuẫn cốt lõi, không dài dòng lan man")
+    content: str = Field(description="Nội dung bài đăng chính của tác giả (Hook mở màn): BẮT BUỘC DÀI TỪ 45 ĐẾN 60 TỪ (khoảng 3 câu văn mềm mại có nhịp điệu). Kể rõ đầu đuôi hoàn cảnh, tình tiết éo le gây tò mò và cảm xúc dở khóc dở cười để dẫn dắt câu chuyện cuốn hút, nói trong 15-18 giây. Tuyệt đối không viết cộc lốc 1-2 câu ngắn!")
     avatar_color: str = Field(default="#8b5cf6", description="Mã màu hex cho avatar tác giả")
     is_verified: bool = Field(default=True, description="True nếu có tích xanh")
     likes: int = Field(default=35000, description="Lượt thích ước tính từ 15000 đến 85000")
@@ -87,12 +89,12 @@ class PostSchema(BaseModel):
         description="Phân loại ngữ cảnh chính xác của câu chuyện"
     )
     has_visual_proof: bool = Field(
-        default=False,
-        description="ĐÁNH GIÁ TỰ NHIÊN: Câu chuyện này có thật sự cần một bức ảnh bằng chứng thực tế để người xem tin và bật cười không? (Ví dụ: chụp ảnh dìm, nấu ăn cháy nồi, mua đồ shopee giao sai hàng, vết trầy xước, hóa đơn đắt đỏ -> true). NẾU là tâm sự tình cảm, chuyện cãi nhau ở công sở, mâu thuẫn gia đình, triết lý hài hước hoặc drama đối đáp thuần lời nói -> BẮT BUỘC để FALSE (khoảng 60% video)! Đừng ép mọi câu chuyện đều có ảnh vì sẽ làm video bị spam dập khuôn!"
+        default=True,
+        description="LUÔN ĐẶT TRUE: Mọi video đều cần có 1 bức ảnh minh họa đời thực chân thật gắn kèm hoặc bung thẻ nổi ở cao trào để tăng tính xác thực và giữ chân người xem."
     )
-    visual_proof_placement: Literal["none", "attached_in_post", "popup_at_twist"] = Field(
-        default="none",
-        description="Vị trí hiển thị ảnh: 'none' (không cần ảnh), 'attached_in_post' (gắn trong thẻ bài viết tác giả như Threads thật), hoặc 'popup_at_twist' (bung thẻ ảnh nổi ở đoạn bẻ lái)"
+    visual_proof_placement: Literal["attached_in_post", "popup_at_twist"] = Field(
+        default="attached_in_post",
+        description="Vị trí hiển thị ảnh: 'attached_in_post' (gắn trực tiếp trong bài tác giả chuẩn Threads) hoặc 'popup_at_twist' (bung thẻ ảnh nổi ở đoạn bẻ lái cao trào)."
     )
     sentence_reveal_mode: Literal["progressive_line_reveal", "standard_full"] = Field(
         default="standard_full",
@@ -127,7 +129,7 @@ class PostSchema(BaseModel):
     emotional_arc: str = Field(default="Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời", description="Tóm tắt đường cong cảm xúc của video")
     hook_energy: Literal["high", "intense", "curious"] = Field(default="high", description="Mức năng lượng mở màn")
     comments: list[CommentSchema] = Field(
-        description="Danh sách từ 3 đến 6 bình luận tiếng Việt tạo thành chuỗi drama/hội thoại cuốn hút, đối đáp qua lại hoặc plot twist liên hoàn"
+        description="BẮT BUỘC TẠO CHÍNH XÁC TỪ 7 ĐẾN 8 BÌNH LUẬN (Tối thiểu 7 bình luận, không bao giờ được dưới 7!). Mỗi bình luận dài 18-28 từ. Đây là yêu cầu sống còn để toàn bộ video đạt độ dài TỐI THIỂU 1 PHÚT (60s - 75s) chuẩn TikTok Creator Rewards."
     )
 
 
@@ -277,21 +279,19 @@ def generate_story_with_gemini(
         f"Hãy tạo 1 kịch bản bài đăng Threads và các bình luận bằng tiếng Việt thật tự nhiên, trau chuốt như người thật đang chia sẻ trải nghiệm với bạn bè.\n"
         f"Chủ đề: '{topic}'\n"
         f"Chế độ kịch bản: {dur_mode}\n\n"
-        f"QUY TẮC CỐT LÕI (PHẢI GIỐNG 100% NGƯỜI THẬT KỂ CHUYỆN - ĐẠT THỜI LƯỢNG ÍT NHẤT 1 PHÚT):\n"
-        f"- BÀI VIẾT CHÍNH: Kể mở đầu một câu chuyện rất đời thực, cuốn hút và có bối cảnh chi tiết (khoảng 35-50 từ, 2-3 câu nhịp điệu mềm mại, nói trong 12-15 giây), khiến người đọc cảm thấy 'sao giống mình vậy' và muốn dừng lại xem hết.\n"
+        f"QUY TẮC CỐT LÕI (PHẢI GIỐNG 100% NGƯỜI THẬT KỂ CHUYỆN - BẮT BUỘC ĐẠT THỜI LƯỢNG ÍT NHẤT 1 PHÚT):\n"
+        f"- BÀI VIẾT CHÍNH CỦA TÁC GIẢ: BẮT BUỘC DÀI TỪ 45 ĐẾN 60 TỪ (khoảng 3 câu văn mềm mại có nhịp điệu, nói trong 15-18 giây). Kể mở đầu một câu chuyện rất đời thực, cuốn hút và có bối cảnh chi tiết, khiến người đọc cảm thấy 'sao giống mình vậy' và muốn dừng lại xem hết.\n"
         f"{cmt_guide}\n"
-        f"- CÁC BÌNH LUẬN: Mỗi bình luận chỉ 1 câu ngắn gọn (12-22 từ), mang góc nhìn chân thật của bạn bè mạng xã hội: người đồng cảm góp thêm tình huống dở khóc dở cười, người bắt thóp chi tiết để cà khịa dí dỏm, người tranh luận phản biện qua lại.\n"
+        f"- CÁC BÌNH LUẬN: BẮT BUỘC TỪ 7 ĐẾN 8 BÌNH LUẬN. Mỗi bình luận PHẢI DÀI TỪ 18 ĐẾN 28 TỪ (từ 1 đến 2 câu đầy đủ ngữ cảnh), mang góc nhìn chân thật của bạn bè mạng xã hội: người đồng cảm góp thêm tình huống dở khóc dở cười, người bắt thóp chi tiết để cà khịa dí dỏm, người tranh luận phản biện qua lại. Tuyệt đối KHÔNG viết bình luận cộc lốc vài từ!\n"
+        f"- HÌNH ẢNH MINH HỌA THỰC TẾ: Mọi câu chuyện đều có 1 bức ảnh chụp thực tế chân thật (đời thường, chụp dìm, thảm họa bếp núc, hóa đơn, bưu phẩm, laptop làm việc...) đính kèm bài viết tác giả ('attached_in_post') hoặc bung thẻ ảnh nổi ở cao trào ('popup_at_twist'). LUÔN để has_visual_proof = true và visual_proof_placement = 'attached_in_post' hoặc 'popup_at_twist'!\n"
         f"- NGÔN NGỮ GENZ TINH TẾ: Dùng từ ngữ tự nhiên của giới trẻ nhưng VỪA ĐỦ, tuyệt đối KHÔNG nhồi nhét tiếng lóng gượng ép, KHÔNG cố tỏ ra hài hước rẻ tiền.\n"
         f"- EMOJI VỪA PHẢI: Tối đa 0-1 emoji mỗi câu khi thật sự cần thiết (tránh spam emoji).\n"
         f"- USERNAME: Tên username tiếng Việt đời thường tự nhiên (ví dụ: 'linh.nguyen99', 'minh.triet01', 'hoang_anh.hr', 'be_meo_ngu_ngay').\n"
         f"- REPLY_TO: Ghi rõ username đang trả lời để tạo sự đối đáp sống động.\n"
-        f"- QUY TẮC ĐỊNH DẠNG TỰ NHIÊN (PHÁ VỠ DẬP KHUÔN, KHÔNG SPAM ẢNH):\n"
-        f"  + Hơn 60% các câu chuyện Threads viral nhất là drama đối đáp chữ thuần túy (tâm sự, cãi nhau, bóc mẽ hài hước). Với các câu chuyện này, BẮT BUỘC để has_visual_proof = false và visual_proof_placement = 'none'!\n"
-        f"  + Chỉ khi câu chuyện trực tiếp nói về một vật thể hoặc bức ảnh thực tế cụ thể (chụp ảnh dìm, nấu ăn cháy, giao sai hàng) mới để has_visual_proof = true và visual_proof_placement = 'popup_at_twist' hoặc 'attached_in_post'.\n"
-        f"  + PHONG CÁCH HIỆN CÂU (SENTENCE REVEAL): Nếu câu chuyện có tính TÒ MÒ, HỒI HỘP, BÍ MẬT, BẺ LÁI BẤT NGỜ hoặc TÂM SỰ SÂU LẮNG/THƠ CA -> BẮT BUỘC chọn sentence_reveal_mode = 'progressive_line_reveal' để từng dòng mở ra theo nhịp đọc. Với chuyện ngắn đơn giản -> chọn 'standard_full'.\n"
-        f"  + KHỚP VIDEO NỀN Ở GIỮA (satisfying_category): Chọn 'food' nếu nói về ăn uống/bếp núc; 'gameplay' nếu là IT/công sở/gay cấn; 'asmr' nếu là tâm sự chia sẻ; 'puzzle' nếu là trinh thám/bóc phốt.\n"
-        f"  + GIAO DIỆN SÁNG/TỐI (recommended_theme): Chọn 'dark' nếu là chuyện đêm muộn/bí mật rình mò/IT trực đêm; 'light' nếu là chuyện ban ngày/cafe/mua sắm.\n"
-        f"  + CÂU HỎI OUTRO VIRAL (cta_question): Nghĩ 1 câu hỏi mở sắc sảo ở 2.4s cuối đánh trúng tim đen để kích thích người xem nhảy vào bình luận.\n"
+        f"- PHONG CÁCH HIỆN CÂU (SENTENCE REVEAL): Nếu câu chuyện có tính TÒ MÒ, HỒI HỘP, BÍ MẬT, BẺ LÁI BẤT NGỜ hoặc TÂM SỰ SÂU LẮNG/THƠ CA -> BẮT BUỘC chọn sentence_reveal_mode = 'progressive_line_reveal' để từng dòng mở ra theo nhịp đọc. Với chuyện ngắn đơn giản -> chọn 'standard_full'.\n"
+        f"- KHỚP VIDEO NỀN Ở GIỮA (satisfying_category): Chọn 'food' nếu nói về ăn uống/bếp núc; 'gameplay' nếu là IT/công sở/gay cấn; 'asmr' nếu là tâm sự chia sẻ; 'puzzle' nếu là trinh thám/bóc phốt.\n"
+        f"- GIAO DIỆN SÁNG/TỐI (recommended_theme): Chọn 'dark' nếu là chuyện đêm muộn/bí mật rình mò/IT trực đêm; 'light' nếu là chuyện ban ngày/cafe/mua sắm.\n"
+        f"- CÂU HỎI OUTRO VIRAL (cta_question): Nghĩ 1 câu hỏi mở sắc sảo ở 2.4s cuối đánh trúng tim đen để kích thích người xem nhảy vào bình luận.\n"
         f"- TUYỆT ĐỐI TRÁNH: Không viết như AI giải thích, không mở đầu sáo rỗng, không kết bài bằng đạo lý rập khuôn.\n\n"
         f"TIÊU CHUẨN KIỂM DUYỆT:\n"
         f"Trước khi trả kết quả, tự hỏi: 'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và truyền cảm không? Thời lượng có đủ dài trên 1 phút không?'\n\n"
@@ -443,19 +443,50 @@ def generate_story_with_gemini(
             camera_motion=camera_mot
         ))
 
-    # Đánh giá tự nhiên: Chỉ tìm kiếm ảnh khi câu chuyện thật sự có bằng chứng thực tế
-    has_proof = bool(data.get("has_visual_proof", False))
-    placement = data.get("visual_proof_placement", "none")
-    if not has_proof:
-        placement = "none"
+    # Đảm bảo video luôn đạt tối thiểu 7 bình luận để dài trên 1 phút (chuẩn TikTok Creator Rewards)
+    if len(comments) < 7:
+        sample_users = ["mai_lan.99", "duy_anh.it", "thuy_tien.ng", "quang_huy.dev", "kim_ngan.art", "tuan_minh.hr"]
+        sample_replies = [
+            f"Đọc xong câu chuyện của @{data.get('username', 'author')} mà tui phải ôm bụng cười, y chang hoàn cảnh tui tuần trước luôn á!",
+            "Tính ra gặp tình huống này thì chỉ có nước cạn lời thôi chứ đỡ sao nổi, cười xỉu với độ lầy lội này luôn đó mọi người 😂",
+            "Ai ngờ cái kết bẻ lái đỉnh cao vậy luôn trời, coi từ đầu tới cuối hồi hộp không rời mắt được giây nào!",
+            "Công nhận đời thực lắm pha éo le hài hước ghê, lưu lại ngay mai mốt gặp còn biết đường mà xử lý khéo nha."
+        ]
+        needed = 7 - len(comments)
+        for extra_idx in range(needed):
+            c_user = sample_users[extra_idx % len(sample_users)]
+            c_text = sample_replies[extra_idx % len(sample_replies)]
+            c_reply_target = comments[-1].username if comments else data.get("username", "author")
+            comments.append(Comment(
+                username=c_user,
+                content=c_text,
+                reply_to=c_reply_target,
+                avatar_color=clean_hex_color("#10b981"),
+                avatar_url=m_avatar_pool[(len(comments)) % len(m_avatar_pool)],
+                likes=random.randint(3000, 18000),
+                sfx="none",
+                emotion="funny",
+                voice_id="minh_quan" if extra_idx % 2 == 0 else "khanh_linh",
+                rate_offset="+18%",
+                pitch_offset="+2Hz",
+                pause_before_ms=200,
+                pause_after_ms=300,
+                camera_motion="none"
+            ))
 
-    illus_prompt = data.get("illustration_prompt", "") if has_proof else ""
-    illus_vn = data.get("illustration_vietnamese_query", "") if has_proof else ""
+    # TỰ ĐỘNG TẢI HOẶC GÁN ẢNH MINH HỌA THẬT CHUẨN NGỮ CẢNH (LUÔN CÓ ẢNH THỰC TẾ)
+    has_proof = True
+    placement = data.get("visual_proof_placement", "attached_in_post")
+    if placement not in ["attached_in_post", "popup_at_twist"]:
+        placement = "attached_in_post"
+
+    illus_prompt = data.get("illustration_prompt", "")
+    illus_vn = data.get("illustration_vietnamese_query", "")
     illus_cat = data.get("illustration_category", "general_life")
     illus_path = ""
 
     candidate_queries = [q for q in [illus_vn, illus_prompt] if q]
-    if has_proof and candidate_queries:
+    if candidate_queries:
         try:
             import importlib.util
             real_img_spec = importlib.util.spec_from_file_location("real_image_search", os.path.join(SRC_DIR, "real_image_search.py"))
@@ -480,6 +511,14 @@ def generate_story_with_gemini(
         except Exception as e:
             print(f"  ⚠️ Lỗi khi tìm ảnh thật trực tuyến ({e})")
 
+    # Nếu tìm kiếm trực tuyến chưa có ảnh, LUÔN dự phòng từ kho ảnh thật có sẵn theo ngữ cảnh
+    if not illus_path or not os.path.exists(illus_path):
+        candidate = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
+        if os.path.exists(candidate):
+            illus_path = candidate
+        else:
+            illus_path = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
+
     post = Post(
         username=data.get("username", "threads.user"),
         content=data.get("content", ""),
@@ -493,8 +532,8 @@ def generate_story_with_gemini(
         illustration_path=illus_path,
         illustration_caption=data.get("illustration_caption", ""),
         illustration_category=illus_cat,
-        enable_illustration=bool(illus_path and has_proof and placement != "none"),
-        has_visual_proof=has_proof,
+        enable_illustration=True,
+        has_visual_proof=True,
         visual_proof_placement=placement,
         sentence_reveal_mode=data.get("sentence_reveal_mode", "standard_full"),
         satisfying_category=data.get("satisfying_category", "gameplay"),
