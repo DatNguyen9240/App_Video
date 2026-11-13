@@ -48,9 +48,11 @@ class Post:
     video_title: str = ""
     video_caption: str = ""
     hashtags: str = ""
-    illustration_prompt: str = ""          # Prompt tiếng Anh ngắn gọn để tạo ảnh minh họa
+    illustration_prompt: str = ""          # Prompt hoặc từ khóa tìm kiếm ảnh minh họa
     illustration_path: str = ""            # Đường dẫn ảnh minh họa đính kèm
     illustration_caption: str = ""         # Câu chú thích ngắn (dưới 10 từ) gắn lên ảnh để hiểu trò đùa
+    illustration_category: str = "general_life"  # Danh mục ngữ cảnh: couple_photo_fail, cafe_lifestyle, food_cooking, office_work, shopping_tech, student_exam, general_life
+    enable_illustration: bool = True       # Bật hoặc tắt ảnh minh họa trong video
     # Metadata đạo diễn cảm xúc
     emotional_arc: str = "curiosity -> tension -> fake_relief -> punchline"
     hook_energy: str = "high"

@@ -76,11 +76,19 @@ class PostSchema(BaseModel):
     hashtags: str = Field(default="", description="Chuỗi 5-7 hashtag viral")
     illustration_prompt: str = Field(
         default="",
-        description="Mô tả hình ảnh bằng tiếng Anh chi tiết (10-15 từ) để AI vẽ ảnh minh họa hài hước chuẩn xác tình huống/trò đùa của bài, ví dụ: 'funny man in bed wearing sunglasses at midnight blinded by bright light funny meme'"
+        description="2-4 từ khóa tìm kiếm ảnh đời thực chân thật bằng tiếng Anh hoặc tiếng Việt khớp 100% với cốt truyện hoặc vật phẩm gây cười trong bài (ví dụ: nếu là chụp ảnh dìm: 'bad angle candid girlfriend photo'; nếu là món ăn cháy: 'burnt fried egg kitchen fail'; nếu là hóa đơn điện: 'high electricity bill shock'; nếu là tai nghe hỏng: 'broken wireless earphone'). TUYỆT ĐỐI KHÔNG tìm kính râm 'sunglasses' trừ phi câu chuyện thật sự nói về kính râm! TUYỆT ĐỐI KHÔNG tìm chó mèo meme chung chung!"
+    )
+    illustration_vietnamese_query: str = Field(
+        default="",
+        description="Từ khóa tiếng Việt đời thường ngắn gọn (2-3 từ) để tìm ảnh minh họa thực tế (ví dụ: 'chụp ảnh bạn gái dìm', 'món ăn cháy khét', 'hóa đơn tiền điện', 'mua hàng trên mạng fail')"
+    )
+    illustration_category: Literal["couple_photo_fail", "cafe_lifestyle", "food_cooking", "office_work", "shopping_tech", "student_exam", "general_life"] = Field(
+        default="general_life",
+        description="Phân loại ngữ cảnh chính xác của câu chuyện"
     )
     illustration_caption: str = Field(
         default="",
-        description="Câu chú thích hài hước tiếng Việt ngắn (dưới 10 từ) gắn lên ảnh minh họa để người xem hiểu ngay trò đùa, ví dụ: 'Đèn ngủ lúc 2h sáng: Sáng như sân Mỹ Đình!'"
+        description="Câu chú thích hài hước tiếng Việt ngắn (dưới 8 từ) làm điểm nhấn cho bức ảnh bằng chứng (ví dụ: 'Thành quả bạn trai chụp', 'Bữa tối định mệnh', 'Hóa đơn tháng này')"
     )
     emotional_arc: str = Field(default="Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời", description="Tóm tắt đường cong cảm xúc của video")
     hook_energy: Literal["high", "intense", "curious"] = Field(default="high", description="Mức năng lượng mở màn")
@@ -209,37 +217,25 @@ def generate_story_with_gemini(
         )
     elif dur_mode == "fast_30s":
         cmt_guide = (
-            "SỐ LƯỢNG BÌNH LUẬN: ĐÚNG 3 BÌNH LUẬN (Thời lượng ngắn 25-30s):\n"
+            "SỐ LƯỢNG BÌNH LUẬN: ĐÚNG 4 BÌNH LUẬN (Thời lượng ngắn 30-40s):\n"
             "- C1: Đồng cảm / reaction hài hước (reply_to username tác giả, sfx='none').\n"
-            "- C2: BẺ LÁI 180° sốc hoặc bóc phốt đau điếng (sfx='sub_drop').\n"
-            "- C3: Chốt hạ cạn lời dí dỏm (sfx='none' hoặc 'scratch')."
+            "- C2: Kể thêm trải nghiệm éo le tương tự (reply C1, sfx='none').\n"
+            "- C3: BẺ LÁI 180° sốc hoặc bóc phốt đau điếng (sfx='sub_drop').\n"
+            "- C4: Chốt hạ cạn lời dí dỏm (sfx='none' hoặc 'scratch')."
         )
-    elif dur_mode == "deep_60s":
+    else:  # "auto", "deep_60s", "viral_story_90s"
         cmt_guide = (
-            "SỐ LƯỢNG BÌNH LUẬN: TỪ 5 ĐẾN 6 BÌNH LUẬN (Thời lượng drama 45-60s):\n"
-            "- C1: Reaction mở đầu châm ngòi drama (reply_to tác giả, sfx='none').\n"
-            "- C2: Tranh cãi hoặc phản bác gay gắt (reply_to username C1, sfx='none').\n"
-            "- C3: Tác giả hoặc người trong cuộc vào bóc thêm chi tiết éo le (sfx='none').\n"
-            "- C4: Bạn bè hoặc người ngoài bắt thóp chi tiết buồn cười (sfx='none').\n"
-            "- C5: Cú bẻ lái sốc lần 2 đảo lộn sự thật (sfx='sub_drop').\n"
-            "- C6: Chốt hạ cạn lời / đúc kết dí dỏm (sfx='scratch' hoặc 'none')."
-        )
-    elif dur_mode == "viral_story_90s":
-        cmt_guide = (
-            "SỐ LƯỢNG BÌNH LUẬN: TỪ 6 ĐẾN 8 BÌNH LUẬN (Thời lượng viral dài 70-90s):\n"
-            "- Tạo một chuỗi drama hoàn chỉnh: khẩu chiến nhiều phe, bóc phốt liên hoàn, các cú twist dồn dập khiến người xem không thể rời mắt.\n"
-            "- QUY TẮC SFX: Tối đa 2 bình luận có sfx (chỉ gắn ở điểm twist đỉnh cao), các bình luận còn lại để sfx='none'."
-        )
-    else:  # "auto"
-        cmt_guide = (
-            "SỐ LƯỢNG BÌNH LUẬN: TỪ 5 ĐẾN 7 BÌNH LUẬN (KHÔNG ĐƯỢC GIỚI HẠN Ở 4 BÌNH LUẬN! Hãy tạo chuỗi hội thoại đa tầng nhiều người đối đáp):\n"
-            "- C1: Reaction mở đầu đồng cảm / ngạc nhiên (reply tác giả).\n"
-            "- C2: Tranh cãi, phản biện hoặc kể thêm trải nghiệm éo le của bản thân (reply C1).\n"
-            "- C3: Bắt thóp chi tiết sơ hở để cà khịa (reply C2 hoặc tác giả).\n"
-            "- C4: Người thứ 4 nhảy vào tiếp lời tạo không khí rôm rả (reply C1 hoặc C3).\n"
-            "- C5: Cú bẻ lái bất ngờ 180° đảo ngược tình huống (sfx='sub_drop').\n"
-            "- C6/C7: Chốt hạ cạn lời, meme đối đáp hài hước.\n"
-            "- QUY TẮC SFX: 80% bình luận để sfx='none'. Chỉ 1-2 comment bẻ lái bất ngờ nhất mới gắn sfx='sub_drop' hoặc 'scratch'."
+            "YÊU CẦU ĐỘ DÀI: VIDEO PHẢI DÀI TỐI THIỂU 1 PHÚT (TỪ 60S ĐẾN 75S - ĐẠT CHUẨN KIẾM TIỀN TIKTOK CREATOR REWARDS PROGRAM)!\n"
+            "SỐ LƯỢNG BÌNH LUẬN: TỪ 7 ĐẾN 8 BÌNH LUẬN (Tạo chuỗi đối đáp nhiều tầng sâu sắc, tuyệt đối không được dưới 6 bình luận):\n"
+            "- C1: Reaction mở đầu đồng cảm / ngạc nhiên (reply tác giả, sfx='none').\n"
+            "- C2: Tranh cãi, phản biện hoặc kể thêm trải nghiệm éo le của bản thân (reply C1, sfx='none').\n"
+            "- C3: Bắt thóp chi tiết sơ hở để cà khịa (reply C2 hoặc tác giả, sfx='none').\n"
+            "- C4: Tác giả hoặc người trong cuộc vào đính chính thêm tình tiết oái oăm (reply C3, sfx='none').\n"
+            "- C5: Người thứ 5 nhảy vào tiếp lời tạo không khí rôm rả (reply C1 hoặc C4, sfx='none').\n"
+            "- C6: Cú BẺ LÁI BẤT NGỜ 180° đảo ngược toàn bộ sự thật (sfx='sub_drop').\n"
+            "- C7: Đúc kết cạn lời / bóc mẽ dí dỏm (sfx='scratch').\n"
+            "- C8 (nếu có): Câu chốt hạ hài hước viral để người xem bật cười thả tim (sfx='none').\n"
+            "- QUY TẮC SFX: 85% bình luận để sfx='none'. Chỉ 1-2 comment bẻ lái bất ngờ nhất mới gắn sfx='sub_drop' hoặc 'scratch'."
         )
 
     prompt = (
@@ -247,25 +243,26 @@ def generate_story_with_gemini(
         f"Hãy tạo 1 kịch bản bài đăng Threads và các bình luận bằng tiếng Việt thật tự nhiên, trau chuốt như người thật đang chia sẻ trải nghiệm với bạn bè.\n"
         f"Chủ đề: '{topic}'\n"
         f"Chế độ kịch bản: {dur_mode}\n\n"
-        f"QUY TẮC CỐT LÕI (PHẢI GIỐNG 100% NGƯỜI THẬT KỂ CHUYỆN):\n"
-        f"- BÀI VIẾT CHÍNH: Ngắn gọn (1-2 câu, tối đa 30-35 từ). Mở đầu bằng một tình huống rất đời, rất cụ thể, câu chữ trau chuốt, nhịp điệu mềm mại, khiến người đọc cảm thấy 'sao giống mình vậy' và muốn dừng lại đọc tiếp.\n"
+        f"QUY TẮC CỐT LÕI (PHẢI GIỐNG 100% NGƯỜI THẬT KỂ CHUYỆN - ĐẠT THỜI LƯỢNG ÍT NHẤT 1 PHÚT):\n"
+        f"- BÀI VIẾT CHÍNH: Kể mở đầu một câu chuyện rất đời thực, cuốn hút và có bối cảnh chi tiết (khoảng 35-50 từ, 2-3 câu nhịp điệu mềm mại, nói trong 12-15 giây), khiến người đọc cảm thấy 'sao giống mình vậy' và muốn dừng lại xem hết.\n"
         f"{cmt_guide}\n"
-        f"- CÁC BÌNH LUẬN: Mỗi bình luận chỉ 1 câu ngắn gọn (dưới 20 từ), mang góc nhìn chân thật của bạn bè mạng xã hội: người đồng cảm góp thêm tình huống dở khóc dở cười, người bắt thóp chi tiết để cà khịa dí dỏm, người tranh luận phản biện qua lại.\n"
+        f"- CÁC BÌNH LUẬN: Mỗi bình luận chỉ 1 câu ngắn gọn (12-22 từ), mang góc nhìn chân thật của bạn bè mạng xã hội: người đồng cảm góp thêm tình huống dở khóc dở cười, người bắt thóp chi tiết để cà khịa dí dỏm, người tranh luận phản biện qua lại.\n"
         f"- NGÔN NGỮ GENZ TINH TẾ: Dùng từ ngữ tự nhiên của giới trẻ nhưng VỪA ĐỦ, tuyệt đối KHÔNG nhồi nhét tiếng lóng gượng ép, KHÔNG cố tỏ ra hài hước rẻ tiền.\n"
         f"- EMOJI VỪA PHẢI: Tối đa 0-1 emoji mỗi câu khi thật sự cần thiết (tránh spam emoji).\n"
         f"- USERNAME: Tên username tiếng Việt đời thường tự nhiên (ví dụ: 'linh.nguyen99', 'minh.triet01', 'hoang_anh.hr', 'be_meo_ngu_ngay').\n"
         f"- REPLY_TO: Ghi rõ username đang trả lời để tạo sự đối đáp sống động.\n"
         f"- TUYỆT ĐỐI TRÁNH: Không viết như AI giải thích, không mở đầu sáo rỗng, không kết bài bằng đạo lý rập khuôn.\n\n"
         f"TIÊU CHUẨN KIỂM DUYỆT:\n"
-        f"Trước khi trả kết quả, tự hỏi: 'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và truyền cảm không?'\n\n"
-        f"VÍ DỤ TONE THAM KHẢO (Đầy đủ 6 bình luận đối đáp nhiều tầng):\n"
-        f"Bài: 'Chồng tui bảo mua đèn ngủ thông minh cho lãng mạn, giờ đêm trở mình đập muỗi một cái là phòng sáng rực như sân bóng 😭'\n"
-        f"- C1: 'Rồi lúc hai vợ chồng cãi nhau cái đèn có chớp tắt báo động không bà? 😂' (reply tác giả)\n"
-        f"- C2: 'Nhà tui mua đèn cảm biến giọng nói nè, đêm ổng ngáy một tiếng là nó tự đổi bảy màu lộng lẫy' (reply C1)\n"
-        f"- C3: 'Ủa rồi lỡ nói mớ gọi tên nyc thì đèn có hú còi cứu hỏa không?' (reply C2)\n"
-        f"- C4: 'Cười xỉu, tính năng tự động hóa hôn nhân phiên bản cảm lạnh dữ dằn 💀' (reply C1)\n"
-        f"- C5: 'Review xin nhẹ link shop đi bà, tui mua tặng con bạn thân sắp cưới cho sáng mắt ra' (reply tác giả)\n"
-        f"- C6: 'Ác vừa thôi bà, cưới xong block nhau nghỉ chơi luôn không chừng' (reply C5)\n"
+        f"Trước khi trả kết quả, tự hỏi: 'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và truyền cảm không? Thời lượng có đủ dài trên 1 phút không?'\n\n"
+        f"VÍ DỤ TONE THAM KHẢO (Đầy đủ 7 bình luận đối đáp liên hoàn, dài trên 1 phút):\n"
+        f"Bài: 'Chồng tui bảo mua đèn ngủ thông minh cảm biến âm thanh cho lãng mạn. Giờ đêm trở mình đập muỗi một cái là phòng sáng rực như sân vận động Mỹ Đình, ổng ngáy một tiếng là đèn tự đổi bảy màu lộng lẫy 😭'\n"
+        f"- C1: 'Rồi lúc hai vợ chồng cãi nhau cái đèn có chớp tắt báo động đỏ như vũ trường không bà? 😂' (reply tác giả)\n"
+        f"- C2: 'Nhà tui mua đèn cảm biến chuyển động nè, đêm mèo chạy qua một cái là sáng trưng tưởng trộm đột nhập' (reply C1)\n"
+        f"- C3: 'Ủa rồi lỡ nói mớ gọi tên nyc thì đèn có hú còi cứu hỏa báo cháy không?' (reply C2)\n"
+        f"- C4: 'Hôm qua ổng lỡ ho một tiếng mà đèn nháy nhạc EDM chớp tắt liên tục làm tui tưởng động đất' (reply C3)\n"
+        f"- C5: 'Cười xỉu, tính năng tự động hóa hôn nhân phiên bản cảm lạnh dữ dằn 💀' (reply tác giả)\n"
+        f"- C6: 'Sáng nay tui phát hiện ổng lén tháo pin giấu vào ngăn kéo rồi, bảo mệt tim quá chịu hết nổi' (reply C5, sfx='sub_drop')\n"
+        f"- C7: 'Đèn thông minh nhưng người mua thì bất lực toàn tập' (reply C6, sfx='scratch')\n"
     )
 
     if progress_cb:
@@ -387,10 +384,14 @@ def generate_story_with_gemini(
             camera_motion=camera_mot
         ))
 
-    # Tự động tìm kiếm & tải ảnh THẬT từ web (Bing Images / Web photography) - KHÔNG dùng AI tự sinh méo mó & watermark
+    # Tự động tìm kiếm & tải ảnh THẬT từ web chuẩn xác theo cốt truyện
     illus_prompt = data.get("illustration_prompt", "")
+    illus_vn = data.get("illustration_vietnamese_query", "")
+    illus_cat = data.get("illustration_category", "general_life")
     illus_path = ""
-    if illus_prompt:
+
+    candidate_queries = [q for q in [illus_vn, illus_prompt] if q]
+    if candidate_queries:
         try:
             import importlib.util
             real_img_spec = importlib.util.spec_from_file_location("real_image_search", os.path.join(SRC_DIR, "real_image_search.py"))
@@ -403,28 +404,17 @@ def generate_story_with_gemini(
             target_file = os.path.join(illus_dir, illus_filename)
 
             found_img = real_img_mod.search_and_download_real_image(
-                query=illus_prompt,
+                queries=candidate_queries,
+                category=illus_cat,
                 output_path=target_file,
                 target_width=940,
                 target_height=620
             )
             if found_img and os.path.exists(found_img):
                 illus_path = found_img
-                print(f"  [✓] Đã tải thành công ảnh thật từ mạng (940x620, không watermark): {illus_path}")
+                print(f"  [✓] Đã tải thành công ảnh thật chuẩn ngữ cảnh (940x620): {illus_path}")
         except Exception as e:
-            print(f"  ⚠️ Không tải được ảnh thật trực tuyến ({e}), tự động chọn ảnh thật từ kho dự phòng.")
-
-    # Fallback tự động chọn ảnh thật từ kho dự phòng (Zero AI watermark & sắc nét)
-    if not illus_path or not os.path.exists(illus_path):
-        fallback_pool = [
-            os.path.join(OUT_DIR, "illustrations", "sunglasses_bed.jpg"),
-            os.path.join(OUT_DIR, "illustrations", "my_eyes_angle.jpg"),
-            os.path.join(OUT_DIR, "illustrations", "cat_lightmode.jpg")
-        ]
-        valid_fallbacks = [p for p in fallback_pool if os.path.exists(p)]
-        if valid_fallbacks:
-            illus_path = random.choice(valid_fallbacks)
-            print(f"  [✓] Đã chọn ảnh chụp thật từ kho dự phòng: {os.path.basename(illus_path)}")
+            print(f"  ⚠️ Lỗi khi tìm ảnh thật trực tuyến ({e})")
 
     post = Post(
         username=data.get("username", "threads.user"),
@@ -438,6 +428,8 @@ def generate_story_with_gemini(
         illustration_prompt=illus_prompt,
         illustration_path=illus_path,
         illustration_caption=data.get("illustration_caption", ""),
+        illustration_category=illus_cat,
+        enable_illustration=bool(illus_path),
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         hook_energy=data.get("hook_energy", "high"),
         voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "adam")),

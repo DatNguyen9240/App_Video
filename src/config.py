@@ -165,7 +165,10 @@ DEFAULT_CONFIG = {
         "progress_bar_height": 6,
         "enable_cinematic_vignette": True,
         "enable_spatial_audio_panning": True,
-        "enable_tension_riser": True
+        "enable_tension_riser": True,
+        "enable_meme_reaction_popups": False,
+        "min_video_duration_s": 60.5,
+        "enforce_min_duration_60s": True
     },
     "illustration_settings": {
         "enable_post_attached_image": False,

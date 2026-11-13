@@ -463,8 +463,9 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                 })
 
             # B. Tại điểm rơi Punchline / Bẻ lái (react_start đến c_end):
-            # TỰ ĐỘNG ĐÈ RA GIỮA MÀN HÌNH VÀ PHÓNG TO NẢY LÒ XO (780px PUNCH-IN BOUNCE)!
-            if meme_file_cand and extra_react_time >= 0.5:
+            # Nếu bật meme reaction popup thì mới chèn ảnh GIF đè ra giữa, mặc định chỉ dùng hiệu ứng âm thanh & camera shake/punch-in để video sang và không rối mắt
+            enable_meme_popups = layout.get("enable_meme_reaction_popups", False)
+            if enable_meme_popups and meme_file_cand and extra_react_time >= 0.5:
                 m_x = "(W-w)/2"
                 m_y = "(H-h)/2" if punchline_center else str(meme_anchor_y)
                 m_w = punchline_sz if punchline_center else sticker_sz
@@ -593,6 +594,18 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         comment_cursor = outro_end
 
     total_duration = comment_cursor + 0.3
+
+    # Đảm bảo video đạt chuẩn tối thiểu 1 phút (>= 60s cho TikTok Creator Rewards)
+    min_required_duration = float(layout.get("min_video_duration_s", 60.5))
+    enforce_min = layout.get("enforce_min_duration_60s", True)
+    if enforce_min and total_duration < min_required_duration:
+        pad_needed = min_required_duration - total_duration
+        print(f"  ⏱️ [CHUẨN VIDEO 1 PHÚT+]: Tự động đệm {pad_needed:.2f}s vào phần outro để video đạt đúng {min_required_duration:.1f}s!")
+        pad_silence = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+        silence_idx += 1
+        tts_mod.generate_silence_mp3(pad_needed, pad_silence)
+        audio_sequence.append(pad_silence)
+        total_duration = min_required_duration
 
     # Outro anchor meme đến hết video (chỉ hiện nếu bật enable_continuous_anchor_meme)
     outro_meme = os.path.join(MEME_DIR, "dancing_cat.gif")
@@ -898,22 +911,24 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             tracker.start_step("cards", "Đang render bộ thẻ Threads chuẩn (Avatar người thật)...", 25)
             os.makedirs(CARDS_DIR, exist_ok=True)
             post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-            post_illus = getattr(post, "illustration_path", "")
-            if not post_illus or not os.path.exists(post_illus):
-                # Kiểm tra kho ảnh minh họa chất lượng cao trong output/illustrations
-                candidate_pool = [
-                    os.path.join(OUT_DIR, "illustrations", "my_eyes_angle.jpg"),
-                    os.path.join(OUT_DIR, "illustrations", "cat_lightmode.jpg"),
-                    os.path.join(OUT_DIR, "illustrations", "sunglasses_bed.jpg")
-                ]
-                valid_cand = [p for p in candidate_pool if os.path.exists(p)]
-                if valid_cand:
-                    post_illus = random.choice(valid_cand)
+            enable_illus = getattr(post, "enable_illustration", True)
+            post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
+            illus_cat = getattr(post, "illustration_category", "general_life")
+
+            # Nếu chưa có ảnh và bật tính năng, lấy từ kho ảnh thật theo đúng danh mục ngữ cảnh
+            if enable_illus and (not post_illus or not os.path.exists(post_illus)):
+                cat_candidate = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
+                if os.path.exists(cat_candidate):
+                    post_illus = cat_candidate
+                else:
+                    gen_candidate = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
+                    if os.path.exists(gen_candidate):
+                        post_illus = gen_candidate
 
             # Tùy chọn gắn ảnh vào câu hỏi bài đăng (có thể có hoặc không):
             illus_cfg = cfg.get("illustration_settings", {})
             use_attached = enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False)
-            attached_img_arg = post_illus if (use_attached and post_illus and os.path.exists(post_illus)) else None
+            attached_img_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
             post_img = card_mod.render_post_card(
                 post.username, post.content, post.avatar_color, post.is_verified, post.likes,
@@ -923,12 +938,16 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             card_mod.save_card(post_img, os.path.join(CARDS_DIR, "post.png"))
 
             # Tạo thẻ ảnh minh họa nổi bên ngoài (Popup Proof Card) nếu được bật
-            if illus_cfg.get("enable_popup_illustration", True) and post_illus and os.path.exists(post_illus):
-                popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
+            popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
+            if enable_illus and illus_cfg.get("enable_popup_illustration", True) and post_illus and os.path.exists(post_illus):
                 badge_lbl = illus_cfg.get("badge_text", "")
                 caption_lbl = getattr(post, "illustration_caption", "")
                 card_mod.create_popup_illustration_card(post_illus, popup_path, badge_text=badge_lbl, caption_text=caption_lbl)
                 tracker.log(f"  📸 Đã tạo khung ảnh minh họa nổi (Popup Proof Card): {popup_path}")
+            else:
+                if os.path.exists(popup_path):
+                    try: os.remove(popup_path)
+                    except OSError: pass
 
             for i, c in enumerate(post.comments, 1):
                 c_avatar = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")

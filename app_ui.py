@@ -71,7 +71,9 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         is_verified = bool(post.get("is_verified", False))
         likes = int(post.get("likes", 0))
         post_avatar = post.get("avatar_url", "") or post.get("avatar_path", "")
-        post_illus = post.get("illustration_path", "")
+        enable_illus = bool(post.get("enable_illustration", True))
+        post_illus = post.get("illustration_path", "") if enable_illus else ""
+        illus_cat = post.get("illustration_category", "general_life")
         comments = post.get("comments", [])
     else:
         username = post.username
@@ -80,16 +82,22 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         is_verified = getattr(post, "is_verified", False)
         likes = getattr(post, "likes", 0)
         post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-        post_illus = getattr(post, "illustration_path", "")
+        enable_illus = bool(getattr(post, "enable_illustration", True))
+        post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
+        illus_cat = getattr(post, "illustration_category", "general_life")
         comments = getattr(post, "comments", [])
 
-    if not post_illus or not os.path.exists(post_illus):
-        sample_illus = os.path.join(OUTPUT_DIR, "illustrations", "test_illus.jpg")
-        if os.path.exists(sample_illus):
-            post_illus = sample_illus
+    if enable_illus and (not post_illus or not os.path.exists(post_illus)):
+        cat_asset = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
+        if os.path.exists(cat_asset):
+            post_illus = cat_asset
+        else:
+            gen_asset = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
+            if os.path.exists(gen_asset):
+                post_illus = gen_asset
 
     use_attached = enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False)
-    attached_arg = post_illus if (use_attached and post_illus and os.path.exists(post_illus)) else None
+    attached_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
     # 1. Thẻ bài đăng chính
     p_img = card_mod.render_post_card(
@@ -100,11 +108,15 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
     card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
 
     # 2. Khung ảnh minh họa nổi bên ngoài (Popup Proof Card)
-    if illus_cfg.get("enable_popup_illustration", True) and post_illus and os.path.exists(post_illus):
-        popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
+    popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
+    if enable_illus and illus_cfg.get("enable_popup_illustration", True) and post_illus and os.path.exists(post_illus):
         badge_lbl = illus_cfg.get("badge_text", "📸 BẰNG CHỨNG THỰC TẾ")
         caption_lbl = (post.get("illustration_caption", "") or post.get("video_title", "")) if isinstance(post, dict) else (getattr(post, "illustration_caption", "") or getattr(post, "video_title", ""))
         card_mod.create_popup_illustration_card(post_illus, popup_path, badge_text=badge_lbl, caption_text=caption_lbl)
+    else:
+        if os.path.exists(popup_path):
+            try: os.remove(popup_path)
+            except OSError: pass
 
     # 3. Các thẻ comment
     for i, c in enumerate(comments, 1):
@@ -272,14 +284,14 @@ HTML_TEMPLATE = """
                   <span>Số lượng câu trả lời / bình luận:</span>
                 </label>
                 <select v-model="commentCountInput" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
-                  <option value="auto">🎲 Tự động tối ưu (5 - 7 câu đối đáp)</option>
-                  <option value="4">💬 Đúng 4 câu bình luận</option>
-                  <option value="5">💬 Đúng 5 câu bình luận</option>
-                  <option value="6">⭐ Đúng 6 câu (Khuyên dùng - Đầy đủ cao trào & twist)</option>
-                  <option value="7">🔥 Đúng 7 câu (Drama khẩu chiến nhiều phe)</option>
-                  <option value="8">🚀 Đúng 8 câu (Đại chiến Threads kịch tính)</option>
+                  <option value="auto">⏱️ Tự động (7 - 8 câu / Chuẩn 1 Phút+ Kiếm Tiền)</option>
+                  <option value="7">⭐ Đúng 7 câu (Chuẩn 1 Phút+ TikTok Creator Rewards)</option>
+                  <option value="8">🚀 Đúng 8 câu (Đại chiến kịch tính 70s+)</option>
+                  <option value="6">💬 Đúng 6 câu (Khoảng 50s - 60s)</option>
+                  <option value="5">💬 Đúng 5 câu</option>
+                  <option value="4">💬 Đúng 4 câu</option>
                 </select>
-                <span class="text-[10px] text-slate-500">Không bị giới hạn 4 câu - Tự do mở rộng đến 8+ câu</span>
+                <span class="text-[10px] text-slate-500">Chuẩn video dài trên 1 phút giúp kiếm tiền TikTok Creator Rewards</span>
               </div>
 
               <div class="space-y-1">
@@ -433,6 +445,82 @@ HTML_TEMPLATE = """
               </button>
               <input v-model="post.avatar_url" type="text" placeholder="Dán link ảnh đại diện hoặc để trống để tự động lấy từ kho người thật"
                 class="flex-1 min-w-[200px] glass-input rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-300">
+            </div>
+          </div>
+
+          <!-- Story Proof & Illustration Cutaway Box -->
+          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
+            <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
+              <span class="text-xs font-bold text-pink-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-camera-retro"></i> ẢNH MINH HỌA BẰNG CHỨNG THỰC TẾ (CUTAWAY PROOF CARD)
+              </span>
+              <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+                <input type="checkbox" v-model="post.enable_illustration" class="rounded bg-slate-800 border-slate-700 text-pink-500 focus:ring-0">
+                <span class="font-semibold text-pink-400">Hiển thị ảnh này trong video</span>
+              </label>
+            </div>
+
+            <div v-if="post.enable_illustration" class="space-y-3">
+              <div class="flex flex-col sm:flex-row gap-4 items-start">
+                <!-- Thumbnail -->
+                <div class="relative w-full sm:w-44 h-28 rounded-lg overflow-hidden border border-slate-700 bg-slate-950 flex-shrink-0 group">
+                  <img v-if="post.illustration_path" :src="getIllustrationThumb(post.illustration_path)"
+                    alt="Proof Illustration" class="w-full h-full object-cover">
+                  <div v-else class="w-full h-full flex flex-col items-center justify-center text-slate-500 text-xs gap-1">
+                    <i class="fa-solid fa-image text-xl text-slate-600"></i>
+                    <span>Chưa có ảnh</span>
+                  </div>
+                </div>
+
+                <!-- Controls -->
+                <div class="flex-1 space-y-2.5 w-full">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label class="text-[11px] font-semibold text-slate-400">Danh mục ngữ cảnh chuẩn:</label>
+                      <select v-model="post.illustration_category" class="w-full glass-input rounded-lg px-2.5 py-1 text-xs bg-slate-800 text-slate-200 mt-1">
+                        <option value="couple_photo_fail">📸 Chụp ảnh bạn gái dìm / sống ảo fail</option>
+                        <option value="cafe_lifestyle">☕ Quán cafe / Thức uống sống ảo</option>
+                        <option value="food_cooking">🍳 Nấu ăn cháy khét / Thảm họa bếp núc</option>
+                        <option value="office_work">💼 Bàn làm việc công sở / Laptop / Tăng ca</option>
+                        <option value="shopping_tech">📦 Kiện hàng bưu phẩm / Mua sắm online</option>
+                        <option value="student_exam">📚 Bài vở / Thi cử / Học sinh</option>
+                        <option value="general_life">🌟 Đời thường chân thật</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label class="text-[11px] font-semibold text-slate-400">Chú thích trên ảnh (dưới 8 từ):</label>
+                      <input v-model="post.illustration_caption" type="text" placeholder="VD: Tác phẩm bạn trai chụp..."
+                        class="w-full glass-input rounded-lg px-2.5 py-1 text-xs text-slate-200 mt-1 font-medium">
+                    </div>
+                  </div>
+
+                  <!-- Search & Upload Bar -->
+                  <div class="flex items-center gap-2 pt-1 flex-wrap">
+                    <div class="relative flex-1 min-w-[200px]">
+                      <input v-model="customImageQuery" @keyup.enter="searchNewIllustration" type="text"
+                        :placeholder="post.illustration_prompt || 'Nhập từ khóa tìm ảnh thật (VD: chụp ảnh dìm, cháy nồi cơm)...'
+                        class="w-full glass-input rounded-lg pl-2.5 pr-8 py-1.5 text-xs text-slate-200">
+                      <i v-if="isSearchingImage" class="fa-solid fa-spinner fa-spin absolute right-2.5 top-2 text-indigo-400 text-xs"></i>
+                    </div>
+
+                    <button @click="searchNewIllustration" :disabled="isSearchingImage"
+                      class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-sm cursor-pointer disabled:opacity-50">
+                      <i class="fa-solid fa-magnifying-glass"></i>
+                      <span>Tìm Ảnh Thật Trên Web</span>
+                    </button>
+
+                    <label class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer">
+                      <i class="fa-solid fa-upload text-pink-400"></i>
+                      <span>Tải Ảnh Từ Máy</span>
+                      <input type="file" accept="image/*" class="hidden" @change="uploadCustomIllustration">
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-else class="text-xs text-slate-500 italic">
+              Đã tắt ảnh minh họa. Video sẽ chỉ tập trung vào câu chuyện chữ và đối đáp của các bình luận.
             </div>
           </div>
 
@@ -1293,14 +1381,28 @@ HTML_TEMPLATE = """
               </div>
 
               <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
-                <label class="text-xs text-slate-400 font-semibold">Meme Đè Ra Giữa Phóng To:</label>
+                <label class="text-xs text-slate-400 font-semibold">Chế độ Meme GIF Đè Màn Hình:</label>
                 <div class="pt-2">
                   <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
-                    <input type="checkbox" v-model="directorConfig.visual_layout.punchline_meme_popup_center" class="rounded bg-slate-800 border-slate-700 text-pink-500">
-                    <span class="font-bold text-pink-300">Đè Ra Giữa Phóng To 780px</span>
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_meme_reaction_popups" class="rounded bg-slate-800 border-slate-700 text-pink-500">
+                    <span :class="directorConfig.visual_layout.enable_meme_reaction_popups ? 'text-pink-300 font-bold' : 'text-slate-400'">
+                      {{ directorConfig.visual_layout.enable_meme_reaction_popups ? 'Bật GIF Meme đè ra giữa' : 'Tắt (Chỉ dùng hiệu ứng chuyển động & SFX)' }}
+                    </span>
                   </label>
                 </div>
-                <span class="text-[10px] text-slate-500">Khi có cú Twist/Reaction, meme nảy đè ra giữa màn hình</span>
+                <span class="text-[10px] text-slate-500">Tắt để video sang trọng, chỉ dùng âm thanh & chuyển động thẻ</span>
+              </div>
+
+              <!-- Chuẩn thời lượng kiếm tiền tối thiểu 1 phút -->
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <label class="text-xs text-slate-400 font-semibold">Đảm Bảo Thời Lượng Trên 1 Phút:</label>
+                <div class="pt-2">
+                  <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enforce_min_duration_60s" class="rounded bg-slate-800 border-slate-700 text-teal-500">
+                    <span class="font-bold text-teal-300">Chuẩn Kiếm Tiền (>= 60 Giây)</span>
+                  </label>
+                </div>
+                <span class="text-[10px] text-slate-500">Đảm bảo video luôn đạt trên 60s để nhận tiền TikTok Creator Rewards</span>
               </div>
 
               <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
@@ -1483,8 +1585,15 @@ HTML_TEMPLATE = """
             avatar_path: '',
             avatar_url: '',
             emotional_arc: '',
+            illustration_prompt: '',
+            illustration_path: '',
+            illustration_caption: '',
+            illustration_category: 'general_life',
+            enable_illustration: true,
             comments: []
           },
+          customImageQuery: '',
+          isSearchingImage: false,
           settings: {
             layout_preset: 'center',
             bg_mode: 'split_gameplay',
@@ -1608,6 +1717,64 @@ HTML_TEMPLATE = """
               this.avatarGallery = data.avatars;
             }
           } catch(e) {}
+        },
+        getIllustrationThumb(path) {
+          if (!path) return '';
+          if (path.startsWith('http://') || path.startsWith('https://')) return path;
+          const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf(String.fromCharCode(92)));
+          const clean = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
+          return '/api/illustration/' + clean + '?t=' + this.cardTimestamp;
+        },
+        async searchNewIllustration() {
+          const q = this.customImageQuery || this.post.illustration_prompt || this.post.illustration_caption || '';
+          if (!q && !this.post.illustration_category) return;
+          this.isSearchingImage = true;
+          try {
+            const res = await fetch('/api/search_illustration', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                queries: q,
+                category: this.post.illustration_category || 'general_life'
+              })
+            });
+            const data = await res.json();
+            if (data.success && data.illustration_path) {
+              this.post.illustration_path = data.illustration_path;
+              this.post.enable_illustration = true;
+              this.cardTimestamp = Date.now();
+              this.refreshCardPreview();
+            } else {
+              alert('Không tìm thấy ảnh trên web cho từ khóa này. Hãy thử từ khóa khác!');
+            }
+          } catch(e) {
+            alert('Lỗi tìm kiếm ảnh: ' + e);
+          } finally {
+            this.isSearchingImage = false;
+          }
+        },
+        async uploadCustomIllustration(e) {
+          const file = e.target.files[0];
+          if (!file) return;
+          const formData = new FormData();
+          formData.append('file', file);
+          try {
+            const res = await fetch('/api/upload_illustration', {
+              method: 'POST',
+              body: formData
+            });
+            const data = await res.json();
+            if (data.success && data.illustration_path) {
+              this.post.illustration_path = data.illustration_path;
+              this.post.enable_illustration = true;
+              this.cardTimestamp = Date.now();
+              this.refreshCardPreview();
+            } else {
+              alert('Lỗi tải ảnh: ' + (data.error || 'Thử lại'));
+            }
+          } catch(e) {
+            alert('Lỗi tải ảnh: ' + e);
+          }
         },
         openAvatarModal(targetType, commentIndex = 0) {
           this.avatarTarget = { type: targetType, index: commentIndex };
@@ -1999,6 +2166,11 @@ def api_generate_script():
                 "avatar_path": getattr(post, "avatar_path", ""),
                 "avatar_url": getattr(post, "avatar_url", ""),
                 "voice_id": getattr(post, "voice_id", "adam"),
+                "illustration_prompt": getattr(post, "illustration_prompt", ""),
+                "illustration_path": getattr(post, "illustration_path", ""),
+                "illustration_caption": getattr(post, "illustration_caption", ""),
+                "illustration_category": getattr(post, "illustration_category", "general_life"),
+                "enable_illustration": getattr(post, "enable_illustration", True),
                 "emotional_arc": getattr(post, "emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
                 "comments": [
                     {
@@ -2196,6 +2368,76 @@ def get_meme_image(filename):
     return send_from_directory(MEMES_DIR, filename)
 
 
+@app.route("/api/illustration/<filename>")
+def get_illustration_file(filename):
+    out_path = os.path.join(OUTPUT_DIR, "illustrations", filename)
+    if os.path.exists(out_path):
+        return send_from_directory(os.path.join(OUTPUT_DIR, "illustrations"), filename)
+    asset_path = os.path.join(BASE_DIR, "assets", "illustrations", filename)
+    if os.path.exists(asset_path):
+        return send_from_directory(os.path.join(BASE_DIR, "assets", "illustrations"), filename)
+    return "Not Found", 404
+
+
+@app.route("/api/search_illustration", methods=["POST"])
+def api_search_illustration():
+    data = request.json or {}
+    queries = data.get("queries") or data.get("query") or ""
+    category = data.get("category", "general_life")
+    if isinstance(queries, str):
+        queries = [q.strip() for q in queries.split(",") if q.strip()]
+    try:
+        real_img_mod = load_mod("real_image_search", "real_image_search.py")
+        illus_dir = os.path.join(OUTPUT_DIR, "illustrations")
+        os.makedirs(illus_dir, exist_ok=True)
+        filename = f"manual_{int(time.time())}_{random.randint(100, 999)}.jpg"
+        target_path = os.path.join(illus_dir, filename)
+        res_path = real_img_mod.search_and_download_real_image(
+            queries=queries,
+            category=category,
+            output_path=target_path,
+            target_width=940,
+            target_height=620
+        )
+        if res_path and os.path.exists(res_path):
+            return jsonify({
+                "success": True,
+                "illustration_path": res_path,
+                "filename": os.path.basename(res_path),
+                "preview_url": f"/api/illustration/{os.path.basename(res_path)}?t={int(time.time())}"
+            })
+        return jsonify({"success": False, "error": "Không tìm thấy ảnh phù hợp"}), 404
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/upload_illustration", methods=["POST"])
+def api_upload_illustration():
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "Chưa chọn file"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"success": False, "error": "File trống"}), 400
+    try:
+        from PIL import Image, ImageOps
+        illus_dir = os.path.join(OUTPUT_DIR, "illustrations")
+        os.makedirs(illus_dir, exist_ok=True)
+        filename = f"upload_{int(time.time())}.jpg"
+        target_path = os.path.join(illus_dir, filename)
+        with Image.open(file.stream) as im:
+            im = im.convert("RGB")
+            fit_im = ImageOps.fit(im, (940, 620), method=Image.Resampling.LANCZOS)
+            fit_im.save(target_path, "JPEG", quality=92)
+        return jsonify({
+            "success": True,
+            "illustration_path": target_path,
+            "filename": filename,
+            "preview_url": f"/api/illustration/{filename}?t={int(time.time())}"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/avatar_file/<filename>")
 def get_avatar_file(filename):
     return send_from_directory(AVATARS_DIR, filename)
@@ -2283,6 +2525,11 @@ def api_render_video():
             voice_id=post_voice,
             rate_offset=post_rate,
             pitch_offset=author_role.get("pitch", "+4Hz"),
+            illustration_prompt=p_data.get("illustration_prompt", ""),
+            illustration_path=p_data.get("illustration_path", ""),
+            illustration_caption=p_data.get("illustration_caption", ""),
+            illustration_category=p_data.get("illustration_category", "general_life"),
+            enable_illustration=bool(p_data.get("enable_illustration", True)),
             emotional_arc=p_data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
             comments=comments
         )
