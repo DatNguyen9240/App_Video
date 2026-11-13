@@ -434,7 +434,8 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
                      is_verified: bool = False, likes: int = 0,
                      time_str: str = "12 giờ", theme: str = None,
                      avatar_source: str = None,
-                     attached_image_path: str = None) -> Image.Image:
+                     attached_image_path: str = None,
+                     fixed_card_h: int = None) -> Image.Image:
     t_name = theme or get_card_theme()
     t = THEMES.get(t_name, THEMES["light"])
 
@@ -469,7 +470,7 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
         except Exception as e:
             print(f"  ⚠️ Lỗi xử lý ảnh minh họa đính kèm: {e}")
 
-    card_h = PAD + AVATAR_SIZE + 22 + text_h + att_h + 26 + ICON_SIZE + PAD
+    card_h = fixed_card_h if fixed_card_h else (PAD + AVATAR_SIZE + 22 + text_h + att_h + 26 + ICON_SIZE + PAD)
     card_h = max(card_h, 240)
 
     img = Image.new("RGBA", (CARD_W, card_h), (0, 0, 0, 0))
@@ -525,7 +526,10 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
         current_bottom_y = img_paste_y + att_resized.height
 
     # 7. Action Bar: CĂN THẲNG TRỤC NGANG 100% GIỮA ICON VÀ SỐ LIỆU
-    action_center_y = current_bottom_y + 20 + ICON_SIZE // 2
+    if fixed_card_h:
+        action_center_y = card_h - PAD - ICON_SIZE // 2 - SHADOW_OFFSET
+    else:
+        action_center_y = current_bottom_y + 20 + ICON_SIZE // 2
 
     likes_val = likes if likes > 0 else random.randint(12000, 35000)
     comments_cnt = max(18, likes_val // 55)

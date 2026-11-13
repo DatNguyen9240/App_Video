@@ -13,6 +13,7 @@ import sys
 import json
 import random
 import re
+import time
 from typing import Optional, Callable
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -134,7 +135,7 @@ def call_gemini_with_resilience(
 
 
 def build_emergency_story(topic: str) -> dict:
-    """Tạo kịch bản chất lượng cao dự phòng nếu máy chủ AI gặp sự cố 503 kéo dài."""
+    """Tạo kịch bản chất lượng cao dự phòng chuẩn trên 1 phút (7 bình luận + ảnh + SFX meme)."""
     return {
         "username": "huyen.nguyen98",
         "gender": "female",
@@ -144,14 +145,23 @@ def build_emergency_story(topic: str) -> dict:
         "video_title": f"Chuyện {topic} dở khóc dở cười",
         "video_caption": f"Có ai từng gặp tình huống này chưa mọi người? 😂",
         "hashtags": "#threads #xuhuong #drama #fyp",
+        "illustration_prompt": f"candid real scene {topic}",
+        "illustration_vietnamese_query": topic[:30],
+        "illustration_category": "office_work" if any(k in topic.lower() for k in ["sếp", "công sở", "lương", "việc"]) else "general_life",
+        "illustration_caption": f"Bằng chứng câu chuyện {topic[:25]}",
+        "cta_question": f"Nếu rơi vào tình huống như câu chuyện về {topic[:20]}, bạn sẽ xử lý thế nào?",
+        "satisfying_category": "gameplay" if any(k in topic.lower() for k in ["sếp", "công sở", "it", "drama"]) else "puzzle",
+        "recommended_theme": "dark" if any(k in topic.lower() for k in ["đêm", "tối", "ot", "bí mật"]) else "light",
+        "sentence_reveal_mode": "progressive_line_reveal",
         "emotional_arc": "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời",
         "comments": [
             {
                 "username": "tuan_anh.dev",
                 "gender": "male",
+                "reply_to": "huyen.nguyen98",
                 "content": "Đọc khúc đầu còn thấy tội, đọc tới khúc sau thì cười rớt hàm luôn chị ơi =))",
                 "likes": random.randint(4000, 12000),
-                "sfx": "laugh",
+                "sfx": "none",
                 "emotion": "funny",
                 "pause_before_ms": 250,
                 "pause_after_ms": 350
@@ -159,22 +169,68 @@ def build_emergency_story(topic: str) -> dict:
             {
                 "username": "minh_thao.hr",
                 "gender": "female",
-                "content": "Ủa alo rồi cái kết bẻ lái gắt vậy ai đỡ cho kịp trời? Quá sốc luôn á!",
+                "reply_to": "tuan_anh.dev",
+                "content": "Bữa bên phòng tui cũng có vụ tương tự, sếp nghe xong lắc đầu ngao ngán không nói nên lời luôn á",
                 "likes": random.randint(5000, 16000),
-                "sfx": "boom",
-                "emotion": "shocked",
-                "pause_before_ms": 300,
-                "pause_after_ms": 450
+                "sfx": "none",
+                "emotion": "funny",
+                "pause_before_ms": 280,
+                "pause_after_ms": 350
             },
             {
                 "username": "quang_huy",
                 "gender": "male",
-                "content": "Tôi cạn lời luôn, đúng là trên Threads chuyện gì cũng có thể xảy ra được 💀",
-                "likes": random.randint(2000, 8000),
-                "sfx": "bruh",
+                "reply_to": "minh_thao.hr",
+                "content": "Ủa rồi rồi ai dọn bãi chiến trường đó vậy bà? Đừng bảo là người kể chuyện nha?",
+                "likes": random.randint(3000, 10000),
+                "sfx": "huh",
                 "emotion": "awkward",
                 "pause_before_ms": 300,
                 "pause_after_ms": 400
+            },
+            {
+                "username": "huyen.nguyen98",
+                "gender": "female",
+                "reply_to": "quang_huy",
+                "content": "Chính xác luôn bạn ơi, vừa mất tiền vừa phải ở lại dọn tới 8 giờ tối mới được về!",
+                "likes": random.randint(6000, 22000),
+                "sfx": "none",
+                "emotion": "awkward",
+                "pause_before_ms": 260,
+                "pause_after_ms": 350
+            },
+            {
+                "username": "hoang_nam_99",
+                "gender": "male",
+                "reply_to": "huyen.nguyen98",
+                "content": "Hahaha cái kết xứng đáng đi vào lịch sử những pha tự hủy đỉnh cao nhất năm 😂",
+                "likes": random.randint(4500, 15000),
+                "sfx": "laugh",
+                "emotion": "funny",
+                "pause_before_ms": 280,
+                "pause_after_ms": 400
+            },
+            {
+                "username": "lan_anh_kool",
+                "gender": "female",
+                "reply_to": "hoang_nam_99",
+                "content": "Chưa hết đâu, nghe bảo hôm sau còn bị sếp nhắc nhở trong buổi họp tổng kết tuần nữa kìa!",
+                "likes": random.randint(7000, 25000),
+                "sfx": "boom",
+                "emotion": "shocked",
+                "pause_before_ms": 320,
+                "pause_after_ms": 500
+            },
+            {
+                "username": "duc_it_pro",
+                "gender": "male",
+                "reply_to": "lan_anh_kool",
+                "content": "Tôi cạn lời toàn tập, đúng là trên đời chuyện quái gì cũng có thể xảy ra được 💀",
+                "likes": random.randint(5500, 18000),
+                "sfx": "bruh",
+                "emotion": "awkward",
+                "pause_before_ms": 300,
+                "pause_after_ms": 550
             }
         ]
     }
@@ -232,7 +288,7 @@ def get_daily_trending_topics(force_refresh: bool = False, api_key: str = None) 
         from google.genai import types
 
         client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
-        model_name = cfg.get("ai_director", {}).get("model", "gemini-3.5-flash")
+        model_name = cfg.get("ai_director", {}).get("model", "gemini-2.5-flash")
 
         prompt = f"""
 Hôm nay là ngày {today_display}. Hãy quét và chọn lọc 7 đến 8 chủ đề, drama, câu chuyện công sở, tình cảm, hài hước hoặc trào lưu đang được thảo luận và bàn tán sôi nổi nhất trên mạng xã hội Threads (threads.net) tại Việt Nam hôm nay.
@@ -255,7 +311,7 @@ Ví dụ:
                 temperature=0.85
             ),
             primary_model=model_name,
-            fallback_models=("gemini-3.5-flash-lite",)
+            fallback_models=("gemini-2.0-flash", "gemini-1.5-flash")
         )
         parsed = json.loads(response.text)
         if isinstance(parsed, list) and len(parsed) >= 3:
@@ -440,12 +496,12 @@ Hãy đóng vai Người viết và săn tin thịnh hành trên Threads (thread
 Tìm kiếm hoặc tái hiện 1 BÀI VIẾT THẬT ĐANG CỰC KỲ TRENDING VÀ VIRAL NHẤT trên Threads về chủ đề: '{topic}'.
 Giọng văn phải tự nhiên như một người thật đang chia sẻ trải nghiệm đời thường cho bạn bè thân thiết nghe.
 
-Quy tắc bắt buộc:
+YÊU CẦU ĐẶC BIỆT ĐẠT CHUẨN VIDEO DÀI TRÊN 1 PHÚT (60s-75s):
 1. Tác giả: Tên username tiếng Việt đời thường của người thật (ví dụ: mai_anh.hr, tuananh.dev, linh.nguyen99, congso.confession).
-2. Nội dung bài viết: CỰC KỲ NGẮN GỌN (1 đến 2 câu ngắn, tối đa 30-35 từ), mở đầu bằng tình huống rất đời, trau chuốt, nhịp điệu mềm mại, thu hút người đọc trong 3 giây đầu.
-3. Bình luận 1: Rất ngắn (1 câu, dưới 20 từ), chia sẻ đồng cảm hoặc góp thêm chi tiết dở khóc dở cười (reply_to = username tác giả).
-4. Bình luận 2: Rất ngắn (1 câu, dưới 20 từ), cú bẻ lái tinh tế (punchline) hoặc cà khịa dí dỏm (sfx: 'boom'). Có thể trả lời tác giả hoặc bình luận 1.
-5. Bình luận 3: Rất ngắn (1 câu, dưới 18 từ), góc nhìn chốt hạ dí dỏm hoặc cạn lời (sfx: 'bruh' hoặc 'laugh').
+2. Nội dung bài viết: Dài từ 35 đến 50 từ (2-3 câu nhịp điệu mềm mại, nói trong 12-15 giây), mở đầu bằng tình huống rất đời thực, cuốn hút, giật mình tò mò.
+3. SỐ LƯỢNG BÌNH LUẬN: BẮT BUỘC ĐỦ TỪ 7 ĐẾN 8 BÌNH LUẬN (từ C1 đến C7/C8). Mỗi bình luận từ 14-22 từ đối đáp liên hoàn, có tranh cãi, bóc phốt, bẻ lái 180° để tổng thời lượng video nói đủ trên 1 phút!
+4. HIỆU ỨNG MEME SFX: Bắt buộc gắn meme SFX ('laugh', 'boom', 'bruh', 'shock', 'huh', 'clown') cho 2-3 bình luận đắt giá nhất để video kích hoạt Meme GIF popup đè ra màn hình cực kỳ sinh động! Các comment khác để 'none'.
+5. HÌNH ẢNH MINH HỌA: Cung cấp illustration_vietnamese_query (2-4 từ tiếng Việt) và illustration_prompt (2-4 từ tiếng Anh) mô tả chính xác vật phẩm hoặc tình huống trong bài.
 6. Ngôn ngữ: Dùng tiếng Việt Gen Z đời thường tinh tế, không gượng ép nhồi nhét từ lóng, dùng emoji có chừng mực (0-1 emoji/câu), tuyệt đối không để lộ văn phong AI giải thích.
 7. Trường reply_to: Bắt buộc ghi rõ username mà bình luận đó đang trực tiếp trả lời.
 8. Giới tính nhân vật (gender): Chỉ định rõ 'male' hoặc 'female' cho tác giả và từng bình luận để hệ thống ghép đúng avatar người thật!
@@ -460,7 +516,7 @@ Quy tắc bắt buộc:
         gender: ai_base.Literal["male", "female"]
         content: str
         likes: int = 4500
-        sfx: ai_base.Literal["laugh", "boom", "bruh", "shock", "huh", "side_eye", "clown", "math", "applause", "ting", "none"] = "laugh"
+        sfx: ai_base.Literal["laugh", "boom", "bruh", "shock", "huh", "side_eye", "clown", "math", "applause", "ting", "none"] = "none"
         emotion: ai_base.Literal["funny", "shocked", "awkward", "sarcastic", "insightful"] = "funny"
         pause_before_ms: int = 250
         pause_after_ms: int = 350
@@ -475,6 +531,14 @@ Quy tắc bắt buộc:
         video_title: str = ""
         video_caption: str = ""
         hashtags: str = ""
+        illustration_prompt: str = ""
+        illustration_vietnamese_query: str = ""
+        illustration_category: ai_base.Literal["couple_photo_fail", "cafe_lifestyle", "food_cooking", "office_work", "shopping_tech", "student_exam", "general_life"] = "general_life"
+        illustration_caption: str = ""
+        cta_question: str = ""
+        satisfying_category: ai_base.Literal["food", "gameplay", "asmr", "puzzle", "hypnotic", "kinetic_sand"] = "gameplay"
+        recommended_theme: ai_base.Literal["light", "dark"] = "light"
+        sentence_reveal_mode: ai_base.Literal["progressive_line_reveal", "standard_full"] = "progressive_line_reveal"
         emotional_arc: str = "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"
         comments: list[TrendingCommentSchema]
 
@@ -483,13 +547,13 @@ Quy tắc bắt buộc:
             client=client,
             contents=prompt_radar,
             config=types.GenerateContentConfig(
-                system_instruction="Bạn là chuyên gia phân tích bài đăng viral trên Threads tại Việt Nam.",
+                system_instruction="Bạn là chuyên gia phân tích bài đăng viral trên Threads tại Việt Nam (Thời lượng video chuẩn trên 1 phút, 7-8 bình luận đối đáp).",
                 response_mime_type="application/json",
                 response_schema=TrendingPostSchema,
                 temperature=0.9,
             ),
-            primary_model=cfg.get("ai_director", {}).get("model", "gemini-3.5-flash"),
-            fallback_models=("gemini-3.5-flash-lite",),
+            primary_model=cfg.get("ai_director", {}).get("model", "gemini-2.5-flash"),
+            fallback_models=("gemini-2.0-flash", "gemini-1.5-flash"),
             max_retries=3,
             progress_cb=progress_cb
         )
@@ -526,8 +590,8 @@ Quy tắc bắt buộc:
         role_info = roles.get(f"commenter_{idx}", {})
         c_voice = role_info.get("voice", "vi-VN-HoaiMyNeural" if c_gender == "female" else "vi-VN-NamMinhNeural")
 
-        sfx_val = c.get("sfx", "laugh")
-        cam_motion = "shake" if sfx_val == "boom" else ("punch_in" if sfx_val in ["laugh", "bruh"] else "none")
+        sfx_val = c.get("sfx", "none")
+        cam_motion = "shake" if sfx_val in ["boom", "shock"] else ("punch_in" if sfx_val in ["laugh", "bruh"] else "none")
 
         comments.append(Comment(
             username=c.get("username", f"user_{idx}"),
@@ -546,6 +610,48 @@ Quy tắc bắt buộc:
             camera_motion=cam_motion
         ))
 
+    # 3. Tải hoặc gán ảnh minh họa thật cho câu chuyện
+    illus_cat = data.get("illustration_category", "general_life")
+    illus_prompt = data.get("illustration_prompt", "") or topic
+    illus_vn = data.get("illustration_vietnamese_query", "") or topic
+    illus_path = ""
+
+    candidate_queries = [q for q in [illus_vn, illus_prompt] if q]
+    if candidate_queries:
+        try:
+            import importlib.util
+            real_img_spec = importlib.util.spec_from_file_location("real_image_search", os.path.join(SRC_DIR, "real_image_search.py"))
+            real_img_mod = importlib.util.module_from_spec(real_img_spec)
+            real_img_spec.loader.exec_module(real_img_mod)
+
+            illus_dir = os.path.join(OUT_DIR, "illustrations")
+            os.makedirs(illus_dir, exist_ok=True)
+            illus_filename = f"real_web_{int(time.time())}_{random.randint(100, 999)}.jpg"
+            target_file = os.path.join(illus_dir, illus_filename)
+
+            found_img = real_img_mod.search_and_download_real_image(
+                queries=candidate_queries,
+                category=illus_cat,
+                output_path=target_file,
+                target_width=940,
+                target_height=620
+            )
+            if found_img and os.path.exists(found_img):
+                illus_path = found_img
+        except Exception as e:
+            print(f"  ⚠️ Lỗi khi tìm ảnh thật trực tuyến ({e})")
+
+    if not illus_path or not os.path.exists(illus_path):
+        cat_file = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
+        if os.path.exists(cat_file):
+            illus_path = cat_file
+        else:
+            gen_file = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
+            if os.path.exists(gen_file):
+                illus_path = gen_file
+
+    enable_illus = bool(illus_path and os.path.exists(illus_path))
+
     post = Post(
         username=data.get("username", "threads.trending"),
         content=data.get("content", ""),
@@ -556,6 +662,19 @@ Quy tắc bắt buộc:
         video_title=data.get("video_title", ""),
         video_caption=data.get("video_caption", ""),
         hashtags=data.get("hashtags", "#threads #trending #xuhuong #chuyencongso"),
+        illustration_prompt=illus_prompt,
+        illustration_path=illus_path,
+        illustration_caption=data.get("illustration_caption", "") or f"Bằng chứng thực tế: {topic[:25]}",
+        illustration_category=illus_cat,
+        enable_illustration=enable_illus,
+        has_visual_proof=True,
+        visual_proof_placement="popup_at_twist",
+        sentence_reveal_mode=data.get("sentence_reveal_mode", "progressive_line_reveal"),
+        satisfying_category=data.get("satisfying_category", "gameplay"),
+        recommended_theme=data.get("recommended_theme", "light"),
+        story_context_type="office_workplace" if any(k in topic.lower() for k in ["sếp", "công sở", "lương", "việc"]) else "general_social",
+        cta_question=data.get("cta_question", "") or f"Nếu là bạn trong tình huống này, bạn sẽ giải quyết ra sao?",
+        pacing_tempo="normal",
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         voice_id=post_voice,
         rate_offset=author_role.get("rate", "+18%"),

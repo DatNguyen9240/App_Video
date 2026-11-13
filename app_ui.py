@@ -77,12 +77,12 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         is_verified = bool(post.get("is_verified", False))
         likes = int(post.get("likes", 0))
         post_avatar = post.get("avatar_url", "") or post.get("avatar_path", "")
-        has_proof = post.get("has_visual_proof", True)
-        placement = post.get("visual_proof_placement", "attached_in_post")
-        if not placement or placement == "none":
-            placement = "attached_in_post"
+        has_proof = post.get("has_visual_proof", None)
+        placement = post.get("visual_proof_placement", "none")
         enable_illus = bool(post.get("enable_illustration", True))
-        post_illus = post.get("illustration_path", "")
+        if has_proof is False or placement == "none":
+            enable_illus = False
+        post_illus = post.get("illustration_path", "") if enable_illus else ""
         illus_cat = post.get("illustration_category", "general_life")
         comments = post.get("comments", [])
     else:
@@ -92,16 +92,16 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         is_verified = getattr(post, "is_verified", False)
         likes = getattr(post, "likes", 0)
         post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-        has_proof = getattr(post, "has_visual_proof", True)
-        placement = getattr(post, "visual_proof_placement", "attached_in_post")
-        if not placement or placement == "none":
-            placement = "attached_in_post"
+        has_proof = getattr(post, "has_visual_proof", None)
+        placement = getattr(post, "visual_proof_placement", "none")
         enable_illus = bool(getattr(post, "enable_illustration", True))
-        post_illus = getattr(post, "illustration_path", "")
+        if has_proof is False or placement == "none":
+            enable_illus = False
+        post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
         illus_cat = getattr(post, "illustration_category", "general_life")
         comments = getattr(post, "comments", [])
 
-    if not post_illus or not os.path.exists(post_illus):
+    if enable_illus and (not post_illus or not os.path.exists(post_illus)):
         cat_asset = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
         if os.path.exists(cat_asset):
             post_illus = cat_asset
@@ -110,7 +110,7 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
             if os.path.exists(gen_asset):
                 post_illus = gen_asset
 
-    use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", True))
+    use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
     attached_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
     # 1. Thẻ bài đăng chính
@@ -131,7 +131,8 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
             step_img = card_mod.render_post_card(
                 username, sub_content, avatar_color, is_verified, likes,
                 theme=theme, avatar_source=post_avatar,
-                attached_image_path=None
+                attached_image_path=attached_arg,
+                fixed_card_h=p_img.height
             )
             card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
 
@@ -1698,15 +1699,15 @@ HTML_TEMPLATE = """
             illustration_path: '',
             illustration_caption: '',
             illustration_category: 'general_life',
-            has_visual_proof: true,
-            visual_proof_placement: 'attached_in_post',
+            has_visual_proof: false,
+            visual_proof_placement: 'none',
             sentence_reveal_mode: 'standard_full',
             satisfying_category: 'auto',
             recommended_theme: 'light',
             story_context_type: 'general_social',
             cta_question: '',
             pacing_tempo: 'normal',
-            enable_illustration: true,
+            enable_illustration: false,
             comments: []
           },
           customImageQuery: '',
