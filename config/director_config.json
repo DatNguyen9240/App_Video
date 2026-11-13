@@ -2,8 +2,8 @@
   "project_name": "Threads Video Automation Studio",
   "version": "2.0.0",
   "ai_director": {
-    "model": "gemini-3.5-flash",
-    "fallback_model": "gemini-3.5-flash-lite",
+    "model": "gemini-2.5-flash",
+    "fallback_model": "gemini-2.0-flash",
     "temperature": 0.92,
     "duration_mode": "auto",
     "min_comments": 6,

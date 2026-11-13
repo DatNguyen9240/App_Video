@@ -15,6 +15,8 @@ import sys
 import json
 import glob
 import random
+import re
+import time
 import threading
 import subprocess
 import webbrowser
@@ -63,6 +65,10 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
     os.makedirs(CARDS_DIR, exist_ok=True)
     cfg = config_mod.load_config()
     illus_cfg = cfg.get("illustration_settings", {})
+
+    if theme == "auto" or not theme:
+        rec_theme = post.get("recommended_theme", "light") if isinstance(post, dict) else getattr(post, "recommended_theme", "light")
+        theme = rec_theme or "light"
 
     if isinstance(post, dict):
         username = post.get("username", "author")
@@ -115,6 +121,20 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
     )
     card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
 
+    # Render các thẻ bước nếu bật sentence reveal
+    reveal_mode = post.get("sentence_reveal_mode", "standard_full") if isinstance(post, dict) else getattr(post, "sentence_reveal_mode", "standard_full")
+    raw_sentences = re.split(r"(?<=[.!?\n])\s+", content.strip())
+    sentences = [s.strip() for s in raw_sentences if s.strip()]
+    if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
+        for step_idx in range(1, len(sentences)):
+            sub_content = " ".join(sentences[:step_idx])
+            step_img = card_mod.render_post_card(
+                username, sub_content, avatar_color, is_verified, likes,
+                theme=theme, avatar_source=post_avatar,
+                attached_image_path=None
+            )
+            card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
+
     # 2. Khung ảnh minh họa nổi bên ngoài: CHỈ khi không gắn trong bài và được bật
     popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
     allow_popup = enable_illus and (placement != "attached_in_post") and illus_cfg.get("enable_popup_illustration", True)
@@ -151,6 +171,14 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
             index=i, reply_to=c_reply, theme=theme, avatar_source=c_avatar
         )
         card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
+
+    # 4. Thẻ Outro Call-To-Action (2.4s cuối)
+    try:
+        outro_card_path = os.path.join(CARDS_DIR, "outro_cta.png")
+        cta_q = (post.get("cta_question", "") if isinstance(post, dict) else getattr(post, "cta_question", "")) or "Còn bạn thì sao? Đã từng gặp tình huống éo le tương tự chưa?"
+        card_mod.render_outro_cta_card(question_text=cta_q, output_path=outro_card_path)
+    except Exception as e:
+        print(f"[WARN] Failed to render outro_cta card in helper: {e}")
 
 
 app = Flask(__name__)
@@ -409,9 +437,25 @@ HTML_TEMPLATE = """
           <!-- Post Editor (Author) -->
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
             <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
-              <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5">
-                <i class="fa-solid fa-feather-pointed"></i> BÀI ĐĂNG CỦA TÁC GIẢ (HOOK MỞ MÀN)
-              </span>
+              <div class="flex items-center gap-3">
+                <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                  <i class="fa-solid fa-feather-pointed"></i> BÀI ĐĂNG CỦA TÁC GIẢ (HOOK MỞ MÀN)
+                </span>
+                <span class="text-[11px] px-2 py-0.5 rounded-full font-semibold border" 
+                  :class="post.sentence_reveal_mode === 'progressive_line_reveal' ? 'bg-amber-950/50 text-amber-300 border-amber-600/50' : 'bg-slate-800 text-slate-400 border-slate-700'">
+                  <i class="fa-solid" :class="post.sentence_reveal_mode === 'progressive_line_reveal' ? 'fa-layer-group' : 'fa-file-lines'"></i>
+                  {{ post.sentence_reveal_mode === 'progressive_line_reveal' ? 'Bung câu từng dòng' : 'Hiện trọn vẹn' }}
+                </span>
+                <span v-if="post.recommended_theme" class="text-[11px] px-2 py-0.5 rounded-full font-semibold border"
+                  :class="post.recommended_theme === 'dark' ? 'bg-slate-900 text-indigo-300 border-indigo-500/50' : 'bg-amber-950/40 text-amber-300 border-amber-600/40'">
+                  <i class="fa-solid" :class="post.recommended_theme === 'dark' ? 'fa-moon' : 'fa-sun'"></i>
+                  Theme: {{ post.recommended_theme === 'dark' ? 'Tối' : 'Sáng' }}
+                </span>
+                <span v-if="post.satisfying_category" class="text-[11px] px-2 py-0.5 rounded-full font-semibold border bg-emerald-950/40 text-emerald-300 border-emerald-600/40">
+                  <i class="fa-solid fa-shapes"></i>
+                  Nền: {{ post.satisfying_category === 'food' ? 'Ẩm thực' : (post.satisfying_category === 'puzzle' ? '3D Puzzle' : (post.satisfying_category === 'asmr' ? 'ASMR' : (post.satisfying_category === 'gameplay' ? 'Gameplay' : post.satisfying_category))) }}
+                </span>
+              </div>
               <div class="flex items-center gap-3">
                 <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
                   <input type="checkbox" v-model="post.is_verified" class="rounded bg-slate-800 border-slate-700 text-indigo-500 focus:ring-0">
@@ -436,6 +480,12 @@ HTML_TEMPLATE = """
                 <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn)</option>
                 <option value="ava">🌸 Ava (Nữ hiện đại)</option>
                 <option value="emma">🌷 Emma (Nữ)</option>
+              </select>
+
+              <span class="text-xs text-slate-400 font-medium ml-1">Nhịp hiện câu:</span>
+              <select v-model="post.sentence_reveal_mode" @change="refreshCardPreview" class="glass-input rounded-lg px-2.5 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
+                <option value="progressive_line_reveal">✨ Bung từng câu theo nhịp đọc (Chống đọc trước)</option>
+                <option value="standard_full">📄 Hiện trọn vẹn cả bài (Tiêu chuẩn)</option>
               </select>
             </div>
 
@@ -659,6 +709,19 @@ HTML_TEMPLATE = """
               </div>
             </div>
           </div>
+
+          <!-- Outro Viral CTA Question Box -->
+          <div class="p-3.5 rounded-xl bg-purple-950/30 border border-purple-800/50 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-purple-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-bullhorn text-purple-400"></i> CÂU HỎI KÊU GỌI TƯƠNG TÁC OUTRO (2.4s CUỐI)
+              </span>
+              <span class="text-[10px] text-purple-400 font-mono">Tự động kích nổ bình luận người xem</span>
+            </div>
+            <input v-model="post.cta_question" @change="refreshCardPreview" type="text"
+              placeholder="VD: Còn bạn thì sao? Nếu rơi vào tình huống này bạn sẽ xử lý thế nào?..."
+              class="w-full glass-input rounded-lg px-3 py-1.5 text-xs text-purple-100 placeholder-purple-400/50 border border-purple-700/50 focus:border-purple-500 font-medium bg-purple-950/40">
+          </div>
         </div>
 
         <!-- Section 3: Phong Cách Dựng Video & Bố Cục Đa Dạng -->
@@ -689,6 +752,7 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-film text-pink-400"></i> Chế độ nền video:
               </label>
               <select v-model="settings.bg_mode" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                <option value="auto">🤖 Tự Động Khớp Chủ Đề (AI Smart Satisfying Matching)</option>
                 <option value="sandwich_puzzle">🧩 Sandwich: Ghép Hình Puzzle Thỏa Mãn Ở Giữa (Khuyên Dùng)</option>
                 <option value="sandwich_food">🍰 Sandwich: Ăn Uống Mukbang / Bánh Ngọt Ở Giữa</option>
                 <option value="sandwich_asmr">🧼 Sandwich: Cắt Xà Phòng ASMR Ở Giữa</option>
@@ -712,6 +776,7 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-palette text-amber-400"></i> Giao diện thẻ Threads:
               </label>
               <select v-model="settings.card_theme" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                <option value="auto">🤖 Tự Động Theo Kịch Bản (AI Khuyên Dùng Sáng/Tối)</option>
                 <option value="light">☀️ Sáng (Chuẩn Threads thật 100%)</option>
                 <option value="dark">🌙 Tối (Dark Mode OLED)</option>
                 <option value="glass">🔮 Glassmorphism (Kính mờ viền sáng)</option>
@@ -853,6 +918,15 @@ HTML_TEMPLATE = """
                   <span class="text-[10px] text-slate-500 font-mono">{{ cmt.emotion }} • {{ cmt.sfx }}</span>
                 </div>
                 <img :src="'/api/card/comment_' + (idx + 1) + '.png?t=' + cardTimestamp" :alt="'Comment ' + (idx + 1)" class="w-full rounded-xl shadow-md border border-slate-700/60">
+              </div>
+
+              <!-- Thẻ Outro Kêu Gọi Tương Tác 2.4s -->
+              <div v-if="post.cta_question" class="space-y-1 pt-2">
+                <div class="text-[11px] text-purple-300 font-semibold flex items-center justify-between">
+                  <span>📢 Thẻ Outro kêu gọi tương tác (2.4s cuối):</span>
+                  <span class="text-[10px] text-purple-400 font-mono">viral outro</span>
+                </div>
+                <img :src="'/api/card/outro_cta.png?t=' + cardTimestamp" alt="Outro CTA Card" class="w-full rounded-xl shadow-md border border-purple-500/40">
               </div>
             </template>
           </div>
@@ -1626,6 +1700,12 @@ HTML_TEMPLATE = """
             illustration_category: 'general_life',
             has_visual_proof: false,
             visual_proof_placement: 'none',
+            sentence_reveal_mode: 'standard_full',
+            satisfying_category: 'auto',
+            recommended_theme: 'light',
+            story_context_type: 'general_social',
+            cta_question: '',
+            pacing_tempo: 'normal',
             enable_illustration: false,
             comments: []
           },
@@ -1633,8 +1713,8 @@ HTML_TEMPLATE = """
           isSearchingImage: false,
           settings: {
             layout_preset: 'center',
-            bg_mode: 'split_gameplay',
-            card_theme: 'light',
+            bg_mode: 'auto',
+            card_theme: 'auto',
             voice: 'vi-VN-HoaiMyNeural',
             rate: '+20%'
           },
@@ -2179,16 +2259,9 @@ def api_generate_script():
         sample_file = os.path.join(OUTPUT_DIR, "sample_post.json")
         content_mod.save_post_to_json(post, sample_file)
 
-        # Render trước các thẻ kèm avatar người thật
-        tracker.start_step("cards", "Vẽ thẻ xem trước (Avatar người thật)...", 80)
-        p_av = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-        card_mod.render_post_card(post.username, post.content, likes=post.likes, is_verified=post.is_verified, avatar_source=p_av)
-        for i, c in enumerate(post.comments, 1):
-            c_av = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
-            c_reply = getattr(c, "reply_to", "") or post.username
-            c_img = card_mod.render_comment_card(c.username, c.content, likes=c.likes, index=i, reply_to=c_reply, avatar_source=c_av)
-            card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
-
+        # Render trước các thẻ kèm avatar người thật & theme tối ưu
+        tracker.start_step("cards", "Vẽ thẻ xem trước (Avatar người thật & Giao diện tối ưu)...", 80)
+        _render_all_cards_helper(post, theme=getattr(post, "recommended_theme", "light"))
         tracker.finish_step("cards")
         tracker.finish_step("script")
         tracker.pause_for_review(f"Đã tạo kịch bản {len(post.comments)} bình luận & vẽ thẻ xem trước (Bước 2/6). Sẵn sàng render video!")
@@ -2209,6 +2282,12 @@ def api_generate_script():
                 "illustration_category": getattr(post, "illustration_category", "general_life"),
                 "has_visual_proof": getattr(post, "has_visual_proof", False),
                 "visual_proof_placement": getattr(post, "visual_proof_placement", "none"),
+                "sentence_reveal_mode": getattr(post, "sentence_reveal_mode", "standard_full"),
+                "satisfying_category": getattr(post, "satisfying_category", "auto"),
+                "recommended_theme": getattr(post, "recommended_theme", "light"),
+                "story_context_type": getattr(post, "story_context_type", "general_social"),
+                "cta_question": getattr(post, "cta_question", ""),
+                "pacing_tempo": getattr(post, "pacing_tempo", "normal"),
                 "enable_illustration": getattr(post, "enable_illustration", False),
                 "emotional_arc": getattr(post, "emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
                 "comments": [
@@ -2294,8 +2373,8 @@ def api_create_video_one_click():
     topic = data.get("topic", "").strip() or None
     sets = data.get("settings", {})
     layout_preset = sets.get("layout_preset", "center")
-    bg_mode = sets.get("bg_mode", "split_gameplay")
-    card_theme = sets.get("card_theme", "light")
+    bg_mode = sets.get("bg_mode", "auto")
+    card_theme = sets.get("card_theme", "auto")
 
     author_voice = data.get("voice") or sets.get("voice") or "adam"
 
@@ -2570,14 +2649,20 @@ def api_render_video():
             illustration_category=p_data.get("illustration_category", "general_life"),
             has_visual_proof=bool(p_data.get("has_visual_proof", False)),
             visual_proof_placement=p_data.get("visual_proof_placement", "none"),
+            sentence_reveal_mode=p_data.get("sentence_reveal_mode", "standard_full"),
+            satisfying_category=p_data.get("satisfying_category", "auto"),
+            recommended_theme=p_data.get("recommended_theme", "light"),
+            story_context_type=p_data.get("story_context_type", "general_social"),
+            cta_question=p_data.get("cta_question", ""),
+            pacing_tempo=p_data.get("pacing_tempo", "normal"),
             enable_illustration=bool(p_data.get("enable_illustration", False)),
             emotional_arc=p_data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
             comments=comments
         )
 
         layout_preset = sets.get("layout_preset", "center")
-        bg_mode = sets.get("bg_mode", "split_gameplay")
-        card_theme = sets.get("card_theme", "light")
+        bg_mode = sets.get("bg_mode", "auto")
+        card_theme = sets.get("card_theme", "auto")
 
         # Khởi chạy quy trình render trong background thread
         thread = threading.Thread(target=_async_render_worker, args=(post_obj, bg_mode, card_theme, layout_preset))

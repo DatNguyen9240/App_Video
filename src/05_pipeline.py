@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import time
 import random
+import re
 from datetime import datetime
 from PIL import Image
 
@@ -128,6 +129,23 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         enable_center_sat = True
     elif preset_str in ["sandwich", "center_satisfying"]:
         enable_center_sat = True
+
+    # AI Đạo Diễn Khớp Video Nền Ở Giữa Theo Ngữ Cảnh Chủ Đề
+    post_sat = getattr(post, "satisfying_category", "auto")
+    if post_sat and post_sat not in ["auto", "random", "none"]:
+        sat_cat = post_sat
+    elif sat_cat in ["random", "auto"]:
+        post_text_lower = (getattr(post, "content", "") + " " + getattr(post, "video_title", "")).lower()
+        if any(k in post_text_lower for k in ["ăn", "bánh", "nấu", "bếp", "món", "cháo", "trứng", "cafe", "trà sữa", "đói", "cơm"]):
+            sat_cat = "food"
+        elif any(k in post_text_lower for k in ["it", "dev", "sếp", "ot", "lương", "xe", "game", "tốc độ", "chạy", "senior"]):
+            sat_cat = "gameplay"
+        elif any(k in post_text_lower for k in ["tâm sự", "buồn", "khóc", "chia tay", "chữa lành", "yêu", "đêm", "ngủ"]):
+            sat_cat = "asmr"
+        elif any(k in post_text_lower for k in ["bóc phốt", "phát hiện", "mật khẩu", "tin nhắn", "rình", "bằng chứng", "tra hỏi", "nghi ngờ", "sự thật", "lén"]):
+            sat_cat = "puzzle"
+        else:
+            sat_cat = random.choice(["kinetic_sand", "hypnotic", "gameplay", "puzzle", "food"])
 
     center_vid_file = None
     if enable_center_sat:
@@ -645,19 +663,68 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "enable_slide": True
         })
 
-    # Thẻ Post ghim từ đầu đến hết video (slide-up mượt lúc mở màn)
-    timeline.insert(0, {
-        "type": "post",
-        "start": cursor,
-        "end": total_duration,
-        "x": "(W-w)/2",
-        "y": post_y,
-        "width": card_w,
-        "camera_motion": "none",
-        "image": os.path.join(CARDS_DIR, "post.png"),
-        "is_video": False,
-        "enable_slide": True
-    })
+    # Thẻ Post hiển thị: Tự động phân nhánh theo Sentence Reveal Mode
+    reveal_mode = getattr(post, "sentence_reveal_mode", "standard_full")
+    raw_sentences = re.split(r"(?<=[.!?\n])\s+", post.content.strip())
+    sentences = [s.strip() for s in raw_sentences if s.strip()]
+
+    if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
+        # Tính thời lượng từng câu theo tỷ lệ số từ
+        word_counts = [max(1, len(s.split())) for s in sentences]
+        total_w = sum(word_counts)
+        step_durs = [post_dur * (w / total_w) for w in word_counts]
+
+        step_cursor = cursor
+        for step_idx in range(1, len(sentences)):
+            step_end = step_cursor + step_durs[step_idx - 1]
+            step_file = os.path.join(CARDS_DIR, f"post_step_{step_idx}.png")
+            if not os.path.exists(step_file):
+                step_file = os.path.join(CARDS_DIR, "post.png")
+
+            timeline.insert(step_idx - 1, {
+                "type": "post",
+                "start": step_cursor,
+                "end": step_end,
+                "x": "(W-w)/2",
+                "y": post_y,
+                "width": card_w,
+                "camera_motion": "none",
+                "image": step_file,
+                "is_video": False,
+                "enable_slide": (step_idx == 1)
+            })
+            if enable_foley and os.path.exists(pop_sfx):
+                overlay_sfx.append({"time": step_end, "file": pop_sfx, "vol": 0.30})
+            step_cursor = step_end
+
+        # Câu cuối mở full bài và ghim tới hết video
+        timeline.insert(len(sentences) - 1, {
+            "type": "post",
+            "start": step_cursor,
+            "end": total_duration,
+            "x": "(W-w)/2",
+            "y": post_y,
+            "width": card_w,
+            "camera_motion": "none",
+            "image": os.path.join(CARDS_DIR, "post.png"),
+            "is_video": False,
+            "enable_slide": False
+        })
+        print(f"  ✨ [SENTENCE REVEAL]: Mở rộng thẻ bài theo {len(sentences)} nhịp đọc (t={cursor:.2f}s -> {step_cursor:.2f}s -> {total_duration:.2f}s)")
+    else:
+        # Tiêu chuẩn: Ghim toàn bộ bài viết từ đầu
+        timeline.insert(0, {
+            "type": "post",
+            "start": cursor,
+            "end": total_duration,
+            "x": "(W-w)/2",
+            "y": post_y,
+            "width": card_w,
+            "camera_motion": "none",
+            "image": os.path.join(CARDS_DIR, "post.png"),
+            "is_video": False,
+            "enable_slide": True
+        })
 
     return timeline, audio_sequence, overlay_sfx, total_duration, emotional_arc_data
 
@@ -896,8 +963,8 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
     if bg_mode is None:
         bg_mode = layout.get("default_bg_mode", "minecraft")
 
-    if card_theme is None:
-        card_theme = layout.get("default_card_theme", "light")
+    if card_theme is None or card_theme == "auto":
+        card_theme = getattr(post, "recommended_theme", "") or layout.get("default_card_theme", "light")
 
     if reset_tracker:
         tracker.reset()
@@ -945,6 +1012,20 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                 attached_image_path=attached_img_arg
             )
             card_mod.save_card(post_img, os.path.join(CARDS_DIR, "post.png"))
+
+            # Render các thẻ bước trung gian nếu bật chế độ bung câu từng dòng (Sentence Reveal)
+            reveal_mode = getattr(post, "sentence_reveal_mode", "standard_full")
+            raw_sentences = re.split(r"(?<=[.!?\n])\s+", post.content.strip())
+            sentences = [s.strip() for s in raw_sentences if s.strip()]
+            if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
+                for step_idx in range(1, len(sentences)):
+                    sub_content = " ".join(sentences[:step_idx])
+                    step_img = card_mod.render_post_card(
+                        post.username, sub_content, post.avatar_color, post.is_verified, post.likes,
+                        theme=card_theme, avatar_source=post_avatar,
+                        attached_image_path=None
+                    )
+                    card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
 
             # Tạo thẻ ảnh minh họa nổi bên ngoài: CHỈ khi không đính kèm trong bài và được bật
             popup_path = os.path.join(CARDS_DIR, "popup_proof.png")

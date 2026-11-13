@@ -94,9 +94,35 @@ class PostSchema(BaseModel):
         default="none",
         description="Vị trí hiển thị ảnh: 'none' (không cần ảnh), 'attached_in_post' (gắn trong thẻ bài viết tác giả như Threads thật), hoặc 'popup_at_twist' (bung thẻ ảnh nổi ở đoạn bẻ lái)"
     )
+    sentence_reveal_mode: Literal["progressive_line_reveal", "standard_full"] = Field(
+        default="standard_full",
+        description="ĐẠO DIỄN NGHỆ THUẬT: AI tự quyết định cách mở màn bài viết tác giả: "
+                    "- 'progressive_line_reveal': Thẻ bài bung nở từng câu theo nhịp đọc. Dành cho câu chuyện mang tính tò mò, hồi hộp, bẻ lái bất ngờ, bí mật, hoặc thơ ca/tâm sự sâu lắng (giúp giấu kết cục, chống người xem đọc lướt trước!). "
+                    "- 'standard_full': Hiển thị trọn vẹn thẻ bài ngay từ đầu. Dành cho câu chuyện ngắn, đối đáp đời thường đơn giản."
+    )
     illustration_caption: str = Field(
         default="",
         description="Câu chú thích hài hước tiếng Việt ngắn (dưới 8 từ) làm điểm nhấn cho bức ảnh bằng chứng (ví dụ: 'Thành quả bạn trai chụp', 'Bữa tối định mệnh', 'Hóa đơn tháng này')"
+    )
+    satisfying_category: Literal["food", "gameplay", "asmr", "puzzle", "hypnotic", "kinetic_sand"] = Field(
+        default="gameplay",
+        description="VIDEO NỀN THỎA MÃN Ở GIỮA: 'food' (ẩm thực, nấu nướng, đồ ngọt, cafe), 'gameplay' (IT, cãi vã, hành động, tốc độ), 'asmr' (tâm sự, cảm xúc, đêm muộn), 'puzzle' (trinh thám, logic, bóc phốt, bắt quả tang), 'hypnotic' (kỳ bí, thôi miên), 'kinetic_sand' (vui nhộn, thư giãn)."
+    )
+    recommended_theme: Literal["light", "dark"] = Field(
+        default="light",
+        description="THEME SÁNG / TỐI: 'dark' nếu là chuyện đêm muộn (nửa đêm, 2h sáng), rình mò, IT trực đêm, bí mật ngầm; 'light' nếu là chuyện ban ngày, quán cafe, công sở, mua sắm vui vẻ."
+    )
+    story_context_type: Literal["office_workplace", "student_youth", "couple_family", "general_social"] = Field(
+        default="general_social",
+        description="BỐI CẢNH ĐỂ GÁN AVATAR: 'office_workplace' (công sở, sếp, đồng nghiệp), 'student_youth' (sinh viên, học đường, gen Z), 'couple_family' hoặc 'general_social'."
+    )
+    cta_question: str = Field(
+        default="",
+        description="CÂU HỎI KÊU GỌI BÌNH LUẬN VIRAL Ở OUTRO (2.4s cuối): Câu hỏi mở gợi đòn tranh luận riêng cho bài viết (dưới 15 từ, vd: 'Người yêu bạn có chụp ảnh có tâm không hay cũng out nét giống vậy? 😂', 'Gặp sếp này bạn có dám gửi link đối thủ như ông senior không?')"
+    )
+    pacing_tempo: Literal["normal", "slow_emotional", "fast_comedic"] = Field(
+        default="normal",
+        description="NHỊP ĐỘ ĐỌC: 'slow_emotional' (-3% đến +5%) cho tâm sự lắng đọng; 'fast_comedic' (+22% đến +26%) cho cãi vã, tấu hài nhanh."
     )
     emotional_arc: str = Field(default="Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời", description="Tóm tắt đường cong cảm xúc của video")
     hook_energy: Literal["high", "intense", "curious"] = Field(default="high", description="Mức năng lượng mở màn")
@@ -262,6 +288,10 @@ def generate_story_with_gemini(
         f"- QUY TẮC ĐỊNH DẠNG TỰ NHIÊN (PHÁ VỠ DẬP KHUÔN, KHÔNG SPAM ẢNH):\n"
         f"  + Hơn 60% các câu chuyện Threads viral nhất là drama đối đáp chữ thuần túy (tâm sự, cãi nhau, bóc mẽ hài hước). Với các câu chuyện này, BẮT BUỘC để has_visual_proof = false và visual_proof_placement = 'none'!\n"
         f"  + Chỉ khi câu chuyện trực tiếp nói về một vật thể hoặc bức ảnh thực tế cụ thể (chụp ảnh dìm, nấu ăn cháy, giao sai hàng) mới để has_visual_proof = true và visual_proof_placement = 'popup_at_twist' hoặc 'attached_in_post'.\n"
+        f"  + PHONG CÁCH HIỆN CÂU (SENTENCE REVEAL): Nếu câu chuyện có tính TÒ MÒ, HỒI HỘP, BÍ MẬT, BẺ LÁI BẤT NGỜ hoặc TÂM SỰ SÂU LẮNG/THƠ CA -> BẮT BUỘC chọn sentence_reveal_mode = 'progressive_line_reveal' để từng dòng mở ra theo nhịp đọc. Với chuyện ngắn đơn giản -> chọn 'standard_full'.\n"
+        f"  + KHỚP VIDEO NỀN Ở GIỮA (satisfying_category): Chọn 'food' nếu nói về ăn uống/bếp núc; 'gameplay' nếu là IT/công sở/gay cấn; 'asmr' nếu là tâm sự chia sẻ; 'puzzle' nếu là trinh thám/bóc phốt.\n"
+        f"  + GIAO DIỆN SÁNG/TỐI (recommended_theme): Chọn 'dark' nếu là chuyện đêm muộn/bí mật rình mò/IT trực đêm; 'light' nếu là chuyện ban ngày/cafe/mua sắm.\n"
+        f"  + CÂU HỎI OUTRO VIRAL (cta_question): Nghĩ 1 câu hỏi mở sắc sảo ở 2.4s cuối đánh trúng tim đen để kích thích người xem nhảy vào bình luận.\n"
         f"- TUYỆT ĐỐI TRÁNH: Không viết như AI giải thích, không mở đầu sáo rỗng, không kết bài bằng đạo lý rập khuôn.\n\n"
         f"TIÊU CHUẨN KIỂM DUYỆT:\n"
         f"Trước khi trả kết quả, tự hỏi: 'Người thật có nói câu này ngoài đời không? Đọc lên có tự nhiên và truyền cảm không? Thời lượng có đủ dài trên 1 phút không?'\n\n"
@@ -279,7 +309,10 @@ def generate_story_with_gemini(
     if progress_cb:
         progress_cb(f"Gemini AI ({model_primary}) đang sáng tạo kịch bản...", 30)
 
-    models_to_try = [model_primary, "gemini-flash-latest"]
+    models_to_try = [model_primary, model_fallback, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # Loại bỏ trùng lặp giữ nguyên thứ tự
+    seen = set()
+    models_to_try = [x for x in models_to_try if x and not (x in seen or seen.add(x))]
     data = None
     last_err = None
 
@@ -338,6 +371,18 @@ def generate_story_with_gemini(
     female_keywords = {"linh", "trang", "mai", "be", "hoa", "ngoc", "lan", "anh", "girl", "cute", "thao", "vy", "my", "phuong", "giang", "nhung", "quynh", "huyen", "nga"}
     male_keywords = {"nam", "tuan", "duc", "boy", "dev", "minh", "hoang", "khoa", "huy", "kien", "dat", "quan", "hung", "long", "thanh", "hai", "son", "dung"}
 
+    # Phân nhóm kho avatar người thật theo bối cảnh câu chuyện
+    ctx_type = data.get("story_context_type", "general_social")
+    if ctx_type == "office_workplace":
+        f_avatar_pool = ["female_office_1.jpg", "female_office_2.jpg", "female_office_3.jpg"]
+        m_avatar_pool = ["male_office_1.jpg", "male_office_2.jpg", "male_office_3.jpg"]
+    elif ctx_type == "student_youth":
+        f_avatar_pool = ["female_student_1.jpg", "female_student_2.jpg", "female_student_3.jpg"]
+        m_avatar_pool = ["male_student_1.jpg", "male_student_2.jpg", "male_student_3.jpg"]
+    else:
+        f_avatar_pool = ["female_office_1.jpg", "female_office_2.jpg", "female_student_1.jpg", "female_student_2.jpg", "female_student_3.jpg", "female_office_3.jpg"]
+        m_avatar_pool = ["male_office_1.jpg", "male_office_2.jpg", "male_student_1.jpg", "male_student_2.jpg", "male_student_3.jpg", "male_office_3.jpg"]
+
     comments = []
     raw_comments = data.get("comments", [])
     for idx, c in enumerate(raw_comments, 1):
@@ -379,11 +424,14 @@ def generate_story_with_gemini(
         assigned_rate = role_info.get("rate") or emo_style_cfg.get("rate_boost") or preset.get("rate", "+20%")
         assigned_pitch = role_info.get("pitch") or emo_style_cfg.get("pitch_boost") or preset.get("pitch", "+2Hz")
 
+        chosen_c_pool = f_avatar_pool if is_female else m_avatar_pool
+        c_avatar_file = chosen_c_pool[(idx - 1) % len(chosen_c_pool)]
         comments.append(Comment(
             username=c.get("username", f"user_{idx}"),
             content=c.get("content", ""),
             reply_to=c.get("reply_to", "") or data.get("username", "author"),
             avatar_color=clean_hex_color(c.get("avatar_color", "")),
+            avatar_url=c_avatar_file,
             likes=c.get("likes", random.randint(2000, 25000)),
             sfx=sfx_val,
             emotion=emotion_val,
@@ -448,6 +496,13 @@ def generate_story_with_gemini(
         enable_illustration=bool(illus_path and has_proof and placement != "none"),
         has_visual_proof=has_proof,
         visual_proof_placement=placement,
+        sentence_reveal_mode=data.get("sentence_reveal_mode", "standard_full"),
+        satisfying_category=data.get("satisfying_category", "gameplay"),
+        recommended_theme=data.get("recommended_theme", "light"),
+        story_context_type=ctx_type,
+        cta_question=data.get("cta_question", ""),
+        pacing_tempo=data.get("pacing_tempo", "normal"),
+        avatar_url=(f_avatar_pool[0] if any(k in data.get("username", "").lower() for k in female_keywords) else m_avatar_pool[0]),
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         hook_energy=data.get("hook_energy", "high"),
         voice_id=author_role.get("voice", voice_cfg.get("default_author_voice", "adam")),

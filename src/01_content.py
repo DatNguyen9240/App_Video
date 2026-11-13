@@ -55,6 +55,12 @@ class Post:
     enable_illustration: bool = False      # Bật hoặc tắt ảnh minh họa trong video (mặc định False để ưu tiên tự nhiên)
     has_visual_proof: bool = False         # AI đánh giá câu chuyện có cần ảnh bằng chứng thực tế không
     visual_proof_placement: str = "none"   # none, attached_in_post, popup_at_twist
+    sentence_reveal_mode: str = "auto"     # auto, progressive_line_reveal, standard_full
+    satisfying_category: str = "auto"      # auto, food, gameplay, asmr, puzzle, hypnotic, kinetic_sand
+    recommended_theme: str = "light"       # light, dark (AI tự chọn theo bối cảnh ban ngày / ban đêm)
+    story_context_type: str = "general_social"  # office_workplace, student_youth, couple_family, general_social
+    cta_question: str = ""                 # Câu hỏi kêu gọi bình luận viral riêng cho từng bài ở Outro
+    pacing_tempo: str = "normal"           # normal, slow_emotional, fast_comedic
     # Metadata đạo diễn cảm xúc
     emotional_arc: str = "curiosity -> tension -> fake_relief -> punchline"
     hook_energy: str = "high"
