@@ -257,28 +257,28 @@
       "vol": 0.4
     },
     "boom": {
-      "sfx_file": "sub_drop.mp3",
+      "sfx_file": "boom.mp3",
       "meme_file": "boom.gif",
       "emotion": "shocked",
       "camera_motion": "shake",
       "vol": 0.45
     },
     "laugh": {
-      "sfx_file": "pop.mp3",
+      "sfx_file": "laugh.mp3",
       "meme_file": "laugh.gif",
       "emotion": "funny",
       "camera_motion": "punch_in",
       "vol": 0.35
     },
     "bruh": {
-      "sfx_file": "scratch.mp3",
+      "sfx_file": "bruh.mp3",
       "meme_file": "bruh.gif",
       "emotion": "awkward",
       "camera_motion": "punch_in",
       "vol": 0.4
     },
     "shock": {
-      "sfx_file": "sub_drop.mp3",
+      "sfx_file": "shock.mp3",
       "meme_file": "shock.gif",
       "emotion": "shocked",
       "camera_motion": "shake",
@@ -292,14 +292,14 @@
       "vol": 0.35
     },
     "side_eye": {
-      "sfx_file": "scratch.mp3",
+      "sfx_file": "side_eye.mp3",
       "meme_file": "side_eye.gif",
       "emotion": "sarcastic",
       "camera_motion": "punch_in",
       "vol": 0.4
     },
     "clown": {
-      "sfx_file": "scratch.mp3",
+      "sfx_file": "clown.mp3",
       "meme_file": "clown.gif",
       "emotion": "funny",
       "camera_motion": "punch_in",
@@ -373,7 +373,7 @@
     "enable_meme_reaction_popups": true,
     "min_video_duration_s": 60.5,
     "enforce_min_duration_60s": true,
-    "enable_continuous_anchor_meme": false,
+    "enable_continuous_anchor_meme": true,
     "punchline_meme_popup_center": true,
     "punchline_meme_popup_size": 780,
     "enable_center_satisfying_video": true,

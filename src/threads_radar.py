@@ -491,7 +491,15 @@ YÊU CẦU ĐẶC BIỆT ĐẠT CHUẨN VIDEO DÀI TRÊN 1 PHÚT (60s-75s):
 2. Nội dung bài viết: Dài từ 35 đến 50 từ (2-3 câu nhịp điệu mềm mại, nói trong 12-15 giây), mở đầu bằng tình huống rất đời thực, cuốn hút, giật mình tò mò.
 3. SỐ LƯỢNG BÌNH LUẬN: BẮT BUỘC ĐỦ TỪ 7 ĐẾN 8 BÌNH LUẬN (từ C1 đến C7/C8). Mỗi bình luận từ 14-22 từ đối đáp liên hoàn, có tranh cãi, bóc thóp, bẻ lái để tổng thời lượng video nói đủ trên 1 phút!
    NGUYÊN TẮC BẮT BUỘC: 100% bình luận phải tập trung bàn luận, tranh cãi, cà khịa về ĐÚNG câu chuyện của tác giả. Tuyệt đối không lan man sang chủ đề hoặc đồ vật khác!
-4. HIỆU ỨNG SFX: 90% bình luận để sfx='none'. Tối đa 1 bình luận có sfx='sub_drop' hoặc 'ting'. Tuyệt đối KHÔNG dùng âm thanh nhảm nhí hoạt hình!
+4. HIỆU ỨNG MEME, SFX & CAMERA MOTION (RẤT QUAN TRỌNG ĐỂ VIDEO GIỮ NHỊP SINH ĐỘNG, BẮT TREND TIKTOK):
+   - Hãy chọn đúng 2 đến 3 bình luận đắt giá nhất để gán SFX và kích hoạt MEME REACTION:
+     + Khi bình luận chọc cười, chế giễu: sfx='laugh', camera_motion='punch_in' (kích hoạt meme laugh.gif)
+     + Khi bình luận ngơ ngác, bất lực: sfx='huh' hoặc 'bruh', camera_motion='punch_in' (kích hoạt meme huh.gif hoặc bruh.gif)
+     + Khi bình luận liếc xéo, cà khịa: sfx='side_eye', camera_motion='punch_in' (kích hoạt meme side_eye.gif)
+     + Khi cú twist bất ngờ hoặc sự cố: sfx='sub_drop' hoặc 'boom', camera_motion='shake' (kích hoạt meme boom.gif kèm rung lắc camera)
+     + Khi bình luận mách nước thông thái: sfx='ting', camera_motion='none' (kích hoạt meme ting.gif)
+     + Các bình luận đối đáp bình thường: sfx='none', camera_motion='none'.
+   - BẮT BUỘC có ít nhất 2 bình luận có SFX/meme để video không bị khô khan!
 5. HÌNH ẢNH MINH HỌA: Luôn cung cấp illustration_vietnamese_query (2-4 từ tiếng Việt) và illustration_prompt (2-4 từ tiếng Anh) mô tả chính xác vật phẩm hoặc tình huống trong bài.
 6. Ngôn ngữ: Dùng tiếng Việt Gen Z đời thường tinh tế, không gượng ép nhồi nhét từ lóng, dùng emoji có chừng mực (0-1 emoji/câu), tuyệt đối không để lộ văn phong AI giải thích.
 7. Trường reply_to: Bắt buộc ghi rõ username mà bình luận đó đang trực tiếp trả lời.
@@ -507,7 +515,7 @@ YÊU CẦU ĐẶC BIỆT ĐẠT CHUẨN VIDEO DÀI TRÊN 1 PHÚT (60s-75s):
         gender: ai_base.Literal["male", "female"]
         content: str
         likes: int = 4500
-        sfx: ai_base.Literal["none", "ting", "pop", "sub_drop"] = "none"
+        sfx: ai_base.Literal["none", "laugh", "bruh", "boom", "sub_drop", "shock", "huh", "side_eye", "ting"] = "none"
         emotion: ai_base.Literal["funny", "shocked", "awkward", "sarcastic", "insightful"] = "funny"
         pause_before_ms: int = 220
         pause_after_ms: int = 280
@@ -583,7 +591,12 @@ YÊU CẦU ĐẶC BIỆT ĐẠT CHUẨN VIDEO DÀI TRÊN 1 PHÚT (60s-75s):
         c_voice = role_info.get("voice", "vi-VN-HoaiMyNeural" if c_gender == "female" else "vi-VN-NamMinhNeural")
 
         sfx_val = c.get("sfx", "none")
-        cam_motion = "shake" if sfx_val in ["boom", "shock"] else ("punch_in" if sfx_val in ["laugh", "bruh"] else "none")
+        cam_motion = c.get("camera_motion", "none")
+        if cam_motion == "none":
+            if sfx_val in ["boom", "shock", "sub_drop"]:
+                cam_motion = "shake"
+            elif sfx_val in ["laugh", "bruh", "huh", "side_eye", "clown"]:
+                cam_motion = "punch_in"
 
         comments.append(Comment(
             username=c.get("username", f"user_{idx}"),

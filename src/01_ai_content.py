@@ -51,9 +51,9 @@ class CommentSchema(BaseModel):
     content: str = Field(description="Bình luận tiếng Việt tự nhiên (14-22 từ), tập trung 100% vào đúng tình huống của tác giả. Tuyệt đối không tự ý kể chuyện lan man sang đồ vật hoặc đề tài khác.")
     avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b)")
     likes: int = Field(default=4500, description="Lượt thích ước tính từ 1500 đến 25000")
-    sfx: Literal["none", "ting", "pop", "sub_drop"] = Field(
+    sfx: Literal["none", "laugh", "bruh", "boom", "sub_drop", "shock", "huh", "side_eye", "ting"] = Field(
         default="none",
-        description="Hiệu ứng âm thanh điểm nhấn nhẹ nhàng, tinh tế. QUAN TRỌNG: 90% bình luận phải để 'none'! Toàn video chỉ tối đa 1 comment có SFX để tạo điểm nhấn bất ngờ ('sub_drop' cho bẻ lái sốc, hoặc 'ting' cho phát hiện đắt giá). Tuyệt đối không dùng âm thanh nhảm nhí hoạt hình!"
+        description="Hiệu ứng âm thanh và meme reaction điểm nhấn. Phân bổ 2-3 comment có SFX tương ứng cảm xúc ('laugh' cho cười, 'bruh'/'huh' cho cạn lời ngơ ngác, 'side_eye' cho liếc xéo cà khịa, 'boom'/'sub_drop' cho bẻ lái rung lắc, 'ting' cho phát hiện đắt giá)."
     )
     emotion: Literal["funny", "shocked", "awkward", "sarcastic", "insightful", "neutral"] = Field(
         default="funny", description="Sắc thái cảm xúc của câu nói"
@@ -294,6 +294,7 @@ def generate_story_with_gemini(
         f"  + Chọn visual_proof_placement = 'popup_at_twist' (bung ảnh nổi tại câu trả lời/cú bẻ lái) hoặc 'attached_in_post' (gắn trong bài).\n"
         f"  + Chọn illustration_category: couple_photo_fail, cafe_lifestyle, food_cooking, office_work, shopping_tech, student_exam, general_life.\n"
         f"- PHONG CÁCH HIỆN CÂU (SENTENCE REVEAL): Mặc định chọn sentence_reveal_mode = 'progressive_line_reveal' để từng dòng mở ra theo nhịp đọc của giọng nói, tạo cảm giác cuốn hút và giữ chân người xem!\n"
+        f"- HIỆU ỨNG MEME, SFX & CAMERA MOTION: Phân bổ 2 đến 3 comment có SFX tương ứng cảm xúc để kích hoạt MEME REACTION (sfx='laugh' cho meme cười, sfx='bruh'/'huh' cho bất lực ngơ ngác, sfx='side_eye' cho liếc xéo bóc mẽ, sfx='sub_drop'/'boom' cho bẻ lái rung lắc camera, sfx='ting' cho mách nước đắt giá).\n"
         f"- KHỚP VIDEO NỀN Ở GIỮA (satisfying_category): Chọn 'food' nếu nói về ăn uống/bếp núc; 'gameplay' nếu là IT/công sở/gay cấn; 'asmr' nếu là tâm sự chia sẻ; 'puzzle' nếu là trinh thám/bóc phốt.\n"
         f"- GIAO DIỆN SÁNG/TỐI (recommended_theme): Chọn 'dark' nếu là chuyện đêm muộn/bí mật rình mò/IT trực đêm; 'light' nếu là chuyện ban ngày/cafe/mua sắm.\n"
         f"- CÂU HỎI OUTRO VIRAL (cta_question): Nghĩ 1 câu hỏi mở sắc sảo ở 2.4s cuối đánh trúng tim đen để kích thích người xem nhảy vào bình luận.\n"
