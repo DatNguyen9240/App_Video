@@ -12,6 +12,7 @@ Chức năng:
 
 import os
 import sys
+import re
 import math
 import random
 import hashlib
@@ -435,7 +436,8 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
                      time_str: str = "12 giờ", theme: str = None,
                      avatar_source: str = None,
                      attached_image_path: str = None,
-                     fixed_card_h: int = None) -> Image.Image:
+                     visible_sentence_count: int = None,
+                     total_sentences_content: str = None) -> Image.Image:
     t_name = theme or get_card_theme()
     t = THEMES.get(t_name, THEMES["light"])
 
@@ -443,9 +445,20 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
     d_dummy = ImageDraw.Draw(dummy)
 
     max_text_w = CARD_W - PAD * 2
-    lines = wrap_text(content, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
-    line_h = 46
-    text_h = len(lines) * line_h
+
+    # Nếu bật chế độ Progressive Reveal, kích thước thẻ luôn cố định theo toàn bộ bài để không bao giờ bị giật
+    full_text = total_sentences_content if total_sentences_content else content
+    full_lines = wrap_text(full_text, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
+    line_h = 48
+    text_h = len(full_lines) * line_h
+
+    # Xử lý các dòng hiển thị cho bước hiện tại
+    if visible_sentence_count is not None and total_sentences_content:
+        raw_s = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", total_sentences_content.strip()) if s.strip()]
+        partial_text = " ".join(raw_s[:visible_sentence_count])
+        display_lines = wrap_text(partial_text, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
+    else:
+        display_lines = wrap_text(content, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
 
     # Xử lý ảnh minh họa đính kèm bên trong thẻ (nếu được bật)
     att_resized = None
@@ -470,7 +483,7 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
         except Exception as e:
             print(f"  ⚠️ Lỗi xử lý ảnh minh họa đính kèm: {e}")
 
-    card_h = fixed_card_h if fixed_card_h else (PAD + AVATAR_SIZE + 22 + text_h + att_h + 26 + ICON_SIZE + PAD)
+    card_h = PAD + AVATAR_SIZE + 22 + text_h + att_h + 26 + ICON_SIZE + PAD
     card_h = max(card_h, 240)
 
     img = Image.new("RGBA", (CARD_W, card_h), (0, 0, 0, 0))
@@ -515,7 +528,7 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
 
     # 6. Nội dung bài viết (Hỗ trợ Emoji màu sắc thực thụ 100%)
     content_y = PAD + AVATAR_SIZE + 22
-    for i, line in enumerate(lines):
+    for i, line in enumerate(display_lines):
         draw_text_with_emojis(draw, (PAD, content_y + i * line_h), line, FONT_BODY, FONT_EMOJI_BODY, t["text_primary"])
 
     # 6.1. Dán ảnh minh họa câu chuyện (nếu có)
@@ -526,10 +539,7 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
         current_bottom_y = img_paste_y + att_resized.height
 
     # 7. Action Bar: CĂN THẲNG TRỤC NGANG 100% GIỮA ICON VÀ SỐ LIỆU
-    if fixed_card_h:
-        action_center_y = card_h - PAD - ICON_SIZE // 2 - SHADOW_OFFSET
-    else:
-        action_center_y = current_bottom_y + 20 + ICON_SIZE // 2
+    action_center_y = current_bottom_y + 20 + ICON_SIZE // 2
 
     likes_val = likes if likes > 0 else random.randint(12000, 35000)
     comments_cnt = max(18, likes_val // 55)

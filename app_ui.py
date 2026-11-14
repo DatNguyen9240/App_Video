@@ -101,14 +101,10 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         illus_cat = getattr(post, "illustration_category", "general_life")
         comments = getattr(post, "comments", [])
 
-    if enable_illus and (not post_illus or not os.path.exists(post_illus)):
-        cat_asset = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
-        if os.path.exists(cat_asset):
-            post_illus = cat_asset
-        else:
-            gen_asset = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
-            if os.path.exists(gen_asset):
-                post_illus = gen_asset
+    # Tuyệt đối không fallback sang ảnh chung cư/nhà hàng không liên quan
+    if not post_illus or not os.path.exists(post_illus):
+        post_illus = ""
+        enable_illus = False
 
     use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
     attached_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
@@ -127,12 +123,12 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
     sentences = [s.strip() for s in raw_sentences if s.strip()]
     if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
         for step_idx in range(1, len(sentences)):
-            sub_content = " ".join(sentences[:step_idx])
             step_img = card_mod.render_post_card(
-                username, sub_content, avatar_color, is_verified, likes,
+                username, content, avatar_color, is_verified, likes,
                 theme=theme, avatar_source=post_avatar,
                 attached_image_path=attached_arg,
-                fixed_card_h=p_img.height
+                visible_sentence_count=step_idx,
+                total_sentences_content=content
             )
             card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
 

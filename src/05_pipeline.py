@@ -269,6 +269,47 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         6: ["laugh.gif", "dancing_cat.gif", "bruh.gif"]
     }
 
+    # ─── ĐỒNG BỘ ĐIỂM RƠI BẰNG CHỨNG (PROOF SYNCHRONIZATION) ──────────────────
+    # Xác định CHÍNH XÁC bình luận nào sẽ bung thẻ ảnh popup:
+    # 1. Ưu tiên bình luận trực tiếp đưa ra bằng chứng ("đây nè", "tui chụp lại", "nhìn ảnh nè", "hình đây...")
+    # 2. Nếu có người hỏi xin ảnh ("có ảnh không?", "có hình không?"), bung đúng ở câu TRẢ LỜI kế tiếp (k + 1)!
+    # 3. Fallback: bung tại cú Twist (sub_drop/boom) hoặc bình luận kề cuối.
+    illus_cfg = cfg.get("illustration_settings", {})
+    popup_card_path = os.path.join(CARDS_DIR, "popup_proof.png")
+    has_popup = illus_cfg.get("enable_popup_illustration", True) and os.path.exists(popup_card_path)
+
+    popup_target_comment_idx = -1
+    if has_popup:
+        answer_cues = ["đây nè", "đây này", "đây nha", "tui chụp", "mình chụp", "ảnh đây", "hình đây", "nhìn ảnh", "xem ảnh", "coi ảnh", "bằng chứng đây", "chụp lại nè", "kết quả đây", "hóa đơn đây"]
+        for idx_c, cmt in enumerate(post.comments, 1):
+            c_low = cmt.content.lower()
+            if any(cue in c_low for cue in answer_cues):
+                popup_target_comment_idx = idx_c
+                print(f"  🎯 [ĐIỂM RƠI BẰNG CHỨNG]: Bình luận {idx_c} (@{cmt.username}) trực tiếp giới thiệu ảnh!")
+                break
+
+        if popup_target_comment_idx == -1:
+            for idx_c, cmt in enumerate(post.comments, 1):
+                c_low = cmt.content.lower()
+                has_img_word = any(w in c_low for w in ["ảnh", "hình", "bằng chứng", "chứng cứ"])
+                has_ask_word = any(w in c_low for w in ["không", "chưa", "đâu", "xin", "hả", "sao", "?"])
+                if has_img_word and has_ask_word:
+                    if idx_c < len(post.comments):
+                        popup_target_comment_idx = idx_c + 1
+                        print(f"  🎯 [ĐIỂM RƠI BẰNG CHỨNG]: Bình luận {idx_c} hỏi xin ảnh -> Bung ở câu TRẢ LỜI {popup_target_comment_idx} (@{post.comments[idx_c].username})!")
+                    else:
+                        popup_target_comment_idx = idx_c
+                    break
+
+        if popup_target_comment_idx == -1:
+            for idx_c, cmt in enumerate(post.comments, 1):
+                if getattr(cmt, "sfx", "none") in ["sub_drop", "boom", "shock"]:
+                    popup_target_comment_idx = idx_c
+                    break
+            if popup_target_comment_idx == -1:
+                popup_target_comment_idx = max(2, len(post.comments) - 1)
+            print(f"  🎯 [ĐIỂM RƠI BẰNG CHỨNG]: Bung ảnh tại cú Twist / Bình luận {popup_target_comment_idx}!")
+
     popup_shown = False
 
     # 2. Xử lý từng bình luận (Đẩy cao trào -> Cú Twist -> Chốt hạ)
@@ -381,15 +422,8 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "enable_slide": True
         })
 
-        # CHỌN MEME HOẶC POPUP ẢNH MINH HỌA NỔI CHO TỪNG PHÂN ĐOẠN CỦA BÌNH LUẬN:
-        illus_cfg = cfg.get("illustration_settings", {})
-        popup_card_path = os.path.join(CARDS_DIR, "popup_proof.png")
-        has_popup = illus_cfg.get("enable_popup_illustration", True) and os.path.exists(popup_card_path)
-        # Kích hoạt tự nhiên: Không spam cứng ở comment 2, chỉ bung khi câu thoại nhắc đến bằng chứng hoặc đoạn bẻ lái
-        c_text_lower = c.content.lower()
-        has_evidence_cue = any(kw in c_text_lower for kw in ["ảnh", "hình", "nhìn", "xem", "bằng chứng", "đây nè", "chụp", "hóa đơn", "kết quả", "out nét"])
-        is_twist_beat = (sfx_name in ["sub_drop", "shock", "boom"]) or (i >= max(2, len(post.comments) - 1))
-        is_popup_target = has_popup and not popup_shown and (has_evidence_cue or is_twist_beat)
+        # Kích hoạt popup ảnh minh họa nổi chuẩn xác tại điểm rơi đối đáp đã đồng bộ trước:
+        is_popup_target = (has_popup and not popup_shown and i == popup_target_comment_idx)
         if is_popup_target:
             popup_shown = True
 
@@ -411,15 +445,14 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             meme_file_cand = os.path.join(MEME_DIR, png_name)
 
         if is_popup_target:
-            # CUTAWAY GAG CHỚP NHOÁNG (1.8s - 2.2s):
-            # Xuất hiện chính giữa màn hình (H-h)/2 với hiệu ứng nảy lò xo Punch-in Bounce
-            # Bắt trọn tâm điểm của trò đùa rồi lập tức biến mất, đúng chuẩn phong cách TikToker triệu view
-            popup_dur = float(illus_cfg.get("popup_duration_s", 2.2))
-            popup_start = c_start + 0.25
-            popup_end = min(popup_start + popup_dur, c_end)
+            # CUTAWAY PROOF CARD: Xuất hiện chính giữa màn hình (H-h)/2 với hiệu ứng Punch-in Bounce
+            # Thời lượng hiển thị khớp trọn vẹn với câu trả lời (tối thiểu 2.4s, đồng bộ lời nói)
+            base_dur = float(illus_cfg.get("popup_duration_s", 2.6))
+            popup_start = c_start + 0.20
+            popup_end = min(popup_start + max(base_dur, c_dur - 0.2), c_end)
             popup_y = "(H-h)/2"
 
-            print(f"     🎬 [CUTAWAY GAG MINH HỌA CHỚP NHOÁNG] -> {popup_start:.2f}s đến {popup_end:.2f}s (Thời lượng: {popup_end-popup_start:.2f}s, Vị trí: Chính giữa màn hình, Kích thước: 980x640px)")
+            print(f"     🎬 [CUTAWAY BẰNG CHỨNG ĐỒNG BỘ CÂU TRẢ LỜI] -> {popup_start:.2f}s đến {popup_end:.2f}s (Thời lượng: {popup_end-popup_start:.2f}s, Vị trí: Chính giữa màn hình, Kích thước: 980x640px)")
             timeline.append({
                 "type": "popup_illustration",
                 "start": popup_start,
@@ -485,8 +518,8 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                 })
 
             # B. Tại điểm rơi Punchline / Bẻ lái (react_start đến c_end):
-            # Nếu bật meme reaction popup thì mới chèn ảnh GIF đè ra giữa, mặc định chỉ dùng hiệu ứng âm thanh & camera shake/punch-in để video sang và không rối mắt
-            enable_meme_popups = layout.get("enable_meme_reaction_popups", False)
+            # Kích hoạt meme reaction popup tại điểm bẻ lái cao trào
+            enable_meme_popups = layout.get("enable_meme_reaction_popups", True)
             if enable_meme_popups and meme_file_cand and extra_react_time >= 0.5:
                 m_x = "(W-w)/2"
                 m_y = "(H-h)/2" if punchline_center else str(meme_anchor_y)
@@ -646,7 +679,69 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "enable_slide": False
         })
 
-    # Chèn video thỏa mãn người xem ở chính giữa (Ghép hình, Ăn uống/Mukbang, ASMR)
+    # 1. Thẻ Post hiển thị: Tự động phân nhánh theo Sentence Reveal Mode
+    reveal_mode = getattr(post, "sentence_reveal_mode", "standard_full")
+    raw_sentences = re.split(r"(?<=[.!?\n])\s+", post.content.strip())
+    sentences = [s.strip() for s in raw_sentences if s.strip()]
+
+    post_entries = []
+    if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
+        # Tính thời lượng từng câu theo tỷ lệ số từ
+        word_counts = [max(1, len(s.split())) for s in sentences]
+        total_w = sum(word_counts)
+        step_durs = [post_dur * (w / total_w) for w in word_counts]
+
+        step_cursor = cursor
+        for step_idx in range(1, len(sentences)):
+            step_end = step_cursor + step_durs[step_idx - 1]
+            step_file = os.path.join(CARDS_DIR, f"post_step_{step_idx}.png")
+            if not os.path.exists(step_file):
+                step_file = os.path.join(CARDS_DIR, "post.png")
+
+            post_entries.append({
+                "type": "post",
+                "start": step_cursor,
+                "end": step_end,
+                "x": "(W-w)/2",
+                "y": post_y,
+                "width": card_w,
+                "camera_motion": "none",
+                "image": step_file,
+                "is_video": False,
+                "enable_slide": (step_idx == 1)
+            })
+            step_cursor = step_end
+
+        # Câu cuối mở full bài và ghim tới hết video
+        post_entries.append({
+            "type": "post",
+            "start": step_cursor,
+            "end": total_duration,
+            "x": "(W-w)/2",
+            "y": post_y,
+            "width": card_w,
+            "camera_motion": "none",
+            "image": os.path.join(CARDS_DIR, "post.png"),
+            "is_video": False,
+            "enable_slide": False
+        })
+        print(f"  ✨ [SENTENCE REVEAL]: Mở rộng thẻ bài cố định chiều cao theo {len(sentences)} nhịp đọc (t={cursor:.2f}s -> {step_cursor:.2f}s -> {total_duration:.2f}s)")
+    else:
+        post_entries.append({
+            "type": "post",
+            "start": cursor,
+            "end": total_duration,
+            "x": "(W-w)/2",
+            "y": post_y,
+            "width": card_w,
+            "camera_motion": "none",
+            "image": os.path.join(CARDS_DIR, "post.png"),
+            "is_video": False,
+            "enable_slide": True
+        })
+
+    # Đảm bảo thứ tự layer chuẩn: Background -> Video Thỏa Mãn Ở Giữa -> Thẻ Post -> Thẻ Comment & Popup
+    sat_layer_offset = 0
     if enable_center_sat and center_vid_file and os.path.exists(center_vid_file):
         timeline.insert(0, {
             "type": "center_satisfying_video",
@@ -662,67 +757,10 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "is_gif": False,
             "enable_slide": True
         })
+        sat_layer_offset = 1
 
-    # Thẻ Post hiển thị: Tự động phân nhánh theo Sentence Reveal Mode
-    reveal_mode = getattr(post, "sentence_reveal_mode", "standard_full")
-    raw_sentences = re.split(r"(?<=[.!?\n])\s+", post.content.strip())
-    sentences = [s.strip() for s in raw_sentences if s.strip()]
-
-    if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
-        # Tính thời lượng từng câu theo tỷ lệ số từ
-        word_counts = [max(1, len(s.split())) for s in sentences]
-        total_w = sum(word_counts)
-        step_durs = [post_dur * (w / total_w) for w in word_counts]
-
-        step_cursor = cursor
-        for step_idx in range(1, len(sentences)):
-            step_end = step_cursor + step_durs[step_idx - 1]
-            step_file = os.path.join(CARDS_DIR, f"post_step_{step_idx}.png")
-            if not os.path.exists(step_file):
-                step_file = os.path.join(CARDS_DIR, "post.png")
-
-            timeline.insert(step_idx - 1, {
-                "type": "post",
-                "start": step_cursor,
-                "end": step_end,
-                "x": "(W-w)/2",
-                "y": post_y,
-                "width": card_w,
-                "camera_motion": "none",
-                "image": step_file,
-                "is_video": False,
-                "enable_slide": (step_idx == 1)
-            })
-            step_cursor = step_end
-
-        # Câu cuối mở full bài và ghim tới hết video
-        timeline.insert(len(sentences) - 1, {
-            "type": "post",
-            "start": step_cursor,
-            "end": total_duration,
-            "x": "(W-w)/2",
-            "y": post_y,
-            "width": card_w,
-            "camera_motion": "none",
-            "image": os.path.join(CARDS_DIR, "post.png"),
-            "is_video": False,
-            "enable_slide": False
-        })
-        print(f"  ✨ [SENTENCE REVEAL]: Mở rộng thẻ bài theo {len(sentences)} nhịp đọc (t={cursor:.2f}s -> {step_cursor:.2f}s -> {total_duration:.2f}s)")
-    else:
-        # Tiêu chuẩn: Ghim toàn bộ bài viết từ đầu
-        timeline.insert(0, {
-            "type": "post",
-            "start": cursor,
-            "end": total_duration,
-            "x": "(W-w)/2",
-            "y": post_y,
-            "width": card_w,
-            "camera_motion": "none",
-            "image": os.path.join(CARDS_DIR, "post.png"),
-            "is_video": False,
-            "enable_slide": True
-        })
+    for p_idx, pe in enumerate(post_entries):
+        timeline.insert(sat_layer_offset + p_idx, pe)
 
     return timeline, audio_sequence, overlay_sfx, total_duration, emotional_arc_data
 
@@ -777,6 +815,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             )
 
     # Lấy các đoạn nói từ timeline
+    post_sub_added = False
     for item in timeline:
         itype = item.get("type")
         if itype == "comment":
@@ -784,7 +823,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if idx < len(post.comments):
                 cmt = post.comments[idx]
                 chunk_text_by_words(cmt.content, item["start"], item["end"] - 0.35, words_per_chunk=4)
-        elif itype == "post":
+        elif itype == "post" and not post_sub_added:
+            post_sub_added = True
             post_dur = timing.get("post", {}).get("duration_ms", 3000) / 1000.0
             chunk_text_by_words(post.content[:100], item["start"], item["start"] + post_dur, words_per_chunk=4)
 
@@ -989,15 +1029,10 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
             illus_cat = getattr(post, "illustration_category", "general_life")
 
-            # Nếu chưa có ảnh và bật tính năng, lấy từ kho ảnh thật theo đúng danh mục ngữ cảnh
-            if enable_illus and (not post_illus or not os.path.exists(post_illus)):
-                cat_candidate = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
-                if os.path.exists(cat_candidate):
-                    post_illus = cat_candidate
-                else:
-                    gen_candidate = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
-                    if os.path.exists(gen_candidate):
-                        post_illus = gen_candidate
+            # Tuyệt đối không fallback sang ảnh chung cư/nhà hàng không liên quan
+            if not post_illus or not os.path.exists(post_illus):
+                post_illus = ""
+                enable_illus = False
 
             # Quyết định ảnh gắn kèm bài đăng (Attached in Post):
             illus_cfg = cfg.get("illustration_settings", {})
@@ -1017,12 +1052,12 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             sentences = [s.strip() for s in raw_sentences if s.strip()]
             if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
                 for step_idx in range(1, len(sentences)):
-                    sub_content = " ".join(sentences[:step_idx])
                     step_img = card_mod.render_post_card(
-                        post.username, sub_content, post.avatar_color, post.is_verified, post.likes,
+                        post.username, post.content, post.avatar_color, post.is_verified, post.likes,
                         theme=card_theme, avatar_source=post_avatar,
                         attached_image_path=attached_img_arg,
-                        fixed_card_h=post_img.height
+                        visible_sentence_count=step_idx,
+                        total_sentences_content=post.content
                     )
                     card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
 
@@ -1097,7 +1132,7 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
         final_video = os.path.join(FINAL_DIR, f"final_meme_pro_{timestamp}.mp4")
 
         ass_sub_path = None
-        if layout.get("enable_kinetic_subtitles", True):
+        if layout.get("enable_kinetic_subtitles", False):
             ass_sub_path = os.path.join(OUT_DIR, "subtitles.ass")
             generate_kinetic_subtitles_ass(post, timing, timeline, ass_sub_path)
             tracker.log(f"  ✨ Đã tạo phụ đề động Kinetic Subtitles: {ass_sub_path}")

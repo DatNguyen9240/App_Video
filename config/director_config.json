@@ -2,8 +2,8 @@
   "project_name": "Threads Video Automation Studio",
   "version": "2.0.0",
   "ai_director": {
-    "model": "gemini-2.5-flash",
-    "fallback_model": "gemini-2.0-flash",
+    "model": "gemini-3.5-flash",
+    "fallback_model": "gemini-3.5-flash-lite",
     "temperature": 0.92,
     "duration_mode": "auto",
     "min_comments": 6,
@@ -257,74 +257,74 @@
       "vol": 0.4
     },
     "boom": {
-      "sfx_file": "boom.mp3",
+      "sfx_file": "sub_drop.mp3",
       "meme_file": "boom.gif",
       "emotion": "shocked",
       "camera_motion": "shake",
-      "vol": 0.28
+      "vol": 0.45
     },
     "laugh": {
-      "sfx_file": "laugh.mp3",
+      "sfx_file": "pop.mp3",
       "meme_file": "laugh.gif",
       "emotion": "funny",
       "camera_motion": "punch_in",
-      "vol": 0.24
+      "vol": 0.35
     },
     "bruh": {
-      "sfx_file": "bruh.mp3",
+      "sfx_file": "scratch.mp3",
       "meme_file": "bruh.gif",
       "emotion": "awkward",
       "camera_motion": "punch_in",
-      "vol": 0.25
+      "vol": 0.4
     },
     "shock": {
-      "sfx_file": "shock.mp3",
+      "sfx_file": "sub_drop.mp3",
       "meme_file": "shock.gif",
       "emotion": "shocked",
       "camera_motion": "shake",
-      "vol": 0.28
+      "vol": 0.45
     },
     "huh": {
       "sfx_file": "huh.mp3",
       "meme_file": "huh.gif",
       "emotion": "awkward",
       "camera_motion": "punch_in",
-      "vol": 0.24
+      "vol": 0.35
     },
     "side_eye": {
-      "sfx_file": "side_eye.mp3",
+      "sfx_file": "scratch.mp3",
       "meme_file": "side_eye.gif",
       "emotion": "sarcastic",
       "camera_motion": "punch_in",
-      "vol": 0.24
+      "vol": 0.4
     },
     "clown": {
-      "sfx_file": "clown.mp3",
+      "sfx_file": "scratch.mp3",
       "meme_file": "clown.gif",
       "emotion": "funny",
       "camera_motion": "punch_in",
-      "vol": 0.22
+      "vol": 0.35
     },
     "math": {
-      "sfx_file": "math.mp3",
+      "sfx_file": "ting.mp3",
       "meme_file": "math.gif",
       "emotion": "shocked",
       "camera_motion": "none",
-      "vol": 0.22
+      "vol": 0.35
     },
     "applause": {
       "sfx_file": "ting.mp3",
       "meme_file": "applause.gif",
       "emotion": "funny",
       "camera_motion": "punch_in",
-      "vol": 0.24
+      "vol": 0.35
     },
     "dancing_cat": {
       "sfx_file": "pop.mp3",
       "meme_file": "dancing_cat.gif",
       "emotion": "funny",
       "camera_motion": "punch_in",
-      "vol": 0.20
+      "vol": 0.35
     },
     "none": {
       "sfx_file": null,
@@ -369,7 +369,7 @@
     "progress_bar_height": 6,
     "enable_cinematic_vignette": true,
     "enable_spatial_audio_panning": true,
-    "enable_tension_riser": true,
+    "enable_tension_riser": false,
     "enable_meme_reaction_popups": true,
     "min_video_duration_s": 60.5,
     "enforce_min_duration_60s": true,
