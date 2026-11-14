@@ -51,9 +51,14 @@ class CommentSchema(BaseModel):
     content: str = Field(description="Bình luận tiếng Việt tự nhiên (14-22 từ), tập trung 100% vào đúng tình huống của tác giả. Tuyệt đối không tự ý kể chuyện lan man sang đồ vật hoặc đề tài khác.")
     avatar_color: str = Field(default="#3b82f6", description="Mã màu hex (vd: #3b82f6, #ef4444, #10b981, #f59e0b)")
     likes: int = Field(default=4500, description="Lượt thích ước tính từ 1500 đến 25000")
-    sfx: Literal["none", "laugh", "bruh", "boom", "sub_drop", "shock", "huh", "side_eye", "ting"] = Field(
+    sfx: Literal[
+        "none", "laugh", "bruh", "boom", "sub_drop", "shock", "huh", "side_eye", "ting",
+        "do_mixi", "pewpew", "emotional_damage", "oh_no",
+        "bat_ngo_chua", "cuu_toi_voi", "so_qua_co", "fbi_open_up",
+        "why_are_you_running", "coffin_dance", "to_be_continued", "gta_wasted", "sad_violin", "bonk"
+    ] = Field(
         default="none",
-        description="Hiệu ứng âm thanh và meme reaction điểm nhấn. Phân bổ 2-3 comment có SFX tương ứng cảm xúc ('laugh' cho cười, 'bruh'/'huh' cho cạn lời ngơ ngác, 'side_eye' cho liếc xéo cà khịa, 'boom'/'sub_drop' cho bẻ lái rung lắc, 'ting' cho phát hiện đắt giá)."
+        description="Hiệu ứng âm thanh và meme reaction điểm nhấn (Có hình GIF động + Giọng nói/SFX đồng bộ 100%). Phân bổ 2-3 comment có SFX tương ứng cảm xúc: 'do_mixi' (giọng Độ Mixi cười/cay cú/hợp lý), 'pewpew' (PewPew quá chuẩn luôn/ghê chưa), 'bat_ngo_chua' (Bất ngờ chưa bà già), 'cuu_toi_voi' (Trời ơi cứu tui với), 'so_qua_co' (Độ Mixi úi sợ quá), 'fbi_open_up' (Bắt quả tang phá cửa), 'why_are_you_running' (Why are you running), 'coffin_dance' (Khiêng quan tài tới số), 'to_be_continued' (Dừng hình JoJo kịch tính), 'gta_wasted' (Cái kết đắng Wasted), 'sad_violin' (Đàn kéo đau thương), 'bonk' (Cheems gõ đầu tỉnh ngộ), 'emotional_damage', 'oh_no', 'laugh', 'bruh', 'boom'/'sub_drop'."
     )
     emotion: Literal["funny", "shocked", "awkward", "sarcastic", "insightful", "neutral"] = Field(
         default="funny", description="Sắc thái cảm xúc của câu nói"

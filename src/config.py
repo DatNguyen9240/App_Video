@@ -132,6 +132,52 @@ DEFAULT_CONFIG = {
         "math": {"sfx_file": "ting.mp3", "meme_file": "math.gif", "emotion": "shocked", "camera_motion": "none", "vol": 0.35},
         "applause": {"sfx_file": "ting.mp3", "meme_file": "applause.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.35},
         "dancing_cat": {"sfx_file": "pop.mp3", "meme_file": "dancing_cat.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.35},
+        "do_mixi": {
+            "sfx_file": "do_mixi_cuoi.mp3",
+            "sound_pool": ["do_mixi_cuoi.mp3", "do_mixi_cay_the_nho.mp3", "do_mixi_kinh_roi.mp3", "do_mixi_hop_ly.mp3", "do_mixi_hoang_duong.mp3"],
+            "meme_file": "do_mixi.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.55
+        },
+        "pewpew": {
+            "sfx_file": "pewpew_qua_chuan_luon.mp3",
+            "sound_pool": ["pewpew_qua_chuan_luon.mp3", "pewpew_cuoi.mp3", "pewpew_tam_chat.mp3", "pewpew_tin_the_nao_duoc.mp3"],
+            "meme_file": "pewpew.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.55
+        },
+        "emotional_damage": {
+            "sfx_file": "emotional_damage.mp3", "meme_file": "emotional_damage.gif", "emotion": "shocked", "camera_motion": "shake", "vol": 0.55
+        },
+        "oh_no": {
+            "sfx_file": "oh_no.mp3", "meme_file": "oh_no.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.50
+        },
+        "bat_ngo_chua": {
+            "sfx_file": "bat_ngo_chua.mp3", "meme_file": "bat_ngo_chua.gif", "emotion": "shocked", "camera_motion": "punch_in", "vol": 0.55
+        },
+        "cuu_toi_voi": {
+            "sfx_file": "cuu_toi_voi.mp3", "meme_file": "cuu_toi_voi.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.55
+        },
+        "so_qua_co": {
+            "sfx_file": "so_qua_co.mp3", "meme_file": "so_qua_co.gif", "emotion": "sarcastic", "camera_motion": "punch_in", "vol": 0.55
+        },
+        "fbi_open_up": {
+            "sfx_file": "fbi_open_up.mp3", "meme_file": "fbi_open_up.gif", "emotion": "shocked", "camera_motion": "shake", "vol": 0.55
+        },
+        "why_are_you_running": {
+            "sfx_file": "why_are_you_running.mp3", "meme_file": "why_are_you_running.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.55
+        },
+        "coffin_dance": {
+            "sfx_file": "coffin_dance.mp3", "meme_file": "coffin_dance.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.55
+        },
+        "to_be_continued": {
+            "sfx_file": "to_be_continued.mp3", "meme_file": "to_be_continued.gif", "emotion": "shocked", "camera_motion": "punch_in", "vol": 0.50
+        },
+        "gta_wasted": {
+            "sfx_file": "gta_wasted.mp3", "meme_file": "gta_wasted.gif", "emotion": "shocked", "camera_motion": "shake", "vol": 0.50
+        },
+        "sad_violin": {
+            "sfx_file": "sad_violin.mp3", "meme_file": "sad_violin.gif", "emotion": "awkward", "camera_motion": "punch_in", "vol": 0.45
+        },
+        "bonk": {
+            "sfx_file": "bonk.mp3", "meme_file": "bonk.gif", "emotion": "funny", "camera_motion": "punch_in", "vol": 0.45
+        },
         "none": {"sfx_file": None, "meme_file": None, "emotion": "neutral", "camera_motion": "none", "vol": 0.0}
     },
     "visual_layout": {
@@ -235,7 +281,15 @@ def get_voice_for_role(role_name: str) -> dict:
 
 def get_sfx_info(sfx_key: str) -> dict:
     """Lấy thông tin file audio, meme sticker, hiệu ứng camera của SFX."""
+    import random
     cfg = load_config()
     reg = cfg.get("sfx_meme_registry", {})
-    return reg.get(sfx_key, reg.get("none", {}))
+    entry = reg.get(sfx_key, reg.get("none", {}))
+    info = dict(entry) if entry else {}
+    # Hỗ trợ xoay vòng nhiều âm thanh meme khác nhau cho cùng một nhân vật/streamer
+    sound_pool = info.get("sound_pool")
+    if sound_pool and isinstance(sound_pool, list) and sound_pool:
+        info["sfx_file"] = random.choice(sound_pool)
+    return info
+
 

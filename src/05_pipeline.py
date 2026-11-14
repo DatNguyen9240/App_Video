@@ -369,12 +369,21 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         if enable_foley and os.path.exists(pop_sfx):
             overlay_sfx.append({"time": c_start, "file": pop_sfx, "vol": 0.35})
 
-        # Thời lượng phản ứng visual (meme popup hoặc dừng nhẹ)
+        # Thời lượng phản ứng (meme popup hoặc khoảng dừng sau câu)
         has_meme_sticker = (sfx_name != "none" and sfx_info.get("meme_file"))
         if has_meme_sticker:
-            extra_react_time = 0.85 # Snappy 0.85s reaction, vừa kịp xem visual, không gây dead air!
+            if sfx_file and os.path.exists(sfx_file):
+                dur_ms = tts_mod.get_mp3_duration_ms(sfx_file)
+                extra_react_time = max(0.85, min(3.2, (dur_ms / 1000.0) + 0.15))
+            else:
+                extra_react_time = 0.85
         else:
-            extra_react_time = pause_after
+            # Ngay cả khi không hiện visual meme, nếu có sound meme thì chừa đủ thời lượng âm thanh
+            if sfx_file and os.path.exists(sfx_file) and sfx_info.get("vol", 0) > 0.1:
+                dur_ms = tts_mod.get_mp3_duration_ms(sfx_file)
+                extra_react_time = max(pause_after, min(3.2, (dur_ms / 1000.0) + 0.10))
+            else:
+                extra_react_time = pause_after
 
         c_end = react_start + extra_react_time
 
@@ -427,22 +436,44 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         if is_popup_target:
             popup_shown = True
 
-        # Tìm meme phản ứng sẵn có
+        # Tìm meme phản ứng sẵn có (Chỉ tải visual nếu meme_file được khai báo khác None)
         meme_file_cand = None
         is_meme_video = False
         is_meme_gif = False
-        gif_name = f"{sfx_name}.gif"
-        mp4_name = f"{sfx_name}.mp4"
-        png_name = sfx_info.get("meme_file") or f"{sfx_name}.png"
+        target_meme_file = sfx_info.get("meme_file")
 
-        if os.path.exists(os.path.join(MEME_DIR, gif_name)):
-            meme_file_cand = os.path.join(MEME_DIR, gif_name)
-            is_meme_gif = True
-        elif os.path.exists(os.path.join(MEME_DIR, mp4_name)):
-            meme_file_cand = os.path.join(MEME_DIR, mp4_name)
-            is_meme_video = True
-        elif os.path.exists(os.path.join(MEME_DIR, png_name)):
-            meme_file_cand = os.path.join(MEME_DIR, png_name)
+        if target_meme_file:
+            cand_path = os.path.join(MEME_DIR, target_meme_file)
+            if os.path.exists(cand_path):
+                meme_file_cand = cand_path
+                is_meme_gif = target_meme_file.endswith(".gif")
+                is_meme_video = target_meme_file.endswith(".mp4")
+            else:
+                # Thử các định dạng khác cùng tên nếu file chỉ định bị thiếu đuôi
+                base_name = os.path.splitext(target_meme_file)[0]
+                for ext in [".gif", ".mp4", ".png"]:
+                    cand_alt = os.path.join(MEME_DIR, base_name + ext)
+                    if os.path.exists(cand_alt):
+                        meme_file_cand = cand_alt
+                        is_meme_gif = ext == ".gif"
+                        is_meme_video = ext == ".mp4"
+                        break
+
+        # Tự động trích xuất âm thanh nếu người dùng đưa file video meme (.mp4) trực tiếp
+        if is_meme_video and meme_file_cand and not sfx_file:
+            cand_sfx = os.path.join(SFX_DIR, f"{sfx_name}.mp3")
+            if not os.path.exists(cand_sfx):
+                exe = bg_mod.get_ffmpeg_exe()
+                subprocess.run([exe, "-y", "-i", meme_file_cand, "-vn", "-c:a", "libmp3lame", "-q:a", "2", cand_sfx], capture_output=True)
+            if os.path.exists(cand_sfx) and os.path.getsize(cand_sfx) > 1000:
+                sfx_file = cand_sfx
+                overlay_sfx.append({
+                    "time": max(0.0, react_start - 0.05),
+                    "file": sfx_file,
+                    "vol": sfx_info.get("vol", 0.50)
+                })
+                print(f"     🔊 [TỰ ĐỘNG PHÁT TIẾNG TỪ VIDEO MEME MP4]: {os.path.basename(cand_sfx)} tại t={react_start:.2f}s")
+
 
         if is_popup_target:
             # CUTAWAY PROOF CARD: Xuất hiện chính giữa màn hình (H-h)/2 với hiệu ứng Punch-in Bounce
@@ -893,7 +924,7 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
         elif h_val:
             filter_chains.append(f"[{img_idx}:v]scale={w}:{h_val}:force_original_aspect_ratio=increase,crop={w}:{h_val}{layer_label}")
         else:
-            filter_chains.append(f"[{img_idx}:v]scale={w}:-1:flags=lanczos{layer_label}")
+            filter_chains.append(f"[{img_idx}:v]scale={w}:-2:flags=lanczos{layer_label}")
 
         # Tính toán hiệu ứng chuyển cảnh đa dạng (Spring Pop, Conversational Slide Left/Right, Punch-in Bounce, Shake)
         trans_type = item.get("transition", "slide_up" if (enable_slide and item.get("enable_slide")) else "none")

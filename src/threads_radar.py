@@ -515,7 +515,12 @@ YÊU CẦU ĐẶC BIỆT ĐẠT CHUẨN VIDEO DÀI TRÊN 1 PHÚT (60s-75s):
         gender: ai_base.Literal["male", "female"]
         content: str
         likes: int = 4500
-        sfx: ai_base.Literal["none", "laugh", "bruh", "boom", "sub_drop", "shock", "huh", "side_eye", "ting"] = "none"
+        sfx: ai_base.Literal[
+            "none", "laugh", "bruh", "boom", "sub_drop", "shock", "huh", "side_eye", "ting",
+            "do_mixi", "pewpew", "emotional_damage", "oh_no",
+            "bat_ngo_chua", "cuu_toi_voi", "so_qua_co", "fbi_open_up",
+            "why_are_you_running", "coffin_dance", "to_be_continued", "gta_wasted", "sad_violin", "bonk"
+        ] = "none"
         emotion: ai_base.Literal["funny", "shocked", "awkward", "sarcastic", "insightful"] = "funny"
         pause_before_ms: int = 220
         pause_after_ms: int = 280
