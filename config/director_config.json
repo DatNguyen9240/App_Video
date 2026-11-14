@@ -216,7 +216,7 @@
   "sfx_meme_registry": {
     "sub_drop": {
       "sfx_file": "sub_drop.mp3",
-      "meme_file": "boom.gif",
+      "meme_file": null,
       "emotion": "shocked",
       "camera_motion": "shake",
       "vol": 0.45
@@ -237,7 +237,7 @@
     },
     "ting": {
       "sfx_file": "ting.mp3",
-      "meme_file": "ting.gif",
+      "meme_file": null,
       "emotion": "insightful",
       "camera_motion": "none",
       "vol": 0.35
@@ -373,7 +373,7 @@
     "enable_meme_reaction_popups": true,
     "min_video_duration_s": 60.5,
     "enforce_min_duration_60s": true,
-    "enable_continuous_anchor_meme": true,
+    "enable_continuous_anchor_meme": false,
     "punchline_meme_popup_center": true,
     "punchline_meme_popup_size": 780,
     "enable_center_satisfying_video": true,
