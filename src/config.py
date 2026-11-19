@@ -72,9 +72,11 @@ DEFAULT_CONFIG = {
         "punchline_post_pause_ms": 250,
         "comment_gap_ms": 180,
         "awkward_silence_duration_ms": 250,
-        "bgm_volume_normal": 0.18,
-        "bgm_volume_duck": 0.06,
+        "enable_bgm": True,
+        "bgm_volume_normal": 0.45,
+        "bgm_volume_duck": 0.20,
         "enable_bgm_ducking": True,
+        "selected_bgm_file": "random",
         "enable_camera_shake": True,
         "enable_card_zoom": True
     },

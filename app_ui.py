@@ -31,6 +31,7 @@ CARDS_DIR  = os.path.join(OUTPUT_DIR, "cards")
 AUDIO_DIR  = os.path.join(OUTPUT_DIR, "audio")
 MEMES_DIR  = os.path.join(BASE_DIR, "assets", "memes")
 AVATARS_DIR = os.path.join(BASE_DIR, "assets", "avatars")
+ASSETS_DIR  = os.path.join(BASE_DIR, "assets")
 JS_DIR     = os.path.join(BASE_DIR, "assets", "js")
 ENV_PATH   = os.path.join(BASE_DIR, ".env")
 
@@ -55,16 +56,25 @@ bg_mod       = load_mod("bg_audio", "04_bg_audio.py")
 pipeline_mod = load_mod("pipeline", "05_pipeline.py")
 
 
-def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
+def _render_all_cards_helper(post, theme="light", enable_attached_image=None, platform=None):
     """
-    Hàm chuẩn hóa render toàn bộ bộ thẻ Threads:
-    - Thẻ Post chính (hỗ trợ tùy chọn gắn kèm ảnh hoặc để sạch gọn)
+    Hàm chuẩn hóa render toàn bộ bộ thẻ theo nền tảng (Threads / Facebook / Instagram):
+    - Thẻ Post chính (hỗ trợ đính kèm ảnh thực tế hoặc hiển thị phong cách FB/IG)
     - Khung Ảnh Minh Họa Nổi Bên Ngoài (Popup Proof Card với viền Neon & 3D shadow)
-    - Tất cả các thẻ Comment với avatar thật và bố cục chuẩn
+    - Tất cả các thẻ Comment với avatar thật và bong bóng chat chuẩn nền tảng
     """
     os.makedirs(CARDS_DIR, exist_ok=True)
     cfg = config_mod.load_config()
     illus_cfg = cfg.get("illustration_settings", {})
+
+    if not platform or platform == "auto":
+        if isinstance(post, dict):
+            platform = post.get("platform", "threads")
+        else:
+            platform = getattr(post, "platform", "threads")
+        if platform == "auto":
+            platform = "threads"
+    plat = (platform or "threads").lower().strip()
 
     if theme == "auto" or not theme:
         rec_theme = post.get("recommended_theme", "light") if isinstance(post, dict) else getattr(post, "recommended_theme", "light")
@@ -106,14 +116,15 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
         post_illus = ""
         enable_illus = False
 
-    use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
+    use_attached = (placement == "attached_in_post") or (plat in ["facebook", "instagram"] and enable_illus) or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
     attached_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
     # 1. Thẻ bài đăng chính
     p_img = card_mod.render_post_card(
         username, content, avatar_color, is_verified, likes,
         theme=theme, avatar_source=post_avatar,
-        attached_image_path=attached_arg
+        attached_image_path=attached_arg,
+        platform=plat
     )
     card_mod.save_card(p_img, os.path.join(CARDS_DIR, "post.png"))
 
@@ -128,13 +139,14 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
                 theme=theme, avatar_source=post_avatar,
                 attached_image_path=attached_arg,
                 visible_sentence_count=step_idx,
-                total_sentences_content=content
+                total_sentences_content=content,
+                platform=plat
             )
             card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
 
     # 2. Khung ảnh minh họa nổi bên ngoài: CHỈ khi không gắn trong bài và được bật
     popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
-    allow_popup = enable_illus and (placement != "attached_in_post") and illus_cfg.get("enable_popup_illustration", True)
+    allow_popup = enable_illus and (not use_attached) and illus_cfg.get("enable_popup_illustration", True)
     if allow_popup and post_illus and os.path.exists(post_illus):
         badge_lbl = illus_cfg.get("badge_text", "📸 BẰNG CHỨNG THỰC TẾ")
         caption_lbl = (post.get("illustration_caption", "") or post.get("video_title", "")) if isinstance(post, dict) else (getattr(post, "illustration_caption", "") or getattr(post, "video_title", ""))
@@ -165,7 +177,8 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
 
         c_img = card_mod.render_comment_card(
             c_user, c_text, c_color, c_ver, c_likes,
-            index=i, reply_to=c_reply, theme=theme, avatar_source=c_avatar
+            index=i, reply_to=c_reply, theme=theme, avatar_source=c_avatar,
+            platform=plat
         )
         card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
 
@@ -173,7 +186,7 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None):
     try:
         outro_card_path = os.path.join(CARDS_DIR, "outro_cta.png")
         cta_q = (post.get("cta_question", "") if isinstance(post, dict) else getattr(post, "cta_question", "")) or "Còn bạn thì sao? Đã từng gặp tình huống éo le tương tự chưa?"
-        card_mod.render_outro_cta_card(question_text=cta_q, output_path=outro_card_path)
+        card_mod.render_outro_cta_card(question_text=cta_q, output_path=outro_card_path, platform=plat)
     except Exception as e:
         print(f"[WARN] Failed to render outro_cta card in helper: {e}")
 
@@ -308,6 +321,36 @@ HTML_TEMPLATE = """
               <input v-model="topicInput" @keyup.enter="generateScriptOnly" type="text"
                 placeholder="Nhập chủ đề muốn làm video (ví dụ: đèn ngủ, công sở, phỏng vấn, người yêu cũ...) hoặc chọn trend bên dưới..."
                 class="w-full glass-input rounded-xl pl-11 pr-4 py-3 text-sm focus:outline-none placeholder-slate-500 font-medium border border-slate-700/80 focus:border-indigo-500 transition">
+            </div>
+
+            <!-- Chọn Nền tảng nội dung: Tự động / Threads / Facebook / Instagram -->
+            <div class="flex items-center gap-2 p-2 rounded-xl bg-slate-900/70 border border-slate-800">
+              <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5 pl-1.5">
+                <i class="fa-solid fa-shapes text-sky-400"></i> Nền tảng:
+              </span>
+              <div class="grid grid-cols-4 gap-1.5 flex-1">
+                <button type="button" @click="setPlatform('auto')"
+                  :class="settings.platform === 'auto' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
+                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer"
+                  title="AI tự động phân tích chủ đề để chọn nền tảng và định dạng tối ưu nhất">
+                  <span>🤖 Tự động</span>
+                </button>
+                <button type="button" @click="setPlatform('threads')"
+                  :class="settings.platform === 'threads' ? 'bg-indigo-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
+                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer">
+                  <span>🧵 Threads</span>
+                </button>
+                <button type="button" @click="setPlatform('facebook')"
+                  :class="settings.platform === 'facebook' ? 'bg-blue-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
+                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer">
+                  <span>📘 Facebook</span>
+                </button>
+                <button type="button" @click="setPlatform('instagram')"
+                  :class="settings.platform === 'instagram' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
+                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer">
+                  <span>📸 Instagram</span>
+                </button>
+              </div>
             </div>
 
             <!-- Tùy chỉnh nhanh: Số lượng bình luận & Giọng đọc Adam / Brian -->
@@ -744,7 +787,20 @@ HTML_TEMPLATE = """
             <span class="text-xs text-slate-400">Tùy biến chuẩn TikTok & Reels</span>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3.5">
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-3.5">
+            <!-- Nền tảng nội dung (Platform) -->
+            <div class="space-y-1.5">
+              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-shapes text-sky-400"></i> Nền tảng hiển thị:
+              </label>
+              <select v-model="settings.platform" @change="onPlatformChange" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                <option value="auto">🤖 Tự Động (AI Phân Tích Chọn Nền Tảng)</option>
+                <option value="threads">🧵 Threads (Đối đáp nhanh, tinh gọn)</option>
+                <option value="facebook">📘 Facebook Post (Kèm ảnh & Like/Share)</option>
+                <option value="instagram">📸 Instagram Feed (Ảnh lớn & Story Ring)</option>
+              </select>
+            </div>
+
             <!-- Bố cục video (Layout Presets) -->
             <div class="space-y-1.5">
               <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
@@ -823,6 +879,30 @@ HTML_TEMPLATE = """
                 <option value="+10%">🌟 Tự nhiên (+10%)</option>
                 <option value="+0%">🐢 Bình thường (+0%)</option>
               </select>
+            </div>
+
+            <!-- Nhạc nền TikTok & Âm lượng -->
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-music text-rose-400"></i> Nhạc nền (BGM):
+                </label>
+                <span class="text-[10px] font-mono text-rose-300 font-bold" v-if="settings.bgm_choice !== 'none'">
+                  {{ settings.bgm_volume }}%
+                </span>
+                <span class="text-[10px] font-mono text-slate-500 font-bold" v-else>
+                  Tắt
+                </span>
+              </div>
+              <select v-model="settings.bgm_choice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+                <option v-for="b in bgmList" :key="b.id" :value="b.id">{{ b.name }}</option>
+              </select>
+              <div class="flex items-center gap-2 pt-0.5" v-if="settings.bgm_choice !== 'none'">
+                <i class="fa-solid fa-volume-low text-[10px] text-slate-400"></i>
+                <input type="range" min="5" max="100" step="5" v-model.number="settings.bgm_volume"
+                  class="w-full accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer">
+                <i class="fa-solid fa-volume-high text-[10px] text-slate-400"></i>
+              </div>
             </div>
           </div>
         </div>
@@ -908,10 +988,21 @@ HTML_TEMPLATE = """
 
             <template v-else>
               <div class="flex items-center justify-between">
-                <span class="text-xs text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1.5">
-                  <i class="fa-solid fa-layer-group"></i> Xem trước các thẻ Threads (PNG)
-                </span>
-                <button @click="refreshCardPreview" class="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                    <i class="fa-solid fa-layer-group"></i> Thẻ xem trước
+                  </span>
+                  <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1"
+                    :class="{
+                      'bg-indigo-600/20 text-indigo-300 border-indigo-500/40': (post.platform || 'threads') === 'threads',
+                      'bg-blue-600/20 text-blue-300 border-blue-500/40': (post.platform || 'threads') === 'facebook',
+                      'bg-pink-600/20 text-pink-300 border-pink-500/40': (post.platform || 'threads') === 'instagram'
+                    }">
+                    <span>{{ post.platform === 'facebook' ? '📘 Facebook' : (post.platform === 'instagram' ? '📸 Instagram' : '🧵 Threads') }}</span>
+                    <span v-if="settings.platform === 'auto'" class="text-[9px] text-amber-300 bg-amber-500/20 px-1 rounded font-normal">AI chọn</span>
+                  </span>
+                </div>
+                <button @click="refreshCardPreview" class="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer">
                   <i class="fa-solid fa-arrows-rotate"></i> Cập nhật thẻ
                 </button>
               </div>
@@ -1190,6 +1281,39 @@ HTML_TEMPLATE = """
                 <label class="text-xs text-slate-400 font-semibold">Khoảng cách giữa các bình luận (ms):</label>
                 <input v-model.number="directorConfig.emotional_pacing.comment_gap_ms" type="number" class="w-full glass-input rounded-lg p-2 text-xs font-mono text-slate-200">
                 <span class="text-[10px] text-slate-500">Nhịp chuyển thẻ bình luận</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Nhóm 1.1: Nhạc Nền BGM & Dynamic Ducking -->
+          <div class="space-y-3" v-if="directorConfig.emotional_pacing">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-rose-400 flex items-center gap-2">
+              <i class="fa-solid fa-music"></i> 1.1. Cấu Hình Nhạc Nền BGM & Dynamic Ducking (Tự Động Nén Khi Nói)
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer font-semibold">
+                  <input type="checkbox" v-model="directorConfig.emotional_pacing.enable_bgm" class="rounded bg-slate-800 border-slate-700 text-rose-500">
+                  <span>Bật nhạc nền TikTok (BGM)</span>
+                </label>
+                <span class="text-[10px] text-slate-500 block">Trộn nhạc nền êm dịu làm tăng cảm xúc người xem</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+                <div class="flex items-center justify-between">
+                  <label class="text-xs text-slate-400 font-semibold">Âm lượng nhạc nền:</label>
+                  <span class="text-xs font-mono font-bold text-rose-400">{{ Math.round((directorConfig.emotional_pacing.bgm_volume_normal || 0.45) * 100) }}%</span>
+                </div>
+                <input type="range" min="0.05" max="1.0" step="0.05" v-model.number="directorConfig.emotional_pacing.bgm_volume_normal" class="w-full accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer">
+                <span class="text-[10px] text-slate-500 block">Khuyên dùng 40% - 50% để không át giọng nói</span>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer font-semibold">
+                  <input type="checkbox" v-model="directorConfig.emotional_pacing.enable_bgm_ducking" class="rounded bg-slate-800 border-slate-700 text-rose-500">
+                  <span>Dynamic Ducking (Tự hạ nhạc khi nói)</span>
+                </label>
+                <span class="text-[10px] text-slate-500 block">Tự động hạ nhỏ nhạc khi có giọng nói, tự nổi lên khi nghỉ</span>
               </div>
             </div>
           </div>
@@ -1698,6 +1822,7 @@ HTML_TEMPLATE = """
           isRefreshingTrends: false,
           viralTopics: [],
           post: {
+            platform: 'threads',
             username: '',
             content: '',
             likes: 0,
@@ -1723,12 +1848,19 @@ HTML_TEMPLATE = """
           customImageQuery: '',
           isSearchingImage: false,
           settings: {
+            platform: 'threads',
             layout_preset: 'center',
             bg_mode: 'auto',
             card_theme: 'auto',
             voice: 'vi-VN-HoaiMyNeural',
-            rate: '+20%'
+            rate: '+20%',
+            bgm_choice: 'random',
+            bgm_volume: 45
           },
+          bgmList: [
+            { id: 'random', name: '🎲 Ngẫu nhiên (Kho nhạc nền TikTok/Lofi)' },
+            { id: 'none', name: '🔇 Tắt nhạc nền (Chỉ giọng đọc & SFX)' }
+          ],
           pipelineState: {
             is_running: false,
             current_step_id: 'idle',
@@ -1758,6 +1890,7 @@ HTML_TEMPLATE = """
       },
       mounted() {
         this.loadSettings();
+        this.loadBgmList();
         this.loadCurrentScript();
         this.loadLatestVideo();
         this.loadDailyTrendingTopics(false);
@@ -1804,6 +1937,20 @@ HTML_TEMPLATE = """
               }
             } catch(e) {}
           }, 800);
+        },
+        setPlatform(plat) {
+          this.settings.platform = plat;
+          if (this.post && plat !== 'auto') {
+            this.post.platform = plat;
+            if ((plat === 'facebook' || plat === 'instagram') && this.post.illustration_path) {
+              this.post.enable_illustration = true;
+            }
+            this.refreshCardPreview();
+          }
+          this.saveSettings();
+        },
+        onPlatformChange() {
+          this.setPlatform(this.settings.platform);
         },
         async createVideoOneClick() {
           this.currentTab = 'pipeline';
@@ -1986,15 +2133,27 @@ HTML_TEMPLATE = """
             this.isCrawlingTrending = false;
           }
         },
+        async loadBgmList() {
+          try {
+            const res = await fetch('/api/bgm_list');
+            const data = await res.json();
+            if (data && data.bgm_list) {
+              this.bgmList = data.bgm_list;
+            }
+          } catch(e) {}
+        },
         async loadSettings() {
           try {
             const res = await fetch('/api/settings');
             const data = await res.json();
+            this.settings.platform = data.platform || 'threads';
             this.settings.layout_preset = data.layout_preset || 'center';
             this.settings.bg_mode = data.bg_mode || 'split_gameplay';
             this.settings.card_theme = data.card_theme || 'light';
             this.settings.voice = data.voice || 'vi-VN-HoaiMyNeural';
             this.settings.rate = data.rate || '+20%';
+            this.settings.bgm_choice = data.bgm_choice || 'random';
+            this.settings.bgm_volume = data.bgm_volume !== undefined ? data.bgm_volume : 45;
           } catch(e) {}
         },
         async saveSettings() {
@@ -2064,7 +2223,8 @@ HTML_TEMPLATE = """
                 topic: this.topicInput,
                 comment_count: this.commentCountInput,
                 voice: this.authorVoiceInput,
-                duration_mode: this.directorConfig?.ai_director?.duration_mode
+                duration_mode: this.directorConfig?.ai_director?.duration_mode,
+                platform: this.settings.platform
               })
             });
             const data = await res.json();
@@ -2087,7 +2247,7 @@ HTML_TEMPLATE = """
             await fetch('/api/save_and_render_cards', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ post: this.post, theme: this.settings.card_theme })
+              body: JSON.stringify({ post: this.post, theme: this.settings.card_theme, platform: this.settings.platform })
             });
             this.cardTimestamp = Date.now();
             this.previewMode = 'cards';
@@ -2193,46 +2353,92 @@ def api_reset_director_config():
     return jsonify({"success": True, "config": config_mod.DEFAULT_CONFIG})
 
 
+@app.route("/api/bgm_list", methods=["GET"])
+def api_bgm_list():
+    """Lấy danh sách các bài nhạc nền hiện có trong kho assets/bgm."""
+    bgm_dir = os.path.join(ASSETS_DIR, "bgm")
+    items = [
+        {"id": "random", "name": "🎲 Ngẫu nhiên (Kho nhạc nền TikTok/Lofi)"},
+        {"id": "none", "name": "🔇 Tắt nhạc nền (Chỉ giọng đọc & SFX)"}
+    ]
+    if os.path.exists(bgm_dir):
+        for f in sorted(os.listdir(bgm_dir)):
+            if f.lower().endswith((".mp3", ".wav", ".m4a")):
+                title = f
+                if "chill" in f.lower():
+                    title = f"☕ {f} (Lofi Chill thư giãn)"
+                elif "upbeat" in f.lower():
+                    title = f"⚡ {f} (Lofi Upbeat nhịp điệu)"
+                else:
+                    title = f"🎵 {f}"
+                items.append({"id": f, "name": title})
+    return jsonify({"bgm_list": items})
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "POST":
         data = request.json
+        platform = data.get("platform", "threads")
         layout_preset = data.get("layout_preset", "center")
         bg_mode = data.get("bg_mode", "split_gameplay")
         card_theme = data.get("card_theme", "light")
         voice = data.get("voice", "vi-VN-HoaiMyNeural")
         rate = data.get("rate", "+20%")
+        bgm_choice = data.get("bgm_choice", "random")
+        bgm_volume = data.get("bgm_volume", 45)
 
         lines = []
         if os.path.exists(ENV_PATH):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
-                    if not any(line.strip().startswith(k + "=") for k in ["LAYOUT_PRESET", "BG_MODE", "CARD_THEME", "TTS_VOICE", "TTS_RATE"]):
+                    if not any(line.strip().startswith(k + "=") for k in ["PLATFORM", "LAYOUT_PRESET", "BG_MODE", "CARD_THEME", "TTS_VOICE", "TTS_RATE", "BGM_CHOICE", "BGM_VOLUME"]):
                         lines.append(line)
+        lines.append(f"PLATFORM={platform}\n")
         lines.append(f"LAYOUT_PRESET={layout_preset}\n")
         lines.append(f"BG_MODE={bg_mode}\n")
         lines.append(f"CARD_THEME={card_theme}\n")
         lines.append(f"TTS_VOICE={voice}\n")
         lines.append(f"TTS_RATE={rate}\n")
+        lines.append(f"BGM_CHOICE={bgm_choice}\n")
+        lines.append(f"BGM_VOLUME={bgm_volume}\n")
         with open(ENV_PATH, "w", encoding="utf-8") as f:
             f.writelines(lines)
         return jsonify({"success": True})
     else:
+        platform = "threads"
         layout_preset = "center"
         bg_mode = "split_gameplay"
         card_theme = "light"
         voice = "vi-VN-HoaiMyNeural"
         rate = "+20%"
+        bgm_choice = "random"
+        bgm_volume = 45
         if os.path.exists(ENV_PATH):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("LAYOUT_PRESET="): layout_preset = line.split("=", 1)[1].strip()
+                    if line.startswith("PLATFORM="): platform = line.split("=", 1)[1].strip()
+                    elif line.startswith("LAYOUT_PRESET="): layout_preset = line.split("=", 1)[1].strip()
                     elif line.startswith("BG_MODE="): bg_mode = line.split("=", 1)[1].strip()
                     elif line.startswith("CARD_THEME="): card_theme = line.split("=", 1)[1].strip()
                     elif line.startswith("TTS_VOICE="): voice = line.split("=", 1)[1].strip()
                     elif line.startswith("TTS_RATE="): rate = line.split("=", 1)[1].strip()
-        return jsonify({"layout_preset": layout_preset, "bg_mode": bg_mode, "card_theme": card_theme, "voice": voice, "rate": rate})
+                    elif line.startswith("BGM_CHOICE="): bgm_choice = line.split("=", 1)[1].strip()
+                    elif line.startswith("BGM_VOLUME="):
+                        try: bgm_volume = int(line.split("=", 1)[1].strip())
+                        except ValueError: pass
+
+        return jsonify({
+            "platform": platform,
+            "layout_preset": layout_preset,
+            "bg_mode": bg_mode,
+            "card_theme": card_theme,
+            "voice": voice,
+            "rate": rate,
+            "bgm_choice": bgm_choice,
+            "bgm_volume": bgm_volume
+        })
 
 
 @app.route("/api/script", methods=["GET"])
@@ -2263,10 +2469,12 @@ def api_generate_script():
         tracker.reset()
         tracker.start_step("script", f"Gemini AI đang sáng tạo kịch bản theo chủ đề: '{topic or 'ngẫu nhiên'}'...", 20)
 
+        platform = data.get("platform", "threads")
         post = ai_mod.generate_story_with_gemini(
             topic,
             duration_mode=duration_mode,
             target_comment_count=target_comment_count,
+            platform=platform,
             progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
         )
         if author_voice:
@@ -2277,7 +2485,7 @@ def api_generate_script():
 
         # Render trước các thẻ kèm avatar người thật & theme tối ưu
         tracker.start_step("cards", "Vẽ thẻ xem trước (Avatar người thật & Giao diện tối ưu)...", 80)
-        _render_all_cards_helper(post, theme=getattr(post, "recommended_theme", "light"))
+        _render_all_cards_helper(post, theme=getattr(post, "recommended_theme", "light"), platform=platform)
         tracker.finish_step("cards")
         tracker.finish_step("script")
         tracker.pause_for_review(f"Đã tạo kịch bản {len(post.comments)} bình luận & vẽ thẻ xem trước (Bước 2/6). Sẵn sàng render video!")
@@ -2285,6 +2493,7 @@ def api_generate_script():
         return jsonify({
             "success": True,
             "post": {
+                "platform": getattr(post, "platform", platform),
                 "username": post.username,
                 "content": post.content,
                 "likes": post.likes,
@@ -2391,6 +2600,9 @@ def api_create_video_one_click():
     layout_preset = sets.get("layout_preset", "center")
     bg_mode = sets.get("bg_mode", "auto")
     card_theme = sets.get("card_theme", "auto")
+    bgm_choice = sets.get("bgm_choice", "random")
+    raw_vol = sets.get("bgm_volume")
+    bgm_volume = (float(raw_vol) / 100.0) if raw_vol is not None else None
 
     author_voice = data.get("voice") or sets.get("voice") or "adam"
 
@@ -2407,13 +2619,25 @@ def api_create_video_one_click():
             if author_voice:
                 post.voice_id = author_voice
 
-            # BƯỚC 2: RENDER BỘ THẺ THREADS CHUẨN (VỚI AVATAR THẬT TỪ THREADS & POPUP CARD)
-            tracker.start_step("cards", "Đang ghép avatar thật từ Threads và vẽ bộ thẻ...", 30)
-            _render_all_cards_helper(post, theme=card_theme)
+            platform = sets.get("platform", "threads")
+            post.platform = platform
+            # BƯỚC 2: RENDER BỘ THẺ CHUẨN NỀN TẢNG
+            tracker.start_step("cards", f"Đang vẽ bộ thẻ {platform.upper()} chuẩn (Avatar người thật)...", 30)
+            _render_all_cards_helper(post, theme=card_theme, platform=platform)
             tracker.finish_step("cards")
 
             # BƯỚC 3 -> 6: CHẠY TIẾP ĐỂ DỰNG VIDEO THÀNH PHẨM (TTS, AUDIO, COMPOSITE, EXPORT)
-            pipeline_mod.run_pipeline(post, bg_mode=bg_mode, card_theme=card_theme, reset_tracker=False, skip_cards_render=True, layout_preset=layout_preset)
+            pipeline_mod.run_pipeline(
+                post,
+                bg_mode=bg_mode,
+                card_theme=card_theme,
+                reset_tracker=False,
+                skip_cards_render=True,
+                layout_preset=layout_preset,
+                bgm_choice=bgm_choice,
+                bgm_volume=bgm_volume,
+                platform=platform
+            )
 
         except Exception as e:
             import traceback
@@ -2462,8 +2686,9 @@ def api_save_cards():
     data = request.json
     p_data = data.get("post", {})
     theme = data.get("theme", "light")
+    platform = data.get("platform") or p_data.get("platform") or "threads"
     try:
-        _render_all_cards_helper(p_data, theme=theme)
+        _render_all_cards_helper(p_data, theme=theme, platform=platform)
 
         # Dọn dẹp các ảnh comment cũ thừa nếu số lượng comment giảm
         for old_file in glob.glob(os.path.join(CARDS_DIR, "comment_*.png")):
@@ -2603,10 +2828,18 @@ def api_reset_tracker():
     return jsonify({"success": True})
 
 
-def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_screen"):
+def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_screen", bgm_choice=None, bgm_volume=None, platform="threads"):
     """Hàm chạy nền cho pipeline để không bao giờ bị timeout trên browser."""
     try:
-        pipeline_mod.run_pipeline(post_obj, bg_mode=bg_mode, card_theme=card_theme, layout_preset=layout_preset)
+        pipeline_mod.run_pipeline(
+            post_obj,
+            bg_mode=bg_mode,
+            card_theme=card_theme,
+            layout_preset=layout_preset,
+            bgm_choice=bgm_choice,
+            bgm_volume=bgm_volume,
+            platform=platform
+        )
     except Exception as e:
         tracker.set_error(str(e))
 
@@ -2645,6 +2878,7 @@ def api_render_video():
                 pause_after_ms=int(c.get("pause_after_ms", 350))
             ))
 
+        platform = sets.get("platform") or p_data.get("platform") or "threads"
         author_role = roles.get("author", {})
         post_rate = chosen_rate or author_role.get("rate", "+18%")
         post_voice = p_data.get("voice_id") or chosen_voice or author_role.get("voice", "adam")
@@ -2673,15 +2907,22 @@ def api_render_video():
             pacing_tempo=p_data.get("pacing_tempo", "normal"),
             enable_illustration=bool(p_data.get("enable_illustration", False)),
             emotional_arc=p_data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
+            platform=platform,
             comments=comments
         )
 
         layout_preset = sets.get("layout_preset", "center")
         bg_mode = sets.get("bg_mode", "auto")
         card_theme = sets.get("card_theme", "auto")
+        bgm_choice = sets.get("bgm_choice", "random")
+        raw_vol = sets.get("bgm_volume")
+        bgm_volume = (float(raw_vol) / 100.0) if raw_vol is not None else None
 
         # Khởi chạy quy trình render trong background thread
-        thread = threading.Thread(target=_async_render_worker, args=(post_obj, bg_mode, card_theme, layout_preset))
+        thread = threading.Thread(
+            target=_async_render_worker,
+            args=(post_obj, bg_mode, card_theme, layout_preset, bgm_choice, bgm_volume, platform)
+        )
         thread.daemon = True
         thread.start()
 

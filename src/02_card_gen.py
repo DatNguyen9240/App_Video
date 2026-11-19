@@ -126,11 +126,14 @@ def _load_font(font_name: str, size: int) -> ImageFont.FreeTypeFont:
 
 FONT_USERNAME = _load_font("segoeuib.ttf", 30)   # Username đậm
 FONT_TIME     = _load_font("segoeui.ttf",  24)   # Thời gian (12 giờ, 2 giờ)
-FONT_LOGO     = _load_font("segoeuib.ttf", 30)   # Logo @threads
+FONT_LOGO     = _load_font("segoeuib.ttf", 30)   # Logo @threads / Platform branding
 FONT_BODY     = _load_font("segoeui.ttf",  34)   # Nội dung bài viết
 FONT_BODY_CMT = _load_font("segoeui.ttf",  33)   # Nội dung bình luận
 FONT_ACTION   = _load_font("segoeui.ttf",  23)   # Số đếm tương tác
 FONT_REPLY    = _load_font("segoeui.ttf",  22)   # "Trả lời @tác_giả"
+FONT_SUB      = _load_font("segoeui.ttf",  22)   # Sub-meta FB/IG
+FONT_BOLD_SUB = _load_font("segoeuib.ttf", 23)   # Nút bấm FB (Thích, Bình luận, Chia sẻ)
+FONT_BOLD_SM  = _load_font("segoeuib.ttf", 26)   # Tiêu đề comment / Likes IG
 FONT_EMOJI_BODY = _load_font("seguiemj.ttf", 31) # Font Emoji màu cho Post
 FONT_EMOJI_CMT  = _load_font("seguiemj.ttf", 30) # Font Emoji màu cho Comment
 
@@ -308,7 +311,7 @@ def get_action_icon_img(kind: str, size: int = ICON_SIZE,
         d.polygon([(cx + r - 3, cy - 9), (cx + r + 10, cy + 2), (cx + r - 11, cy + 5)], fill=color)
         d.polygon([(cx - r + 3, cy + 9), (cx - r - 10, cy - 2), (cx - r + 11, cy - 5)], fill=color)
 
-    elif kind == "share":
+    elif kind in ["share", "threads_share"]:
         pts = [
             (S * 0.12, S * 0.14),
             (S * 0.88, S * 0.50),
@@ -317,6 +320,62 @@ def get_action_icon_img(kind: str, size: int = ICON_SIZE,
         ]
         d.polygon(pts, outline=color, width=w)
 
+    elif kind in ["fb_like", "like"]:
+        # Facebook Thumbs Up
+        d.rounded_rectangle([10, 26, 20, 54], radius=3, outline=color, width=w, fill=color if fill_solid else None)
+        hand = [(24, 28), (28, 16), (35, 12), (40, 15), (37, 26), (53, 26), (56, 33), (54, 41), (56, 44), (53, 50), (50, 54), (24, 54)]
+        d.polygon(hand, outline=color, fill=color if fill_solid else None, width=w)
+
+    elif kind in ["fb_share"]:
+        # Facebook curved share arrow
+        arrow = [(54, 30), (36, 14), (36, 23), (14, 23), (14, 46), (22, 46), (22, 34), (36, 34), (36, 46)]
+        d.polygon(arrow, outline=color, fill=color if fill_solid else None, width=w)
+
+    elif kind in ["ig_plane", "plane"]:
+        # Instagram DM/Share paper plane
+        d.polygon([(54, 10), (10, 34), (28, 40), (46, 22), (32, 42), (36, 54)], outline=color, fill=color if fill_solid else None, width=w)
+
+    elif kind in ["ig_bookmark", "bookmark"]:
+        # Instagram Bookmark ribbon
+        d.polygon([(16, 10), (48, 10), (48, 54), (32, 42), (16, 54)], outline=color, fill=color if fill_solid else None, width=w)
+
+    elif kind in ["more", "dots"]:
+        # 3 horizontal dots •••
+        r = 3.5
+        for cx in [16, 32, 48]:
+            d.ellipse([cx - r, 32 - r, cx + r, 32 + r], fill=color)
+
+    elif kind in ["globe"]:
+        # Globe icon for Facebook public status
+        d.ellipse([10, 10, 54, 54], outline=color, width=w)
+        d.line([(10, 32), (54, 32)], fill=color, width=max(1, w - 1))
+        d.ellipse([21, 10, 43, 54], outline=color, width=max(1, w - 1))
+
+    return img.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def create_ig_avatar_ring(size: int = 84, ring_thickness: int = 4) -> Image.Image:
+    """Tạo viền Story Gradient rực rỡ đặc trưng của Instagram."""
+    S = size * 2
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    colors = [
+        (254, 218, 119),  # Vàng
+        (245, 133, 41),   # Cam
+        (221, 42, 123),   # Hồng
+        (129, 52, 175),   # Tím
+        (81, 91, 212)     # Xanh tím
+    ]
+    th = ring_thickness * 2
+    for deg in range(360):
+        c_idx = int((deg / 360.0) * len(colors))
+        c1 = colors[c_idx]
+        c2 = colors[(c_idx + 1) % len(colors)]
+        t = (deg / 360.0 * len(colors)) - c_idx
+        r = int(c1[0] * (1 - t) + c2[0] * t)
+        g = int(c1[1] * (1 - t) + c2[1] * t)
+        b = int(c1[2] * (1 - t) + c2[2] * t)
+        d.arc([0, 0, S - 1, S - 1], start=deg, end=deg + 2, fill=(r, g, b, 255), width=th)
     return img.resize((size, size), Image.Resampling.LANCZOS)
 
 
@@ -431,13 +490,13 @@ def get_realistic_avatar(username: str, size: int = AVATAR_SIZE, avatar_source: 
 
 # ─── Render Thẻ POST (Bài đăng chính) ─────────────────────────────────────────
 
-def render_post_card(username: str, content: str, avatar_color: str = None,
-                     is_verified: bool = False, likes: int = 0,
-                     time_str: str = "12 giờ", theme: str = None,
-                     avatar_source: str = None,
-                     attached_image_path: str = None,
-                     visible_sentence_count: int = None,
-                     total_sentences_content: str = None) -> Image.Image:
+def _render_threads_post_card(username: str, content: str, avatar_color: str = None,
+                              is_verified: bool = False, likes: int = 0,
+                              time_str: str = "12 giờ", theme: str = None,
+                              avatar_source: str = None,
+                              attached_image_path: str = None,
+                              visible_sentence_count: int = None,
+                              total_sentences_content: str = None) -> Image.Image:
     t_name = theme or get_card_theme()
     t = THEMES.get(t_name, THEMES["light"])
 
@@ -556,12 +615,10 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
     act_x = PAD
     gap = 48
     for kind, val in actions:
-        # Icon căn đúng trục action_center_y
         icon = get_action_icon_img(kind, size=ICON_SIZE, color=t["action_icon"], bg_fill=t["card_bg"])
         icon_y = int(action_center_y - ICON_SIZE / 2)
         img.paste(icon, (act_x, icon_y), icon)
 
-        # Số liệu căn đúng trục action_center_y
         val_bbox = draw.textbbox((0, 0), val, font=FONT_ACTION)
         val_y = int(action_center_y - (val_bbox[1] + val_bbox[3]) / 2)
         draw.text((act_x + ICON_SIZE + 8, val_y), val, font=FONT_ACTION, fill=t["action_text"])
@@ -570,6 +627,346 @@ def render_post_card(username: str, content: str, avatar_color: str = None,
         act_x += ICON_SIZE + 8 + int(val_w) + gap
 
     return img
+
+
+def _draw_fb_reactions_summary(img: Image.Image, draw: ImageDraw.Draw, x: int, y: int, size: int = 24, bg_outline=(255, 255, 255)):
+    """Vẽ 3 vòng tròn reaction Facebook (Like 👍, Heart ❤️, Haha 😆) chồng mí nhau chuẩn xác."""
+    r = size // 2
+    # 1. Like
+    cx1 = x + r
+    cy = y + r
+    draw.ellipse([cx1 - r, cy - r, cx1 + r, cy + r], fill=(24, 119, 242))
+    like_ico = get_action_icon_img("fb_like", size=int(size * 0.65), color=(255, 255, 255), fill_solid=True)
+    img.paste(like_ico, (int(cx1 - like_ico.width / 2), int(cy - like_ico.height / 2)), like_ico)
+
+    # 2. Heart
+    cx2 = x + int(size * 0.72) + r
+    draw.ellipse([cx2 - r - 2, cy - r - 2, cx2 + r + 2, cy + r + 2], fill=bg_outline)
+    draw.ellipse([cx2 - r, cy - r, cx2 + r, cy + r], fill=(250, 56, 86))
+    heart_ico = get_action_icon_img("heart", size=int(size * 0.65), color=(255, 255, 255), fill_solid=True)
+    img.paste(heart_ico, (int(cx2 - heart_ico.width / 2), int(cy - heart_ico.height / 2)), heart_ico)
+
+    # 3. Haha
+    cx3 = x + int(size * 1.44) + r
+    draw.ellipse([cx3 - r - 2, cy - r - 2, cx3 + r + 2, cy + r + 2], fill=bg_outline)
+    draw.ellipse([cx3 - r, cy - r, cx3 + r, cy + r], fill=(247, 177, 37))
+    d_mini = ImageDraw.Draw(img)
+    d_mini.line([(cx3 - 4, cy - 2), (cx3 - 2, cy - 4), (cx3, cy - 2)], fill=(110, 65, 0), width=2)
+    d_mini.line([(cx3 + 1, cy - 2), (cx3 + 3, cy - 4), (cx3 + 5, cy - 2)], fill=(110, 65, 0), width=2)
+    d_mini.chord([cx3 - 5, cy - 1, cx3 + 5, cy + 6], start=0, end=180, fill=(110, 65, 0))
+
+    return x + int(size * 1.44) + size + 8
+
+
+def _render_facebook_post_card(username: str, content: str, avatar_color: str = None,
+                               is_verified: bool = False, likes: int = 0,
+                               time_str: str = "12 giờ", theme: str = None,
+                               avatar_source: str = None,
+                               attached_image_path: str = None,
+                               visible_sentence_count: int = None,
+                               total_sentences_content: str = None) -> Image.Image:
+    t_name = theme or get_card_theme()
+    t = THEMES.get(t_name, THEMES["light"])
+    dummy = Image.new("RGB", (1, 1))
+    d_dummy = ImageDraw.Draw(dummy)
+
+    PAD_FB = 36
+    max_text_w = CARD_W - PAD_FB * 2
+
+    full_text = total_sentences_content if total_sentences_content else content
+    full_lines = wrap_text(full_text, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
+    line_h = 46
+    text_h = len(full_lines) * line_h
+
+    if visible_sentence_count is not None and total_sentences_content:
+        raw_s = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", total_sentences_content.strip()) if s.strip()]
+        partial_text = " ".join(raw_s[:visible_sentence_count])
+        display_lines = wrap_text(partial_text, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
+    else:
+        display_lines = wrap_text(content, FONT_BODY, max_text_w, d_dummy, FONT_EMOJI_BODY)
+
+    # Ảnh đính kèm (Facebook photo attachment)
+    att_resized = None
+    att_mask = None
+    att_h = 0
+    if attached_image_path and os.path.exists(attached_image_path):
+        try:
+            with Image.open(attached_image_path) as att_raw:
+                raw_w, raw_h = att_raw.size
+                target_w = max_text_w
+                aspect = raw_h / max(1, raw_w)
+                target_h = int(target_w * aspect)
+                target_h = max(260, min(500, target_h))
+
+                att_resized = att_raw.convert("RGBA").resize((target_w, target_h), Image.Resampling.LANCZOS)
+                att_mask = Image.new("L", (target_w, target_h), 0)
+                ImageDraw.Draw(att_mask).rounded_rectangle([0, 0, target_w - 1, target_h - 1], radius=16, fill=255)
+                att_h = target_h + 16
+        except Exception as e:
+            print(f"  ⚠️ Lỗi xử lý ảnh đính kèm FB: {e}")
+
+    av_size = 64
+    rx_h = 32
+    btn_h = 40
+    card_h = PAD_FB + av_size + 16 + text_h + att_h + 16 + rx_h + 12 + 1 + 6 + btn_h + PAD_FB
+    card_h = max(card_h, 260)
+
+    img = Image.new("RGBA", (CARD_W, card_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # 1. Đổ bóng 3D
+    draw.rounded_rectangle([2, SHADOW_OFFSET, CARD_W - 3, card_h - 1], radius=RADIUS, fill=t["shadow"])
+
+    # 2. Thân thẻ
+    draw.rounded_rectangle([0, 0, CARD_W - 1, card_h - SHADOW_OFFSET - 1], radius=RADIUS,
+                           fill=(*t["card_bg"], 255), outline=t["card_outline"], width=2)
+
+    # 3. Avatar
+    av_img = get_realistic_avatar(username, size=av_size, avatar_source=avatar_source)
+    img.paste(av_img, (PAD_FB, PAD_FB), av_img)
+
+    # 4. Header: Username + Subline (thời gian • 🌐 Công khai)
+    user_x = PAD_FB + av_size + 14
+    u_y = PAD_FB + 4
+    draw.text((user_x, u_y), username, font=FONT_USERNAME, fill=t["text_username"])
+    user_w = draw.textlength(username, font=FONT_USERNAME)
+    if is_verified:
+        badge = get_verified_badge_img(size=20)
+        img.paste(badge, (int(user_x + user_w + 8), u_y + 4), badge)
+
+    meta_y = PAD_FB + 36
+    draw.text((user_x, meta_y), f"{time_str} • ", font=FONT_SUB, fill=t["text_meta"])
+    m_w = draw.textlength(f"{time_str} • ", font=FONT_SUB)
+    globe_ico = get_action_icon_img("globe", size=15, color=t["text_meta"])
+    img.paste(globe_ico, (int(user_x + m_w), meta_y + 3), globe_ico)
+    draw.text((user_x + m_w + 18, meta_y), "Công khai", font=FONT_SUB, fill=t["text_meta"])
+
+    # Nút "•••" góc trên bên phải
+    more_ico = get_action_icon_img("more", size=22, color=t["text_meta"])
+    img.paste(more_ico, (CARD_W - PAD_FB - 24, PAD_FB + 14), more_ico)
+
+    # 5. Nội dung bài viết
+    content_y = PAD_FB + av_size + 16
+    for i, line in enumerate(display_lines):
+        draw_text_with_emojis(draw, (PAD_FB, content_y + i * line_h), line, FONT_BODY, FONT_EMOJI_BODY, t["text_primary"])
+
+    # 5.1. Dán ảnh đính kèm (nếu có)
+    current_bottom_y = content_y + text_h
+    if att_resized and att_mask:
+        img_paste_y = current_bottom_y + 10
+        img.paste(att_resized, (PAD_FB, img_paste_y), att_mask)
+        draw.rounded_rectangle([PAD_FB, img_paste_y, PAD_FB + att_resized.width - 1, img_paste_y + att_resized.height - 1],
+                               radius=16, outline=t["card_outline"], width=1)
+        current_bottom_y = img_paste_y + att_resized.height
+
+    # 6. Reaction summary bar (Like 👍, Heart ❤️, Haha 😆 + Like count + Cmt & Share counts)
+    rx_y = current_bottom_y + 14
+    bg_out = (255, 255, 255) if t_name == "light" else (22, 22, 24)
+    next_x = _draw_fb_reactions_summary(img, draw, PAD_FB, rx_y, size=24, bg_outline=bg_out)
+
+    likes_val = likes if likes > 0 else random.randint(12000, 48000)
+    comments_cnt = max(24, likes_val // 45)
+    shares_cnt = max(12, likes_val // 75)
+
+    like_txt = format_metric(likes_val)
+    draw.text((next_x, rx_y + 1), like_txt, font=FONT_ACTION, fill=t["action_text"])
+
+    # Phía bên phải: "{comments_cnt} bình luận • {shares_cnt} lượt chia sẻ"
+    right_meta = f"{format_metric(comments_cnt)} bình luận  •  {format_metric(shares_cnt)} lượt chia sẻ"
+    r_w = draw.textlength(right_meta, font=FONT_SUB)
+    draw.text((CARD_W - PAD_FB - int(r_w), rx_y + 2), right_meta, font=FONT_SUB, fill=t["text_meta"])
+
+    # 7. Đường phân cách 1px (Divider line)
+    div_y = rx_y + 32
+    draw.line([(PAD_FB, div_y), (CARD_W - PAD_FB, div_y)], fill=t["card_outline"], width=1)
+
+    # 8. 3 Nút tương tác chính (Action buttons): [👍 Thích], [💬 Bình luận], [↗️ Chia sẻ]
+    btn_y = div_y + 6
+    col_w = max_text_w // 3
+    actions = [
+        ("fb_like", "Thích"),
+        ("comment", "Bình luận"),
+        ("fb_share", "Chia sẻ")
+    ]
+    for idx, (icon_k, label) in enumerate(actions):
+        cx = PAD_FB + idx * col_w + col_w // 2
+        lbl_w = draw.textlength(label, font=FONT_BOLD_SUB)
+        ico_size = 20
+        total_w = ico_size + 8 + int(lbl_w)
+        start_x = cx - total_w // 2
+
+        ico_img = get_action_icon_img(icon_k, size=ico_size, color=t["action_text"], bg_fill=t["card_bg"])
+        img.paste(ico_img, (start_x, btn_y + 10), ico_img)
+        draw.text((start_x + ico_size + 8, btn_y + 8), label, font=FONT_BOLD_SUB, fill=t["action_text"])
+
+    return img
+
+
+def _render_instagram_post_card(username: str, content: str, avatar_color: str = None,
+                               is_verified: bool = False, likes: int = 0,
+                               time_str: str = "12 giờ", theme: str = None,
+                               avatar_source: str = None,
+                               attached_image_path: str = None,
+                               visible_sentence_count: int = None,
+                               total_sentences_content: str = None) -> Image.Image:
+    t_name = theme or get_card_theme()
+    t = THEMES.get(t_name, THEMES["light"])
+    dummy = Image.new("RGB", (1, 1))
+    d_dummy = ImageDraw.Draw(dummy)
+
+    PAD_IG = 34
+    max_w = CARD_W - PAD_IG * 2
+
+    full_text = total_sentences_content if total_sentences_content else content
+    full_lines = wrap_text(full_text, FONT_BODY, max_w, d_dummy, FONT_EMOJI_BODY)
+    line_h = 44
+    text_h = len(full_lines) * line_h
+
+    if visible_sentence_count is not None and total_sentences_content:
+        raw_s = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", total_sentences_content.strip()) if s.strip()]
+        partial_text = " ".join(raw_s[:visible_sentence_count])
+        display_lines = wrap_text(partial_text, FONT_BODY, max_w, d_dummy, FONT_EMOJI_BODY)
+    else:
+        display_lines = wrap_text(content, FONT_BODY, max_w, d_dummy, FONT_EMOJI_BODY)
+
+    # Ảnh Instagram: Tâm điểm trực quan chính (Hero visual)
+    att_resized = None
+    att_mask = None
+    photo_h = 0
+    if attached_image_path and os.path.exists(attached_image_path):
+        try:
+            with Image.open(attached_image_path) as att_raw:
+                raw_w, raw_h = att_raw.size
+                target_w = max_w
+                aspect = raw_h / max(1, raw_w)
+                target_h = int(target_w * aspect)
+                target_h = max(340, min(540, target_h))
+
+                att_resized = att_raw.convert("RGBA").resize((target_w, target_h), Image.Resampling.LANCZOS)
+                att_mask = Image.new("L", (target_w, target_h), 0)
+                ImageDraw.Draw(att_mask).rounded_rectangle([0, 0, target_w - 1, target_h - 1], radius=16, fill=255)
+                photo_h = target_h + 16
+        except Exception as e:
+            print(f"  ⚠️ Lỗi xử lý ảnh IG: {e}")
+
+    av_size = 62
+    act_h = 36
+    likes_h = 28
+    teaser_h = 24
+    time_h = 22
+
+    card_h = PAD_IG + av_size + 16 + photo_h + act_h + 12 + likes_h + 6 + text_h + 10 + teaser_h + 6 + time_h + PAD_IG
+    card_h = max(card_h, 320)
+
+    img = Image.new("RGBA", (CARD_W, card_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Đổ bóng 3D
+    draw.rounded_rectangle([2, SHADOW_OFFSET, CARD_W - 3, card_h - 1], radius=RADIUS, fill=t["shadow"])
+    draw.rounded_rectangle([0, 0, CARD_W - 1, card_h - SHADOW_OFFSET - 1], radius=RADIUS,
+                           fill=(*t["card_bg"], 255), outline=t["card_outline"], width=2)
+
+    # Avatar với Instagram Story gradient ring
+    ring_size = av_size + 10
+    ig_ring = create_ig_avatar_ring(size=ring_size, ring_thickness=3)
+    img.paste(ig_ring, (PAD_IG - 5, PAD_IG - 5), ig_ring)
+
+    av_img = get_realistic_avatar(username, size=av_size, avatar_source=avatar_source)
+    img.paste(av_img, (PAD_IG, PAD_IG), av_img)
+
+    # Header: Username + Location / Audio subline
+    user_x = PAD_IG + av_size + 16
+    u_y = PAD_IG + 6
+    draw.text((user_x, u_y), username, font=FONT_USERNAME, fill=t["text_username"])
+    user_w = draw.textlength(username, font=FONT_USERNAME)
+    if is_verified:
+        badge = get_verified_badge_img(size=20)
+        img.paste(badge, (int(user_x + user_w + 8), u_y + 4), badge)
+
+    meta_y = PAD_IG + 36
+    draw.text((user_x, meta_y), "Âm thanh gốc  •  Threads Story", font=FONT_SUB, fill=t["text_meta"])
+
+    # Nút "•••" góc trên bên phải
+    more_ico = get_action_icon_img("more", size=22, color=t["text_meta"])
+    img.paste(more_ico, (CARD_W - PAD_IG - 24, PAD_IG + 18), more_ico)
+
+    # Dán ảnh tâm điểm bài viết
+    current_y = PAD_IG + av_size + 16
+    if att_resized and att_mask:
+        img.paste(att_resized, (PAD_IG, current_y), att_mask)
+        draw.rounded_rectangle([PAD_IG, current_y, PAD_IG + att_resized.width - 1, current_y + att_resized.height - 1],
+                               radius=16, outline=t["card_outline"], width=1)
+        current_y += att_resized.height + 16
+
+    # Action Bar: Heart, Comment, Share (Plane) bên trái, Bookmark bên phải
+    act_y = current_y + 4
+    ico_sz = 28
+    heart_ico = get_action_icon_img("heart", size=ico_sz, color=t["action_icon"])
+    img.paste(heart_ico, (PAD_IG, act_y), heart_ico)
+    cmt_ico = get_action_icon_img("comment", size=ico_sz, color=t["action_icon"], bg_fill=t["card_bg"])
+    img.paste(cmt_ico, (PAD_IG + ico_sz + 22, act_y), cmt_ico)
+    plane_ico = get_action_icon_img("ig_plane", size=ico_sz, color=t["action_icon"])
+    img.paste(plane_ico, (PAD_IG + (ico_sz + 22) * 2, act_y), plane_ico)
+    bm_ico = get_action_icon_img("ig_bookmark", size=ico_sz, color=t["action_icon"])
+    img.paste(bm_ico, (CARD_W - PAD_IG - ico_sz, act_y), bm_ico)
+
+    # Dòng Likes: "{likes} lượt thích"
+    likes_val = likes if likes > 0 else random.randint(18000, 65000)
+    comments_cnt = max(35, likes_val // 40)
+    likes_y = act_y + ico_sz + 14
+    likes_str = f"{format_metric(likes_val)} lượt thích"
+    draw.text((PAD_IG, likes_y), likes_str, font=FONT_BOLD_SM, fill=t["text_username"])
+
+    # Caption: Username đậm + Nội dung
+    caption_y = likes_y + 32
+    for i, line in enumerate(display_lines):
+        draw_text_with_emojis(draw, (PAD_IG, caption_y + i * line_h), line, FONT_BODY, FONT_EMOJI_BODY, t["text_primary"])
+
+    # Dòng xem tất cả bình luận
+    teaser_y = caption_y + text_h + 8
+    draw.text((PAD_IG, teaser_y), f"Xem tất cả {format_metric(comments_cnt)} bình luận", font=FONT_SUB, fill=t["text_meta"])
+
+    # Dòng thời gian: "12 GIỜ TRƯỚC"
+    time_y = teaser_y + 28
+    draw.text((PAD_IG, time_y), f"{time_str.upper()} TRƯỚC", font=FONT_SUB, fill=t["text_meta"])
+
+    return img
+
+
+def render_post_card(username: str, content: str, avatar_color: str = None,
+                     is_verified: bool = False, likes: int = 0,
+                     time_str: str = "12 giờ", theme: str = None,
+                     avatar_source: str = None,
+                     attached_image_path: str = None,
+                     visible_sentence_count: int = None,
+                     total_sentences_content: str = None,
+                     platform: str = "threads") -> Image.Image:
+    """Hàm điều phối Render Thẻ POST chuẩn theo từng Nền Tảng (Threads / Facebook / Instagram)."""
+    plat = (platform or "threads").lower().strip()
+    if plat == "facebook":
+        return _render_facebook_post_card(
+            username=username, content=content, avatar_color=avatar_color,
+            is_verified=is_verified, likes=likes, time_str=time_str, theme=theme,
+            avatar_source=avatar_source, attached_image_path=attached_image_path,
+            visible_sentence_count=visible_sentence_count,
+            total_sentences_content=total_sentences_content
+        )
+    elif plat == "instagram":
+        return _render_instagram_post_card(
+            username=username, content=content, avatar_color=avatar_color,
+            is_verified=is_verified, likes=likes, time_str=time_str, theme=theme,
+            avatar_source=avatar_source, attached_image_path=attached_image_path,
+            visible_sentence_count=visible_sentence_count,
+            total_sentences_content=total_sentences_content
+        )
+    else:
+        return _render_threads_post_card(
+            username=username, content=content, avatar_color=avatar_color,
+            is_verified=is_verified, likes=likes, time_str=time_str, theme=theme,
+            avatar_source=avatar_source, attached_image_path=attached_image_path,
+            visible_sentence_count=visible_sentence_count,
+            total_sentences_content=total_sentences_content
+        )
 
 
 def create_popup_illustration_card(image_path: str, output_path: str,
@@ -610,15 +1007,13 @@ def create_popup_illustration_card(image_path: str, output_path: str,
                 crop_h = int(raw_w / target_ratio)
                 crop_x = 0
                 crop_y = (raw_h - crop_h) // 2
-            
+
             cropped = raw_im.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
             im = cropped.convert("RGBA").resize((w, h), Image.Resampling.LANCZOS)
             mask = Image.new("L", (w, h), 0)
             ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=24, fill=255)
             canvas.paste(im, (20, 20), mask)
 
-        # Lọc bỏ emoji để tránh hiện ô vuông font chữ []
-        import re
         emoji_pattern = re.compile(
             "[\U00010000-\U0010ffff]|[\u2600-\u27bf]|[\u2300-\u23ff]|[\u2b50-\u2b55]",
             flags=re.UNICODE
@@ -626,7 +1021,6 @@ def create_popup_illustration_card(image_path: str, output_path: str,
         clean_caption = emoji_pattern.sub("", caption_text).strip() if caption_text else ""
         clean_badge = emoji_pattern.sub("", badge_text).strip() if badge_text else ""
 
-        # 4. Banner giải thích ngữ cảnh trò đùa ở đáy ảnh (chỉ vẽ khi có clean_caption)
         if clean_caption:
             banner_h = 74
             banner = Image.new("RGBA", (w, banner_h), (10, 15, 30, 235))
@@ -637,7 +1031,6 @@ def create_popup_illustration_card(image_path: str, output_path: str,
             b_draw.text((cap_x, 18), clean_caption, font=FONT_BODY, fill=(255, 255, 255))
             canvas.paste(banner, (20, 20 + h - banner_h), banner)
 
-        # 5. Huy hiệu góc trên (chỉ vẽ khi có clean_badge)
         if clean_badge:
             badge_w = max(180, int(draw.textlength(clean_badge, font=FONT_TIME)) + 36)
             badge = Image.new("RGBA", (badge_w, 42), (0, 0, 0, 0))
@@ -650,10 +1043,6 @@ def create_popup_illustration_card(image_path: str, output_path: str,
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         canvas.save(output_path)
         return output_path
-
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        canvas.save(output_path)
-        return output_path
     except Exception as e:
         print(f"  ⚠️ Lỗi tạo khung ảnh minh họa nổi: {e}")
         return ""
@@ -661,11 +1050,11 @@ def create_popup_illustration_card(image_path: str, output_path: str,
 
 # ─── Render Thẻ COMMENT (Bình luận như thật) ──────────────────────────────────
 
-def render_comment_card(username: str, content: str, avatar_color: str = None,
-                        is_verified: bool = False, likes: int = 0,
-                        index: int = 1, reply_to: str = None,
-                        time_str: str = None, theme: str = None,
-                        avatar_source: str = None) -> Image.Image:
+def _render_threads_comment_card(username: str, content: str, avatar_color: str = None,
+                                 is_verified: bool = False, likes: int = 0,
+                                 index: int = 1, reply_to: str = None,
+                                 time_str: str = None, theme: str = None,
+                                 avatar_source: str = None) -> Image.Image:
     t_name = theme or get_card_theme()
     t = THEMES.get(t_name, THEMES["light"])
 
@@ -699,7 +1088,7 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
     av_img = get_realistic_avatar(username, size=AVATAR_SIZE, avatar_source=avatar_source)
     img.paste(av_img, (PAD, PAD), av_img)
 
-    # 4. Header: CĂN THẲNG TRỤC NGANG HOÀN TOÀN (Center Y = PAD + AVATAR_SIZE / 2)
+    # 4. Header: CĂN THẲNG TRỤC NGANG HOÀN TOÀN
     header_center_y = PAD + AVATAR_SIZE // 2
 
     user_x = PAD + AVATAR_SIZE + 16
@@ -732,7 +1121,7 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
         draw.text((PAD, cur_y), f"Trả lời @{clean_reply}", font=FONT_REPLY, fill=t["text_reply"])
         cur_y += reply_h
 
-    # 7. Nội dung bình luận (Hỗ trợ Emoji màu sắc thực thụ 100%)
+    # 7. Nội dung bình luận
     for i, line in enumerate(lines):
         draw_text_with_emojis(draw, (PAD, cur_y + i * line_h), line, FONT_BODY_CMT, FONT_EMOJI_CMT, t["text_primary"])
 
@@ -767,13 +1156,204 @@ def render_comment_card(username: str, content: str, avatar_color: str = None,
     return img
 
 
-def render_outro_cta_card(question_text: str = None, output_path: str = None) -> Image.Image:
+def _render_facebook_comment_card(username: str, content: str, avatar_color: str = None,
+                                 is_verified: bool = False, likes: int = 0,
+                                 index: int = 1, reply_to: str = None,
+                                 time_str: str = None, theme: str = None,
+                                 avatar_source: str = None) -> Image.Image:
+    t_name = theme or get_card_theme()
+    t = THEMES.get(t_name, THEMES["light"])
+    dummy = Image.new("RGB", (1, 1))
+    d_dummy = ImageDraw.Draw(dummy)
+
+    PAD_CMT = 32
+    av_size = 52
+
+    if not time_str:
+        time_options = ["15 phút", "45 phút", "1 giờ", "2 giờ", "3 giờ", "5 giờ"]
+        time_str = time_options[(index - 1) % len(time_options)]
+
+    bubble_x = PAD_CMT + av_size + 14
+    max_bubble_w = CARD_W - PAD_CMT - bubble_x
+    inner_pad_x = 18
+    inner_pad_y = 12
+
+    cmt_lines = wrap_text(content, FONT_BODY_CMT, max_bubble_w - inner_pad_x * 2, d_dummy, FONT_EMOJI_CMT)
+    line_h = 42
+    text_h = len(cmt_lines) * line_h
+
+    u_w = d_dummy.textlength(username, font=FONT_BOLD_SM)
+    widest_line = max([d_dummy.textlength(l, font=FONT_BODY_CMT) for l in cmt_lines] + [u_w + 30])
+    bubble_w = max(220, min(max_bubble_w, int(widest_line) + inner_pad_x * 2 + 10))
+
+    bubble_h = inner_pad_y + 28 + 6 + text_h + inner_pad_y
+    card_h = PAD_CMT + bubble_h + 14 + 22 + PAD_CMT
+    card_h = max(card_h, 180)
+
+    img = Image.new("RGBA", (CARD_W, card_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Đổ bóng 3D
+    draw.rounded_rectangle([2, SHADOW_OFFSET, CARD_W - 3, card_h - 1], radius=RADIUS, fill=t["shadow"])
+    draw.rounded_rectangle([0, 0, CARD_W - 1, card_h - SHADOW_OFFSET - 1], radius=RADIUS,
+                           fill=(*t["card_bg"], 255), outline=t["card_outline"], width=2)
+
+    # Avatar
+    av_img = get_realistic_avatar(username, size=av_size, avatar_source=avatar_source)
+    img.paste(av_img, (PAD_CMT, PAD_CMT), av_img)
+
+    if t_name == "light":
+        bubble_bg = (240, 242, 245)
+    elif t_name == "dark":
+        bubble_bg = (58, 59, 60)
+    elif t_name == "glass":
+        bubble_bg = (30, 41, 59)
+    else:
+        bubble_bg = (35, 37, 45)
+
+    bubble_box = [bubble_x, PAD_CMT, bubble_x + bubble_w, PAD_CMT + bubble_h]
+    draw.rounded_rectangle(bubble_box, radius=18, fill=bubble_bg)
+
+    u_y = PAD_CMT + inner_pad_y
+    draw.text((bubble_x + inner_pad_x, u_y), username, font=FONT_BOLD_SM, fill=t["text_username"])
+    if is_verified:
+        badge = get_verified_badge_img(size=18)
+        img.paste(badge, (int(bubble_x + inner_pad_x + u_w + 6), u_y + 4), badge)
+
+    cmt_y = u_y + 30
+    for i, line in enumerate(cmt_lines):
+        draw_text_with_emojis(draw, (bubble_x + inner_pad_x, cmt_y + i * line_h), line, FONT_BODY_CMT, FONT_EMOJI_CMT, t["text_primary"])
+
+    # Reaction pill nổi ở góc dưới bong bóng
+    cmt_likes = likes if likes > 0 else random.randint(180, 2400)
+    rx_cnt_str = format_metric(cmt_likes)
+    pill_w = 44 + int(draw.textlength(rx_cnt_str, font=FONT_SUB))
+    pill_h = 24
+    pill_x = bubble_x + bubble_w - pill_w + 6
+    pill_y = PAD_CMT + bubble_h - pill_h // 2 - 2
+
+    draw.rounded_rectangle([pill_x + 1, pill_y + 1, pill_x + pill_w + 1, pill_y + pill_h + 1], radius=12, fill=(0, 0, 0, 40))
+    pill_bg = (255, 255, 255) if t_name == "light" else (40, 40, 42)
+    draw.rounded_rectangle([pill_x, pill_y, pill_x + pill_w, pill_y + pill_h], radius=12, fill=pill_bg, outline=t["card_outline"], width=1)
+
+    m_r = 8
+    draw.ellipse([pill_x + 4, pill_y + 4, pill_x + 4 + m_r * 2, pill_y + 4 + m_r * 2], fill=(24, 119, 242))
+    m_like = get_action_icon_img("fb_like", size=10, color=(255, 255, 255), fill_solid=True)
+    img.paste(m_like, (pill_x + 7, pill_y + 7), m_like)
+
+    draw.ellipse([pill_x + 16, pill_y + 4, pill_x + 16 + m_r * 2, pill_y + 4 + m_r * 2], fill=(250, 56, 86))
+    m_heart = get_action_icon_img("heart", size=10, color=(255, 255, 255), fill_solid=True)
+    img.paste(m_heart, (pill_x + 19, pill_y + 7), m_heart)
+
+    draw.text((pill_x + 36, pill_y + 2), rx_cnt_str, font=FONT_SUB, fill=t["text_meta"])
+
+    # Dòng phụ dưới bong bóng
+    sub_y = PAD_CMT + bubble_h + 8
+    sub_text = f"Thích  •  Phản hồi  •  {time_str}"
+    draw.text((bubble_x + 12, sub_y), sub_text, font=FONT_SUB, fill=t["text_meta"])
+
+    return img
+
+
+def _render_instagram_comment_card(username: str, content: str, avatar_color: str = None,
+                                  is_verified: bool = False, likes: int = 0,
+                                  index: int = 1, reply_to: str = None,
+                                  time_str: str = None, theme: str = None,
+                                  avatar_source: str = None) -> Image.Image:
+    t_name = theme or get_card_theme()
+    t = THEMES.get(t_name, THEMES["light"])
+    dummy = Image.new("RGB", (1, 1))
+    d_dummy = ImageDraw.Draw(dummy)
+
+    PAD_IG = 32
+    av_size = 50
+
+    if not time_str:
+        time_options = ["15 phút", "45 phút", "1 giờ", "2 giờ", "3 giờ", "5 giờ"]
+        time_str = time_options[(index - 1) % len(time_options)]
+
+    text_x = PAD_IG + av_size + 16
+    right_pad = 70
+    max_w = CARD_W - text_x - right_pad
+
+    cmt_lines = wrap_text(content, FONT_BODY_CMT, max_w, d_dummy, FONT_EMOJI_CMT)
+    line_h = 42
+    text_h = len(cmt_lines) * line_h
+
+    card_h = PAD_IG + 28 + text_h + 12 + 24 + PAD_IG
+    card_h = max(card_h, 170)
+
+    img = Image.new("RGBA", (CARD_W, card_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    draw.rounded_rectangle([2, SHADOW_OFFSET, CARD_W - 3, card_h - 1], radius=RADIUS, fill=t["shadow"])
+    draw.rounded_rectangle([0, 0, CARD_W - 1, card_h - SHADOW_OFFSET - 1], radius=RADIUS,
+                           fill=(*t["card_bg"], 255), outline=t["card_outline"], width=2)
+
+    ig_ring = create_ig_avatar_ring(size=av_size + 6, ring_thickness=2)
+    img.paste(ig_ring, (PAD_IG - 3, PAD_IG - 3), ig_ring)
+
+    av_img = get_realistic_avatar(username, size=av_size, avatar_source=avatar_source)
+    img.paste(av_img, (PAD_IG, PAD_IG), av_img)
+
+    u_y = PAD_IG + 2
+    draw.text((text_x, u_y), username, font=FONT_BOLD_SM, fill=t["text_username"])
+    u_w = draw.textlength(username, font=FONT_BOLD_SM)
+    if is_verified:
+        badge = get_verified_badge_img(size=18)
+        img.paste(badge, (int(text_x + u_w + 6), u_y + 4), badge)
+
+    cmt_y = u_y + 30
+    for i, line in enumerate(cmt_lines):
+        draw_text_with_emojis(draw, (text_x, cmt_y + i * line_h), line, FONT_BODY_CMT, FONT_EMOJI_CMT, t["text_primary"])
+
+    cmt_likes = likes if likes > 0 else random.randint(240, 3200)
+    sub_y = cmt_y + text_h + 8
+    sub_txt = f"{time_str}  •  {format_metric(cmt_likes)} lượt thích  •  Trả lời"
+    draw.text((text_x, sub_y), sub_txt, font=FONT_SUB, fill=t["text_meta"])
+
+    heart_ico = get_action_icon_img("heart", size=20, color=t["text_meta"])
+    img.paste(heart_ico, (CARD_W - PAD_IG - 24, PAD_IG + 14), heart_ico)
+
+    return img
+
+
+def render_comment_card(username: str, content: str, avatar_color: str = None,
+                        is_verified: bool = False, likes: int = 0,
+                        index: int = 1, reply_to: str = None,
+                        time_str: str = None, theme: str = None,
+                        avatar_source: str = None,
+                        platform: str = "threads") -> Image.Image:
+    """Hàm điều phối Render Thẻ COMMENT chuẩn theo từng Nền Tảng (Threads / Facebook / Instagram)."""
+    plat = (platform or "threads").lower().strip()
+    if plat == "facebook":
+        return _render_facebook_comment_card(
+            username=username, content=content, avatar_color=avatar_color,
+            is_verified=is_verified, likes=likes, index=index, reply_to=reply_to,
+            time_str=time_str, theme=theme, avatar_source=avatar_source
+        )
+    elif plat == "instagram":
+        return _render_instagram_comment_card(
+            username=username, content=content, avatar_color=avatar_color,
+            is_verified=is_verified, likes=likes, index=index, reply_to=reply_to,
+            time_str=time_str, theme=theme, avatar_source=avatar_source
+        )
+    else:
+        return _render_threads_comment_card(
+            username=username, content=content, avatar_color=avatar_color,
+            is_verified=is_verified, likes=likes, index=index, reply_to=reply_to,
+            time_str=time_str, theme=theme, avatar_source=avatar_source
+        )
+
+
+def render_outro_cta_card(question_text: str = None, output_path: str = None,
+                          platform: str = "threads") -> Image.Image:
     """
-    Render thẻ Outro Call-To-Action (Kích thích bình luận & tương tác cuối video).
-    Tích hợp Vector Icon chuẩn xịn (Trái tim đỏ & Bong bóng bình luận) 100% không bị lỗi ô vuông font chữ!
+    Render thẻ Outro Call-To-Action phù hợp với từng nền tảng (Threads / Facebook / Instagram).
+    Căn thẳng trục ngang 100% giữa Icon Vector và Chữ (chênh lệch trục Y = 0px).
     """
+    plat = (platform or "threads").lower().strip()
     q_str = question_text or "Còn bạn thì sao? Đã bao giờ gặp tình huống này chưa?"
-    # Lọc bỏ emoji ký tự để tránh lỗi font ô vuông (tofu box)
     for emo in ["👇", "❤️", "😱", "😂", "💀", "🔥", "✨", "🗨️", "👉"]:
         q_str = q_str.replace(emo, "").strip()
 
@@ -781,20 +1361,49 @@ def render_outro_cta_card(question_text: str = None, output_path: str = None) ->
     card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(card)
 
-    # Đổ bóng 3D
     draw.rounded_rectangle([2, 10, w - 3, h - 1], radius=28, fill=(0, 0, 0, 160))
-
-    # Nền Acrylic tối sang trọng
     draw.rounded_rectangle([0, 0, w - 1, h - 11], radius=28, fill=(15, 20, 32, 248),
                            outline=(99, 102, 241, 255), width=3)
 
-    # Header badge: GÓC BÀN LUẬN DRAMA (Có icon vector micro/chat mini)
-    badge_title = "GÓC BÀN LUẬN DRAMA"
-    bw = int(draw.textlength(badge_title, font=FONT_TIME)) + 56
-    draw.rounded_rectangle([(w - bw)//2, 22, (w + bw)//2, 66], radius=16,
+    if plat == "facebook":
+        badge_title = "THEO DÕI FANPAGE"
+        badge_ico = "fb_like"
+        b1_txt = "Thích trang"
+        b1_ico = "fb_like"
+        b2_txt = "Bình luận ý kiến"
+        b2_ico = "comment"
+    elif plat == "instagram":
+        badge_title = "FOLLOW INSTAGRAM"
+        badge_ico = "heart"
+        b1_txt = "Thả tim bài viết"
+        b1_ico = "heart"
+        b2_txt = "Lưu bài viết"
+        b2_ico = "ig_bookmark"
+    else:
+        badge_title = "THẢO LUẬN TRÊN THREADS"
+        badge_ico = "comment"
+        b1_txt = "Thả tim tương tác"
+        b1_ico = "heart"
+        b2_txt = "Bình luận câu chuyện"
+        b2_ico = "comment"
+
+    # Header badge căn chuẩn tâm 100%
+    badge_ico_sz = 18
+    badge_ico_img = get_action_icon_img(badge_ico, size=badge_ico_sz, color=(255, 255, 255), fill_solid=True)
+    t_len = draw.textlength(badge_title, font=FONT_TIME)
+    bw = badge_ico_sz + 10 + int(t_len) + 40
+    badge_y = 22
+    badge_h = 44
+    badge_x = (w - bw) // 2
+    draw.rounded_rectangle([badge_x, badge_y, badge_x + bw, badge_y + badge_h], radius=16,
                            fill=(236, 72, 153, 235))
-    draw.text(((w - int(draw.textlength(badge_title, font=FONT_TIME)))//2, 32),
-              badge_title, fill=(255, 255, 255), font=FONT_TIME)
+    badge_center_y = badge_y + badge_h // 2
+    b_ico_y = int(badge_center_y - badge_ico_sz / 2)
+    card.paste(badge_ico_img, (badge_x + 18, b_ico_y), badge_ico_img)
+
+    t_box = draw.textbbox((0, 0), badge_title, font=FONT_TIME)
+    b_txt_y = int(badge_center_y - (t_box[1] + t_box[3]) / 2)
+    draw.text((badge_x + 18 + badge_ico_sz + 10, b_txt_y), badge_title, fill=(255, 255, 255), font=FONT_TIME)
 
     # Câu hỏi kích thích tương tác
     lines = wrap_text(q_str, FONT_BODY, w - 80, draw)
@@ -804,36 +1413,45 @@ def render_outro_cta_card(question_text: str = None, output_path: str = None) ->
         draw.text(((w - int(lw))//2, line_y), l, fill=(255, 255, 255), font=FONT_BODY)
         line_y += 42
 
-    # 2 Nút tương tác kêu gọi hành động (CÓ ICON VECTOR CHUẨN XỊN 100%)
-    btn_h = 60
-    btn_y = 208
-    btn1_w = 340
-    btn2_w = 440
-    total_btns_w = btn1_w + 24 + btn2_w
-    start_bx = (w - total_btns_w) // 2
+    # 2 Nút tương tác cân xứng hoàn hảo (Equal width & Center-aligned)
+    btn_h = 58
+    btn_y = 210
+    btn_gap = 24
+    btn_w = 400
+    start_bx = (w - (btn_w * 2 + btn_gap)) // 2
+    btn_center_y = btn_y + btn_h // 2
+    ico_sz = 28
 
-    # Nút 1: Thả tim (Có Icon Trái Tim Đỏ Vector)
-    draw.rounded_rectangle([start_bx, btn_y, start_bx + btn1_w, btn_y + btn_h], radius=18,
+    # Nút 1
+    b1_x = start_bx
+    draw.rounded_rectangle([b1_x, btn_y, b1_x + btn_w, btn_y + btn_h], radius=18,
                            fill=(30, 41, 59, 230), outline=(239, 68, 68, 180), width=2)
-    heart_icon = get_action_icon_img("heart", size=26, color=(239, 68, 68), fill_solid=True)
-    b1_txt = "Thả tim tương tác"
+    b1_icon = get_action_icon_img(b1_ico, size=ico_sz, color=(239, 68, 68), fill_solid=True)
     b1_tw = draw.textlength(b1_txt, font=FONT_ACTION)
-    b1_content_w = 26 + 12 + int(b1_tw)
-    b1_content_x = start_bx + (btn1_w - b1_content_w) // 2
-    card.paste(heart_icon, (b1_content_x, btn_y + (btn_h - 26)//2), heart_icon)
-    draw.text((b1_content_x + 26 + 12, btn_y + 19), b1_txt, fill=(255, 255, 255), font=FONT_ACTION)
+    b1_content_w = ico_sz + 12 + int(b1_tw)
+    b1_content_x = b1_x + (btn_w - b1_content_w) // 2
 
-    # Nút 2: Để lại bình luận (Có Icon Bong Bóng Chat Vector)
-    b2_x = start_bx + btn1_w + 24
-    draw.rounded_rectangle([b2_x, btn_y, b2_x + btn2_w, btn_y + btn_h], radius=18,
+    ico_y = int(btn_center_y - ico_sz / 2)
+    card.paste(b1_icon, (b1_content_x, ico_y), b1_icon)
+
+    t1_bbox = draw.textbbox((0, 0), b1_txt, font=FONT_ACTION)
+    t1_y = int(btn_center_y - (t1_bbox[1] + t1_bbox[3]) / 2)
+    draw.text((b1_content_x + ico_sz + 12, t1_y), b1_txt, fill=(255, 255, 255), font=FONT_ACTION)
+
+    # Nút 2
+    b2_x = start_bx + btn_w + btn_gap
+    draw.rounded_rectangle([b2_x, btn_y, b2_x + btn_w, btn_y + btn_h], radius=18,
                            fill=(99, 102, 241, 230), outline=(199, 210, 254, 200), width=2)
-    comment_icon = get_action_icon_img("comment", size=26, color=(255, 255, 255), fill_solid=True)
-    b2_txt = "Bình luận câu chuyện của bạn"
+    b2_icon = get_action_icon_img(b2_ico, size=ico_sz, color=(255, 255, 255), fill_solid=True)
     b2_tw = draw.textlength(b2_txt, font=FONT_ACTION)
-    b2_content_w = 26 + 12 + int(b2_tw)
-    b2_content_x = b2_x + (btn2_w - b2_content_w) // 2
-    card.paste(comment_icon, (b2_content_x, btn_y + (btn_h - 26)//2), comment_icon)
-    draw.text((b2_content_x + 26 + 12, btn_y + 19), b2_txt, fill=(255, 255, 255), font=FONT_ACTION)
+    b2_content_w = ico_sz + 12 + int(b2_tw)
+    b2_content_x = b2_x + (btn_w - b2_content_w) // 2
+
+    card.paste(b2_icon, (b2_content_x, ico_y), b2_icon)
+
+    t2_bbox = draw.textbbox((0, 0), b2_txt, font=FONT_ACTION)
+    t2_y = int(btn_center_y - (t2_bbox[1] + t2_bbox[3]) / 2)
+    draw.text((b2_content_x + ico_sz + 12, t2_y), b2_txt, fill=(255, 255, 255), font=FONT_ACTION)
 
     if output_path:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)

@@ -346,11 +346,12 @@ def prepare_background(duration_sec: float, output_path: str, mode: str = "infin
         return cut_background_video(duration_sec, output_path)
 
 
-def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_music_path: str = None, overlay_sfx: list[dict] = None) -> str:
+def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_music_path: str = None, overlay_sfx: list[dict] = None, bg_volume: float = None) -> str:
     """
     Nối tuần tự các file âm thanh (giọng đọc + hiệu ứng âm thanh meme SFX)
     và trộn nhạc nền lofi nhẹ. Đảm bảo an toàn 100% trước file hỏng.
     Hỗ trợ lồng ghép hiệu ứng âm thanh Foley chuyển cảnh (Whoosh, Pop, Camera shutter) đồng bộ timeline.
+    Hỗ trợ tùy chỉnh âm lượng nhạc nền và Dynamic Ducking tự nhiên.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     audio_dir = os.path.join(OUT_DIR, "audio")
@@ -421,33 +422,43 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
     if bg_music_path and os.path.exists(bg_music_path):
         cfg = config_mod.load_config()
         pacing = cfg.get("emotional_pacing", {})
-        bg_vol = pacing.get("bgm_volume_normal", 0.16)
-        duck_enabled = pacing.get("enable_bgm_ducking", True)
-        print(f"  🎵 Trộn nhạc nền TikTok (volume={bg_vol}, ducking={duck_enabled}): {os.path.basename(bg_music_path)}")
+        if bg_volume is not None:
+            bg_vol = float(bg_volume)
+        else:
+            bg_vol = pacing.get("bgm_volume_normal", 0.45)
+        bg_vol = max(0.0, min(1.0, bg_vol))
 
-        if duck_enabled:
-            # Dynamic ducking qua sidechaincompress:
-            # Nhạc nền tự hạ khi có giọng nói, tự động trồi lên khi dừng câu hoặc có khoảng lặng
-            # normalize=0 giữ nguyên mức âm lượng nguyên bản của vocal
-            filter_str = (
-                f"[1:a]volume={bg_vol}[bg];"
-                f"[0:a]asplit=2[v_main][v_side];"
-                f"[bg][v_side]sidechaincompress=threshold=0.03:ratio=4:attack=50:release=350[ducked_bg];"
-                f"[v_main][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
+        duck_enabled = pacing.get("enable_bgm_ducking", True)
+
+        if bg_vol > 0.01:
+            print(f"  🎵 Trộn nhạc nền TikTok (volume={bg_vol:.2f}, ducking={duck_enabled}): {os.path.basename(bg_music_path)}")
+
+            if duck_enabled:
+                # Dynamic ducking qua sidechaincompress cân chỉnh tự nhiên:
+                # threshold=0.10: chỉ giọng nói thực thụ mới kích hoạt ducking
+                # ratio=2.2: hạ nhạc nền xuống mức êm dịu (~ -30dB), vừa đủ nghe làm nền sau lời nói
+                # attack=40ms, release=350ms: nhả nhạc nền nhanh và mượt mà ngay khi dứt câu thoại
+                filter_str = (
+                    f"[1:a]volume={bg_vol:.3f}[bg];"
+                    f"[0:a]asplit=2[v_main][v_side];"
+                    f"[bg][v_side]sidechaincompress=threshold=0.10:ratio=2.2:attack=40:release=350[ducked_bg];"
+                    f"[v_main][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
+                )
+            else:
+                filter_str = f"[1:a]volume={(bg_vol * 0.7):.3f}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
+
+            run_ffmpeg(
+                "-i", voice_sfx_merged,
+                "-stream_loop", "-1",
+                "-i", bg_music_path,
+                "-filter_complex", filter_str,
+                "-map", "[out]",
+                "-c:a", "libmp3lame",
+                "-b:a", "192k",
+                temp_pre_master
             )
         else:
-            filter_str = f"[1:a]volume={bg_vol}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
-
-        run_ffmpeg(
-            "-i", voice_sfx_merged,
-            "-stream_loop", "-1",
-            "-i", bg_music_path,
-            "-filter_complex", filter_str,
-            "-map", "[out]",
-            "-c:a", "libmp3lame",
-            "-b:a", "192k",
-            temp_pre_master
-        )
+            shutil.copy(voice_sfx_merged, temp_pre_master)
     else:
         shutil.copy(voice_sfx_merged, temp_pre_master)
 

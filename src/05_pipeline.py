@@ -1009,11 +1009,14 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
 
 def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                  reset_tracker: bool = True, skip_cards_render: bool = False,
-                 layout_preset: str = None, enable_attached_image: bool = None) -> str:
+                 layout_preset: str = None, enable_attached_image: bool = None,
+                 bgm_choice: str = None, bgm_volume: float = None,
+                 platform: str = None) -> str:
     """
     Quy trình tự động hoàn chỉnh từ dữ liệu -> video thành phẩm chuẩn đồ thị cảm xúc.
     Đồng bộ và cập nhật liên tục sang tracker để giao diện Web UI hiển thị.
     Hỗ trợ tùy biến bố cục video: split_screen, center, bottom_story.
+    Hỗ trợ đa nền tảng nội dung: Threads, Facebook, Instagram (kèm hình ảnh đính kèm).
     Hỗ trợ bật/tắt ảnh đính kèm trong câu hỏi & ảnh minh họa pop-up nổi bên ngoài.
     """
     cfg = config_mod.load_config()
@@ -1046,9 +1049,14 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             time.sleep(0.3)
             tracker.finish_step("script")
 
-        # BƯỚC 2: RENDER THẺ THREADS (AVATAR NGƯỜI THẬT & POPUP MINH HỌA)
+        # BƯỚC 2: RENDER BỘ THẺ NỀN TẢNG (AVATAR NGƯỜI THẬT & HÌNH ẢNH MINH HỌA)
         if not skip_cards_render:
-            tracker.start_step("cards", "Đang render bộ thẻ Threads chuẩn (Avatar người thật)...", 25)
+            plat = platform or getattr(post, "platform", "threads") or "threads"
+            if plat == "auto":
+                plat = getattr(post, "platform", "threads") or "threads"
+                if plat == "auto":
+                    plat = "threads"
+            tracker.start_step("cards", f"Đang render bộ thẻ {plat.upper()} chuẩn (Avatar người thật)...", 25)
             os.makedirs(CARDS_DIR, exist_ok=True)
             post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
             has_proof = getattr(post, "has_visual_proof", None)
@@ -1067,13 +1075,14 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
 
             # Quyết định ảnh gắn kèm bài đăng (Attached in Post):
             illus_cfg = cfg.get("illustration_settings", {})
-            use_attached = (placement == "attached_in_post") or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
+            use_attached = (placement == "attached_in_post") or (plat in ["facebook", "instagram"] and enable_illus) or (enable_attached_image if enable_attached_image is not None else illus_cfg.get("enable_post_attached_image", False))
             attached_img_arg = post_illus if (enable_illus and use_attached and post_illus and os.path.exists(post_illus)) else None
 
             post_img = card_mod.render_post_card(
                 post.username, post.content, post.avatar_color, post.is_verified, post.likes,
                 theme=card_theme, avatar_source=post_avatar,
-                attached_image_path=attached_img_arg
+                attached_image_path=attached_img_arg,
+                platform=plat
             )
             card_mod.save_card(post_img, os.path.join(CARDS_DIR, "post.png"))
 
@@ -1088,13 +1097,14 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                         theme=card_theme, avatar_source=post_avatar,
                         attached_image_path=attached_img_arg,
                         visible_sentence_count=step_idx,
-                        total_sentences_content=post.content
+                        total_sentences_content=post.content,
+                        platform=plat
                     )
                     card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
 
             # Tạo thẻ ảnh minh họa nổi bên ngoài: CHỈ khi không đính kèm trong bài và được bật
             popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
-            allow_popup = enable_illus and (placement != "attached_in_post") and illus_cfg.get("enable_popup_illustration", True)
+            allow_popup = enable_illus and (not use_attached) and illus_cfg.get("enable_popup_illustration", True)
             if allow_popup and post_illus and os.path.exists(post_illus):
                 badge_lbl = illus_cfg.get("badge_text", "")
                 caption_lbl = getattr(post, "illustration_caption", "")
@@ -1110,7 +1120,8 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                 c_reply = getattr(c, "reply_to", "") or post.username
                 c_img = card_mod.render_comment_card(
                     c.username, c.content, c.avatar_color, c.is_verified, c.likes,
-                    index=i, reply_to=c_reply, theme=card_theme, avatar_source=c_avatar
+                    index=i, reply_to=c_reply, theme=card_theme, avatar_source=c_avatar,
+                    platform=plat
                 )
                 card_mod.save_card(c_img, os.path.join(CARDS_DIR, f"comment_{i}.png"))
 
@@ -1118,8 +1129,10 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             if layout.get("enable_outro_cta", True):
                 outro_card_path = os.path.join(CARDS_DIR, "outro_cta.png")
                 cta_q = getattr(post, "cta_question", "") or "Còn bạn thì sao? Đã từng gặp tình huống éo le tương tự chưa?"
-                card_mod.render_outro_cta_card(question_text=cta_q, output_path=outro_card_path)
-                tracker.log(f"  📢 Đã tạo thẻ Outro Call-To-Action: {outro_card_path}")
+                card_mod.render_outro_cta_card(question_text=cta_q, output_path=outro_card_path, platform=plat)
+                tracker.log(f"  📢 Đã tạo thẻ Outro Call-To-Action ({plat}): {outro_card_path}")
+
+            tracker.finish_step("cards")
 
             tracker.finish_step("cards")
 
@@ -1140,20 +1153,44 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
         bg_mod.prepare_background(total_duration, bg_video_out, mode=bg_mode)
 
         mixed_audio_out = os.path.join(AUDIO_DIR, "_audio_final.mp3")
-        # Tự động chọn nhạc nền ngẫu nhiên từ kho assets/bgm hoặc file mặc định
-        bgm_candidates = []
-        bgm_dir = os.path.join(ASSETS_DIR, "bgm")
-        if os.path.exists(bgm_dir):
-            bgm_candidates += [os.path.join(bgm_dir, f) for f in os.listdir(bgm_dir) if f.lower().endswith((".mp3", ".wav", ".m4a"))]
-        default_lofi = os.path.join(ASSETS_DIR, "sfx", "lofi_bg.mp3")
-        if os.path.exists(default_lofi) and default_lofi not in bgm_candidates:
-            bgm_candidates.append(default_lofi)
+        # Tự động chọn nhạc nền theo cấu hình hoặc từ kho assets/bgm
+        cfg = config_mod.load_config()
+        pacing = cfg.get("emotional_pacing", {})
+        enable_bgm = pacing.get("enable_bgm", True)
 
-        selected_bgm = random.choice(bgm_candidates) if bgm_candidates else None
+        if bgm_choice == "none":
+            enable_bgm = False
+
+        selected_bgm = None
+        if enable_bgm:
+            bgm_candidates = []
+            bgm_dir = os.path.join(ASSETS_DIR, "bgm")
+            if os.path.exists(bgm_dir):
+                bgm_candidates += [os.path.join(bgm_dir, f) for f in os.listdir(bgm_dir) if f.lower().endswith((".mp3", ".wav", ".m4a"))]
+            default_lofi = os.path.join(ASSETS_DIR, "sfx", "lofi_bg.mp3")
+            if os.path.exists(default_lofi) and default_lofi not in bgm_candidates:
+                bgm_candidates.append(default_lofi)
+
+            pref = bgm_choice or pacing.get("selected_bgm_file", "random")
+            if pref and pref not in ["random", "auto", "none"]:
+                exact_path = os.path.join(bgm_dir, pref)
+                if os.path.exists(exact_path):
+                    selected_bgm = exact_path
+
+            if not selected_bgm and bgm_candidates:
+                selected_bgm = random.choice(bgm_candidates)
+
+        vol = bgm_volume if bgm_volume is not None else pacing.get("bgm_volume_normal", 0.45)
+        if selected_bgm and enable_bgm:
+            tracker.log(f"  🎵 Nhạc nền TikTok: {os.path.basename(selected_bgm)} (Âm lượng: {int(vol * 100)}%)")
+        else:
+            tracker.log("  🔇 Nhạc nền: Tắt (Chỉ dùng giọng đọc & SFX)")
+
         bg_mod.build_mixed_audio_with_sfx(
             audio_sequence, mixed_audio_out,
             bg_music_path=selected_bgm,
-            overlay_sfx=overlay_sfx
+            overlay_sfx=overlay_sfx,
+            bg_volume=vol
         )
         tracker.finish_step("audio")
 

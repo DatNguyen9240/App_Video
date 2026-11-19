@@ -115,6 +115,10 @@ class PostSchema(BaseModel):
         default="light",
         description="THEME SÁNG / TỐI: 'dark' nếu là chuyện đêm muộn (nửa đêm, 2h sáng), rình mò, IT trực đêm, bí mật ngầm; 'light' nếu là chuyện ban ngày, quán cafe, công sở, mua sắm vui vẻ."
     )
+    recommended_platform: Literal["threads", "facebook", "instagram"] = Field(
+        default="threads",
+        description="NỀN TẢNG PHÙ HỢP NHẤT CHO CÂU CHUYỆN: 'facebook' (drama đời sống, confession, gia đình, công sở, tình cảm, bóc phốt, chuyện oái oăm cần ảnh bằng chứng); 'instagram' (phong cách sống, cafe, ẩm thực, du lịch, sống ảo, thú cưng, thẩm mỹ thị giác); 'threads' (đối đáp nhanh, trào phúng, witty banter, ngắn gọn)."
+    )
     story_context_type: Literal["office_workplace", "student_youth", "couple_family", "general_social"] = Field(
         default="general_social",
         description="BỐI CẢNH ĐỂ GÁN AVATAR: 'office_workplace' (công sở, sếp, đồng nghiệp), 'student_youth' (sinh viên, học đường, gen Z), 'couple_family' hoặc 'general_social'."
@@ -199,11 +203,12 @@ def generate_story_with_gemini(
     topic: str = "",
     duration_mode: str = None,
     target_comment_count: Optional[int] = None,
+    platform: str = "threads",
     api_key: str = None,
     progress_cb: Optional[Callable[[str, int], None]] = None
 ) -> Post:
     """
-    Sử dụng Gemini API với cấu hình đạo diễn cảm xúc để tạo kịch bản Threads hoàn chỉnh.
+    Sử dụng Gemini API với cấu hình đạo diễn cảm xúc để tạo kịch bản hoàn chỉnh đa nền tảng (Threads / Facebook / Instagram).
     Hỗ trợ linh hoạt số lượng bình luận (4-8+ câu) và đa dạng hóa đồ thị drama.
     Tự động phân vai giọng đọc (Adam, Brian, Nam Minh, Hoài My...) và thiết lập khoảng lặng.
     """
@@ -277,11 +282,42 @@ def generate_story_with_gemini(
             "- ÂM THANH SFX TINH TẾ: 90% bình luận để sfx='none'. Tuyệt đối KHÔNG spam âm thanh hoạt hình nhảm nhí!"
         )
 
+    plat_choice = (platform or "auto").lower().strip()
+    if plat_choice == "facebook":
+        plat_guide = (
+            "NỀN TẢNG NỘI DUNG: FACEBOOK POST & CONFESSION (BÀI VIẾT KÈM ẢNH ĐỜI THỰC & BÌNH LUẬN XÔM TỤ):\n"
+            "- Phong cách kể chuyện: Giọng văn tâm sự/confession/drama đời sống, cuốn hút, gần gũi, mở đầu gây tò mò.\n"
+            "- Bài viết chính có đính kèm ảnh chụp thực tế (has_visual_proof = true, visual_proof_placement = 'attached_in_post').\n"
+            "- Các bình luận bên dưới như hội nhóm cư dân mạng/bạn bè Facebook vào thả haha, bóc phốt, đồng cảm, tag bạn bè."
+        )
+    elif plat_choice == "instagram":
+        plat_guide = (
+            "NỀN TẢNG NỘI DUNG: INSTAGRAM POST (BÀI ĐĂNG CHÚ TRỌNG HÌNH ẢNH SỐNG ĐỘNG & CAPTION TINH TẾ):\n"
+            "- Phong cách kể chuyện: Aesthetic, trải nghiệm cá nhân, review tình huống oái oăm đời thường hoặc lifestyle.\n"
+            "- Bài viết chính luôn lấy hình ảnh thực tế làm tâm điểm (has_visual_proof = true, visual_proof_placement = 'attached_in_post').\n"
+            "- Các bình luận bên dưới thả tim, trêu chọc dí dỏm, hỏi địa chỉ/nguồn gốc sự việc."
+        )
+    elif plat_choice == "threads":
+        plat_guide = (
+            "NỀN TẢNG NỘI DUNG: THREADS (NGẮN GỌN, SNAPPY, HỘI THOẠI ĐỐI ĐÁP PHẢN ỨNG NHANH CỰC DÍ DỎM):\n"
+            "- Phong cách kể chuyện: Trải nghiệm thực tế, nhịp nhanh, witty banter, các bình luận nối tiếp đối đáp liên hoàn."
+        )
+    else:  # "auto"
+        plat_guide = (
+            "NỀN TẢNG NỘI DUNG (AI TỰ ĐỘNG CHỌN NỀN TẢNG TỐI ƯU NHẤT - recommended_platform):\n"
+            "Hãy tự động phân tích chủ đề và bối cảnh để quyết định chọn 1 trong 3 nền tảng phù hợp nhất:\n"
+            "- Chọn 'facebook': Nếu là câu chuyện drama đời sống, gia đình, công sở, tình cảm rắc rối, bóc phốt, hoặc chuyện oái oăm cần đính kèm ảnh chụp làm chứng.\n"
+            "- Chọn 'instagram': Nếu là trải nghiệm du lịch, quán cafe, ẩm thực, ăn uống, thú cưng, đồ hiệu, phong cách sống, chụp ảnh sống ảo.\n"
+            "- Chọn 'threads': Nếu là mẩu đối đáp ngắn, hài hước, châm biếm, witty banter, chia sẻ nhanh suy nghĩ độc lạ."
+        )
+
     prompt = (
-        f"Bạn là người viết Threads chuyên nghiệp (SKILL: THREADS HUMAN GEN Z WRITER).\n"
-        f"Hãy tạo 1 kịch bản bài đăng Threads và các bình luận bằng tiếng Việt thật tự nhiên, trau chuốt như người thật đang chia sẻ trải nghiệm với bạn bè.\n"
+        f"Bạn là người viết kịch bản mạng xã hội chuyên nghiệp (SKILL: MULTI-PLATFORM GEN Z WRITER).\n"
+        f"Hãy tạo 1 kịch bản bài đăng và các bình luận bằng tiếng Việt thật tự nhiên, trau chuốt như người thật đang chia sẻ trải nghiệm với bạn bè.\n"
+        f"Nền tảng mục tiêu: {plat_choice.upper()}\n"
         f"Chủ đề: '{topic}'\n"
         f"Chế độ kịch bản: {dur_mode}\n\n"
+        f"{plat_guide}\n\n"
         f"QUY TẮC CỐT LÕI (PHẢI GIỐNG 100% NGƯỜI THẬT KỂ CHUYỆN - ĐẠT THỜI LƯỢNG ÍT NHẤT 1 PHÚT):\n"
         f"- BÀI VIẾT CHÍNH: Kể mở đầu một câu chuyện rất đời thực, cuốn hút và có bối cảnh chi tiết (khoảng 35-50 từ, 2-3 câu nhịp điệu mềm mại, nói trong 12-15 giây), nêu rõ vật phẩm/sự việc cụ thể khiến người đọc cảm thấy 'sao giống mình vậy' và muốn dừng lại xem hết.\n"
         f"{cmt_guide}\n"
@@ -473,11 +509,20 @@ def generate_story_with_gemini(
             camera_motion=camera_mot
         ))
 
+    # Xác định nền tảng hiển thị (Auto Platform Resolution)
+    if plat_choice == "auto":
+        chosen_plat = str(data.get("recommended_platform", "threads")).lower().strip()
+        if chosen_plat not in ["threads", "facebook", "instagram"]:
+            chosen_plat = "threads"
+    else:
+        chosen_plat = plat_choice
+
     # Xử lý ảnh minh họa bằng chứng chuẩn ngữ cảnh
     has_proof = bool(data.get("has_visual_proof", True))
-    placement = data.get("visual_proof_placement", "popup_at_twist")
+    default_placement = "attached_in_post" if chosen_plat in ["facebook", "instagram"] else "popup_at_twist"
+    placement = data.get("visual_proof_placement") or default_placement
     if placement == "none" or not placement:
-        placement = "popup_at_twist"
+        placement = default_placement
 
     illus_prompt = data.get("illustration_prompt", "") or topic
     illus_vn = data.get("illustration_vietnamese_query", "") or topic
@@ -549,6 +594,7 @@ def generate_story_with_gemini(
         pause_before_ms=150,
         pause_after_ms=300,
         camera_motion="none",
+        platform=chosen_plat,
         comments=comments
     )
 
@@ -563,6 +609,7 @@ def generate_story_with_gemini(
     print("✨ ĐẠO DIỄN GEMINI ĐÃ SÁNG TẠO XONG KỊCH BẢN CẢM XÚC!")
     print("=" * 60)
     print(f"📊 Đồ thị cảm xúc: {post.emotional_arc}")
+    print(f"📱 Nền tảng: {post.platform.upper()} ({'AI Tự động tối ưu' if plat_choice == 'auto' else 'Người dùng chọn'})")
     print(f"📌 @{post.username} [{post.voice_id}]:")
     print(f"   {post.content}")
     print("\n💬 Các bình luận phân vai:")

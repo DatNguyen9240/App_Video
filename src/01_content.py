@@ -34,12 +34,14 @@ class Comment:
     pause_before_ms: int = 180             # Khoảng lặng trước khi đọc câu (nhịp thở)
     pause_after_ms: int = 220              # Khoảng lặng sau khi đọc xong câu
     camera_motion: str = "none"            # none, punch_in, shake
+    platform: str = "threads"              # threads, facebook, instagram
 
 
 @dataclass
 class Post:
     username: str
     content: str
+    platform: str = "threads"              # threads, facebook, instagram
     avatar_color: str = "#6366f1"
     avatar_path: str = ""                  # Đường dẫn ảnh thật hoặc URL avatar tác giả
     avatar_url: str = ""                   # URL ảnh đại diện trên mạng
