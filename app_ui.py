@@ -223,66 +223,77 @@ HTML_TEMPLATE = """
     }
   </script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
     [v-cloak] { display: none !important; }
-    body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #080c15; }
     .font-mono { font-family: 'JetBrains Mono', monospace; }
     .glass-panel {
-      background: rgba(15, 23, 42, 0.78);
-      backdrop-filter: blur(16px);
+      background: rgba(15, 23, 42, 0.72);
+      backdrop-filter: blur(20px);
       border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
     }
     .glass-input {
-      background: rgba(30, 41, 59, 0.6);
+      background: rgba(30, 41, 59, 0.55);
       border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.2s ease;
     }
     .glass-input:focus {
       border-color: #6366f1;
-      box-shadow: 0 0 15px rgba(99, 102, 241, 0.25);
+      box-shadow: 0 0 16px rgba(99, 102, 241, 0.3);
+      background: rgba(30, 41, 59, 0.85);
     }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    .card-item-hover {
+      transition: all 0.2s ease;
+    }
+    .card-item-hover:hover {
+      border-color: rgba(99, 102, 241, 0.4);
+      background: rgba(15, 23, 42, 0.9);
+      box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.6);
+    }
+    ::-webkit-scrollbar { width: 7px; height: 7px; }
+    ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); border-radius: 8px; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); }
     ::-webkit-scrollbar-thumb:hover { background: #475569; }
   </style>
 </head>
-<body class="bg-dark-900 text-slate-100 min-h-screen">
+<body class="bg-[#080c15] text-slate-100 min-h-screen selection:bg-indigo-500 selection:text-white">
   <div id="app" v-cloak class="flex flex-col min-h-screen">
     
     <!-- Top Navigation Header -->
-    <header class="h-16 border-b border-slate-800 glass-panel sticky top-0 z-50 px-6 flex items-center justify-between">
-      <div class="flex items-center space-x-3">
-        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 via-indigo-500 to-pink-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+    <header class="h-16 border-b border-slate-800/80 glass-panel sticky top-0 z-50 px-4 sm:px-8 flex items-center justify-between">
+      <div class="flex items-center space-x-3.5">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 via-indigo-500 to-pink-500 flex items-center justify-center shadow-lg shadow-indigo-500/25">
           <i class="fa-solid fa-wand-magic-sparkles text-white text-lg"></i>
         </div>
         <div>
-          <h1 class="text-lg font-bold bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent">
-            Threads Video Studio <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold">AI Director 2.0</span>
+          <h1 class="text-lg font-bold bg-gradient-to-r from-white via-slate-100 to-indigo-300 bg-clip-text text-transparent flex items-center gap-2">
+            Threads Video Studio <span class="text-[11px] px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold tracking-wide">AI Director 2.0</span>
           </h1>
           <div class="text-xs text-slate-400 flex items-center gap-2">
             <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            Gemini 3.5 Flash • Multi-Voice Acting • Đồ Thị Cảm Xúc
+            Gemini 3.5 Flash • Đa Nền Tảng (Threads / FB / IG) • Đồ Thị Cảm Xúc
           </div>
         </div>
       </div>
 
       <!-- Center Tabs -->
-      <nav class="flex items-center bg-slate-900/80 p-1.5 rounded-xl border border-slate-800">
-        <button @click="currentTab = 'studio'" :class="currentTab === 'studio' ? 'bg-brand-600 text-white font-bold shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:text-slate-200'"
-          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2">
+      <nav class="flex items-center bg-slate-900/90 p-1.5 rounded-xl border border-slate-800 shadow-inner">
+        <button @click="currentTab = 'studio'" :class="currentTab === 'studio' ? 'bg-brand-600 text-white font-bold shadow-md shadow-indigo-600/35' : 'text-slate-400 hover:text-slate-200'"
+          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2 cursor-pointer">
           <i class="fa-solid fa-film"></i>
           <span>1. Studio Sáng Tạo</span>
         </button>
 
-        <button @click="currentTab = 'pipeline'" :class="currentTab === 'pipeline' ? 'bg-brand-600 text-white font-bold shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:text-slate-200'"
-          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2 relative">
+        <button @click="currentTab = 'pipeline'" :class="currentTab === 'pipeline' ? 'bg-brand-600 text-white font-bold shadow-md shadow-indigo-600/35' : 'text-slate-400 hover:text-slate-200'"
+          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2 relative cursor-pointer">
           <i class="fa-solid fa-chart-line"></i>
           <span>2. Giám Sát Quy Trình</span>
-          <span v-if="pipelineState.is_running" class="w-2 h-2 rounded-full bg-pink-500 animate-ping absolute -top-0.5 -right-0.5"></span>
+          <span v-if="pipelineState.is_running" class="w-2.5 h-2.5 rounded-full bg-pink-500 animate-ping absolute -top-0.5 -right-0.5"></span>
         </button>
 
-        <button @click="currentTab = 'config'" :class="currentTab === 'config' ? 'bg-brand-600 text-white font-bold shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:text-slate-200'"
-          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2">
+        <button @click="currentTab = 'config'" :class="currentTab === 'config' ? 'bg-brand-600 text-white font-bold shadow-md shadow-indigo-600/35' : 'text-slate-400 hover:text-slate-200'"
+          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2 cursor-pointer">
           <i class="fa-solid fa-sliders"></i>
           <span>3. Cấu Hình Đạo Diễn</span>
         </button>
@@ -290,77 +301,88 @@ HTML_TEMPLATE = """
 
       <!-- Right Action Tools -->
       <div class="flex items-center space-x-3">
-        <button @click="openFinalFolder" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold glass-input hover:bg-slate-700/60 transition flex items-center gap-2 text-slate-300">
+        <button @click="openFinalFolder" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold glass-input hover:bg-slate-700/60 transition flex items-center gap-2 text-slate-300 cursor-pointer">
           <i class="fa-regular fa-folder-open text-indigo-400"></i> Thư Mục Video
         </button>
-        <button @click="saveSettings" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/80 hover:bg-indigo-600 shadow-md shadow-indigo-600/30 transition flex items-center gap-2">
+        <button @click="saveSettings" class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition flex items-center gap-2 cursor-pointer">
           <i class="fa-solid fa-floppy-disk"></i> Lưu Nhanh
         </button>
       </div>
     </header>
 
     <!-- TAB 1: STUDIO SÁNG TẠO & BIÊN TẬP -->
-    <main v-show="currentTab === 'studio'" class="flex-1 max-w-7xl w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+    <main v-show="currentTab === 'studio'" class="flex-1 max-w-[1760px] w-full mx-auto px-4 sm:px-8 py-6 grid grid-cols-1 xl:grid-cols-12 gap-8">
       
-      <!-- Left Panel: Controls & Script Editor (7 cols) -->
-      <div class="lg:col-span-7 flex flex-col space-y-6">
+      <!-- Left Panel: Controls & Script Editor (7 cols on XL, 8 cols on 2XL) -->
+      <div class="xl:col-span-7 2xl:col-span-8 flex flex-col space-y-6">
         
         <!-- Section 1: AI Prompt & Generator -->
-        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
-          <div class="flex items-center justify-between">
+        <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-5">
+          <div class="flex items-center justify-between border-b border-slate-800/80 pb-3">
             <h2 class="text-sm font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-2">
-              <i class="fa-solid fa-wand-magic-sparkles"></i> 1. Sáng Tạo Kịch Bản Bằng Gemini AI & Quét Threads
+              <i class="fa-solid fa-wand-magic-sparkles text-indigo-400"></i> 1. Sáng Tạo Kịch Bản Bằng Gemini AI & Quét Threads
             </h2>
-            <span class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">gemini-3.5-flash</span>
+            <span class="text-xs px-3 py-1 rounded-full bg-slate-800 text-indigo-300 font-mono border border-slate-700/60 flex items-center gap-1.5 shadow-inner">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              gemini-3.5-flash
+            </span>
           </div>
 
-          <div class="space-y-3">
-            <!-- Thanh nhập chủ đề (Rộng rãi, rõ ràng) -->
+          <div class="space-y-4">
+            <!-- Thanh nhập chủ đề (Rộng rãi, dễ nhìn) -->
             <div class="relative flex items-center">
-              <i class="fa-solid fa-magnifying-glass absolute left-4 text-slate-500 text-sm"></i>
+              <i class="fa-solid fa-magnifying-glass absolute left-4 text-slate-400 text-base"></i>
               <input v-model="topicInput" @keyup.enter="generateScriptOnly" type="text"
-                placeholder="Nhập chủ đề muốn làm video (ví dụ: đèn ngủ, công sở, phỏng vấn, người yêu cũ...) hoặc chọn trend bên dưới..."
-                class="w-full glass-input rounded-xl pl-11 pr-4 py-3 text-sm focus:outline-none placeholder-slate-500 font-medium border border-slate-700/80 focus:border-indigo-500 transition">
+                placeholder="Nhập chủ đề muốn làm video (ví dụ: khóa xe tặng bạn gái, công sở, phỏng vấn, người yêu cũ...) hoặc chọn trend bên dưới..."
+                class="w-full glass-input rounded-xl pl-12 pr-4 py-3.5 text-sm focus:outline-none placeholder-slate-500 font-medium border border-slate-700/80 focus:border-indigo-500 transition shadow-inner">
             </div>
 
-            <!-- Chọn Nền tảng nội dung: Tự động / Threads / Facebook / Instagram -->
-            <div class="flex items-center gap-2 p-2 rounded-xl bg-slate-900/70 border border-slate-800">
-              <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5 pl-1.5">
-                <i class="fa-solid fa-shapes text-sky-400"></i> Nền tảng:
-              </span>
-              <div class="grid grid-cols-4 gap-1.5 flex-1">
+            <!-- Chọn Nền tảng nội dung: Segmented Control rộng rãi, màu sắc trực quan -->
+            <div class="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5 uppercase tracking-wide">
+                  <i class="fa-solid fa-shapes text-sky-400"></i> Nền tảng nội dung & Phong cách hiển thị:
+                </span>
+                <span class="text-xs text-slate-400 font-medium hidden sm:inline">
+                  {{ settings.platform === 'auto' ? 'AI tự động chọn nền tảng tối ưu theo nội dung' : (settings.platform === 'facebook' ? 'Định dạng Facebook Confession / Post kèm tương tác' : (settings.platform === 'instagram' ? 'Định dạng Instagram Feed kèm Story Ring' : 'Định dạng Threads tối giản đối đáp nhanh')) }}
+                </span>
+              </div>
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <button type="button" @click="setPlatform('auto')"
-                  :class="settings.platform === 'auto' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
-                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer"
-                  title="AI tự động phân tích chủ đề để chọn nền tảng và định dạng tối ưu nhất">
-                  <span>🤖 Tự động</span>
+                  :class="settings.platform === 'auto' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold shadow-md shadow-purple-600/35 ring-2 ring-purple-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
+                  class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
+                  <span class="text-base">🤖</span>
+                  <span>Tự động (AI chọn)</span>
                 </button>
                 <button type="button" @click="setPlatform('threads')"
-                  :class="settings.platform === 'threads' ? 'bg-indigo-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
-                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer">
-                  <span>🧵 Threads</span>
+                  :class="settings.platform === 'threads' ? 'bg-indigo-600 text-white font-bold shadow-md shadow-indigo-600/35 ring-2 ring-indigo-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
+                  class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
+                  <span class="text-base">🧵</span>
+                  <span>Threads</span>
                 </button>
                 <button type="button" @click="setPlatform('facebook')"
-                  :class="settings.platform === 'facebook' ? 'bg-blue-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
-                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer">
-                  <span>📘 Facebook</span>
+                  :class="settings.platform === 'facebook' ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/35 ring-2 ring-blue-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
+                  class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
+                  <span class="text-base">📘</span>
+                  <span>Facebook</span>
                 </button>
                 <button type="button" @click="setPlatform('instagram')"
-                  :class="settings.platform === 'instagram' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white font-bold shadow-sm' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'"
-                  class="py-1.5 px-1.5 rounded-lg text-xs transition flex items-center justify-center gap-1 cursor-pointer">
-                  <span>📸 Instagram</span>
+                  :class="settings.platform === 'instagram' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white font-bold shadow-md shadow-pink-600/35 ring-2 ring-pink-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
+                  class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
+                  <span class="text-base">📸</span>
+                  <span>Instagram</span>
                 </button>
               </div>
             </div>
 
             <!-- Tùy chỉnh nhanh: Số lượng bình luận & Giọng đọc Adam / Brian -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div class="space-y-1">
-                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 rounded-xl bg-slate-900/70 border border-slate-800">
+              <div class="space-y-1.5">
+                <label class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
                   <i class="fa-solid fa-list-ol text-cyan-400"></i>
                   <span>Số lượng câu trả lời / bình luận:</span>
                 </label>
-                <select v-model="commentCountInput" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                <select v-model="commentCountInput" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
                   <option value="auto">⏱️ Tự động (7 - 8 câu / Chuẩn 1 Phút+ Kiếm Tiền)</option>
                   <option value="7">⭐ Đúng 7 câu (Chuẩn 1 Phút+ TikTok Creator Rewards)</option>
                   <option value="8">🚀 Đúng 8 câu (Đại chiến kịch tính 70s+)</option>
@@ -368,15 +390,15 @@ HTML_TEMPLATE = """
                   <option value="5">💬 Đúng 5 câu</option>
                   <option value="4">💬 Đúng 4 câu</option>
                 </select>
-                <span class="text-[10px] text-slate-500">Chuẩn video dài trên 1 phút giúp kiếm tiền TikTok Creator Rewards</span>
+                <span class="text-xs text-slate-400 block">Chuẩn video dài trên 1 phút giúp kiếm tiền TikTok Creator Rewards</span>
               </div>
 
-              <div class="space-y-1">
-                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+              <div class="space-y-1.5">
+                <label class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
                   <i class="fa-solid fa-microphone-lines text-pink-400"></i>
                   <span>Giọng đọc dẫn chuyện chính:</span>
                 </label>
-                <select v-model="authorVoiceInput" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                <select v-model="authorVoiceInput" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
                   <option value="adam">🎙️ Adam (Trầm ấm, nam tính, cuốn hút như Podcast - Khuyên dùng)</option>
                   <option value="brian">🎬 Brian (Nam điện ảnh, truyền cảm sâu lắng)</option>
                   <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn truyền cảm)</option>
@@ -384,28 +406,28 @@ HTML_TEMPLATE = """
                   <option value="ava">🌸 Ava (Nữ hiện đại, sôi nổi)</option>
                   <option value="emma">🌷 Emma (Nữ dịu dàng)</option>
                 </select>
-                <span class="text-[10px] text-slate-500">Giọng Adam & Brian lồng tiếng nam châm cực cuốn hút</span>
+                <span class="text-xs text-slate-400 block">Giọng Adam & Brian lồng tiếng nam châm cực cuốn hút</span>
               </div>
             </div>
 
             <!-- Đúng 2 nút bấm hành động chính rõ ràng, cân đối -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
               <!-- Nút 1: Tạo kịch bản để duyệt và sửa trước -->
               <button @click="generateScriptOnly" :disabled="pipelineState.is_running || isGeneratingScript"
                 title="AI nghĩ kịch bản và tải vào form để bạn tự do đọc duyệt và sửa từng câu chữ trước khi dựng video"
-                class="py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/30 transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer">
-                <i v-if="isGeneratingScript" class="fa-solid fa-spinner fa-spin text-sm"></i>
-                <i v-else class="fa-solid fa-pen-nib text-sm"></i>
-                <span>📝 TẠO KỊCH BẢN ĐỂ DUYỆT</span>
+                class="py-3.5 px-5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-lg shadow-indigo-600/30 transition flex items-center justify-center gap-2.5 disabled:opacity-50 cursor-pointer">
+                <i v-if="isGeneratingScript" class="fa-solid fa-spinner fa-spin text-base"></i>
+                <i v-else class="fa-solid fa-pen-nib text-base"></i>
+                <span class="text-sm">📝 TẠO KỊCH BẢN ĐỂ DUYỆT</span>
               </button>
 
               <!-- Nút 2: Tự động 100% 1-Click từ A-Z -->
               <button @click="createVideoOneClick" :disabled="pipelineState.is_running"
                 title="Tự động 100% từ A đến Z: AI kịch bản -> Avatar thật -> Render video 60 FPS ngay"
-                class="py-3 px-4 rounded-xl bg-gradient-to-r from-pink-600 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer">
-                <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-sm"></i>
-                <i v-else class="fa-solid fa-bolt text-sm"></i>
-                <span>🚀 1-CLICK TỰ ĐỘNG XUẤT VIDEO</span>
+                class="py-3.5 px-5 rounded-xl bg-gradient-to-r from-pink-600 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-xl shadow-pink-500/30 transition flex items-center justify-center gap-2.5 disabled:opacity-50 cursor-pointer">
+                <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-base"></i>
+                <i v-else class="fa-solid fa-bolt text-base"></i>
+                <span class="text-sm">🚀 1-CLICK TỰ ĐỘNG XUẤT VIDEO</span>
               </button>
             </div>
 
@@ -415,197 +437,215 @@ HTML_TEMPLATE = """
                 <div class="flex items-center gap-2">
                   <span class="text-amber-400 font-bold flex items-center gap-1.5">
                     <i class="fa-solid fa-fire text-amber-500"></i>
-                    <span>Trend Threads Hôm Nay</span>
+                    <span>Trend Thịnh Hành Hôm Nay</span>
                     <span v-if="trendingTopicsInfo.date_display" class="px-2 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-medium">
                       {{ trendingTopicsInfo.date_display }}
                     </span>
                   </span>
-                  <span v-if="trendingTopicsInfo.updated_at" class="text-[10px] text-slate-500 hidden md:inline">
+                  <span v-if="trendingTopicsInfo.updated_at" class="text-xs text-slate-500 hidden md:inline">
                     (Cập nhật lúc: {{ trendingTopicsInfo.updated_at }})
                   </span>
                 </div>
                 <div class="flex items-center gap-2">
-                  <!-- Tùy chọn cào bài thật Threads phụ trợ -->
                   <button @click="crawlTrendingThreads(false)" :disabled="pipelineState.is_running || isCrawlingTrending"
-                    class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-cyan-300 hover:text-cyan-200 border border-cyan-500/30 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
+                    class="text-xs px-3 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-cyan-300 hover:text-cyan-200 border border-cyan-500/30 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
                     title="Cào bài viết thật từ Threads đưa vào bảng duyệt">
-                    <i v-if="isCrawlingTrending" class="fa-solid fa-spinner fa-spin text-[10px]"></i>
-                    <i v-else class="fa-solid fa-hashtag text-[10px]"></i>
+                    <i v-if="isCrawlingTrending" class="fa-solid fa-spinner fa-spin text-xs"></i>
+                    <i v-else class="fa-solid fa-hashtag text-xs"></i>
                     <span>Quét bài thật Threads</span>
                   </button>
 
                   <button @click="loadDailyTrendingTopics(true)" :disabled="isRefreshingTrends"
-                    class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-slate-700/60 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
-                    title="Quét lại xu hướng thịnh hành mới nhất trên Threads hôm nay">
+                    class="text-xs px-3 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-slate-700/60 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
+                    title="Quét lại xu hướng thịnh hành mới nhất">
                     <i class="fa-solid fa-arrows-rotate text-indigo-400" :class="{'fa-spin': isRefreshingTrends}"></i>
                     <span class="font-medium">{{ isRefreshingTrends ? 'Đang quét...' : 'Làm mới trend' }}</span>
                   </button>
                 </div>
               </div>
 
-              <div class="flex items-center gap-1.5 flex-wrap">
+              <div class="flex items-center gap-2 flex-wrap">
                 <button v-for="t in viralTopics" :key="t" @click="pickTopic(t)"
-                  class="text-xs px-2.5 py-1 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/50 transition hover:border-amber-500/60 hover:text-amber-200 hover:shadow-sm">
+                  class="text-xs px-3 py-1.5 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition hover:border-amber-500/60 hover:text-amber-200 hover:shadow-sm cursor-pointer">
                   {{ t }}
                 </button>
               </div>
             </div>
 
             <!-- Emotional Arc Badge -->
-            <div v-if="post.emotional_arc" class="p-2.5 rounded-xl bg-indigo-950/40 border border-indigo-800/40 flex items-center justify-between text-xs">
-              <span class="text-indigo-300 font-semibold"><i class="fa-solid fa-wave-square text-indigo-400 mr-1.5"></i> Đồ thị cảm xúc:</span>
-              <span class="text-slate-300 font-medium">{{ post.emotional_arc }}</span>
+            <div v-if="post.emotional_arc" class="p-3 rounded-xl bg-indigo-950/40 border border-indigo-800/40 flex items-center justify-between text-xs">
+              <span class="text-indigo-300 font-semibold flex items-center gap-2"><i class="fa-solid fa-wave-square text-indigo-400"></i> Đồ thị cảm xúc:</span>
+              <span class="text-slate-200 font-medium">{{ post.emotional_arc }}</span>
             </div>
           </div>
         </div>
 
         <!-- Section 2: Script Detail Editor & Review Workspace -->
-        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
-          <div class="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+        <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-5">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3.5 flex-wrap gap-2">
             <div>
               <h2 class="text-sm font-bold uppercase tracking-wider text-pink-400 flex items-center gap-2">
                 <i class="fa-solid fa-pen-to-square"></i> 2. Bảng Soạn & Duyệt Kịch Bản (Tự Do Chỉnh Sửa)
               </h2>
-              <p class="text-xs text-slate-400 mt-0.5">Sửa câu từ, chọn ảnh người thật, đổi Meme GIF/SFX, thêm hoặc xóa bình luận tùy ý.</p>
+              <p class="text-xs text-slate-400 mt-1">Sửa câu từ, chọn ảnh người thật, đổi Meme GIF/SFX, thêm hoặc xóa bình luận tùy ý mà không bị gò bó.</p>
             </div>
-            <button @click="refreshCardPreview" class="px-3 py-1.5 rounded-xl bg-indigo-600/80 hover:bg-indigo-600 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-sm cursor-pointer">
+            <button @click="refreshCardPreview" class="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition shadow-md shadow-indigo-600/30 cursor-pointer">
               <i class="fa-solid fa-rotate-right"></i>
               <span>Cập Nhật Thẻ Xem Trước</span>
             </button>
           </div>
 
           <!-- Post Editor (Author) -->
-          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
-            <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
-              <div class="flex items-center gap-3">
-                <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+          <div class="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4 shadow-md">
+            <div class="flex items-center justify-between border-b border-slate-800/80 pb-3 flex-wrap gap-2">
+              <div class="flex items-center gap-2.5 flex-wrap">
+                <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5 uppercase tracking-wide">
                   <i class="fa-solid fa-feather-pointed"></i> BÀI ĐĂNG CỦA TÁC GIẢ (HOOK MỞ MÀN)
                 </span>
-                <span class="text-[11px] px-2 py-0.5 rounded-full font-semibold border" 
+                <span class="text-xs px-2.5 py-0.5 rounded-full font-semibold border" 
                   :class="post.sentence_reveal_mode === 'progressive_line_reveal' ? 'bg-amber-950/50 text-amber-300 border-amber-600/50' : 'bg-slate-800 text-slate-400 border-slate-700'">
-                  <i class="fa-solid" :class="post.sentence_reveal_mode === 'progressive_line_reveal' ? 'fa-layer-group' : 'fa-file-lines'"></i>
+                  <i class="fa-solid mr-1" :class="post.sentence_reveal_mode === 'progressive_line_reveal' ? 'fa-layer-group' : 'fa-file-lines'"></i>
                   {{ post.sentence_reveal_mode === 'progressive_line_reveal' ? 'Bung câu từng dòng' : 'Hiện trọn vẹn' }}
                 </span>
-                <span v-if="post.recommended_theme" class="text-[11px] px-2 py-0.5 rounded-full font-semibold border"
+                <span v-if="post.recommended_theme" class="text-xs px-2.5 py-0.5 rounded-full font-semibold border"
                   :class="post.recommended_theme === 'dark' ? 'bg-slate-900 text-indigo-300 border-indigo-500/50' : 'bg-amber-950/40 text-amber-300 border-amber-600/40'">
-                  <i class="fa-solid" :class="post.recommended_theme === 'dark' ? 'fa-moon' : 'fa-sun'"></i>
+                  <i class="fa-solid mr-1" :class="post.recommended_theme === 'dark' ? 'fa-moon' : 'fa-sun'"></i>
                   Theme: {{ post.recommended_theme === 'dark' ? 'Tối' : 'Sáng' }}
                 </span>
-                <span v-if="post.satisfying_category" class="text-[11px] px-2 py-0.5 rounded-full font-semibold border bg-emerald-950/40 text-emerald-300 border-emerald-600/40">
-                  <i class="fa-solid fa-shapes"></i>
+                <span v-if="post.satisfying_category" class="text-xs px-2.5 py-0.5 rounded-full font-semibold border bg-emerald-950/40 text-emerald-300 border-emerald-600/40">
+                  <i class="fa-solid fa-shapes mr-1"></i>
                   Nền: {{ post.satisfying_category === 'food' ? 'Ẩm thực' : (post.satisfying_category === 'puzzle' ? '3D Puzzle' : (post.satisfying_category === 'asmr' ? 'ASMR' : (post.satisfying_category === 'gameplay' ? 'Gameplay' : post.satisfying_category))) }}
                 </span>
               </div>
-              <div class="flex items-center gap-3">
-                <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+              <div class="flex items-center gap-4">
+                <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
                   <input type="checkbox" v-model="post.is_verified" class="rounded bg-slate-800 border-slate-700 text-indigo-500 focus:ring-0">
                   <span class="text-indigo-400 font-semibold">Tích xanh ✓</span>
                 </label>
-                <div class="flex items-center gap-1.5 text-xs text-slate-400">
-                  <i class="fa-regular fa-heart text-rose-500"></i>
-                  <input v-model="post.likes" type="number" class="glass-input rounded-lg px-2 py-0.5 text-xs w-20 text-right font-mono">
+                <div class="flex items-center gap-1.5 text-xs text-slate-300">
+                  <i class="fa-regular fa-heart text-rose-500 text-sm"></i>
+                  <input v-model="post.likes" type="number" class="glass-input rounded-lg px-2.5 py-1 text-xs w-24 text-right font-mono" placeholder="likes">
                 </div>
               </div>
             </div>
 
-            <div class="flex items-center gap-2.5 flex-wrap">
-              <span class="text-xs text-slate-400 font-medium">Tên tác giả:</span>
-              <input v-model="post.username" type="text" class="glass-input rounded-lg px-2.5 py-1 text-xs w-40 font-semibold text-slate-200">
+            <!-- 3 Cột điều khiển bài đăng tác giả: Tên, Giọng đọc, Nhịp hiện câu -->
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+              <div class="space-y-1">
+                <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                  <i class="fa-solid fa-user text-indigo-400"></i> Tên tác giả:
+                </label>
+                <input v-model="post.username" type="text" class="w-full glass-input rounded-xl px-3 py-2 text-xs font-semibold text-slate-100">
+              </div>
 
-              <span class="text-xs text-slate-400 font-medium ml-1">Giọng đọc bài chính:</span>
-              <select v-model="post.voice_id" class="glass-input rounded-lg px-2.5 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
-                <option value="adam">🎙️ Adam (Trầm ấm podcast)</option>
-                <option value="brian">🎬 Brian (Nam điện ảnh)</option>
-                <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn)</option>
-                <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn)</option>
-                <option value="ava">🌸 Ava (Nữ hiện đại)</option>
-                <option value="emma">🌷 Emma (Nữ)</option>
-              </select>
+              <div class="space-y-1">
+                <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                  <i class="fa-solid fa-microphone text-pink-400"></i> Giọng đọc bài chính:
+                </label>
+                <select v-model="post.voice_id" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
+                  <option value="adam">🎙️ Adam (Trầm ấm podcast)</option>
+                  <option value="brian">🎬 Brian (Nam điện ảnh)</option>
+                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn)</option>
+                  <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn)</option>
+                  <option value="ava">🌸 Ava (Nữ hiện đại)</option>
+                  <option value="emma">🌷 Emma (Nữ)</option>
+                </select>
+              </div>
 
-              <span class="text-xs text-slate-400 font-medium ml-1">Nhịp hiện câu:</span>
-              <select v-model="post.sentence_reveal_mode" @change="refreshCardPreview" class="glass-input rounded-lg px-2.5 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
-                <option value="progressive_line_reveal">✨ Bung từng câu theo nhịp đọc (Chống đọc trước)</option>
-                <option value="standard_full">📄 Hiện trọn vẹn cả bài (Tiêu chuẩn)</option>
-              </select>
+              <div class="space-y-1">
+                <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                  <i class="fa-solid fa-layer-group text-amber-400"></i> Nhịp hiện câu:
+                </label>
+                <select v-model="post.sentence_reveal_mode" @change="refreshCardPreview" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
+                  <option value="progressive_line_reveal">✨ Bung từng câu theo nhịp đọc</option>
+                  <option value="standard_full">📄 Hiện trọn vẹn cả bài</option>
+                </select>
+              </div>
             </div>
 
-            <textarea v-model="post.content" rows="3"
-              class="w-full glass-input rounded-xl p-3 text-sm focus:outline-none placeholder-slate-500 font-normal leading-relaxed"
-              placeholder="Nội dung bài đăng chính..."></textarea>
+            <!-- Textarea nội dung bài đăng -->
+            <div class="space-y-1">
+              <label class="text-xs text-slate-300 font-semibold">Nội dung bài viết:</label>
+              <textarea v-model="post.content" rows="4"
+                class="w-full glass-input rounded-xl p-3.5 text-sm focus:outline-none placeholder-slate-500 font-normal leading-relaxed text-slate-100"
+                placeholder="Nội dung bài đăng chính..."></textarea>
+            </div>
             
             <!-- Avatar Picker Row for Author -->
-            <div class="flex items-center gap-2.5 pt-1 text-xs flex-wrap">
+            <div class="flex items-center gap-3 p-3 rounded-xl bg-slate-950/50 border border-slate-800/80 flex-wrap">
               <img :src="getAvatarThumb(post.avatar_url || post.avatar_path)" alt="Author Avatar"
-                class="w-8 h-8 rounded-full border-2 border-indigo-500/60 object-cover shadow-sm bg-slate-800">
+                class="w-10 h-10 rounded-full border-2 border-indigo-500/60 object-cover shadow-md bg-slate-800 flex-shrink-0">
+              <div class="flex-1 min-w-[200px]">
+                <input v-model="post.avatar_url" type="text" placeholder="Dán link ảnh đại diện hoặc để trống để tự động lấy từ kho người thật"
+                  class="w-full glass-input rounded-xl px-3 py-1.5 text-xs font-mono text-slate-300">
+              </div>
               <button @click="openAvatarModal('author')"
-                class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/40 text-xs font-semibold flex items-center gap-1.5 transition">
+                class="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/40 text-xs font-semibold flex items-center gap-2 transition cursor-pointer shadow-sm">
                 <i class="fa-solid fa-image-portrait"></i>
                 <span>📷 Chọn Avatar Người Thật</span>
               </button>
-              <input v-model="post.avatar_url" type="text" placeholder="Dán link ảnh đại diện hoặc để trống để tự động lấy từ kho người thật"
-                class="flex-1 min-w-[200px] glass-input rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-300">
             </div>
           </div>
 
           <!-- Story Visual Format & Proof Box -->
-          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
-            <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
+          <div class="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4 shadow-md">
+            <div class="flex items-center justify-between border-b border-slate-800/80 pb-3 flex-wrap gap-2">
               <div class="flex items-center gap-2">
-                <span v-if="post.enable_illustration" class="text-xs font-bold text-pink-400 flex items-center gap-1.5">
+                <span v-if="post.enable_illustration" class="text-xs font-bold text-pink-400 flex items-center gap-1.5 uppercase tracking-wide">
                   <i class="fa-solid fa-camera-retro"></i> ĐỊNH DẠNG: CÓ ẢNH BẰNG CHỨNG THỰC TẾ
                 </span>
-                <span v-else class="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                <span v-else class="text-xs font-bold text-emerald-400 flex items-center gap-1.5 uppercase tracking-wide">
                   <i class="fa-solid fa-comments"></i> ĐỊNH DẠNG TỰ NHIÊN: THUẦN HỘI THOẠI & ĐỐI ĐÁP (KHÔNG SPAM ẢNH)
                 </span>
               </div>
-              <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+              <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                 <input type="checkbox" v-model="post.enable_illustration" @change="refreshCardPreview"
                   class="rounded bg-slate-800 border-slate-700 text-pink-500 focus:ring-0">
-                <span class="font-semibold" :class="post.enable_illustration ? 'text-pink-400' : 'text-slate-400'">
-                  {{ post.enable_illustration ? 'Đang bật ảnh' : '+ Bật ảnh cho bài này' }}
+                <span class="font-semibold text-xs" :class="post.enable_illustration ? 'text-pink-400' : 'text-slate-400'">
+                  {{ post.enable_illustration ? 'Đang bật ảnh bằng chứng' : '+ Bật ảnh cho bài này' }}
                 </span>
               </label>
             </div>
 
             <!-- Khi Tắt Ảnh: Thông báo nhịp dựng tự nhiên -->
-            <div v-if="!post.enable_illustration" class="flex items-center justify-between text-xs text-slate-400 p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/60">
-              <div class="flex items-center gap-2">
-                <i class="fa-solid fa-sparkles text-emerald-400 text-sm"></i>
+            <div v-if="!post.enable_illustration" class="flex items-center justify-between text-xs text-slate-300 p-3.5 rounded-xl bg-slate-950/40 border border-slate-800/60 leading-relaxed">
+              <div class="flex items-center gap-2.5">
+                <i class="fa-solid fa-sparkles text-emerald-400 text-base"></i>
                 <span>Video sẽ chạy theo <strong>phong cách thuần thoại tự nhiên</strong>: tập trung 100% vào sự đối đáp nhịp nhàng của các bình luận, chuyển động camera và âm thanh SFX kịch tính, không bị dập khuôn chèn ảnh gượng ép.</span>
               </div>
             </div>
 
             <!-- Khi Bật Ảnh: Điều khiển chi tiết -->
-            <div v-else class="space-y-3">
-              <div class="flex items-center gap-4 text-xs bg-slate-950/50 p-2 rounded-lg border border-slate-800/70 flex-wrap">
-                <span class="font-semibold text-slate-400">Cách xuất hiện:</span>
-                <label class="flex items-center gap-1.5 cursor-pointer text-slate-200">
+            <div v-else class="space-y-4">
+              <div class="flex items-center gap-5 text-xs bg-slate-950/50 p-3 rounded-xl border border-slate-800/70 flex-wrap">
+                <span class="font-bold text-slate-300">Cách xuất hiện:</span>
+                <label class="flex items-center gap-2 cursor-pointer text-slate-200">
                   <input type="radio" value="popup_at_twist" v-model="post.visual_proof_placement" @change="refreshCardPreview" class="text-pink-500">
                   <span>Bung thẻ ảnh nổi ở đoạn bẻ lái (Cutaway Pop-up)</span>
                 </label>
-                <label class="flex items-center gap-1.5 cursor-pointer text-slate-200">
+                <label class="flex items-center gap-2 cursor-pointer text-slate-200">
                   <input type="radio" value="attached_in_post" v-model="post.visual_proof_placement" @change="refreshCardPreview" class="text-indigo-400">
-                  <span>Gắn trực tiếp trong bài tác giả (như Threads thật)</span>
+                  <span>Gắn trực tiếp trong bài tác giả (chuẩn FB / IG / Threads thật)</span>
                 </label>
               </div>
 
-              <div class="flex flex-col sm:flex-row gap-4 items-start">
+              <div class="flex flex-col sm:flex-row gap-5 items-start">
                 <!-- Thumbnail -->
-                <div class="relative w-full sm:w-44 h-28 rounded-lg overflow-hidden border border-slate-700 bg-slate-950 flex-shrink-0 group">
+                <div class="relative w-full sm:w-48 h-32 rounded-xl overflow-hidden border border-slate-700 bg-slate-950 flex-shrink-0 group shadow-lg">
                   <img v-if="post.illustration_path" :src="getIllustrationThumb(post.illustration_path)"
                     alt="Proof Illustration" class="w-full h-full object-cover">
-                  <div v-else class="w-full h-full flex flex-col items-center justify-center text-slate-500 text-xs gap-1">
-                    <i class="fa-solid fa-image text-xl text-slate-600"></i>
+                  <div v-else class="w-full h-full flex flex-col items-center justify-center text-slate-500 text-xs gap-1.5">
+                    <i class="fa-solid fa-image text-2xl text-slate-600"></i>
                     <span>Chưa có ảnh</span>
                   </div>
                 </div>
 
                 <!-- Controls -->
-                <div class="flex-1 space-y-2.5 w-full">
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <div>
-                      <label class="text-[11px] font-semibold text-slate-400">Danh mục ngữ cảnh chuẩn:</label>
-                      <select v-model="post.illustration_category" class="w-full glass-input rounded-lg px-2.5 py-1 text-xs bg-slate-800 text-slate-200 mt-1">
+                <div class="flex-1 space-y-3 w-full">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div class="space-y-1">
+                      <label class="text-xs font-semibold text-slate-300">Danh mục ngữ cảnh chuẩn:</label>
+                      <select v-model="post.illustration_category" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
                         <option value="couple_photo_fail">📸 Chụp ảnh bạn gái dìm / sống ảo fail</option>
                         <option value="cafe_lifestyle">☕ Quán cafe / Thức uống sống ảo</option>
                         <option value="food_cooking">🍳 Nấu ăn cháy khét / Thảm họa bếp núc</option>
@@ -616,29 +656,29 @@ HTML_TEMPLATE = """
                       </select>
                     </div>
 
-                    <div>
-                      <label class="text-[11px] font-semibold text-slate-400">Chú thích trên ảnh (dưới 8 từ):</label>
+                    <div class="space-y-1">
+                      <label class="text-xs font-semibold text-slate-300">Chú thích trên ảnh (dưới 8 từ):</label>
                       <input v-model="post.illustration_caption" type="text" placeholder="VD: Tác phẩm bạn trai chụp..."
-                        class="w-full glass-input rounded-lg px-2.5 py-1 text-xs text-slate-200 mt-1 font-medium">
+                        class="w-full glass-input rounded-xl px-3 py-2 text-xs text-slate-200 font-medium">
                     </div>
                   </div>
 
                   <!-- Search & Upload Bar -->
-                  <div class="flex items-center gap-2 pt-1 flex-wrap">
-                    <div class="relative flex-1 min-w-[200px]">
+                  <div class="flex items-center gap-2.5 pt-1 flex-wrap">
+                    <div class="relative flex-1 min-w-[220px]">
                       <input v-model="customImageQuery" @keyup.enter="searchNewIllustration" type="text"
-                        :placeholder="post.illustration_prompt || 'Nhập từ khóa tìm ảnh thật (VD: chụp ảnh dìm, cháy nồi cơm)...'"
-                        class="w-full glass-input rounded-lg pl-2.5 pr-8 py-1.5 text-xs text-slate-200">
-                      <i v-if="isSearchingImage" class="fa-solid fa-spinner fa-spin absolute right-2.5 top-2 text-indigo-400 text-xs"></i>
+                        :placeholder="post.illustration_prompt || 'Nhập từ khóa tìm ảnh thật (VD: khóa xe, chụp ảnh dìm)...'"
+                        class="w-full glass-input rounded-xl pl-3 pr-8 py-2 text-xs text-slate-200">
+                      <i v-if="isSearchingImage" class="fa-solid fa-spinner fa-spin absolute right-3 top-2.5 text-indigo-400 text-xs"></i>
                     </div>
 
                     <button @click="searchNewIllustration" :disabled="isSearchingImage"
-                      class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-sm cursor-pointer disabled:opacity-50">
+                      class="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-sm cursor-pointer disabled:opacity-50">
                       <i class="fa-solid fa-magnifying-glass"></i>
                       <span>Tìm Ảnh Thật Trên Web</span>
                     </button>
 
-                    <label class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer">
+                    <label class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer">
                       <i class="fa-solid fa-upload text-pink-400"></i>
                       <span>Tải Ảnh Từ Máy</span>
                       <input type="file" accept="image/*" class="hidden" @change="uploadCustomIllustration">
@@ -650,49 +690,73 @@ HTML_TEMPLATE = """
           </div>
 
           <!-- Comments Editor -->
-          <div class="space-y-3 pt-1">
+          <div class="space-y-4 pt-1">
             <div class="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wide">
-              <span class="flex items-center gap-2 text-indigo-300">
+              <span class="flex items-center gap-2 text-indigo-300 text-sm">
                 <i class="fa-solid fa-comments"></i>
                 <span>Các Bình Luận Tương Tác & Bẻ Lái ({{ post.comments ? post.comments.length : 0 }} bình luận)</span>
               </span>
               <button @click="addComment"
-                class="px-3 py-1 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer">
+                class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-2 transition shadow-md shadow-emerald-600/30 cursor-pointer">
                 <i class="fa-solid fa-plus"></i>
-                <span>➕ Thêm Bình Luận</span>
+                <span>➕ Thêm Bình Luận Mới</span>
               </button>
             </div>
             
             <div v-for="(cmt, idx) in post.comments" :key="idx"
-              class="p-3.5 rounded-xl bg-slate-900/50 border border-slate-800/80 space-y-2.5">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-300 text-xs flex items-center justify-center font-bold">#{{ idx+1 }}</span>
-                <input v-model="cmt.username" type="text" placeholder="username" class="glass-input rounded-lg px-2.5 py-1 text-xs w-28 font-semibold text-slate-200">
-                
-                <!-- Reply-To Selector (Trả lời bài đăng hoặc commenter trước) -->
-                <div class="flex items-center gap-1 text-[11px] bg-slate-800/80 px-2 py-0.5 rounded-lg border border-slate-700/60">
-                  <span class="text-slate-400"><i class="fa-solid fa-reply text-indigo-400"></i> Trả lời:</span>
-                  <select v-model="cmt.reply_to" class="bg-transparent text-indigo-300 font-semibold focus:outline-none text-[11px]">
-                    <option :value="post.username">@{{ post.username || 'tác_giả' }} (Bài đăng)</option>
-                    <option v-for="(otherCmt, cIdx) in post.comments.slice(0, idx)" :key="cIdx" :value="otherCmt.username">
-                      @{{ otherCmt.username || ('cmt_' + (cIdx+1)) }} (#{{ cIdx + 1 }})
-                    </option>
+              class="p-4 rounded-2xl bg-slate-900/60 hover:bg-slate-900/80 border border-slate-800 hover:border-slate-700/80 transition shadow-lg space-y-3">
+              
+              <!-- Row 1: Header (Badge, Username, Reply-to & Delete Button) -->
+              <div class="flex items-center justify-between gap-3 flex-wrap border-b border-slate-800/70 pb-2.5">
+                <div class="flex items-center gap-2.5 flex-wrap">
+                  <span class="w-7 h-7 rounded-lg bg-indigo-500/20 text-indigo-300 text-xs flex items-center justify-center font-bold border border-indigo-500/30">#{{ idx+1 }}</span>
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-xs text-slate-400 font-medium">@</span>
+                    <input v-model="cmt.username" type="text" placeholder="username" class="glass-input rounded-xl px-3 py-1 text-xs w-36 font-semibold text-slate-200">
+                  </div>
+                  
+                  <!-- Reply-To Selector -->
+                  <div class="flex items-center gap-1.5 text-xs bg-slate-800/80 px-2.5 py-1 rounded-xl border border-slate-700/60">
+                    <span class="text-slate-400"><i class="fa-solid fa-reply text-indigo-400"></i> Trả lời:</span>
+                    <select v-model="cmt.reply_to" class="bg-transparent text-indigo-300 font-semibold focus:outline-none text-xs cursor-pointer">
+                      <option :value="post.username">@{{ post.username || 'tác_giả' }} (Bài đăng)</option>
+                      <option v-for="(otherCmt, cIdx) in post.comments.slice(0, idx)" :key="cIdx" :value="otherCmt.username">
+                        @{{ otherCmt.username || ('cmt_' + (cIdx+1)) }} (#{{ cIdx + 1 }})
+                      </option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-3">
+                  <!-- Likes -->
+                  <div class="flex items-center gap-1.5 text-xs text-slate-400">
+                    <i class="fa-regular fa-heart text-rose-500"></i>
+                    <input v-model="cmt.likes" type="number" class="glass-input rounded-lg px-2.5 py-1 text-xs w-20 text-right font-mono" placeholder="likes">
+                  </div>
+                  <!-- Nút Xóa Comment -->
+                  <button @click="removeComment(idx)" title="Xóa bình luận này"
+                    class="w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-400 flex items-center justify-center transition border border-rose-500/30 cursor-pointer">
+                    <i class="fa-solid fa-trash-can text-xs"></i>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Row 2: Controls (Emotion, Voice, Meme/SFX) in a clean 3-column grid -->
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div>
+                  <label class="text-xs font-semibold text-slate-400 block mb-1">Cảm xúc:</label>
+                  <select v-model="cmt.emotion" class="w-full glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-indigo-300 font-medium">
+                    <option value="funny">😂 Hài hước</option>
+                    <option value="shocked">💥 Bẻ lái sốc</option>
+                    <option value="awkward">💀 Cạn lời</option>
+                    <option value="sarcastic">😏 Châm biếm</option>
+                    <option value="insightful">✨ Thông minh</option>
                   </select>
                 </div>
 
-                <!-- Emotion Badge -->
-                <select v-model="cmt.emotion" class="glass-input rounded-lg px-2 py-1 text-xs bg-slate-800 text-indigo-300 font-medium">
-                  <option value="funny">😂 Hài hước</option>
-                  <option value="shocked">💥 Bẻ lái sốc</option>
-                  <option value="awkward">💀 Cạn lời</option>
-                  <option value="sarcastic">😏 Châm biếm</option>
-                  <option value="insightful">✨ Thông minh</option>
-                </select>
-
-                <!-- Voice Selector for this Comment -->
-                <div class="flex items-center gap-1 text-[11px] bg-slate-800/80 px-2 py-0.5 rounded-lg border border-slate-700/60">
-                  <span class="text-slate-400"><i class="fa-solid fa-microphone text-emerald-400"></i> Giọng:</span>
-                  <select v-model="cmt.voice_id" class="bg-transparent text-slate-200 font-medium focus:outline-none text-[11px]">
+                <div>
+                  <label class="text-xs font-semibold text-slate-400 block mb-1">Giọng đọc:</label>
+                  <select v-model="cmt.voice_id" class="w-full glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
                     <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ)</option>
                     <option value="vi-VN-NamMinhNeural">Nam Minh (Nam)</option>
                     <option value="adam">Adam (Nam trầm)</option>
@@ -702,10 +766,9 @@ HTML_TEMPLATE = """
                   </select>
                 </div>
 
-                <!-- SFX & Meme selector (14 Gifs) -->
-                <div class="flex items-center gap-1.5 ml-auto flex-wrap">
-                  <span class="text-xs text-slate-500">Meme/SFX:</span>
-                  <select v-model="cmt.sfx" class="glass-input rounded-lg px-2 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
+                <div>
+                  <label class="text-xs font-semibold text-slate-400 block mb-1">Meme & SFX:</label>
+                  <select v-model="cmt.sfx" class="w-full glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
                     <option value="none">✨ Không SFX (Tự nhiên / Lofi)</option>
                     <option value="do_mixi">🎙️ Độ Mixi (Cười / Cay thế nhờ / Hợp lý)</option>
                     <option value="pewpew">🎙️ PewPew (Quá chuẩn luôn / Tấm chiếu mới)</option>
@@ -736,172 +799,196 @@ HTML_TEMPLATE = """
                     <option value="applause">👏 Vỗ tay / Nâng ly (applause.gif)</option>
                     <option value="dancing_cat">💃 Mèo nhảy ăn mừng (dancing_cat.gif)</option>
                   </select>
-
-                  <!-- Nút Xóa Comment nếu thừa -->
-                  <button @click="removeComment(idx)" title="Xóa bình luận này"
-                    class="w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-400 flex items-center justify-center transition border border-rose-500/30">
-                    <i class="fa-solid fa-trash-can text-xs"></i>
-                  </button>
                 </div>
               </div>
 
-              <textarea v-model="cmt.content" rows="2"
-                class="w-full glass-input rounded-xl p-2.5 text-xs focus:outline-none placeholder-slate-500"
+              <!-- Row 3: Content textarea -->
+              <textarea v-model="cmt.content" rows="3"
+                class="w-full glass-input rounded-xl p-3.5 text-sm focus:outline-none placeholder-slate-500 leading-relaxed text-slate-100"
                 :placeholder="'Bình luận ' + (idx+1) + '...'"></textarea>
 
-              <!-- Avatar Picker Row for Commenter -->
-              <div class="flex items-center gap-2 pt-0.5 text-[11px] text-slate-400 flex-wrap">
+              <!-- Row 4: Avatar Picker for Commenter -->
+              <div class="flex items-center gap-3 pt-0.5 text-xs text-slate-400 flex-wrap">
                 <img :src="getAvatarThumb(cmt.avatar_url || cmt.avatar_path)" alt="Comment Avatar"
-                  class="w-6 h-6 rounded-full border border-slate-700 object-cover bg-slate-800">
+                  class="w-8 h-8 rounded-full border border-slate-700 object-cover bg-slate-800 flex-shrink-0">
+                <div class="flex-1 min-w-[200px]">
+                  <input v-model="cmt.avatar_url" type="text" placeholder="Link ảnh hoặc để trống để gán ảnh thật"
+                    class="w-full glass-input rounded-xl px-3 py-1.5 text-xs font-mono text-slate-300">
+                </div>
                 <button @click="openAvatarModal('comment', idx)"
-                  class="px-2.5 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/30 text-[11px] font-semibold flex items-center gap-1 transition">
+                  class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/30 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer">
                   <i class="fa-solid fa-image-portrait"></i>
                   <span>📷 Chọn Avatar</span>
                 </button>
-                <input v-model="cmt.avatar_url" type="text" placeholder="Link ảnh hoặc để trống để gán ảnh thật"
-                  class="flex-1 min-w-[180px] glass-input rounded-lg px-2 py-0.5 text-[10px] font-mono text-slate-300">
               </div>
             </div>
           </div>
 
           <!-- Outro Viral CTA Question Box -->
-          <div class="p-3.5 rounded-xl bg-purple-950/30 border border-purple-800/50 space-y-2">
+          <div class="p-4 rounded-2xl bg-purple-950/40 border border-purple-800/60 space-y-2.5 shadow-md">
             <div class="flex items-center justify-between">
-              <span class="text-xs font-bold text-purple-300 flex items-center gap-1.5">
-                <i class="fa-solid fa-bullhorn text-purple-400"></i> CÂU HỎI KÊU GỌI TƯƠNG TÁC OUTRO (2.4s CUỐI)
+              <span class="text-xs font-bold text-purple-300 flex items-center gap-2">
+                <i class="fa-solid fa-bullhorn text-purple-400 text-sm"></i> CÂU HỎI KÊU GỌI TƯƠNG TÁC OUTRO (2.4s CUỐI)
               </span>
-              <span class="text-[10px] text-purple-400 font-mono">Tự động kích nổ bình luận người xem</span>
+              <span class="text-xs text-purple-400 font-mono">Tự động kích nổ bình luận người xem</span>
             </div>
             <input v-model="post.cta_question" @change="refreshCardPreview" type="text"
               placeholder="VD: Còn bạn thì sao? Nếu rơi vào tình huống này bạn sẽ xử lý thế nào?..."
-              class="w-full glass-input rounded-lg px-3 py-1.5 text-xs text-purple-100 placeholder-purple-400/50 border border-purple-700/50 focus:border-purple-500 font-medium bg-purple-950/40">
+              class="w-full glass-input rounded-xl px-4 py-2.5 text-xs text-purple-100 placeholder-purple-400/50 border border-purple-700/60 focus:border-purple-500 font-medium bg-purple-950/50">
           </div>
         </div>
 
-        <!-- Section 3: Phong Cách Dựng Video & Bố Cục Đa Dạng -->
-        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
-          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <!-- Section 3: Phong Cách Dựng Video & Bố Cục Đa Dạng (Không Bị Bó Lại) -->
+        <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-5">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3.5">
             <h2 class="text-sm font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
-              <i class="fa-solid fa-sliders"></i> 3. Phong Cách Dựng Video & Bố Cục (Đa Dạng Hóa)
+              <i class="fa-solid fa-sliders text-cyan-400"></i> 3. Phong Cách Dựng Video & Bố Cục (Tùy Biến Rộng Rãi)
             </h2>
-            <span class="text-xs text-slate-400">Tùy biến chuẩn TikTok & Reels</span>
+            <span class="text-xs text-slate-400">Tùy biến chuẩn TikTok, Reels & Shorts 60 FPS</span>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-3.5">
-            <!-- Nền tảng nội dung (Platform) -->
-            <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <i class="fa-solid fa-shapes text-sky-400"></i> Nền tảng hiển thị:
-              </label>
-              <select v-model="settings.platform" @change="onPlatformChange" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="auto">🤖 Tự Động (AI Phân Tích Chọn Nền Tảng)</option>
-                <option value="threads">🧵 Threads (Đối đáp nhanh, tinh gọn)</option>
-                <option value="facebook">📘 Facebook Post (Kèm ảnh & Like/Share)</option>
-                <option value="instagram">📸 Instagram Feed (Ảnh lớn & Story Ring)</option>
-              </select>
-            </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+            <!-- Nhóm A: Nền Tảng & Giao Diện Thẻ -->
+            <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3.5">
+              <h3 class="text-xs font-bold uppercase tracking-wide text-indigo-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-layer-group"></i> Nền Tảng & Thẻ Card
+              </h3>
 
-            <!-- Bố cục video (Layout Presets) -->
-            <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <i class="fa-solid fa-table-columns text-indigo-400"></i> Bố cục khung hình:
-              </label>
-              <select v-model="settings.layout_preset" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="center">🎯 Căn Giữa Chuẩn TikTok / Reels (Đẹp nhất, dễ đọc, không bị che)</option>
-                <option value="split_screen">📱 Nửa Trên Gameplay - Nửa Dưới Thẻ (TikTok Split-Screen)</option>
-                <option value="bottom_story">📖 Storyteller (Hơi thấp, tối giản)</option>
-              </select>
-            </div>
-
-            <!-- Chế độ nền video -->
-            <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <i class="fa-solid fa-film text-pink-400"></i> Chế độ nền video:
-              </label>
-              <select v-model="settings.bg_mode" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="auto">🤖 Tự Động Khớp Chủ Đề (AI Smart Satisfying Matching)</option>
-                <option value="sandwich_puzzle">🧩 Sandwich: Ghép Hình Puzzle Thỏa Mãn Ở Giữa (Khuyên Dùng)</option>
-                <option value="sandwich_food">🍰 Sandwich: Ăn Uống Mukbang / Bánh Ngọt Ở Giữa</option>
-                <option value="sandwich_asmr">🧼 Sandwich: Cắt Xà Phòng ASMR Ở Giữa</option>
-                <option value="minecraft">🎮 Minecraft Parkour Full 9:16</option>
-                <option value="gta5">🚗 GTA 5 Mega Ramp Stunt 9:16</option>
-                <option value="subway">🏃 Subway Surfers High Speed 9:16</option>
-                <option value="asmr">🧼 Satisfying ASMR Cắt Xà Phòng Full 9:16</option>
-                <option value="split_gameplay">🔥 Split (Gameplay 60FPS + Thẻ dưới)</option>
-                <option value="random_gameplay">🎲 Ngẫu Nhiên Kho Gameplay (GTA / Minecraft / Subway / ASMR)</option>
-                <option value="infinity_neon">🌀 3D Infinity Cyberpunk (Neon)</option>
-                <option value="infinity_dark">🌑 3D Infinity Dark Luxury (Kim loại)</option>
-                <option value="infinity_gold">✨ 3D Infinity Golden Matrix (Vàng)</option>
-                <option value="gradient_cyber">🌌 Gradient Dark Cyberpunk (Tĩnh)</option>
-                <option value="gradient_lofi">☕ Gradient Lofi Cozy (Ấm cúng)</option>
-              </select>
-            </div>
-
-            <!-- Giao diện thẻ -->
-            <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <i class="fa-solid fa-palette text-amber-400"></i> Giao diện thẻ Threads:
-              </label>
-              <select v-model="settings.card_theme" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="auto">🤖 Tự Động Theo Kịch Bản (AI Khuyên Dùng Sáng/Tối)</option>
-                <option value="light">☀️ Sáng (Chuẩn Threads thật 100%)</option>
-                <option value="dark">🌙 Tối (Dark Mode OLED)</option>
-                <option value="glass">🔮 Glassmorphism (Kính mờ viền sáng)</option>
-                <option value="cyber_neon">⚡ Cyber Neon (Viền hồng dạ quang)</option>
-              </select>
-            </div>
-
-            <!-- Giọng đọc tác giả -->
-            <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc dẫn chuyện:
-              </label>
-              <select v-model="settings.voice" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="adam">🎙️ Adam (Trầm ấm, nam tính, cuốn hút như Podcast - Khuyên dùng)</option>
-                <option value="brian">🎬 Brian (Nam điện ảnh, truyền cảm sâu lắng)</option>
-                <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn truyền cảm)</option>
-                <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn biểu cảm, TikTok viral)</option>
-                <option value="ava">🌸 Ava (Nữ hiện đại, sôi nổi)</option>
-                <option value="emma">🌷 Emma (Nữ dịu dàng)</option>
-              </select>
-            </div>
-
-            <!-- Tốc độ đọc (Reading Speed) -->
-            <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <i class="fa-solid fa-gauge-high text-amber-400"></i> Tốc độ đọc:
-              </label>
-              <select v-model="settings.rate" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                <option value="+25%">⚡ Rất nhanh (+25% - Chuẩn TikTok Drama)</option>
-                <option value="+20%">🔥 Nhanh cuốn hút (+20% - Khuyên dùng)</option>
-                <option value="+18%">🚀 Nhanh mượt mà (+18%)</option>
-                <option value="+15%">✨ Nhanh vừa (+15%)</option>
-                <option value="+10%">🌟 Tự nhiên (+10%)</option>
-                <option value="+0%">🐢 Bình thường (+0%)</option>
-              </select>
-            </div>
-
-            <!-- Nhạc nền TikTok & Âm lượng -->
-            <div class="space-y-1.5">
-              <div class="flex items-center justify-between">
+              <!-- Nền tảng nội dung (Platform) -->
+              <div class="space-y-1">
                 <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                  <i class="fa-solid fa-music text-rose-400"></i> Nhạc nền (BGM):
+                  <i class="fa-solid fa-shapes text-sky-400"></i> Nền tảng hiển thị:
                 </label>
-                <span class="text-[10px] font-mono text-rose-300 font-bold" v-if="settings.bgm_choice !== 'none'">
-                  {{ settings.bgm_volume }}%
-                </span>
-                <span class="text-[10px] font-mono text-slate-500 font-bold" v-else>
-                  Tắt
-                </span>
+                <select v-model="settings.platform" @change="onPlatformChange" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                  <option value="auto">🤖 Tự Động (AI Phân Tích Chọn Nền Tảng)</option>
+                  <option value="threads">🧵 Threads (Đối đáp nhanh, tinh gọn)</option>
+                  <option value="facebook">📘 Facebook Post (Kèm ảnh & Like/Share)</option>
+                  <option value="instagram">📸 Instagram Feed (Ảnh lớn & Story Ring)</option>
+                </select>
+                <span class="text-xs text-slate-500 block">Kiểu dáng thẻ, reaction & avatar</span>
               </div>
-              <select v-model="settings.bgm_choice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-                <option v-for="b in bgmList" :key="b.id" :value="b.id">{{ b.name }}</option>
-              </select>
-              <div class="flex items-center gap-2 pt-0.5" v-if="settings.bgm_choice !== 'none'">
-                <i class="fa-solid fa-volume-low text-[10px] text-slate-400"></i>
-                <input type="range" min="5" max="100" step="5" v-model.number="settings.bgm_volume"
-                  class="w-full accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer">
-                <i class="fa-solid fa-volume-high text-[10px] text-slate-400"></i>
+
+              <!-- Giao diện thẻ -->
+              <div class="space-y-1">
+                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-palette text-amber-400"></i> Giao diện thẻ bài viết:
+                </label>
+                <select v-model="settings.card_theme" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                  <option value="auto">🤖 Tự Động Theo Kịch Bản (AI Khuyên Dùng Sáng/Tối)</option>
+                  <option value="light">☀️ Sáng (Chuẩn Threads thật 100%)</option>
+                  <option value="dark">🌙 Tối (Dark Mode OLED)</option>
+                  <option value="glass">🔮 Glassmorphism (Kính mờ viền sáng)</option>
+                  <option value="cyber_neon">⚡ Cyber Neon (Viền hồng dạ quang)</option>
+                </select>
+                <span class="text-xs text-slate-500 block">Màu nền và độ tương phản của thẻ chữ</span>
+              </div>
+            </div>
+
+            <!-- Nhóm B: Bố Cục Khung Hình & Nền Video -->
+            <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3.5">
+              <h3 class="text-xs font-bold uppercase tracking-wide text-pink-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-film"></i> Bố Cục Khung Hình & Nền Video
+              </h3>
+
+              <!-- Bố cục video (Layout Presets) -->
+              <div class="space-y-1">
+                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-table-columns text-indigo-400"></i> Bố cục khung hình:
+                </label>
+                <select v-model="settings.layout_preset" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                  <option value="center">🎯 Căn Giữa Chuẩn TikTok / Reels (Đẹp nhất, không bị che)</option>
+                  <option value="split_screen">📱 Nửa Trên Gameplay - Nửa Dưới Thẻ (Split-Screen)</option>
+                  <option value="bottom_story">📖 Storyteller (Hơi thấp, tối giản)</option>
+                </select>
+                <span class="text-xs text-slate-500 block">Vị trí đặt thẻ chữ trên tỷ lệ dọc 9:16</span>
+              </div>
+
+              <!-- Chế độ nền video -->
+              <div class="space-y-1">
+                <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-photo-film text-pink-400"></i> Chế độ nền video:
+                </label>
+                <select v-model="settings.bg_mode" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                  <option value="auto">🤖 Tự Động Khớp Chủ Đề (AI Smart Satisfying Matching)</option>
+                  <option value="sandwich_puzzle">🧩 Sandwich: Ghép Hình Puzzle Thỏa Mãn Ở Giữa (Khuyên Dùng)</option>
+                  <option value="sandwich_food">🍰 Sandwich: Ăn Uống Mukbang / Bánh Ngọt Ở Giữa</option>
+                  <option value="sandwich_asmr">🧼 Sandwich: Cắt Xà Phòng ASMR Ở Giữa</option>
+                  <option value="minecraft">🎮 Minecraft Parkour Full 9:16</option>
+                  <option value="gta5">🚗 GTA 5 Mega Ramp Stunt 9:16</option>
+                  <option value="subway">🏃 Subway Surfers High Speed 9:16</option>
+                  <option value="asmr">🧼 Satisfying ASMR Cắt Xà Phòng Full 9:16</option>
+                  <option value="split_gameplay">🔥 Split (Gameplay 60FPS + Thẻ dưới)</option>
+                  <option value="random_gameplay">🎲 Ngẫu Nhiên Kho Gameplay (GTA / Minecraft / Subway / ASMR)</option>
+                  <option value="infinity_neon">🌀 3D Infinity Cyberpunk (Neon)</option>
+                  <option value="infinity_dark">🌑 3D Infinity Dark Luxury (Kim loại)</option>
+                  <option value="infinity_gold">✨ 3D Infinity Golden Matrix (Vàng)</option>
+                  <option value="gradient_cyber">🌌 Gradient Dark Cyberpunk (Tĩnh)</option>
+                  <option value="gradient_lofi">☕ Gradient Lofi Cozy (Ấm cúng)</option>
+                </select>
+                <span class="text-xs text-slate-500 block">Video động chạy phía sau thẻ chữ</span>
+              </div>
+            </div>
+
+            <!-- Nhóm C: Giọng Đọc, Tốc Độ & BGM -->
+            <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3.5">
+              <h3 class="text-xs font-bold uppercase tracking-wide text-emerald-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-headphones"></i> Giọng Đọc, Tốc Độ & Nhạc Nền
+              </h3>
+
+              <div class="grid grid-cols-2 gap-2.5">
+                <!-- Giọng đọc tác giả -->
+                <div class="space-y-1">
+                  <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc chính:
+                  </label>
+                  <select v-model="settings.voice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+                    <option value="adam">🎙️ Adam (Trầm ấm podcast)</option>
+                    <option value="brian">🎬 Brian (Nam điện ảnh)</option>
+                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam)</option>
+                    <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ)</option>
+                    <option value="ava">🌸 Ava (Nữ hiện đại)</option>
+                    <option value="emma">🌷 Emma (Nữ)</option>
+                  </select>
+                </div>
+
+                <!-- Tốc độ đọc -->
+                <div class="space-y-1">
+                  <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-gauge-high text-amber-400"></i> Tốc độ đọc:
+                  </label>
+                  <select v-model="settings.rate" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+                    <option value="+25%">⚡ Rất nhanh (+25%)</option>
+                    <option value="+20%">🔥 Nhanh (+20%)</option>
+                    <option value="+18%">🚀 Nhanh mượt (+18%)</option>
+                    <option value="+15%">✨ Nhanh vừa (+15%)</option>
+                    <option value="+10%">🌟 Tự nhiên (+10%)</option>
+                    <option value="+0%">🐢 Bình thường (+0%)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Nhạc nền TikTok & Âm lượng -->
+              <div class="space-y-1.5 pt-0.5">
+                <div class="flex items-center justify-between">
+                  <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-music text-rose-400"></i> Nhạc nền (BGM):
+                  </label>
+                  <span class="text-xs font-mono text-rose-300 font-bold" v-if="settings.bgm_choice !== 'none'">
+                    {{ settings.bgm_volume }}%
+                  </span>
+                  <span class="text-xs font-mono text-slate-500 font-bold" v-else>
+                    Tắt
+                  </span>
+                </div>
+                <select v-model="settings.bgm_choice" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                  <option v-for="b in bgmList" :key="b.id" :value="b.id">{{ b.name }}</option>
+                </select>
+                <div class="flex items-center gap-2 pt-1" v-if="settings.bgm_choice !== 'none'">
+                  <i class="fa-solid fa-volume-low text-xs text-slate-400"></i>
+                  <input type="range" min="5" max="100" step="5" v-model.number="settings.bgm_volume"
+                    class="w-full accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer">
+                  <i class="fa-solid fa-volume-high text-xs text-slate-400"></i>
+                </div>
               </div>
             </div>
           </div>
@@ -915,61 +1002,61 @@ HTML_TEMPLATE = """
             <i v-else class="fa-solid fa-circle-check text-xl text-emerald-300"></i>
             <span>{{ isRenderingVideo ? ('⏳ ' + pipelineState.message) : '🚀 DUYỆT KỊCH BẢN & BẮT ĐẦU DỰNG VIDEO (RENDER NGAY)' }}</span>
           </button>
-          <p class="text-center text-[11px] text-slate-500 mt-2">
+          <p class="text-center text-xs text-slate-400 mt-2">
             Hệ thống sẽ lấy chính xác kịch bản và phong cách dựng video bạn vừa duyệt để xuất file 60 FPS chuẩn Studio.
           </p>
         </div>
 
       </div>
 
-      <!-- Right Panel: Live Preview & Player (5 cols) -->
-      <div class="lg:col-span-5 flex flex-col space-y-6">
+      <!-- Right Panel: Live Preview & Player (5 cols on XL, 4 cols on 2XL, Sticky) -->
+      <div class="xl:col-span-5 2xl:col-span-4 flex flex-col space-y-6 xl:sticky xl:top-20 self-start">
         
         <!-- Video Player / Card Preview Container -->
-        <div class="glass-panel rounded-2xl p-5 shadow-xl flex flex-col items-center">
+        <div class="glass-panel rounded-2xl p-6 shadow-xl flex flex-col items-center">
           <div class="w-full flex items-center justify-between mb-4 border-b border-slate-800 pb-3">
-            <div class="flex items-center gap-2">
-              <button @click="previewMode = 'video'" :class="{'text-indigo-400 font-bold border-b-2 border-indigo-400': previewMode === 'video'}" class="text-xs px-2 py-1">
+            <div class="flex items-center gap-2 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
+              <button @click="previewMode = 'video'" :class="previewMode === 'video' ? 'bg-indigo-600 text-white font-bold shadow-sm' : 'text-slate-400 hover:text-slate-200'" class="text-xs px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 cursor-pointer">
                 <i class="fa-solid fa-play"></i> Xem Video
               </button>
-              <button @click="previewMode = 'cards'" :class="{'text-indigo-400 font-bold border-b-2 border-indigo-400': previewMode === 'cards'}" class="text-xs px-2 py-1">
-                <i class="fa-solid fa-image"></i> Xem Thẻ Card
+              <button @click="previewMode = 'cards'" :class="previewMode === 'cards' ? 'bg-indigo-600 text-white font-bold shadow-sm' : 'text-slate-400 hover:text-slate-200'" class="text-xs px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 cursor-pointer">
+                <i class="fa-solid fa-images"></i> Xem Thẻ Card
               </button>
             </div>
-            <span class="text-xs text-slate-500 font-mono">9:16 Vertical</span>
+            <span class="text-xs text-slate-400 font-mono px-2 py-1 rounded-lg bg-slate-800/80 border border-slate-700/60">9:16 Vertical HD</span>
           </div>
 
           <!-- Video Player Display -->
           <div v-show="previewMode === 'video'" class="w-full flex flex-col items-center">
-            <div class="w-[280px] h-[500px] bg-black rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-800 relative flex items-center justify-center group">
+            <div class="w-[300px] h-[533px] bg-black rounded-3xl overflow-hidden shadow-2xl border-4 border-slate-800 relative flex items-center justify-center group">
               <video v-if="latestVideoUrl" :src="latestVideoUrl" controls autoplay loop
                 class="w-full h-full object-cover"></video>
-              <div v-else class="text-center p-6 text-slate-500 text-xs space-y-2">
-                <i class="fa-solid fa-video-slash text-3xl"></i>
-                <div>Chưa có video nào. Nhấn Render để tạo ngay!</div>
+              <div v-else class="text-center p-6 text-slate-400 text-xs space-y-2">
+                <i class="fa-solid fa-video-slash text-4xl text-slate-600"></i>
+                <div class="font-medium">Chưa có video nào. Nhấn Render để tạo ngay!</div>
               </div>
             </div>
 
             <!-- Video Actions & Caption -->
-            <div v-if="latestVideoUrl" class="w-full mt-4 space-y-3">
-              <div class="flex items-center gap-2">
-                <a :href="latestVideoUrl" download class="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-center text-slate-200 transition">
-                  <i class="fa-solid fa-download"></i> Tải Video Về Máy
+            <div v-if="latestVideoUrl" class="w-full mt-5 space-y-3">
+              <div class="flex items-center gap-2.5">
+                <a :href="latestVideoUrl" download class="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-center text-white transition shadow-md shadow-indigo-600/30">
+                  <i class="fa-solid fa-download mr-1.5"></i> Tải Video Về Máy
                 </a>
-                <button @click="openFinalFolder" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-200">
-                  <i class="fa-solid fa-folder"></i>
+                <button @click="openFinalFolder" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 transition" title="Mở thư mục video">
+                  <i class="fa-solid fa-folder-open text-indigo-400"></i>
                 </button>
               </div>
 
               <!-- Caption Box -->
-              <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 text-xs space-y-2">
+              <div class="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs space-y-2">
                 <div class="flex items-center justify-between text-slate-400">
-                  <span class="font-bold">Caption & Hashtag:</span>
-                  <button @click="copyCaption" class="text-indigo-400 hover:text-indigo-300">
+                  <span class="font-bold text-slate-300">Caption & Hashtag:</span>
+                  <button @click="copyCaption" class="text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 cursor-pointer">
                     <i class="fa-regular fa-copy"></i> Sao chép
                   </button>
                 </div>
-                <div class="text-slate-300 whitespace-pre-line max-h-24 overflow-y-auto font-mono text-[11px]">
+                <div class="text-slate-300 whitespace-pre-line max-h-28 overflow-y-auto font-mono text-xs leading-relaxed">
                   {{ latestCaption || 'Chưa có caption' }}
                 </div>
               </div>
@@ -977,12 +1064,12 @@ HTML_TEMPLATE = """
           </div>
 
           <!-- Cards Preview Display -->
-          <div v-show="previewMode === 'cards'" class="w-full space-y-4 max-h-[640px] overflow-y-auto pr-1">
-            <div v-if="!post || !post.username || !post.content" class="text-center p-8 text-slate-500 text-xs space-y-2">
+          <div v-show="previewMode === 'cards'" class="w-full space-y-4 max-h-[820px] overflow-y-auto pr-2">
+            <div v-if="!post || !post.username || !post.content" class="text-center p-8 text-slate-500 text-xs space-y-2.5">
               <i class="fa-solid fa-wand-magic-sparkles text-3xl text-indigo-400/60 mb-2"></i>
-              <div class="font-bold text-slate-300 text-sm">Chưa Có Kịch Bản</div>
+              <div class="font-bold text-slate-200 text-sm">Chưa Có Kịch Bản</div>
               <div class="text-slate-400 max-w-[280px] mx-auto leading-relaxed">
-                Nhập chủ đề ở khung bên trái rồi bấm <strong class="text-indigo-400">"AI Tạo Kịch Bản Để Duyệt"</strong> hoặc <strong class="text-pink-400">"Tự Động 1-Click"</strong> để tạo mới!
+                Nhập chủ đề ở khung bên trái rồi bấm <strong class="text-indigo-400">"Tạo Kịch Bản Để Duyệt"</strong> hoặc <strong class="text-pink-400">"Tự Động 1-Click"</strong> để tạo mới!
               </div>
             </div>
 
@@ -992,64 +1079,67 @@ HTML_TEMPLATE = """
                   <span class="text-xs text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1.5">
                     <i class="fa-solid fa-layer-group"></i> Thẻ xem trước
                   </span>
-                  <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1"
+                  <span class="px-2.5 py-0.5 rounded-full text-xs font-bold border flex items-center gap-1"
                     :class="{
                       'bg-indigo-600/20 text-indigo-300 border-indigo-500/40': (post.platform || 'threads') === 'threads',
                       'bg-blue-600/20 text-blue-300 border-blue-500/40': (post.platform || 'threads') === 'facebook',
                       'bg-pink-600/20 text-pink-300 border-pink-500/40': (post.platform || 'threads') === 'instagram'
                     }">
                     <span>{{ post.platform === 'facebook' ? '📘 Facebook' : (post.platform === 'instagram' ? '📸 Instagram' : '🧵 Threads') }}</span>
-                    <span v-if="settings.platform === 'auto'" class="text-[9px] text-amber-300 bg-amber-500/20 px-1 rounded font-normal">AI chọn</span>
+                    <span v-if="settings.platform === 'auto'" class="text-[10px] text-amber-300 bg-amber-500/20 px-1.5 rounded font-normal">AI chọn</span>
                   </span>
                 </div>
-                <button @click="refreshCardPreview" class="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer">
+                <button @click="refreshCardPreview" class="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 cursor-pointer">
                   <i class="fa-solid fa-arrows-rotate"></i> Cập nhật thẻ
                 </button>
               </div>
 
               <!-- Thẻ Post chính -->
-              <div class="space-y-1">
-                <div class="text-[11px] text-slate-400 font-medium">Thẻ bài viết của tác giả:</div>
-                <img :src="'/api/card/post.png?t=' + cardTimestamp" alt="Post Card" class="w-full rounded-xl shadow-md border border-slate-700/60">
+              <div class="space-y-1.5">
+                <div class="text-xs text-slate-300 font-semibold flex items-center justify-between">
+                  <span>Thẻ bài viết của tác giả:</span>
+                  <span class="text-xs text-slate-500 font-mono">@{{ post.username }}</span>
+                </div>
+                <img :src="'/api/card/post.png?t=' + cardTimestamp" alt="Post Card" class="w-full rounded-2xl shadow-lg border border-slate-700/60">
               </div>
               
               <!-- Danh sách thẻ các bình luận -->
-              <div v-for="(cmt, idx) in post.comments" :key="idx" class="space-y-1 pt-1">
-                <div class="text-[11px] text-slate-400 font-medium flex items-center justify-between">
+              <div v-for="(cmt, idx) in post.comments" :key="idx" class="space-y-1.5 pt-1">
+                <div class="text-xs text-slate-300 font-semibold flex items-center justify-between">
                   <span>Thẻ bình luận #{{ idx + 1 }} (@{{ cmt.username }}):</span>
-                  <span class="text-[10px] text-slate-500 font-mono">{{ cmt.emotion }} • {{ cmt.sfx }}</span>
+                  <span class="text-xs text-slate-400 font-mono">{{ cmt.emotion }} • {{ cmt.sfx }}</span>
                 </div>
-                <img :src="'/api/card/comment_' + (idx + 1) + '.png?t=' + cardTimestamp" :alt="'Comment ' + (idx + 1)" class="w-full rounded-xl shadow-md border border-slate-700/60">
+                <img :src="'/api/card/comment_' + (idx + 1) + '.png?t=' + cardTimestamp" :alt="'Comment ' + (idx + 1)" class="w-full rounded-2xl shadow-lg border border-slate-700/60">
               </div>
 
               <!-- Thẻ Outro Kêu Gọi Tương Tác 2.4s -->
-              <div v-if="post.cta_question" class="space-y-1 pt-2">
-                <div class="text-[11px] text-purple-300 font-semibold flex items-center justify-between">
+              <div v-if="post.cta_question" class="space-y-1.5 pt-2">
+                <div class="text-xs text-purple-300 font-semibold flex items-center justify-between">
                   <span>📢 Thẻ Outro kêu gọi tương tác (2.4s cuối):</span>
-                  <span class="text-[10px] text-purple-400 font-mono">viral outro</span>
+                  <span class="text-xs text-purple-400 font-mono">viral outro</span>
                 </div>
-                <img :src="'/api/card/outro_cta.png?t=' + cardTimestamp" alt="Outro CTA Card" class="w-full rounded-xl shadow-md border border-purple-500/40">
+                <img :src="'/api/card/outro_cta.png?t=' + cardTimestamp" alt="Outro CTA Card" class="w-full rounded-2xl shadow-lg border border-purple-500/40">
               </div>
             </template>
           </div>
         </div>
 
         <!-- Section 4: Batch Factory (Sản Xuất Hàng Loạt) -->
-        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-3">
+        <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-3.5">
           <div class="flex items-center justify-between">
             <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
               <i class="fa-solid fa-industry"></i> Sản Xuất Hàng Loạt (Batch Mode)
             </h3>
-            <span class="text-xs text-slate-500">Tự động 100%</span>
+            <span class="text-xs text-slate-400 font-medium">Tự động 100%</span>
           </div>
 
-          <p class="text-xs text-slate-400">
+          <p class="text-xs text-slate-300 leading-relaxed">
             Hệ thống tự động dùng Gemini AI nghĩ kịch bản khác nhau, cắt nền và render liên tục theo số lượng bạn chọn.
           </p>
 
           <div class="flex items-center gap-3">
             <button v-for="cnt in [3, 5, 10]" :key="cnt" @click="startBatch(cnt)" :disabled="pipelineState.is_running"
-              class="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700/60 text-xs font-bold text-slate-200 transition disabled:opacity-40">
+              class="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700/60 text-xs font-bold text-slate-200 transition disabled:opacity-40 cursor-pointer shadow-sm">
               Tạo {{ cnt }} Video
             </button>
           </div>
@@ -1060,7 +1150,7 @@ HTML_TEMPLATE = """
     </main>
 
     <!-- TAB 2: GIÁM SÁT QUY TRÌNH (LIVE PIPELINE & EMOTION INSPECTOR) -->
-    <main v-show="currentTab === 'pipeline'" class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+    <main v-show="currentTab === 'pipeline'" class="flex-1 max-w-[1760px] w-full mx-auto px-4 sm:px-8 py-6 space-y-6">
       
       <!-- Top Hero Progress Bar -->
       <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-4">
@@ -1088,10 +1178,10 @@ HTML_TEMPLATE = """
 
         <!-- Action Callout when Script is ready but Video is not rendered yet -->
         <div v-if="pipelineState.steps[1] && pipelineState.steps[1].status === 'done' && pipelineState.steps[2] && pipelineState.steps[2].status === 'idle'"
-          class="p-4 rounded-xl bg-gradient-to-r from-indigo-950 via-purple-950 to-slate-900 border-2 border-indigo-500/60 flex items-center justify-between gap-4 flex-wrap shadow-xl">
+          class="p-5 rounded-2xl bg-gradient-to-r from-indigo-950 via-purple-950 to-slate-900 border-2 border-indigo-500/60 flex items-center justify-between gap-4 flex-wrap shadow-xl">
           <div class="space-y-1">
             <h3 class="text-sm font-extrabold text-white flex items-center gap-2">
-              <span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[11px] font-bold border border-emerald-500/30">
+              <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-bold border border-emerald-500/30">
                 ✅ ĐÃ XONG BƯỚC 1 & 2
               </span>
               <span>Kịch bản & Thẻ Avatar người thật đã sẵn sàng!</span>
@@ -1101,13 +1191,13 @@ HTML_TEMPLATE = """
             </p>
           </div>
 
-          <div class="flex items-center gap-2.5">
-            <button @click="currentTab = 'studio'" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition flex items-center gap-1.5 text-xs font-semibold">
+          <div class="flex items-center gap-3">
+            <button @click="currentTab = 'studio'" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition flex items-center gap-1.5 text-xs font-semibold cursor-pointer">
               <i class="fa-solid fa-pen-to-square text-indigo-400"></i>
               <span>Xem/Sửa Kịch Bản (Tab 1)</span>
             </button>
             <button @click="startRender" :disabled="isRenderingVideo"
-              class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center gap-2 animate-pulse">
+              class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center gap-2 animate-pulse cursor-pointer">
               <i class="fa-solid fa-play text-sm"></i>
               <span>BẤM RENDER VIDEO NGAY (BƯỚC 3 -> 6)</span>
             </button>
@@ -1117,21 +1207,21 @@ HTML_TEMPLATE = """
         <!-- Quick Action Bar -->
         <div v-else class="flex items-center justify-between pt-1 border-t border-slate-800/60 flex-wrap gap-2 text-xs">
           <div class="flex items-center gap-2">
-            <button @click="currentTab = 'studio'" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition flex items-center gap-1.5 font-medium">
+            <button @click="currentTab = 'studio'" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition flex items-center gap-1.5 font-medium cursor-pointer">
               <i class="fa-solid fa-arrow-left text-slate-400"></i>
               <span>Về Tab 1: Studio Sáng Tạo (Xem Kịch Bản & Thẻ)</span>
             </button>
           </div>
           <button @click="startRender" :disabled="isRenderingVideo"
-            class="px-4 py-1.5 rounded-lg bg-gradient-to-r from-pink-600 to-indigo-600 hover:opacity-90 text-white font-bold transition flex items-center gap-2 shadow-md shadow-pink-500/20 disabled:opacity-50">
+            class="px-5 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-indigo-600 hover:opacity-90 text-white font-bold transition flex items-center gap-2 shadow-md shadow-pink-500/20 disabled:opacity-50 cursor-pointer">
             <i class="fa-solid fa-play"></i>
             <span>Bấm Render Video Hoàn Chỉnh (60 FPS)</span>
           </button>
         </div>
       </div>
 
-      <!-- 6-Stage Stepper Grid -->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <!-- 6-Stage Stepper Grid (Spacious 6 columns on XL) -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
         <div v-for="(step, idx) in pipelineState.steps" :key="step.id"
           class="p-4 rounded-xl border transition-all duration-200"
           :class="{
@@ -1234,7 +1324,7 @@ HTML_TEMPLATE = """
     </main>
 
     <!-- TAB 3: CẤU HÌNH ĐẠO DIỄN (DIRECTOR CONFIG STUDIO) -->
-    <main v-show="currentTab === 'config'" class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+    <main v-show="currentTab === 'config'" class="flex-1 max-w-[1760px] w-full mx-auto px-4 sm:px-8 py-6 space-y-6">
       <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
         
         <div class="flex items-center justify-between border-b border-slate-800 pb-4">
