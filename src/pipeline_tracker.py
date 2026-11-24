@@ -7,7 +7,6 @@ Chức năng:
   - Lưu trữ log hoạt động có timestamp để truyền về Web UI Tab "Giám Sát Quy Trình"
 """
 
-import time
 import threading
 from datetime import datetime
 from copy import deepcopy
@@ -183,6 +182,11 @@ def finish_pipeline(video_filename: str, caption: str, total_duration: float = 0
             if s["status"] == "running":
                 s["status"] = "done"
     log(f"🎉 TOÀN BỘ QUY TRÌNH HOÀN TẤT: {video_filename} ({total_duration:.1f}s)")
+
+
+def set_success(msg: str = "Hoàn thành video!", video_filename: str = "", caption: str = "", total_duration: float = 0.0):
+    """Alias tương thích an toàn cho finish_pipeline."""
+    finish_pipeline(video_filename=video_filename or "final_video.mp4", caption=caption or msg, total_duration=total_duration)
 
 
 def set_error(error_msg: str):

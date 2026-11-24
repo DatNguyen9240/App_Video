@@ -14,6 +14,7 @@ import json
 import random
 import re
 import time
+import datetime
 from typing import Optional, Callable
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -236,52 +237,83 @@ def build_emergency_story(topic: str) -> dict:
     }
 
 
-def get_daily_trending_topics(force_refresh: bool = False, api_key: str = None) -> dict:
+DAILY_RADAR_DIR = os.path.join(OUT_DIR, "daily_radar")
+os.makedirs(DAILY_RADAR_DIR, exist_ok=True)
+
+
+def get_daily_trending_topics(target_date: str = None, mode: str = "social", force_refresh: bool = False, api_key: str = None) -> dict:
     """
-    Tự động fetch danh sách chủ đề trending trên Threads mỗi ngày 1 lần.
-    - Nếu trong ngày đã fetch rồi (cache hợp lệ) -> Đọc từ cache (nhanh 0ms).
-    - Nếu sang ngày mới hoặc force_refresh=True -> Gọi Gemini AI quét tin tức/trend Threads mới nhất hôm nay.
-    - Nếu mất mạng -> Fallback dùng lại cache gần nhất hoặc danh sách dự phòng.
+    Tự động quét danh sách chủ đề theo ngày:
+    - target_date: Ngày định dạng 'YYYY-MM-DD' (mặc định là hôm nay).
+    - mode: 'true_story' (sự kiện có thật/cú lừa/kỳ án trong lịch sử) hoặc 'social' (drama/trend Threads).
+    - force_refresh: Ép buộc AI quét mới thay vì đọc cache.
     """
     import datetime
-    os.makedirs(OUT_DIR, exist_ok=True)
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
-    today_display = datetime.date.today().strftime("%d/%m/%Y")
+    today_dt = datetime.date.today()
+    if not target_date:
+        target_date = today_dt.strftime("%Y-%m-%d")
+
+    try:
+        dt_parts = [int(p) for p in target_date.split("-")]
+        dt_obj = datetime.date(dt_parts[0], dt_parts[1], dt_parts[2])
+    except Exception:
+        dt_obj = today_dt
+        target_date = dt_obj.strftime("%Y-%m-%d")
+
+    date_display = dt_obj.strftime("%d/%m/%Y")
+    day_month_display = f"ngày {dt_obj.day} tháng {dt_obj.month}"
     now_time = datetime.datetime.now().strftime("%H:%M")
 
-    # 1. Kiểm tra cache trong ngày (trừ khi ép làm mới)
-    if not force_refresh and os.path.exists(DAILY_CACHE_FILE):
-        try:
-            with open(DAILY_CACHE_FILE, "r", encoding="utf-8") as f:
-                cached = json.load(f)
-            if cached.get("date") == today_str and cached.get("topics") and len(cached["topics"]) >= 3:
-                return {
-                    "success": True,
-                    "date": today_str,
-                    "date_display": today_display,
-                    "updated_at": cached.get("updated_at", now_time),
-                    "is_cached": True,
-                    "topics": cached["topics"]
-                }
-        except Exception:
-            pass
+    safe_mode = "true_story" if mode in ["true_story", "documentary", "history"] else "social"
+    cache_file = os.path.join(DAILY_RADAR_DIR, f"{safe_mode}_{target_date}.json")
 
-    # 2. Cần fetch mới (hôm nay chưa fetch, sang ngày mới hoặc người dùng bấm Làm mới)
+    # 1. Kiểm tra cache theo ngày & chế độ
+    if not force_refresh:
+        # Kiểm tra cache riêng theo ngày
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                if cached.get("topics") and len(cached["topics"]) >= 3:
+                    return {
+                        "success": True,
+                        "date": target_date,
+                        "date_display": date_display,
+                        "mode": safe_mode,
+                        "updated_at": cached.get("updated_at", now_time),
+                        "is_cached": True,
+                        "topics": cached["topics"]
+                    }
+            except Exception:
+                pass
+
+        # Backwards-compatibility: Kiểm tra cache cũ nếu là hôm nay & social
+        if safe_mode == "social" and target_date == today_dt.strftime("%Y-%m-%d") and os.path.exists(DAILY_CACHE_FILE):
+            try:
+                with open(DAILY_CACHE_FILE, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                if cached.get("date") == target_date and cached.get("topics") and len(cached["topics"]) >= 3:
+                    return {
+                        "success": True,
+                        "date": target_date,
+                        "date_display": date_display,
+                        "mode": safe_mode,
+                        "updated_at": cached.get("updated_at", now_time),
+                        "is_cached": True,
+                        "topics": cached["topics"]
+                    }
+            except Exception:
+                pass
+
+    # 2. Cần fetch mới qua Gemini AI
     if not api_key:
         api_key = ai_base.load_gemini_api_key()
 
     cfg = config_mod.load_config()
 
     if not api_key:
-        return {
-            "success": False,
-            "date": today_str,
-            "date_display": today_display,
-            "updated_at": now_time,
-            "is_cached": False,
-            "error": "Chưa cấu hình GEMINI_API_KEY",
-            "topics": []
-        }
+        # Fallback ngoại tuyến phong phú khi chưa có API key
+        return _build_offline_daily_topics(target_date, date_display, day_month_display, safe_mode)
 
     try:
         from google import genai
@@ -290,19 +322,35 @@ def get_daily_trending_topics(force_refresh: bool = False, api_key: str = None) 
         client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
         model_name = cfg.get("ai_director", {}).get("model", "gemini-3.5-flash")
 
-        prompt = f"""
-Hôm nay là ngày {today_display}. Hãy quét và chọn lọc 7 đến 8 chủ đề, drama, câu chuyện công sở, tình cảm, hài hước hoặc trào lưu đang được thảo luận và bàn tán sôi nổi nhất trên mạng xã hội Threads (threads.net) tại Việt Nam hôm nay.
+        if safe_mode == "true_story":
+            prompt = f"""
+Bạn là chuyên gia sử học và biên kịch phim tài liệu quốc tế.
+Hôm nay là {date_display} ({day_month_display}). Hãy tìm và chọn lọc 6 đến 8 sự kiện có thật chấn động, phi vụ lừa đảo thế kỷ, kỳ án bí ẩn, vụ trộm kim cương/nghệ thuật, chiến dịch tình báo hoặc sự việc kỳ thú từng diễn ra vào {day_month_display} trong lịch sử thế giới (hoặc tuần này trong lịch sử).
+
+Yêu cầu:
+1. Mỗi sự kiện phải là SỰ VIỆC CÓ THẬT 100% ngoài đời thực (True Story / On This Day).
+2. Viết dưới dạng 1 câu tiêu đề giật gân, cuốn hút (từ 8 đến 16 từ), nêu rõ tên sự kiện hoặc nhân vật và năm diễn ra.
+3. Phong cách lôi cuốn như tiêu đề phóng sự Discovery / Netflix / Hồ Sơ Kỳ Thú.
+4. Trả về đúng 1 JSON array các chuỗi tiêu đề, không giải thích thêm.
+Ví dụ:
+[
+  "Vụ trộm kim cương thế kỷ 100 triệu USD tại hầm kiên cố Antwerp năm 2003",
+  "Victor Lustig giả mạo Thứ trưởng 2 lần bán tháp Eiffel lấy tiền sắt vụn năm 1925",
+  "Chiến dịch Trojan T-shirt biến 250 phần tử cực đoan thành biển quảng cáo năm 2011",
+  "Vụ đánh cắp bức tranh Mona Lisa khỏi bảo tàng Louvre năm 1911",
+  "Bí ẩn vụ không tặc D.B. Cooper ôm 200.000 USD nhảy dù mất tích năm 1971"
+]
+"""
+        else:
+            prompt = f"""
+Hôm nay là ngày {date_display}. Hãy quét và chọn lọc 7 đến 8 chủ đề, drama, câu chuyện công sở, tình cảm, hài hước hoặc trào lưu đang được thảo luận và bàn tán sôi nổi nhất trên mạng xã hội Threads (threads.net) tại Việt Nam hôm nay.
 
 Yêu cầu:
 1. Mỗi chủ đề là 1 câu ngắn gọn (từ 5 đến 12 từ), tự nhiên, hấp dẫn, khơi gợi tò mò (viral hook).
 2. Mang đậm phong cách đời sống thật trên Threads: drama đi làm, hẹn hò, tiền bạc, gia đình, bạn bè, trào lưu Gen Z.
 3. Trả về đúng 1 JSON array gồm các chuỗi chủ đề, không giải thích thêm.
-Ví dụ:
-[
-  "Chuyện xin nghỉ phép bị sếp tra khảo lý do cá nhân",
-  "Đi ăn sinh nhật bạn thân nhưng hóa đơn chia đều bất ổn"
-]
 """
+
         response = call_gemini_with_resilience(
             client=client,
             contents=prompt,
@@ -317,50 +365,71 @@ Ví dụ:
         if isinstance(parsed, list) and len(parsed) >= 3:
             topics = [str(t).strip() for t in parsed if str(t).strip()]
             cache_payload = {
-                "date": today_str,
-                "date_display": today_display,
+                "date": target_date,
+                "date_display": date_display,
+                "mode": safe_mode,
                 "updated_at": datetime.datetime.now().strftime("%H:%M:%S %d/%m/%Y"),
                 "topics": topics
             }
-            with open(DAILY_CACHE_FILE, "w", encoding="utf-8") as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, ensure_ascii=False, indent=2)
+
+            if safe_mode == "social" and target_date == today_dt.strftime("%Y-%m-%d"):
+                with open(DAILY_CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cache_payload, f, ensure_ascii=False, indent=2)
 
             return {
                 "success": True,
-                "date": today_str,
-                "date_display": today_display,
+                "date": target_date,
+                "date_display": date_display,
+                "mode": safe_mode,
                 "updated_at": cache_payload["updated_at"],
                 "is_cached": False,
                 "topics": topics
             }
     except Exception as e:
-        print(f"[DailyRadar] Lỗi fetch trend hôm nay: {e}")
-        # Nếu có cache cũ thì dùng tạm
-        if os.path.exists(DAILY_CACHE_FILE):
-            try:
-                with open(DAILY_CACHE_FILE, "r", encoding="utf-8") as f:
-                    old_cached = json.load(f)
-                if old_cached.get("topics"):
-                    return {
-                        "success": True,
-                        "date": old_cached.get("date", today_str),
-                        "date_display": today_display,
-                        "updated_at": old_cached.get("updated_at", now_time) + " (Offline cache)",
-                        "is_cached": True,
-                        "topics": old_cached["topics"]
-                    }
-            except Exception:
-                pass
+        print(f"[DailyRadar] Lỗi fetch trend ({safe_mode} - {target_date}): {e}")
+
+    # Fallback ngoại tuyến chất lượng cao
+    return _build_offline_daily_topics(target_date, date_display, day_month_display, safe_mode)
+
+
+def _build_offline_daily_topics(target_date: str, date_display: str, day_month_display: str, mode: str) -> dict:
+    """Tạo danh sách sự kiện phong phú ngoại tuyến theo ngày khi không có internet/API."""
+    now_time = datetime.datetime.now().strftime("%H:%M")
+    if mode == "true_story":
+        topics = [
+            f"Bí ẩn vụ không tặc D.B. Cooper ôm 200.000 USD nhảy dù mất tích {day_month_display} năm 1971",
+            f"Cú lừa ngoạn mục bán tháp Eiffel 2 lần của Victor Lustig {day_month_display} năm 1925",
+            f"Vụ trộm thế kỷ 100 triệu USD kim cương tại hầm kiên cố Antwerp {day_month_display} năm 2003",
+            f"Chiến dịch Trojan T-shirt biến 250 phần tử cực đoan thành biển quảng cáo {day_month_display} năm 2011",
+            f"Vụ đánh cắp bức tranh Mona Lisa khỏi Louvre 28 giờ sau mới phát hiện {day_month_display} năm 1911",
+            f"Vụ cướp đoàn tàu chở thư tín hoàng gia Anh chấn động thế giới {day_month_display} năm 1963",
+            f"Phi vụ đào tẩu không tưởng khỏi nhà tù trên đảo đá Alcatraz {day_month_display} năm 1962",
+            f"Bí ẩn bức thư đe dọa và danh tính thật của sát nhân Zodiac {day_month_display} năm 1969"
+        ]
+    else:
+        topics = [
+            "Công ty bắt cài app theo dõi vị trí khi làm từ xa",
+            "Đi ăn nhóm bạn thân nhưng đoạn chuyển khoản lại quá bất ổn",
+            "Người yêu cũ bất ngờ nhắn tin đòi lại tiền hẹn hò",
+            "Công ty thông báo thưởng Tết bằng sản phẩm tồn kho gây sốc",
+            "Lần đầu về ra mắt nhà người yêu và bài học nhớ đời",
+            "Rủ bạn thân đi du lịch chung và cái kết cạch mặt",
+            "Trào lưu mua túi mù xả stress khiến dân văn phòng hết tiền",
+            "Bị chủ nhà trọ bất ngờ tăng giá điện gấp đôi tháng này"
+        ]
 
     return {
-        "success": False,
-        "date": today_str,
-        "date_display": today_display,
-        "updated_at": now_time,
-        "is_cached": False,
-        "error": "Không thể kết nối internet hoặc API lỗi",
-        "topics": []
+        "success": True,
+        "date": target_date,
+        "date_display": date_display,
+        "mode": mode,
+        "updated_at": f"{now_time} (Ngoại tuyến)",
+        "is_cached": True,
+        "topics": topics
     }
+
 
 
 # BỘ TÀI KHOẢN THREADS NGƯỜI THẬT THEO TỪNG CHỦ ĐỀ NGỮ CẢNH (TOPIC-CONTEXTUAL ACCOUNTS)
@@ -397,7 +466,7 @@ def detect_topic_context(topic: str) -> str:
     t = topic.lower()
     if any(k in t for k in ["sếp", "công sở", "đi làm", "hr", "lương", "đồng nghiệp", "phỏng vấn", "nghỉ việc", "task", "deadline", "công ty"]):
         return "cong_so"
-    if any(k in t for k in ["sinh viên", "trọ", "phòng trọ", "ở ghép", "chủ nhà", "tiền điện", "đi học", "thi cử", "học phí"]):
+    if any(k in t for k in ["sinh viên", "trọ", "phòng trọ", "ở ghép", "chủ nhà", "tiền điện", "đi học", "thi cử", "học phí", "đại học", "học sinh", "rớt môn", "thi lại"]):
         return "sinh_vien"
     if any(k in t for k in ["it", "dev", "lập trình", "code", "coder", "bug", "khách hàng", "phần mềm", "tester"]):
         return "it_tech"
@@ -624,42 +693,37 @@ YÊU CẦU ĐẶC BIỆT ĐẠT CHUẨN VIDEO DÀI TRÊN 1 PHÚT (60s-75s):
     if progress_cb:
         progress_cb("Đang tìm kiếm & AI Vision thẩm định ảnh minh họa...", 85)
 
-    has_proof = bool(data.get("has_visual_proof", True))
+    illus_prompt = data.get("illustration_prompt", "") or topic or "candid real scene"
+    illus_vn = data.get("illustration_vietnamese_query", "") or topic or "ảnh đời thực"
     illus_cat = data.get("illustration_category", "general_life")
-    illus_prompt = data.get("illustration_prompt", "") or topic
-    illus_vn = data.get("illustration_vietnamese_query", "") or topic
     illus_path = ""
 
-    candidate_queries = [q for q in [illus_vn, illus_prompt] if q]
-    if candidate_queries:
-        try:
-            import importlib.util
-            real_img_spec = importlib.util.spec_from_file_location("real_image_search", os.path.join(SRC_DIR, "real_image_search.py"))
-            real_img_mod = importlib.util.module_from_spec(real_img_spec)
-            real_img_spec.loader.exec_module(real_img_mod)
+    try:
+        from src.real_image_search import search_and_download_real_image
+        search_terms = [t for t in [illus_prompt, illus_vn, topic] if t]
+        illus_path = search_and_download_real_image(
+            queries=search_terms,
+            category=illus_cat,
+            target_width=940,
+            target_height=620,
+            fallback_to_category=True
+        )
+    except Exception as e:
+        print(f"  ⚠️ Lỗi khi tìm ảnh thật Threads ({e})")
 
-            illus_dir = os.path.join(OUT_DIR, "illustrations")
-            os.makedirs(illus_dir, exist_ok=True)
-            illus_filename = f"real_web_{int(time.time())}_{random.randint(100, 999)}.jpg"
-            target_file = os.path.join(illus_dir, illus_filename)
-
-            found_img = real_img_mod.search_and_download_real_image(
-                queries=candidate_queries,
-                category=illus_cat,
-                output_path=target_file,
-                target_width=940,
-                target_height=620
-            )
-            if found_img and os.path.exists(found_img):
-                illus_path = found_img
-        except Exception as e:
-            print(f"  ⚠️ Lỗi khi tìm ảnh thật trực tuyến ({e})")
-
-    # Tuyệt đối không fallback sang ảnh chung cư/nhà hàng không liên quan
     if not illus_path or not os.path.exists(illus_path):
-        illus_path = ""
+        cat_file = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
+        if os.path.exists(cat_file):
+            illus_path = cat_file
+        else:
+            gen_file = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
+            if os.path.exists(gen_file):
+                illus_path = gen_file
 
     enable_illus = bool(illus_path and os.path.exists(illus_path))
+    has_proof = enable_illus
+    placement = "attached_in_post" if enable_illus else "none"
+
     if progress_cb:
         progress_cb("Đang đóng gói kịch bản và đồ thị cảm xúc...", 95)
 
@@ -678,8 +742,8 @@ YÊU CẦU ĐẶC BIỆT ĐẠT CHUẨN VIDEO DÀI TRÊN 1 PHÚT (60s-75s):
         illustration_caption=data.get("illustration_caption", "") or f"Bằng chứng thực tế: {topic[:25]}",
         illustration_category=illus_cat,
         enable_illustration=enable_illus,
-        has_visual_proof=True,
-        visual_proof_placement="popup_at_twist",
+        has_visual_proof=has_proof,
+        visual_proof_placement=placement,
         sentence_reveal_mode=data.get("sentence_reveal_mode", "progressive_line_reveal"),
         satisfying_category=data.get("satisfying_category", "gameplay"),
         recommended_theme=data.get("recommended_theme", "light"),

@@ -17,7 +17,6 @@ import re
 import time
 import shutil
 import asyncio
-import tempfile
 import subprocess
 from typing import Optional, Callable
 
@@ -45,8 +44,8 @@ def get_ffmpeg_exe() -> str:
 def get_configured_voice_and_rate() -> tuple[str, str]:
     cfg = config_mod.load_config()
     voice_cfg = cfg.get("voice_casting", {})
-    voice = voice_cfg.get("default_author_voice", "vi-VN-HoaiMyNeural")
-    rate = voice_cfg.get("roles", {}).get("author", {}).get("rate", "+18%")
+    voice = voice_cfg.get("default_author_voice", "nam_hai")
+    rate = voice_cfg.get("roles", {}).get("author", {}).get("rate", "+0%")
     if os.path.exists(ENV_PATH):
         try:
             with open(ENV_PATH, "r", encoding="utf-8") as f:
@@ -63,16 +62,35 @@ def get_configured_voice_and_rate() -> tuple[str, str]:
     return voice, rate
 
 
+import unicodedata
+
 DEFAULT_VOICE, DEFAULT_RATE = get_configured_voice_and_rate()
 
 
 def clean_for_tts(text: str) -> str:
-    """Loại bỏ emoji, ký tự đặc biệt gây lỗi SSML."""
-    cleaned = re.sub(r"[^\u0000-\u2BFF]+", " ", text)
-    for ch in ["'", '"', "‘", "’", "“", "”", "`", "<", ">", "&", "\\", "/", "^", "|", "[", "]", "{", "}"]:
+    """Loại bỏ emoji, ký tự đặc biệt gây lỗi SSML và chuẩn hóa các ký hiệu %, số, từ tiếng Anh sang tiếng Việt chuẩn."""
+    cleaned = text.replace("%", " phần trăm ").replace("&", " và ").replace("@", " a còng ")
+    # Chuyển đổi các từ tiếng Anh / tiếng lóng hay bị Edge-TTS từ chối (NoAudioReceived)
+    replacements = {
+        "cotton 100%": "vải sợi bông một trăm phần trăm",
+        "cotton": "vải sợi bông",
+        "unisex": "thời trang",
+        "Shop": "Người bán",
+        "shop": "người bán",
+        "199k": "hai trăm nghìn",
+        "200k": "hai trăm nghìn",
+        "cành": "nghìn",
+        "áo lót": "áo hai dây",
+        "quần lót": "đồ mặc trong"
+    }
+    for k, v in replacements.items():
+        cleaned = re.sub(re.escape(k), v, cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"[^\u0000-\u2BFF]+", " ", cleaned)
+    for ch in ["'", '"', "‘", "’", "“", "”", "`", "<", ">", "\\", "/", "^", "|", "[", "]", "{", "}"]:
         cleaned = cleaned.replace(ch, " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
+    return unicodedata.normalize("NFC", cleaned)
 
 
 def apply_spatial_panning(filepath: str, direction: str = "center") -> bool:
@@ -105,11 +123,12 @@ def apply_spatial_panning(filepath: str, direction: str = "center") -> bool:
     return False
 
 
-def verify_and_standardize_mp3(filepath: str, apply_mastering: bool = True) -> bool:
+def verify_and_standardize_mp3(filepath: str, apply_mastering: bool = True, extra_filter: str = "") -> bool:
     """
     Dùng FFmpeg kiểm tra và chuẩn hóa file MP3 về 44100Hz Stereo.
     Tự động áp dụng Vocal Mastering Chain (EQ, Compressor, Normalization -14 LUFS)
     giúp giọng đọc ấm, sáng, rõ tiếng như thu âm trong phòng thu podcast chuyên nghiệp.
+    Hỗ trợ extra_filter để biến điệu pitch/tempo tạo các giọng hài hước, cà khịa.
     """
     if not os.path.exists(filepath) or os.path.getsize(filepath) < 200:
         return False
@@ -122,15 +141,19 @@ def verify_and_standardize_mp3(filepath: str, apply_mastering: bool = True) -> b
     bitrate = mast.get("audio_bitrate", "256k")
 
     af_filters = []
+    if extra_filter:
+        af_filters.append(extra_filter)
+
     if apply_mastering and mast.get("enable_vocal_chain", True):
-        hp = mast.get("vocal_highpass_hz", 80)
-        boost = mast.get("vocal_presence_boost_db", 2.5)
-        lufs = mast.get("target_lufs", -14)
+        hp = mast.get("vocal_highpass_hz", 75)
+        boost = mast.get("vocal_presence_boost_db", 0.8)
+        lufs = mast.get("target_lufs", -15)
         af_filters.append(f"highpass=f={hp}")
-        af_filters.append(f"equalizer=f=3200:t=q:w=1:g={boost}")
+        af_filters.append(f"equalizer=f=2200:t=q:w=1.2:g={boost}")
         if mast.get("enable_compression", True):
-            af_filters.append("acompressor=threshold=-16dB:ratio=2.5:attack=5:release=50")
-        af_filters.append(f"loudnorm=I={lufs}:TP=-1.5:LRA=7")
+            # Attack 25ms bảo toàn chu kỳ âm trầm của giọng nam, loại bỏ triệt để méo rè
+            af_filters.append("acompressor=threshold=-15dB:ratio=2.0:attack=25:release=120")
+        af_filters.append(f"loudnorm=I={lufs}:TP=-1.5:LRA=8")
 
     cmd = [
         exe, "-y",
@@ -172,28 +195,136 @@ def generate_silence_mp3(duration_sec: float, output_path: str) -> str:
     return output_path
 
 
-# ─── BỘ ÁNH XẠ GIỌNG ĐỌC THU HÚT & NỔI TIẾNG (ADAM, BRIAN, AVA, NAM MINH, HOÀI MY) ─
+# ─── BỘ HÌNH TƯỢNG GIỌNG ĐỌC HÀI HƯỚC & ĐA VAI DIỄN VIỆT NAM (GEN Z / MEME) ─
+VOICE_PROFILES = {
+    # 1. Chị Google: Robot meme hài hước kinh điển, tốc độ TikTok nhanh nhẹn (+30%)
+    "chi_google": {
+        "base_voice": "chi_google",
+        "rate": "+0%",
+        "af_filter": "atempo=1.30",
+        "name": "Chị Google (Meme robot nhanh nhẹn, bắt trend)",
+        "gender": "female"
+    },
+    # 2. Nữ Cà Khịa Gen Z: Hoài My tốc độ TikTok (+26%), đanh đá, sắc bén, dứt khoát
+    "nu_cakhia": {
+        "base_voice": "vi-VN-HoaiMyNeural",
+        "rate": "+0%",
+        "af_filter": "atempo=1.26",
+        "name": "Nữ Cà Khịa Gen Z (Đanh đá, hài hước, tốc độ cao)",
+        "gender": "female"
+    },
+    # 3. Nữ Nhí Nhảnh: Hoài My vui tươi, nhanh nhẹn (+26%)
+    "nu_nhinhanh": {
+        "base_voice": "vi-VN-HoaiMyNeural",
+        "rate": "+0%",
+        "af_filter": "atempo=1.26",
+        "name": "Nữ Nhí Nhảnh (Vui tươi, dễ thương, hài nhẹ)",
+        "gender": "female"
+    },
+    # 4. Nam Hài: Giọng Nam Minh chuẩn Việt, tốc độ nói tự nhiên +12%, âm sắc ấm áp, rõ ràng không rè
+    "nam_hai": {
+        "base_voice": "vi-VN-NamMinhNeural",
+        "rate": "+12%",
+        "af_filter": "",
+        "name": "Nam Hài Hước (Dí dỏm, nhanh nhảu, âm thanh sạch không rè)",
+        "gender": "male"
+    },
+    # 5. Nam Trầm Hài: Giọng Andrew Multilingual hoặc Nam Minh trầm ấm, điện ảnh
+    "nam_tram_hai": {
+        "base_voice": "en-US-AndrewMultilingualNeural",
+        "rate": "+8%",
+        "af_filter": "",
+        "name": "Nam Trầm Hài (Podcast, truyền cảm, trầm ấm)",
+        "gender": "male"
+    },
+    # 6. Nam Minh: Giọng nam chuẩn Việt Nam rõ ràng, truyền cảm
+    "nam_minh": {
+        "base_voice": "vi-VN-NamMinhNeural",
+        "rate": "+12%",
+        "af_filter": "",
+        "name": "Nam Minh (Chuẩn tiếng Việt, rõ nét không rè)",
+        "gender": "male"
+    },
+    # 7. Hoài My Chuẩn: Hoài My Gen Z tốc độ lướt TikTok (+25%)
+    "hoai_my": {
+        "base_voice": "vi-VN-HoaiMyNeural",
+        "rate": "+0%",
+        "af_filter": "atempo=1.25",
+        "name": "Hoài My Gen Z (Tự nhiên, tốc độ lướt TikTok)",
+        "gender": "female"
+    }
+}
+
+
+def get_voice_filter(voice: str) -> Optional[str]:
+    """Trả về audio filter (pitch + speed shift) định hình phong cách giọng hài hước."""
+    if not voice:
+        return None
+    v_clean = voice.lower().strip()
+    if v_clean in VOICE_PROFILES:
+        return VOICE_PROFILES[v_clean].get("af_filter")
+    if v_clean in VOICE_MAP:
+        mapped = VOICE_MAP[v_clean]
+        if mapped in VOICE_PROFILES:
+            return VOICE_PROFILES[mapped].get("af_filter")
+    return None
+
+
+# ─── BỘ ÁNH XẠ GIỌNG ĐỌC THU HÚT & NỔI TIẾNG (ADAM, BRIAN, NAM MINH, HOÀI MY) ─
 VOICE_MAP = {
-    "adam": "en-US-AndrewMultilingualNeural",         # Giọng Adam phong cách podcast trầm ấm, cực cuốn hút
-    "andrew": "en-US-AndrewMultilingualNeural",       # Giọng nam trầm đĩnh đạc
-    "brian": "en-US-BrianMultilingualNeural",         # Giọng nam điện ảnh truyền cảm
-    "ava": "en-US-AvaMultilingualNeural",             # Giọng nữ hiện đại sôi nổi
-    "emma": "en-US-EmmaMultilingualNeural",           # Giọng nữ dịu dàng
-    "nam_minh": "vi-VN-NamMinhNeural",                 # Giọng nam chuẩn Việt
-    "hoai_my": "vi-VN-HoaiMyNeural",                  # Giọng nữ chuẩn Việt
-    "minh_quan": "vi-VN-NamMinhNeural",
-    "bao_long": "vi-VN-NamMinhNeural",
-    "khanh_linh": "vi-VN-HoaiMyNeural",
-    "thu_quynh": "vi-VN-HoaiMyNeural",
+    # Giọng Hài Hước Tiếng Việt (Gen Z Meme / Threads viral)
+    "nam_hai": "nam_hai",
+    "funny_male": "nam_hai",
+    "nam_hai_huoc": "nam_hai",
+    "nam_tung_tung": "nam_hai",
+    "nu_cakhia": "nu_cakhia",
+    "funny_female": "nu_cakhia",
+    "nu_hai_huoc": "nu_cakhia",
+    "nu_danh_da": "nu_cakhia",
+    "nam_tram_hai": "nam_tram_hai",
+    "funny_deadpan": "nam_tram_hai",
+    "nam_bua": "nam_tram_hai",
+    "nam_can_loi": "nam_tram_hai",
+    "nu_nhinhanh": "nu_nhinhanh",
+    "funny_cheerful": "nu_nhinhanh",
+    "chi_google": "chi_google",
+
+    # Giọng Nam / Nữ chuẩn Việt Nam
+    "nam_minh": "nam_minh",
+    "vi-vn-namminhneural": "vi-VN-NamMinhNeural",
+    "hoai_my": "hoai_my",
+    "vi-vn-hoaimyneural": "vi-VN-HoaiMyNeural",
+    "minh_quan": "nam_minh",
+    "bao_long": "nam_minh",
+    "khanh_linh": "hoai_my",
+    "thu_quynh": "hoai_my",
+    "nam": "nam_hai",
+    "male": "nam_hai",
+    "nu": "nu_cakhia",
+    "female": "nu_cakhia",
+
+    # Giọng tiếng Anh podcast quốc tế
+    "adam": "en-US-AndrewMultilingualNeural",
+    "andrew": "en-US-AndrewMultilingualNeural",
+    "brian": "en-US-BrianMultilingualNeural",
+    "ava": "en-US-AvaMultilingualNeural",
+    "emma": "en-US-EmmaMultilingualNeural",
 }
 
 
 def resolve_voice_id(voice: str) -> str:
-    """Chuyển đổi tên voice thân thiện (adam, brian, ava...) sang mã voice Edge-TTS chuẩn."""
+    """Chuyển đổi tên voice thân thiện sang mã voice Edge-TTS chuẩn."""
     if not voice:
-        return "en-US-AndrewMultilingualNeural"
+        return "vi-VN-NamMinhNeural"
     v_clean = voice.lower().strip()
-    return VOICE_MAP.get(v_clean, voice)
+    if v_clean in VOICE_PROFILES:
+        return VOICE_PROFILES[v_clean]["base_voice"]
+    if v_clean in VOICE_MAP:
+        mapped = VOICE_MAP[v_clean]
+        if mapped in VOICE_PROFILES:
+            return VOICE_PROFILES[mapped]["base_voice"]
+        return mapped
+    return voice
 
 
 def synthesize_elevenlabs(text: str, output_path: str, voice_id: str = "pNInz6obpgDQGcFmaJgB") -> bool:
@@ -241,36 +372,96 @@ def synthesize_elevenlabs(text: str, output_path: str, voice_id: str = "pNInz6ob
     return False
 
 
-async def _run_edge_tts_async(text: str, output_path: str, voice: str, rate: str, pitch: str = "+0Hz", style: str = ""):
-    """
-    Tạo audio Edge TTS.
-    Hỗ trợ cả giọng tiếng Việt gốc (Nam Minh, Hoài My) và các giọng quốc tế đa ngôn ngữ
-    (Andrew/Adam Multilingual, Brian Multilingual, Ava...) đọc tiếng Việt siêu truyền cảm!
-    """
+async def _run_edge_tts_chunk_async(text: str, output_path: str, voice: str, rate: str = "+0%", max_retries: int = 3) -> bool:
+    """Tạo audio cho một câu / mệnh đề với cơ chế tự động thử lại khi Edge-TTS bị nghẽn mạng."""
     import edge_tts
     actual_voice = resolve_voice_id(voice)
-    comm = edge_tts.Communicate(text, actual_voice, rate=rate, pitch=pitch)
-    await comm.save(output_path)
+    clean_rate = rate if (rate and "%" in rate) else "+0%"
+
+    for attempt in range(max_retries):
+        try:
+            comm = edge_tts.Communicate(text, actual_voice, rate=clean_rate)
+            await comm.save(output_path)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
+                return True
+        except Exception:
+            if attempt == max_retries - 1:
+                # Dự phòng giọng BrianMultilingual nếu Hoài My bị Microsoft chặn
+                if actual_voice != "en-US-BrianMultilingualNeural":
+                    try:
+                        fallback_comm = edge_tts.Communicate(text, "en-US-BrianMultilingualNeural", rate=clean_rate)
+                        await fallback_comm.save(output_path)
+                        if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
+                            return True
+                    except Exception:
+                        pass
+                return False
+            await asyncio.sleep(1.0 * (attempt + 1))
+    return False
 
 
-def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str, pitch: str = "+0Hz", style: str = "") -> bool:
-    """Tạo audio qua Edge TTS với biến thiên rate và pitch điều độ cảm xúc."""
+def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0%", pitch: str = "+0Hz", style: str = "", extra_filter: str = "") -> bool:
+    """
+    Tạo audio Edge-TTS tự nhiên 100%:
+    - Tự động tách câu theo dấu chấm/phẩy để tránh lỗi NoAudioReceived trên câu dài.
+    - Cơ chế thử lại chống rớt kết nối WebSocket.
+    - Nối các câu liền mạch và áp dụng bộ Mastering âm thanh chuẩn LUFS -14.
+    """
     try:
         if os.path.exists(output_path):
             try: os.remove(output_path)
             except OSError: pass
 
-        asyncio.run(_run_edge_tts_async(text, output_path, voice, rate, pitch, style))
-        return verify_and_standardize_mp3(output_path)
-    except Exception:
+        cleaned = clean_for_tts(text)
+        # Tách theo câu để đảm bảo TTS không bị quá tải
+        raw_sentences = [s.strip() for s in re.split(r"[.!?]+", cleaned) if len(s.strip()) > 3]
+        if not raw_sentences:
+            raw_sentences = [cleaned]
+
+        temp_files = []
+        exe = get_ffmpeg_exe()
+
+        for idx, s in enumerate(raw_sentences):
+            chunk_out = f"{output_path}.chunk_{idx}.mp3"
+            ok = asyncio.run(_run_edge_tts_chunk_async(s, chunk_out, voice, rate=rate))
+            if ok:
+                temp_files.append(chunk_out)
+
+        if not temp_files:
+            return False
+
+        if len(temp_files) == 1:
+            shutil.move(temp_files[0], output_path)
+        else:
+            # Ghép nối các câu mượt mà
+            concat_txt = f"{output_path}.concat.txt"
+            with open(concat_txt, "w", encoding="utf-8") as f:
+                for tf in temp_files:
+                    f.write(f"file '{os.path.abspath(tf)}'\n")
+
+            cmd = [exe, "-y", "-f", "concat", "-safe", "0", "-i", concat_txt, "-c", "copy", output_path]
+            res = subprocess.run(cmd, capture_output=True)
+            try: os.remove(concat_txt)
+            except OSError: pass
+
+        for tf in temp_files:
+            if os.path.exists(tf):
+                try: os.remove(tf)
+                except OSError: pass
+
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 500:
+            return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
+
+        return False
+    except Exception as e:
         if os.path.exists(output_path):
             try: os.remove(output_path)
             except OSError: pass
         return False
 
 
-def synthesize_gtts(text: str, output_path: str) -> bool:
-    """Dự phòng qua Google Translate TTS."""
+def synthesize_gtts(text: str, output_path: str, extra_filter: str = "") -> bool:
+    """Tạo audio qua Google Translate TTS (Chị Google chuẩn nguyên bản, deadpan meme kinh điển)."""
     try:
         from gtts import gTTS
         if os.path.exists(output_path):
@@ -279,7 +470,7 @@ def synthesize_gtts(text: str, output_path: str) -> bool:
 
         tts = gTTS(text=text, lang="vi", slow=False)
         tts.save(output_path)
-        return verify_and_standardize_mp3(output_path)
+        return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
     except Exception:
         if os.path.exists(output_path):
             try: os.remove(output_path)
@@ -287,7 +478,7 @@ def synthesize_gtts(text: str, output_path: str) -> bool:
         return False
 
 
-def synthesize_windows_sapi(text: str, output_path: str) -> bool:
+def synthesize_windows_sapi(text: str, output_path: str, extra_filter: str = "") -> bool:
     """Dự phòng offline qua Windows SAPI5 SpeechSynthesizer."""
     try:
         exe = get_ffmpeg_exe()
@@ -304,7 +495,7 @@ $synth.Dispose();
             subprocess.run([exe, "-y", "-i", temp_wav, "-ar", "44100", "-ac", "2", "-c:a", "libmp3lame", "-b:a", "192k", output_path], capture_output=True)
             try: os.remove(temp_wav)
             except OSError: pass
-            return verify_and_standardize_mp3(output_path)
+            return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
     except Exception:
         pass
     return False
@@ -338,17 +529,22 @@ def text_to_speech(text: str, output_path: str,
                    rate: str = DEFAULT_RATE,
                    pitch: str = "+0Hz",
                    style: str = "",
+                   extra_filter: Optional[str] = None,
                    max_retries: int = 2) -> str:
     """
     Quy trình chuyển văn bản thành tiếng Việt đa tầng tự động phục hồi:
-    0. Thử ElevenLabs (Giọng Adam gốc đỉnh cao) nếu có cấu hình API Key.
-    1. Thử Edge TTS (Giọng Adam/Andrew Multilingual, Brian, Hoài My, Nam Minh).
+    0. Thử ElevenLabs nếu có cấu hình API Key.
+    1. Thử Edge TTS với biến điệu phong cách hài hước (Nam Hài, Nữ Cà Khịa, Nam Trầm Hài...).
     2. Fallback sang Google Translate TTS.
     3. Fallback sang Windows Speech SAPI5 offline.
     4. Fallback tone an toàn tuyệt đối.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     cleaned = clean_for_tts(text)
+
+    # Lấy filter định hình giọng hài hước nếu chưa được truyền tường minh
+    if extra_filter is None:
+        extra_filter = get_voice_filter(voice) or ""
 
     # 0. Thử ElevenLabs nếu yêu cầu giọng Adam hoặc chỉ định elevenlabs
     v_lower = voice.lower().strip()
@@ -361,21 +557,31 @@ def text_to_speech(text: str, output_path: str,
         if synthesize_elevenlabs(cleaned, output_path, eleven_id):
             return output_path
 
-    # 1. Thử Edge TTS (hỗ trợ Adam/Andrew Multilingual, Brian, Nam Minh, Hoài My)
+    # 0b. Tạo giọng Chị Google meme kinh điển nếu chỉ định
     actual_voice = resolve_voice_id(voice)
+    if v_lower in ["chi_google", "google", "gtts"] or actual_voice == "chi_google":
+        print(f"     🤖 [CHỊ GOOGLE MEME]: Đang tạo giọng Chị Google nguyên bản cho {os.path.basename(output_path)}...")
+        if synthesize_gtts(cleaned, output_path, extra_filter=extra_filter):
+            return output_path
     for attempt in range(1, max_retries + 1):
-        if synthesize_edge_tts(cleaned, output_path, actual_voice, rate, pitch, style):
+        if synthesize_edge_tts(cleaned, output_path, actual_voice, rate, pitch, style, extra_filter=extra_filter):
             return output_path
         time.sleep(0.5 * attempt)
 
-    # 2. Thử gTTS
-    print(f"     ⚠️ Edge TTS bận ({voice}), đang chuyển sang Google TTS...")
-    if synthesize_gtts(cleaned, output_path):
+    # 1b. Dự phòng Edge-TTS thuần Việt nếu giọng chỉ định gặp sự cố
+    if actual_voice not in ["vi-VN-NamMinhNeural", "vi-VN-HoaiMyNeural"]:
+        fallback_vi = "vi-VN-HoaiMyNeural" if any(k in voice.lower() for k in ["female", "nu", "ava", "emma", "hoai"]) else "vi-VN-NamMinhNeural"
+        print(f"     ⚠️ Đang thử giọng dự phòng thuần Việt ({fallback_vi})...")
+        if synthesize_edge_tts(cleaned, output_path, fallback_vi, rate, "+0Hz", style, extra_filter=extra_filter):
+            return output_path
+
+    # 2. Thử gTTS tiếng Việt với extra_filter hài hước
+    print(f"     ⚠️ Edge TTS bận ({voice}), đang chuyển sang Google TTS tiếng Việt...")
+    if synthesize_gtts(cleaned, output_path, extra_filter=extra_filter):
         return output_path
 
-    # 3. Thử Windows SAPI5 Offline
-    print("     ⚠️ Google TTS bận, chuyển sang Windows Speech Engine Offline...")
-    if synthesize_windows_sapi(cleaned, output_path):
+    # 3. Fallback an toàn: Thử lại Nam Minh lần cuối với pitch chuẩn
+    if synthesize_edge_tts(cleaned, output_path, "vi-VN-NamMinhNeural", rate="+12%", pitch="+0Hz", extra_filter=extra_filter):
         return output_path
 
     # 4. Fallback Tone
@@ -415,7 +621,7 @@ def generate_all_audio(
     emotion_map = voice_cfg.get("emotion_style_map", {})
 
     if not default_voice:
-        default_voice = voice_cfg.get("default_author_voice", "vi-VN-HoaiMyNeural")
+        default_voice = voice_cfg.get("default_author_voice", "nam_hai")
 
     result = {
         "post": None,
@@ -425,8 +631,8 @@ def generate_all_audio(
 
     # 1. Diễn xuất bài đăng tác giả
     post_voice = getattr(post, "voice_id", "") or default_voice
-    post_rate = getattr(post, "rate_offset", "") or voice_cfg.get("roles", {}).get("author", {}).get("rate", "+18%")
-    post_pitch = getattr(post, "pitch_offset", "") or voice_cfg.get("roles", {}).get("author", {}).get("pitch", "+4Hz")
+    post_rate = getattr(post, "rate_offset", "") or voice_cfg.get("roles", {}).get("author", {}).get("rate", "+0%")
+    post_pitch = getattr(post, "pitch_offset", "") or voice_cfg.get("roles", {}).get("author", {}).get("pitch", "+0Hz")
     post_style = ""  # Tác giả kể chuyện tự nhiên
 
     if progress_cb:
@@ -450,14 +656,12 @@ def generate_all_audio(
     total_cmt = len(post.comments)
     for i, comment in enumerate(post.comments, 1):
         pct = 20 + int((i / max(1, total_cmt)) * 60)
-        c_voice = getattr(comment, "voice_id", "") or voice_cfg.get("default_commenter_female_voice", "vi-VN-HoaiMyNeural")
-        c_rate = getattr(comment, "rate_offset", "") or "+20%"
-        c_pitch = getattr(comment, "pitch_offset", "") or "+2Hz"
-        emotion = getattr(comment, "emotion", "funny")
-
-        # Lấy style từ role config trước, nếu không có thì lấy từ emotion map
+        c_voice = getattr(comment, "voice_id", "") or voice_cfg.get("default_commenter_female_voice", "nu_cakhia")
         role_key = f"commenter_{i}"
         role_info = voice_cfg.get("roles", {}).get(role_key, {})
+        c_rate = getattr(comment, "rate_offset", "") or role_info.get("rate") or "+0%"
+        c_pitch = getattr(comment, "pitch_offset", "") or role_info.get("pitch") or "+0Hz"
+        emotion = getattr(comment, "emotion", "funny")
         c_style = role_info.get("style", "")
 
         # Nếu role không có style riêng, áp dụng emotion → style mapping
@@ -491,6 +695,31 @@ def generate_all_audio(
         })
         print(f"     → {c_dur/1000:.2f}s")
         time.sleep(0.3)
+
+    # 3. Diễn xuất câu chốt Outro Call-To-Action (nếu có hoặc mặc định)
+    layout_cfg = cfg.get("visual_layout", {})
+    if layout_cfg.get("enable_outro_cta", True):
+        cta_q = getattr(post, "cta_question", "") or "Còn bạn thì sao? Hãy thả tim và để lại bình luận câu chuyện của bạn nhé!"
+        for emo in ["👇", "❤️", "😱", "😂", "💀", "🔥", "✨"]:
+            cta_q = cta_q.replace(emo, "").strip()
+        outro_voice = voice_cfg.get("default_commenter_female_voice", "nu_cakhia")
+        outro_path = os.path.join(out_dir, "outro_cta.mp3")
+        try:
+            if progress_cb:
+                progress_cb(f"Tạo giọng đọc Outro Call-To-Action [{outro_voice}]...", 92)
+            print(f"  🎙️ Đang tạo audio Outro CTA ({outro_voice})...")
+            text_to_speech(cta_q, outro_path, voice=outro_voice, rate="+0%")
+            o_dur = get_mp3_duration_ms(outro_path)
+            if o_dur > 500:
+                result["outro"] = {
+                    "path": outro_path,
+                    "duration_ms": o_dur,
+                    "voice": outro_voice,
+                    "text": cta_q
+                }
+                print(f"     → {o_dur/1000:.2f}s")
+        except Exception as e:
+            print(f"  ⚠️ Outro TTS fallback: {e}")
 
     return result
 

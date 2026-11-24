@@ -17,3 +17,14 @@ def _load(filename: str):
     spec.loader.exec_module(mod)
     return mod
 
+
+def load_module(name: str, path: str = None):
+    if path is None:
+        filename = name if name.endswith(".py") else f"{name}.py"
+        return _load(filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+

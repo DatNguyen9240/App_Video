@@ -198,7 +198,7 @@ DEFAULT_CONFIG = {
             "math.gif",
             "applause.gif"
         ],
-        "default_bg_mode": "minecraft",
+        "default_bg_mode": "infinity_neon",
         "default_card_theme": "light",
         "fps": 60,
         "video_crf": 18,

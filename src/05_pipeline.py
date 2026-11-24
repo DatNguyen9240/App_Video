@@ -14,7 +14,6 @@ Chức năng:
 
 import os
 import sys
-import shutil
 import subprocess
 import time
 import random
@@ -104,58 +103,100 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
     preset_str = (layout_preset or "").lower()
 
     # TÙY CHỌN BỐ CỤC SANDWICH ĐỈNH CAO TIKTOK:
-    # 1. Thẻ bài viết ở trên (140px)
-    # 2. VIDEO THỎA MÃN (Ghép hình puzzle, Ăn uống mukbang, ASMR cắt xà phòng) Ở CHÍNH GIỮA (560px)
-    # 3. Thẻ bình luận đối đáp ở dưới (1050px)
-    enable_center_sat = layout.get("enable_center_satisfying_video", True)
+    # 1. Thẻ bài viết ở trên (100 - 140px)
+    # 2. VIDEO Ở CHÍNH GIỮA (Minecraft gameplay, Ghép hình puzzle, Mukbang, ASMR cắt xà phòng, hoặc Video tư liệu thật)
+    # 3. Thẻ bình luận đối đáp ở dưới (1000 - 1050px)
+    custom_center = getattr(post, "center_video_custom_path", "")
+    has_custom_center = bool(custom_center and os.path.exists(custom_center))
+
+    enable_center_sat = False
+    if has_custom_center:
+        enable_center_sat = True
+    elif preset_str in ["sandwich", "center_satisfying"] or "sandwich" in mode_str:
+        enable_center_sat = True
+    elif any(k in mode_str for k in ["puzzle", "food", "mukbang", "asmr", "hypnotic", "sand", "kinetic"]):
+        enable_center_sat = True
+    elif layout.get("enable_center_satisfying_video", True):
+        # Mặc định kích hoạt nếu không chọn layout split_screen hoặc bottom_story
+        if preset_str not in ["split_screen", "bottom_story"]:
+            enable_center_sat = True
+
     sat_cat = layout.get("center_satisfying_category", "random")
     if "puzzle" in mode_str:
         sat_cat = "puzzle"
-        enable_center_sat = True
     elif "food" in mode_str or "mukbang" in mode_str:
         sat_cat = "food"
-        enable_center_sat = True
     elif "asmr" in mode_str:
         sat_cat = "asmr"
-        enable_center_sat = True
     elif "gameplay" in mode_str or "parkour" in mode_str:
         sat_cat = "gameplay"
-        enable_center_sat = True
     elif "hypnotic" in mode_str or "spiral" in mode_str or "geometry" in mode_str:
         sat_cat = "hypnotic"
-        enable_center_sat = True
     elif "sand" in mode_str or "kinetic" in mode_str:
         sat_cat = "kinetic_sand"
-        enable_center_sat = True
-    elif preset_str in ["sandwich", "center_satisfying"]:
-        enable_center_sat = True
 
     # AI Đạo Diễn Khớp Video Nền Ở Giữa Theo Ngữ Cảnh Chủ Đề
-    post_sat = getattr(post, "satisfying_category", "auto")
-    if post_sat and post_sat not in ["auto", "random", "none"]:
-        sat_cat = post_sat
-    elif sat_cat in ["random", "auto"]:
-        post_text_lower = (getattr(post, "content", "") + " " + getattr(post, "video_title", "")).lower()
-        if any(k in post_text_lower for k in ["ăn", "bánh", "nấu", "bếp", "món", "cháo", "trứng", "cafe", "trà sữa", "đói", "cơm"]):
-            sat_cat = "food"
-        elif any(k in post_text_lower for k in ["it", "dev", "sếp", "ot", "lương", "xe", "game", "tốc độ", "chạy", "senior"]):
-            sat_cat = "gameplay"
-        elif any(k in post_text_lower for k in ["tâm sự", "buồn", "khóc", "chia tay", "chữa lành", "yêu", "đêm", "ngủ"]):
-            sat_cat = "asmr"
-        elif any(k in post_text_lower for k in ["bóc phốt", "phát hiện", "mật khẩu", "tin nhắn", "rình", "bằng chứng", "tra hỏi", "nghi ngờ", "sự thật", "lén"]):
-            sat_cat = "puzzle"
-        else:
-            sat_cat = random.choice(["kinetic_sand", "hypnotic", "gameplay", "puzzle", "food"])
+    if enable_center_sat:
+        post_sat = getattr(post, "satisfying_category", "auto")
+        if post_sat and post_sat not in ["auto", "random", "none"]:
+            sat_cat = post_sat
+        elif sat_cat in ["random", "auto"]:
+            post_text_lower = (getattr(post, "content", "") + " " + getattr(post, "video_title", "")).lower()
+            if any(k in post_text_lower for k in ["ăn", "bánh", "nấu", "bếp", "món", "cháo", "trứng", "cafe", "trà sữa", "đói", "cơm"]):
+                sat_cat = "food"
+            elif any(k in post_text_lower for k in ["it", "dev", "sếp", "ot", "lương", "xe", "game", "tốc độ", "chạy", "senior"]):
+                sat_cat = "gameplay"
+            elif any(k in post_text_lower for k in ["tâm sự", "buồn", "khóc", "chia tay", "chữa lành", "yêu", "đêm", "ngủ"]):
+                sat_cat = "asmr"
+            elif any(k in post_text_lower for k in ["bóc phốt", "phát hiện", "mật khẩu", "tin nhắn", "rình", "bằng chứng", "tra hỏi", "nghi ngờ", "sự thật", "lén"]):
+                sat_cat = "puzzle"
+            else:
+                sat_cat = random.choice(["kinetic_sand", "hypnotic", "gameplay", "puzzle", "food"])
 
     center_vid_file = None
-    if enable_center_sat:
-        post_y = 140
-        center_video_w = layout.get("center_satisfying_width", 960)
-        center_video_h = layout.get("center_satisfying_height", 560)
-        center_video_y = post_y + actual_post_h + 20
-        actual_comment_y = center_video_y + center_video_h + 24
+    if has_custom_center:
+        center_vid_file = custom_center
+    elif enable_center_sat:
         center_vid_file = bg_mod.get_satisfying_video_path(sat_cat)
-        print(f"  ✨ [BỐ CỤC SANDWICH TIKTOK]: Video thỏa mãn ({sat_cat}) ở chính giữa 960x{center_video_h}px (y={center_video_y})!")
+
+    if enable_center_sat and center_vid_file and os.path.exists(center_vid_file):
+        center_video_w = layout.get("center_satisfying_width", 960)
+
+        # TÍNH TOÁN VỊ TRÍ & CHIỀU CAO THÔNG MINH CHO BỐ CỤC 3 TẦNG (SANDWICH):
+        # Đảm bảo video ở giữa luôn hiển thị trọn vẹn, không bao giờ bị thẻ comment đè lên!
+        if actual_post_h > 450:
+            # Thẻ bài viết có ảnh minh họa đính kèm: đặt post_y ở 65px để dành nhiều không gian cho video giữa và comment
+            post_y = 65
+            center_video_h = 360
+            center_video_y = post_y + actual_post_h + 20
+            actual_comment_y = center_video_y + center_video_h + 28
+        else:
+            post_y = 95
+            center_video_h = layout.get("center_satisfying_height", 480)
+            center_video_y = post_y + actual_post_h + 22
+            actual_comment_y = center_video_y + center_video_h + 30
+
+        # BẢO VỆ VÙNG AN TOÀN TIKTOK/REELS/SHORTS (Đáy an toàn 1720px chuẩn 9:16):
+        # Nếu tổng chiều cao dài hơn vùng an toàn, đẩy post lên và co nhẹ video giữa,
+        # TUYỆT ĐỐI KHÔNG để thẻ comment nhảy lên đè vào video giữa!
+        max_safe_bottom = 1720
+        if actual_comment_y + max_cmt_h > max_safe_bottom:
+            overflow = (actual_comment_y + max_cmt_h) - max_safe_bottom
+            shift_up = min(overflow, post_y - 45)
+            post_y -= max(0, shift_up)
+            overflow -= max(0, shift_up)
+            if overflow > 0:
+                reduce_h = min(overflow, center_video_h - 260)
+                center_video_h -= max(0, reduce_h)
+                overflow -= max(0, reduce_h)
+            center_video_y = post_y + actual_post_h + 16
+            actual_comment_y = center_video_y + center_video_h + 24
+
+        if has_custom_center:
+            print(f"  🎬 [TƯ LIỆU THẬT]: Video tư liệu câu chuyện chính giữa 960x{center_video_h}px (y={center_video_y}): {center_vid_file}")
+        else:
+            print(f"  ✨ [BỐ CỤC SANDWICH TIKTOK]: Video thỏa mãn ({sat_cat}) ở chính giữa 960x{center_video_h}px (y={center_video_y})!")
+
     elif preset_str == "split_screen" or mode_str in ["split", "split_gameplay", "split_screen"]:
         # Bố cục chia nửa màn hình: gameplay 60FPS phía trên (0-720px), thẻ Threads phía dưới (từ 740px)
         post_y = 740
@@ -165,14 +206,25 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         post_y = max(220, min(target_y, max_safe_bottom - total_stack_h))
         actual_comment_y = post_y + actual_post_h + card_gap
     else:
-        # Bố cục Toàn Màn Hình Chuẩn TikTok (Center Focus / Full Minecraft)
+        # Bố cục Toàn Màn Hình Chuẩn Threads/TikTok (Center Focus)
         if actual_post_h > 450:
-            post_y = 180  # Có ảnh minh họa đính kèm: đẩy lên 180px để thẻ không bị tràn đáy
+            post_y = 120  # Có ảnh minh họa đính kèm: đặt ở 120px
         else:
-            post_y = layout.get("post_card_y", 280)
+            post_y = layout.get("post_card_y", 240)
         if post_y + total_stack_h > max_safe_bottom:
-            post_y = max(160, max_safe_bottom - total_stack_h)
+            post_y = max(120, max_safe_bottom - total_stack_h)
         actual_comment_y = post_y + actual_post_h + card_gap
+
+    # BẢO VỆ VÙNG AN TOÀN TIKTOK/REELS/SHORTS (Bottom Safe Zone):
+    max_safe_bottom = 1720
+    if actual_comment_y + max_cmt_h > max_safe_bottom:
+        overflow = (actual_comment_y + max_cmt_h) - max_safe_bottom
+        post_y = max(45, post_y - overflow)
+        if enable_center_sat and center_vid_file and os.path.exists(center_vid_file):
+            center_video_y = post_y + actual_post_h + 16
+            actual_comment_y = center_video_y + center_video_h + 24
+        else:
+            actual_comment_y = post_y + actual_post_h + card_gap
 
     timeline = []
     audio_sequence = []
@@ -199,12 +251,12 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
 
     # 1. Thẻ bài đăng (Hook & Context)
     post_dur = timing["post"]["duration_ms"] / 1000.0
-    post_pause_after = min(0.30, getattr(post, "pause_after_ms", 250) / 1000.0)
+    post_pause_after = min(0.18, getattr(post, "pause_after_ms", 150) / 1000.0)
 
     audio_sequence.append(timing["post"]["path"])
 
     # Chèn khoảng lặng tự nhiên sau bài viết
-    if post_pause_after > 0.05:
+    if post_pause_after > 0.04:
         silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
         silence_idx += 1
         tts_mod.generate_silence_mp3(post_pause_after, silence_file)
@@ -321,9 +373,9 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         cam_motion = getattr(c, "camera_motion", "none")
         sfx_info = config_mod.get_sfx_info(sfx_name)
 
-        # Khoảng lặng tự nhiên giữa các câu nói (nhịp thở người thật 120ms - 220ms)
-        pause_before = min(0.22, max(0.12, getattr(c, "pause_before_ms", 180) / 1000.0))
-        pause_after = min(0.28, max(0.15, getattr(c, "pause_after_ms", 220) / 1000.0))
+        # Khoảng lặng tự nhiên giữa các câu nói (nhịp thở nhanh gọn 60ms - 150ms)
+        pause_before = min(0.12, max(0.06, getattr(c, "pause_before_ms", 100) / 1000.0))
+        pause_after = min(0.18, max(0.08, getattr(c, "pause_after_ms", 120) / 1000.0))
 
         # Khoảng lặng trước câu nói (nhịp thở tự nhiên)
         if pause_before > 0.05:
@@ -365,38 +417,8 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                     })
                     print(f"     🔥 [TENSION RISER SWELL]: Gió rít căng thẳng tăng dần tại t={riser_time:.2f}s trước cú Twist!")
 
-        # Foley Pop giòn tan khi thẻ bình luận trượt lên
-        if enable_foley and os.path.exists(pop_sfx):
-            overlay_sfx.append({"time": c_start, "file": pop_sfx, "vol": 0.35})
-
-        # Thời lượng phản ứng (meme popup hoặc khoảng dừng sau câu)
-        has_meme_sticker = (sfx_name != "none" and sfx_info.get("meme_file"))
-        if has_meme_sticker:
-            if sfx_file and os.path.exists(sfx_file):
-                dur_ms = tts_mod.get_mp3_duration_ms(sfx_file)
-                extra_react_time = max(0.85, min(3.2, (dur_ms / 1000.0) + 0.15))
-            else:
-                extra_react_time = 0.85
-        else:
-            # Ngay cả khi không hiện visual meme, nếu có sound meme thì chừa đủ thời lượng âm thanh
-            if sfx_file and os.path.exists(sfx_file) and sfx_info.get("vol", 0) > 0.1:
-                dur_ms = tts_mod.get_mp3_duration_ms(sfx_file)
-                extra_react_time = max(pause_after, min(3.2, (dur_ms / 1000.0) + 0.10))
-            else:
-                extra_react_time = pause_after
-
-        c_end = react_start + extra_react_time
-
-        # Đồng bộ audio_sequence với c_end
-        silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
-        silence_idx += 1
-        tts_mod.generate_silence_mp3(extra_react_time, silence_file)
-        audio_sequence.append(silence_file)
-
-        if sfx_name in ["boom", "sub_drop"] and cam_motion == "none":
-            cam_motion = "shake"
-
         # Hiệu ứng chuyển động thông minh theo vai trò (Spring Pop, Conversational Slide Left/Right)
+        enable_slide = layout.get("enable_slide_up_animation", True)
         cmt_reply_to = getattr(c, "reply_to", "")
         global_trans_style = layout.get("transition_style", "dynamic_conversational")
         if global_trans_style == "spring_pop":
@@ -413,11 +435,36 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             else:
                 cmt_transition = "slide_left"
 
+        # Card lead time: trượt trước 0.12s để thẻ cố định vị trí đúng khi giọng đọc bắt đầu phát âm
+        card_visual_start = max(0.0, c_start - 0.12) if (enable_slide and cmt_transition != "none") else c_start
+
+        # Foley Pop giòn tan khi thẻ bình luận trượt lên
+        if enable_foley and os.path.exists(pop_sfx):
+            overlay_sfx.append({"time": card_visual_start, "file": pop_sfx, "vol": 0.35})
+
+        # Nhịp điệu TikTok nhanh gọn nhưng đủ thời lượng để meme reaction hiển thị (0.45s - 0.70s)
+        has_meme_sticker = (sfx_name != "none" and sfx_info.get("meme_file"))
+        if has_meme_sticker:
+            extra_react_time = max(0.45, min(0.70, pause_after + 0.30))
+        else:
+            extra_react_time = max(0.10, min(0.25, pause_after))
+
+        c_end = react_start + extra_react_time
+
+        # Đồng bộ audio_sequence với c_end
+        silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+        silence_idx += 1
+        tts_mod.generate_silence_mp3(extra_react_time, silence_file)
+        audio_sequence.append(silence_file)
+
+        if sfx_name in ["boom", "sub_drop"] and cam_motion == "none":
+            cam_motion = "shake"
+
         # Đưa thẻ bình luận vào timeline với hiệu ứng chuyển cảnh sống động
         timeline.append({
             "type": "comment",
             "index": i,
-            "start": c_start,
+            "start": card_visual_start,
             "end": c_end,
             "x": "(W-w)/2",
             "y": actual_comment_y,
@@ -475,7 +522,17 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                 print(f"     🔊 [TỰ ĐỘNG PHÁT TIẾNG TỪ VIDEO MEME MP4]: {os.path.basename(cand_sfx)} tại t={react_start:.2f}s")
 
 
-        if is_popup_target:
+        # Kiểm tra thẻ bằng chứng / tư liệu:
+        # Hỗ trợ cả thẻ đơn lẻ mặc định và danh sách nhiều mốc tư liệu (popup_illustrations)
+        custom_popups = [p for p in getattr(post, "popup_illustrations", []) if p.get("target_comment_idx") == i and os.path.exists(p.get("path", ""))]
+        current_popup_path = popup_card_path
+        if custom_popups:
+            is_popup_target = True
+            current_popup_path = custom_popups[0]["path"]
+        else:
+            is_popup_target = (i == popup_target_comment_idx)
+
+        if is_popup_target and current_popup_path and os.path.exists(current_popup_path):
             # CUTAWAY PROOF CARD: Xuất hiện chính giữa màn hình (H-h)/2 với hiệu ứng Punch-in Bounce
             # Thời lượng hiển thị khớp trọn vẹn với câu trả lời (tối thiểu 2.4s, đồng bộ lời nói)
             base_dur = float(illus_cfg.get("popup_duration_s", 2.6))
@@ -483,7 +540,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             popup_end = min(popup_start + max(base_dur, c_dur - 0.2), c_end)
             popup_y = "(H-h)/2"
 
-            print(f"     🎬 [CUTAWAY BẰNG CHỨNG ĐỒNG BỘ CÂU TRẢ LỜI] -> {popup_start:.2f}s đến {popup_end:.2f}s (Thời lượng: {popup_end-popup_start:.2f}s, Vị trí: Chính giữa màn hình, Kích thước: 980x640px)")
+            print(f"     🎬 [CUTAWAY BẰNG CHỨNG ĐỒNG BỘ CÂU TRẢ LỜI {i}] -> {popup_start:.2f}s đến {popup_end:.2f}s: {os.path.basename(current_popup_path)}")
             timeline.append({
                 "type": "popup_illustration",
                 "start": popup_start,
@@ -493,7 +550,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
                 "width": 980,
                 "height": 640,
                 "camera_motion": "punch_in_bounce",
-                "image": popup_card_path,
+                "image": current_popup_path,
                 "is_video": False,
                 "is_gif": False,
                 "enable_slide": False
@@ -551,7 +608,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             # B. Tại điểm rơi Punchline / Bẻ lái (react_start đến c_end):
             # Kích hoạt meme reaction popup tại điểm bẻ lái cao trào
             enable_meme_popups = layout.get("enable_meme_reaction_popups", True)
-            if enable_meme_popups and meme_file_cand and extra_react_time >= 0.5:
+            if enable_meme_popups and meme_file_cand and extra_react_time >= 0.20:
                 m_x = "(W-w)/2"
                 m_y = "(H-h)/2" if punchline_center else str(meme_anchor_y)
                 m_w = punchline_sz if punchline_center else sticker_sz
@@ -607,28 +664,45 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
     enable_outro = layout.get("enable_outro_cta", True)
     outro_card_path = os.path.join(CARDS_DIR, "outro_cta.png")
     if enable_outro and os.path.exists(outro_card_path):
-        # Tạo giọng đọc kêu gọi tương tác (TTS Outro) để câu cuối có giọng nói lôi cuốn thay vì im lặng
+        # Giọng đọc kêu gọi tương tác (TTS Outro)
         cta_q = getattr(post, "cta_question", "") or "Còn bạn thì sao? Hãy thả tim và để lại bình luận câu chuyện của bạn nhé!"
         for emo in ["👇", "❤️", "😱", "😂", "💀", "🔥", "✨"]:
             cta_q = cta_q.replace(emo, "").strip()
 
         outro_dur = float(layout.get("outro_cta_duration_s", 2.6))
         outro_voice_file = os.path.join(AUDIO_DIR, "outro_cta.mp3")
-        try:
-            # Dùng giọng nữ ngọt ngào hoặc giọng chính để kêu gọi hành động
-            tts_mod.text_to_speech(cta_q, outro_voice_file, voice="vi-VN-HoaiMyNeural", rate="+18%")
-            actual_outro_dur = bg_mod.get_media_duration(outro_voice_file)
-            if actual_outro_dur > 0.5:
-                outro_dur = max(outro_dur, actual_outro_dur + 0.3)
-                audio_sequence.append(outro_voice_file)
-            else:
-                raise ValueError("Outro voice duration too short")
-        except Exception:
-            silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
-            silence_idx += 1
-            tts_mod.generate_silence_mp3(outro_dur, silence_file)
-            audio_sequence.append(silence_file)
+        outro_info = timing.get("outro") if timing else None
 
+        actual_outro_dur = 0.0
+        if outro_info and os.path.exists(outro_info.get("path", "")):
+            outro_voice_file = outro_info["path"]
+            actual_outro_dur = outro_info["duration_ms"] / 1000.0
+            audio_sequence.append(outro_voice_file)
+        elif os.path.exists(outro_voice_file) and bg_mod.get_media_duration(outro_voice_file) > 0.5:
+            actual_outro_dur = bg_mod.get_media_duration(outro_voice_file)
+            audio_sequence.append(outro_voice_file)
+        else:
+            try:
+                tts_mod.text_to_speech(cta_q, outro_voice_file, voice="vi-VN-HoaiMyNeural", rate="+18%")
+                actual_outro_dur = bg_mod.get_media_duration(outro_voice_file)
+                if actual_outro_dur > 0.5:
+                    audio_sequence.append(outro_voice_file)
+                else:
+                    raise ValueError("Outro voice duration too short")
+            except Exception:
+                actual_outro_dur = outro_dur
+                silence_outro = os.path.join(AUDIO_DIR, "_outro_silence.mp3")
+                tts_mod.generate_silence_mp3(actual_outro_dur, silence_outro)
+                audio_sequence.append(silence_outro)
+
+        # Chèn khoảng dừng thở tự nhiên 0.25s đồng bộ sau câu Outro
+        outro_pause = 0.25
+        silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+        silence_idx += 1
+        tts_mod.generate_silence_mp3(outro_pause, silence_file)
+        audio_sequence.append(silence_file)
+
+        outro_dur = actual_outro_dur + outro_pause
         outro_start = comment_cursor
         outro_end = comment_cursor + outro_dur
         timeline.append({
@@ -670,7 +744,7 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
             "role": "Studio CTA",
             "emotion": "interactive",
             "energy_level": 90,
-            "voice": "vi-VN-HoaiMyNeural",
+            "voice": outro_info.get("voice", "vi-VN-HoaiMyNeural") if outro_info else "vi-VN-HoaiMyNeural",
             "text": cta_q,
             "duration_s": outro_dur,
             "sfx": "whoosh",
@@ -679,7 +753,14 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         })
         comment_cursor = outro_end
 
-    total_duration = comment_cursor + 0.3
+    # Khoảng dừng tự nhiên trước khi kết thúc video (đệm đúng 0.3s silence vào audio_sequence)
+    post_outro_pause = 0.3
+    silence_file = os.path.join(AUDIO_DIR, f"_silence_{silence_idx}.mp3")
+    silence_idx += 1
+    tts_mod.generate_silence_mp3(post_outro_pause, silence_file)
+    audio_sequence.append(silence_file)
+    comment_cursor += post_outro_pause
+    total_duration = comment_cursor
 
     # Đảm bảo video đạt chuẩn tối thiểu 1 phút (>= 60s cho TikTok Creator Rewards)
     min_required_duration = float(layout.get("min_video_duration_s", 60.5))
@@ -692,6 +773,12 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
         tts_mod.generate_silence_mp3(pad_needed, pad_silence)
         audio_sequence.append(pad_silence)
         total_duration = min_required_duration
+
+    # Ghim thẻ Outro tới đúng total_duration (không để biến mất trước khi video kết thúc)
+    if enable_outro:
+        for t_item in timeline:
+            if t_item.get("type") in ["outro_cta", "outro_sticker"]:
+                t_item["end"] = total_duration
 
     # Outro anchor meme đến hết video (chỉ hiện nếu bật enable_continuous_anchor_meme)
     outro_meme = os.path.join(MEME_DIR, "dancing_cat.gif")
@@ -712,15 +799,24 @@ def build_timeline_with_emotional_pacing(post, timing: dict, layout_preset: str 
 
     # 1. Thẻ Post hiển thị: Tự động phân nhánh theo Sentence Reveal Mode
     reveal_mode = getattr(post, "sentence_reveal_mode", "standard_full")
+    if actual_post_h > 450:
+        # Nếu thẻ bài viết có ảnh minh họa đính kèm, luôn hiển thị full thẻ chuẩn để tránh nhảy giật layout
+        reveal_mode = "standard_full"
+
     raw_sentences = re.split(r"(?<=[.!?\n])\s+", post.content.strip())
     sentences = [s.strip() for s in raw_sentences if s.strip()]
 
     post_entries = []
     if reveal_mode == "progressive_line_reveal" and len(sentences) >= 2:
-        # Tính thời lượng từng câu theo tỷ lệ số từ
-        word_counts = [max(1, len(s.split())) for s in sentences]
-        total_w = sum(word_counts)
-        step_durs = [post_dur * (w / total_w) for w in word_counts]
+        # Tính thời lượng từng câu có trọng số ngắt nghỉ theo dấu câu
+        def calc_sentence_weight(s: str) -> float:
+            w_count = len(s.split())
+            pause_pts = s.count(",") * 1.5 + s.count(";") * 1.5 + (s.count(".") + s.count("!") + s.count("?")) * 2.5
+            return max(1.0, w_count + pause_pts)
+
+        weights = [calc_sentence_weight(s) for s in sentences]
+        total_w = sum(weights)
+        step_durs = [post_dur * (w / total_w) for w in weights]
 
         step_cursor = cursor
         for step_idx in range(1, len(sentences)):
@@ -1009,6 +1105,7 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
 
 def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                  reset_tracker: bool = True, skip_cards_render: bool = False,
+                 skip_audio_generation: bool = False,
                  layout_preset: str = None, enable_attached_image: bool = None,
                  bgm_choice: str = None, bgm_volume: float = None,
                  platform: str = None) -> str:
@@ -1032,8 +1129,19 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             radar_spec.loader.exec_module(radar_mod)
             post = radar_mod.crawl_trending_threads_story()
 
-    if bg_mode is None:
-        bg_mode = layout.get("default_bg_mode", "minecraft")
+    if bg_mode is None or bg_mode == "auto":
+        post_text = (getattr(post, "content", "") + " " + getattr(post, "video_title", "")).lower()
+        if any(k in post_text for k in ["cafe", "tâm sự", "buồn", "chia tay", "chữa lành", "thất tình", "mẹ"]):
+            bg_mode = "gradient_lofi"
+        elif any(k in post_text for k in ["công nghệ", "it", "dev", "lương", "code", "hacker", "game"]):
+            bg_mode = "infinity_neon"
+        elif any(k in post_text for k in ["quốc tế", "lịch sử", "bí ẩn", "thế kỷ", "vụ án"]):
+            bg_mode = "infinity_dark"
+        elif any(k in post_text for k in ["thư giãn", "chill", "ngủ ngon"]):
+            bg_mode = "kinetic_sand"
+        else:
+            def_bg = layout.get("default_bg_mode", "infinity_neon")
+            bg_mode = "infinity_neon" if def_bg == "minecraft" else def_bg
 
     if card_theme is None or card_theme == "auto":
         card_theme = getattr(post, "recommended_theme", "") or layout.get("default_card_theme", "light")
@@ -1059,19 +1167,18 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             tracker.start_step("cards", f"Đang render bộ thẻ {plat.upper()} chuẩn (Avatar người thật)...", 25)
             os.makedirs(CARDS_DIR, exist_ok=True)
             post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-            has_proof = getattr(post, "has_visual_proof", None)
-            placement = getattr(post, "visual_proof_placement", "none")
-            enable_illus = getattr(post, "enable_illustration", True)
-            if has_proof is False or placement == "none":
-                enable_illus = False
-
-            post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
-            illus_cat = getattr(post, "illustration_category", "general_life")
-
-            # Tuyệt đối không fallback sang ảnh chung cư/nhà hàng không liên quan
-            if not post_illus or not os.path.exists(post_illus):
+            enable_illus = bool(getattr(post, "enable_illustration", True))
+            post_illus = getattr(post, "illustration_path", "")
+            placement = getattr(post, "visual_proof_placement", "attached_in_post")
+            if enable_illus and post_illus and os.path.exists(post_illus):
+                if not placement or placement == "none":
+                    placement = "attached_in_post"
+                has_proof = True
+            else:
                 post_illus = ""
                 enable_illus = False
+                has_proof = False
+            illus_cat = getattr(post, "illustration_category", "general_life")
 
             # Quyết định ảnh gắn kèm bài đăng (Attached in Post):
             illus_cfg = cfg.get("illustration_settings", {})
@@ -1102,18 +1209,29 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
                     )
                     card_mod.save_card(step_img, os.path.join(CARDS_DIR, f"post_step_{step_idx}.png"))
 
-            # Tạo thẻ ảnh minh họa nổi bên ngoài: CHỈ khi không đính kèm trong bài và được bật
+            # Tạo thẻ ảnh minh họa nổi bên ngoài: Kích hoạt khi có ảnh minh họa và bật tính năng popup
             popup_path = os.path.join(CARDS_DIR, "popup_proof.png")
-            allow_popup = enable_illus and (not use_attached) and illus_cfg.get("enable_popup_illustration", True)
+            allow_popup = enable_illus and illus_cfg.get("enable_popup_illustration", True)
             if allow_popup and post_illus and os.path.exists(post_illus):
-                badge_lbl = illus_cfg.get("badge_text", "")
-                caption_lbl = getattr(post, "illustration_caption", "")
+                badge_lbl = illus_cfg.get("badge_text", "") or "BẰNG CHỨNG CÓ THẬT"
+                caption_lbl = getattr(post, "illustration_caption", "") or "Hình ảnh áo phông mỏng dính"
                 card_mod.create_popup_illustration_card(post_illus, popup_path, badge_text=badge_lbl, caption_text=caption_lbl)
                 tracker.log(f"  📸 Đã tạo khung ảnh minh họa nổi (Popup Proof Card): {popup_path}")
             else:
                 if os.path.exists(popup_path):
                     try: os.remove(popup_path)
                     except OSError: pass
+
+            # Tạo các thẻ ảnh minh họa tư liệu đa điểm rơi (True Story Cutaways)
+            for p_idx, p_item in enumerate(getattr(post, "popup_illustrations", []), 1):
+                p_src = p_item.get("src", "") or p_item.get("path", "")
+                p_out = os.path.join(CARDS_DIR, f"popup_proof_{p_idx}.png")
+                if p_src and os.path.exists(p_src) and not p_src.endswith(f"popup_proof_{p_idx}.png"):
+                    badge_lbl = p_item.get("badge", "TƯ LIỆU CÓ THẬT")
+                    caption_lbl = p_item.get("caption", "")
+                    card_mod.create_popup_illustration_card(p_src, p_out, badge_text=badge_lbl, caption_text=caption_lbl)
+                    p_item["path"] = p_out
+                    tracker.log(f"  📸 Đã tạo khung ảnh tư liệu [{p_idx}]: {p_out}")
 
             for i, c in enumerate(post.comments, 1):
                 c_avatar = getattr(c, "avatar_url", "") or getattr(c, "avatar_path", "")
@@ -1137,20 +1255,56 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             tracker.finish_step("cards")
 
         # BƯỚC 3: DIỄN XUẤT GIỌNG ĐỌC ĐA VAI (TTS + VOCAL MASTERING)
-        tracker.start_step("tts", "Đang tạo giọng đọc đa vai (Nam/Nữ) và xử lý Vocal Mastering (LUFS -14)...", 45)
-        timing = tts_mod.generate_all_audio(
-            post, out_dir=AUDIO_DIR,
-            progress_cb=lambda msg, pct: tracker.update_progress(45 + int(pct * 0.2), msg)
-        )
-        tracker.finish_step("tts")
+        post_audio_file = os.path.join(AUDIO_DIR, "post.mp3")
+        if skip_audio_generation and os.path.exists(post_audio_file):
+            tracker.start_step("tts", "Sử dụng audio chất lượng cao đã tạo sẵn...", 45)
+            timing = {
+                "post": {
+                    "path": post_audio_file,
+                    "duration_ms": tts_mod.get_mp3_duration_ms(post_audio_file),
+                    "voice": getattr(post, "voice_id", "") or "nam_hai",
+                },
+                "comments": [],
+                "pauses": {}
+            }
+            for i, comment in enumerate(post.comments, 1):
+                cp = os.path.join(AUDIO_DIR, f"comment_{i}.mp3")
+                timing["comments"].append({
+                    "path": cp,
+                    "duration_ms": tts_mod.get_mp3_duration_ms(cp) if os.path.exists(cp) else 3000.0,
+                    "voice": getattr(comment, "voice_id", "") or "nu_cakhia",
+                    "emotion": getattr(comment, "emotion", "funny"),
+                    "sfx": getattr(comment, "sfx", "none")
+                })
+            outro_path = os.path.join(AUDIO_DIR, "outro_cta.mp3")
+            if os.path.exists(outro_path):
+                timing["outro"] = {
+                    "path": outro_path,
+                    "duration_ms": tts_mod.get_mp3_duration_ms(outro_path),
+                    "voice": getattr(post, "voice_id", "") or "nu_cakhia",
+                    "text": getattr(post, "cta_question", "")
+                }
+            tracker.finish_step("tts")
+        else:
+            tracker.start_step("tts", "Đang tạo giọng đọc đa vai (Nam/Nữ) và xử lý Vocal Mastering (LUFS -14)...", 45)
+            timing = tts_mod.generate_all_audio(
+                post, out_dir=AUDIO_DIR,
+                progress_cb=lambda msg, pct: tracker.update_progress(45 + int(pct * 0.2), msg)
+            )
+            outro_path = os.path.join(AUDIO_DIR, "outro_cta.mp3")
+            if os.path.exists(outro_path):
+                timing["outro"] = {
+                    "path": outro_path,
+                    "duration_ms": tts_mod.get_mp3_duration_ms(outro_path),
+                    "voice": getattr(post, "voice_id", "") or "nu_cakhia",
+                    "text": getattr(post, "cta_question", "")
+                }
+            tracker.finish_step("tts")
 
         # BƯỚC 4: THIẾT KẾ ÂM THANH & NHỊP THỞ
         tracker.start_step("audio", "Đang đồng bộ timeline, chèn khoảng lặng kịch tính & mix nhạc nền...", 70)
         timeline, audio_sequence, overlay_sfx, total_duration, emotional_arc_data = build_timeline_with_emotional_pacing(post, timing, layout_preset=layout_preset, bg_mode=bg_mode)
         tracker.set_emotional_arc(emotional_arc_data)
-
-        bg_video_out = os.path.join(FINAL_DIR, "_bg_temp.mp4")
-        bg_mod.prepare_background(total_duration, bg_video_out, mode=bg_mode)
 
         mixed_audio_out = os.path.join(AUDIO_DIR, "_audio_final.mp3")
         # Tự động chọn nhạc nền theo cấu hình hoặc từ kho assets/bgm
@@ -1167,22 +1321,28 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             bgm_dir = os.path.join(ASSETS_DIR, "bgm")
             if os.path.exists(bgm_dir):
                 bgm_candidates += [os.path.join(bgm_dir, f) for f in os.listdir(bgm_dir) if f.lower().endswith((".mp3", ".wav", ".m4a"))]
-            default_lofi = os.path.join(ASSETS_DIR, "sfx", "lofi_bg.mp3")
-            if os.path.exists(default_lofi) and default_lofi not in bgm_candidates:
-                bgm_candidates.append(default_lofi)
 
-            pref = bgm_choice or pacing.get("selected_bgm_file", "random")
+            # Ưu tiên các bản nhạc nhẹ, êm dịu, không tiếng trống dồn dập
+            gentle_candidates = [
+                p for p in bgm_candidates
+                if any(k in os.path.basename(p).lower() for k in ["gentle", "satie", "clair", "nocturne", "lofi_chill"])
+            ]
+
+            pref = bgm_choice or pacing.get("selected_bgm_file", "gentle_piano_satie.mp3")
             if pref and pref not in ["random", "auto", "none"]:
                 exact_path = os.path.join(bgm_dir, pref)
                 if os.path.exists(exact_path):
                     selected_bgm = exact_path
 
-            if not selected_bgm and bgm_candidates:
-                selected_bgm = random.choice(bgm_candidates)
+            if not selected_bgm:
+                if gentle_candidates:
+                    selected_bgm = random.choice(gentle_candidates)
+                elif bgm_candidates:
+                    selected_bgm = random.choice(bgm_candidates)
 
-        vol = bgm_volume if bgm_volume is not None else pacing.get("bgm_volume_normal", 0.45)
+        vol = bgm_volume if bgm_volume is not None else pacing.get("bgm_volume_normal", 0.25)
         if selected_bgm and enable_bgm:
-            tracker.log(f"  🎵 Nhạc nền TikTok: {os.path.basename(selected_bgm)} (Âm lượng: {int(vol * 100)}%)")
+            tracker.log(f"  🎵 Nhạc nền êm dịu: {os.path.basename(selected_bgm)} (Âm lượng: {int(vol * 100)}%)")
         else:
             tracker.log("  🔇 Nhạc nền: Tắt (Chỉ dùng giọng đọc & SFX)")
 
@@ -1192,6 +1352,23 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             overlay_sfx=overlay_sfx,
             bg_volume=vol
         )
+
+        # KHÓA ĐỒNG BỘ 100% GIỮA HÌNH VÀ TIẾNG (ZERO-DRIFT AUDIO/VIDEO SYNC LOCK)
+        actual_audio_dur = bg_mod.get_media_duration(mixed_audio_out)
+        if actual_audio_dur > 1.0:
+            total_duration = round(actual_audio_dur, 2)
+            tracker.log(f"  🔒 [ĐỒNG BỘ TUYỆT ĐỐI]: Khóa thời lượng hình ảnh khớp 100% thời lượng âm thanh thực tế: {total_duration}s")
+            # Cập nhật mốc kết thúc cho các layer ghim tới hết video
+            for item in timeline:
+                if item.get("end", 0) > total_duration - 0.5:
+                    item["end"] = total_duration
+
+        bg_video_out = os.path.join(FINAL_DIR, "_bg_temp.mp4")
+        effective_bg_mode = bg_mode
+        has_center_video = any(item.get("type") == "center_satisfying_video" for item in timeline)
+        if has_center_video and (not bg_mode or bg_mode in ["split_gameplay", "split", "split_screen"]):
+            effective_bg_mode = "gameplay"
+        bg_mod.prepare_background(total_duration, bg_video_out, mode=effective_bg_mode)
         tracker.finish_step("audio")
 
         # BƯỚC 5: DỰNG PHIM ĐA LỚP & CAMERA MOTION (60 FPS + SLIDE-UP + LOSSLESS CRF 18)
@@ -1235,6 +1412,17 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
             if os.path.exists(thumb_bg_path):
                 card_mod.render_video_thumbnail(post, thumb_bg_path, thumb_out_path)
                 tracker.log(f"  🖼️ Đã tạo ảnh bìa Thumbnail chuẩn tỉ lệ 9:16: {thumb_out_path}")
+                try:
+                    os.remove(thumb_bg_path)
+                except Exception:
+                    pass
+
+        # Tự động dọn dẹp video nền tạm thời để tránh tốn dung lượng đĩa
+        if 'bg_video_out' in locals() and os.path.exists(bg_video_out):
+            try:
+                os.remove(bg_video_out)
+            except Exception:
+                pass
 
         tracker.finish_step("export")
         tracker.finish_pipeline(os.path.basename(final_video), caption_full, total_duration)

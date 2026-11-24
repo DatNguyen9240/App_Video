@@ -10,7 +10,6 @@ Chức năng:
 import json
 import os
 from dataclasses import dataclass, field, asdict, fields
-from typing import Literal
 
 # ─── Kiểu dữ liệu ─────────────────────────────────────────────────────────────
 
@@ -63,6 +62,13 @@ class Post:
     story_context_type: str = "general_social"  # office_workplace, student_youth, couple_family, general_social
     cta_question: str = ""                 # Câu hỏi kêu gọi bình luận viral riêng cho từng bài ở Outro
     pacing_tempo: str = "normal"           # normal, slow_emotional, fast_comedic
+    story_mode: str = "everyday_life"      # everyday_life (đời thường), true_story (chuyện thật quốc tế/tư liệu lịch sử)
+    documentary_query: str = ""            # Từ khóa tìm kiếm tư liệu quốc tế (vd: 'Exit Deutschland trojan t-shirt')
+    documentary_media_urls: list[str] = field(default_factory=list) # Danh sách link ảnh/video tư liệu
+    center_video_custom_path: str = ""     # Đường dẫn video tư liệu phát ở khung trung tâm 960x560
+    popup_illustrations: list[dict] = field(default_factory=list) # Danh sách mốc ảnh tư liệu cutaway [{"path": "...", "target_comment_idx": 1, "caption": "..."}]
+    documentary_scenes: list[dict] = field(default_factory=list) # Danh sách phân cảnh phim tư liệu (video clips + ảnh tư liệu)
+    story_badge: str = ""                  # Nhãn tiêu đề hồ sơ kỳ thú (vd: 'HỒ SƠ KỲ THÚ • EXIT DEUTSCHLAND')
     # Metadata đạo diễn cảm xúc
     emotional_arc: str = "curiosity -> tension -> fake_relief -> punchline"
     hook_energy: str = "high"

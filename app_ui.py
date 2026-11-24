@@ -18,10 +18,9 @@ import random
 import re
 import time
 import threading
-import subprocess
 import webbrowser
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR    = os.path.join(BASE_DIR, "src")
@@ -54,14 +53,16 @@ card_mod     = load_mod("card_gen", "02_card_gen.py")
 tts_mod      = load_mod("tts", "03_tts.py")
 bg_mod       = load_mod("bg_audio", "04_bg_audio.py")
 pipeline_mod = load_mod("pipeline", "05_pipeline.py")
+visual_builder_mod = load_mod("visual_story_builder", "visual_story_builder.py")
 
 
 def _render_all_cards_helper(post, theme="light", enable_attached_image=None, platform=None):
     """
-    Hàm chuẩn hóa render toàn bộ bộ thẻ theo nền tảng (Threads / Facebook / Instagram):
+    Hàm chuẩn hóa render toàn bộ bộ thẻ theo nền tảng (Threads / Facebook / Instagram / Phim Tư Liệu):
     - Thẻ Post chính (hỗ trợ đính kèm ảnh thực tế hoặc hiển thị phong cách FB/IG)
     - Khung Ảnh Minh Họa Nổi Bên Ngoài (Popup Proof Card với viền Neon & 3D shadow)
     - Tất cả các thẻ Comment với avatar thật và bong bóng chat chuẩn nền tảng
+    - Định dạng Phim Tư Liệu: Tạo thẻ Header thời sự/hồ sơ kỳ thú
     """
     os.makedirs(CARDS_DIR, exist_ok=True)
     cfg = config_mod.load_config()
@@ -76,6 +77,17 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None, pl
             platform = "threads"
     plat = (platform or "threads").lower().strip()
 
+    # Xử lý riêng cho định dạng Phim Tư Liệu (Hình + Video)
+    if plat == "documentary":
+        header_path = os.path.join(CARDS_DIR, "header_badge.png")
+        p_dict = post if isinstance(post, dict) else {}
+        story_title = (p_dict.get("video_title") if p_dict else getattr(post, "video_title", "")) or \
+                      (p_dict.get("title") if p_dict else getattr(post, "title", "")) or \
+                      ((p_dict.get("content", "")[:50].upper() if p_dict else getattr(post, "content", "")[:50].upper()) if (p_dict.get("content") if p_dict else getattr(post, "content", "")) else "HỒ SƠ TƯ LIỆU QUỐC TẾ")
+        story_badge = (p_dict.get("story_badge") if p_dict else getattr(post, "story_badge", "")) or "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT"
+        visual_builder_mod.create_header_badge_image(story_title, story_badge, header_path)
+        return
+
     if theme == "auto" or not theme:
         rec_theme = post.get("recommended_theme", "light") if isinstance(post, dict) else getattr(post, "recommended_theme", "light")
         theme = rec_theme or "light"
@@ -87,12 +99,17 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None, pl
         is_verified = bool(post.get("is_verified", False))
         likes = int(post.get("likes", 0))
         post_avatar = post.get("avatar_url", "") or post.get("avatar_path", "")
-        has_proof = post.get("has_visual_proof", None)
-        placement = post.get("visual_proof_placement", "none")
         enable_illus = bool(post.get("enable_illustration", True))
-        if has_proof is False or placement == "none":
+        post_illus = post.get("illustration_path", "")
+        placement = post.get("visual_proof_placement", "attached_in_post")
+        if enable_illus and post_illus and os.path.exists(post_illus):
+            if not placement or placement == "none":
+                placement = "attached_in_post"
+            has_proof = True
+        else:
+            post_illus = ""
             enable_illus = False
-        post_illus = post.get("illustration_path", "") if enable_illus else ""
+            has_proof = False
         illus_cat = post.get("illustration_category", "general_life")
         comments = post.get("comments", [])
     else:
@@ -102,12 +119,17 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None, pl
         is_verified = getattr(post, "is_verified", False)
         likes = getattr(post, "likes", 0)
         post_avatar = getattr(post, "avatar_url", "") or getattr(post, "avatar_path", "")
-        has_proof = getattr(post, "has_visual_proof", None)
-        placement = getattr(post, "visual_proof_placement", "none")
         enable_illus = bool(getattr(post, "enable_illustration", True))
-        if has_proof is False or placement == "none":
+        post_illus = getattr(post, "illustration_path", "")
+        placement = getattr(post, "visual_proof_placement", "attached_in_post")
+        if enable_illus and post_illus and os.path.exists(post_illus):
+            if not placement or placement == "none":
+                placement = "attached_in_post"
+            has_proof = True
+        else:
+            post_illus = ""
             enable_illus = False
-        post_illus = getattr(post, "illustration_path", "") if enable_illus else ""
+            has_proof = False
         illus_cat = getattr(post, "illustration_category", "general_life")
         comments = getattr(post, "comments", [])
 
@@ -155,6 +177,17 @@ def _render_all_cards_helper(post, theme="light", enable_attached_image=None, pl
         if os.path.exists(popup_path):
             try: os.remove(popup_path)
             except OSError: pass
+
+    # 2b. Các thẻ ảnh tư liệu đa điểm rơi (True Story Cutaways)
+    popups = post.get("popup_illustrations", []) if isinstance(post, dict) else getattr(post, "popup_illustrations", [])
+    for p_idx, p_item in enumerate(popups, 1):
+        p_src = p_item.get("src", "") or p_item.get("path", "")
+        p_out = os.path.join(CARDS_DIR, f"popup_proof_{p_idx}.png")
+        if p_src and os.path.exists(p_src) and not p_src.endswith(f"popup_proof_{p_idx}.png"):
+            badge_lbl = p_item.get("badge", "TƯ LIỆU CÓ THẬT")
+            caption_lbl = p_item.get("caption", "")
+            card_mod.create_popup_illustration_card(p_src, p_out, badge_text=badge_lbl, caption_text=caption_lbl)
+            p_item["path"] = p_out
 
     # 3. Các thẻ comment
     for i, c in enumerate(comments, 1):
@@ -304,7 +337,7 @@ HTML_TEMPLATE = """
         <button @click="openFinalFolder" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold glass-input hover:bg-slate-700/60 transition flex items-center gap-2 text-slate-300 cursor-pointer">
           <i class="fa-regular fa-folder-open text-indigo-400"></i> Thư Mục Video
         </button>
-        <button @click="saveSettings" class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition flex items-center gap-2 cursor-pointer">
+        <button @click="saveSettings(true)" class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition flex items-center gap-2 cursor-pointer">
           <i class="fa-solid fa-floppy-disk"></i> Lưu Nhanh
         </button>
       </div>
@@ -333,8 +366,92 @@ HTML_TEMPLATE = """
             <div class="relative flex items-center">
               <i class="fa-solid fa-magnifying-glass absolute left-4 text-slate-400 text-base"></i>
               <input v-model="topicInput" @keyup.enter="generateScriptOnly" type="text"
-                placeholder="Nhập chủ đề muốn làm video (ví dụ: khóa xe tặng bạn gái, công sở, phỏng vấn, người yêu cũ...) hoặc chọn trend bên dưới..."
+                placeholder="Nhập chủ đề muốn làm video (ví dụ: cú lừa 250 áo phông của nhóm Tân Phát xít Đức, công sở, phỏng vấn...)"
                 class="w-full glass-input rounded-xl pl-12 pr-4 py-3.5 text-sm focus:outline-none placeholder-slate-500 font-medium border border-slate-700/80 focus:border-indigo-500 transition shadow-inner">
+            </div>
+
+            <!-- TỰ ĐỘNG TÌM CHỦ ĐỀ THEO NGÀY (KHÔNG HARDCODE) -->
+            <div class="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3.5 shadow-lg">
+              <div class="flex items-center justify-between flex-wrap gap-2.5">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-xs font-bold text-amber-400 uppercase tracking-wide flex items-center gap-1.5">
+                    <i class="fa-solid fa-calendar-day"></i> Quét chủ đề theo ngày:
+                  </span>
+                  <!-- Date Picker -->
+                  <input type="date" v-model="selectedDate" @change="loadDailyTrendingTopics(false)"
+                    class="glass-input rounded-xl px-3 py-1 text-xs text-slate-100 bg-slate-800 border border-slate-700 font-mono">
+
+                  <button type="button" @click="selectedDate = new Date().toISOString().split('T')[0]; loadDailyTrendingTopics(false);"
+                    class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition cursor-pointer font-medium">
+                    Hôm nay
+                  </button>
+                </div>
+
+                <!-- 2 Tab Chế độ & Quét bài -->
+                <div class="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                  <button type="button" @click="topicModeTab = 'true_story'; loadDailyTrendingTopics(false);"
+                    :class="topicModeTab === 'true_story' ? 'bg-gradient-to-r from-amber-600 to-red-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-slate-200'"
+                    class="px-3 py-1 rounded-lg text-xs transition cursor-pointer flex items-center gap-1.5">
+                    <i class="fa-solid fa-landmark text-xs"></i> Chuyện Thật Lịch Sử (On This Day)
+                  </button>
+                  <button type="button" @click="topicModeTab = 'social'; loadDailyTrendingTopics(false);"
+                    :class="topicModeTab === 'social' ? 'bg-gradient-to-r from-indigo-600 to-blue-600 text-white font-bold shadow-md' : 'text-slate-400 hover:text-slate-200'"
+                    class="px-3 py-1 rounded-lg text-xs transition cursor-pointer flex items-center gap-1.5">
+                    <i class="fa-brands fa-threads text-xs"></i> Trend Threads
+                  </button>
+                  <button type="button" @click="loadDailyTrendingTopics(true)" :disabled="isRefreshingTrends"
+                    title="Quét mới bằng Gemini AI"
+                    class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs transition cursor-pointer disabled:opacity-50">
+                    <i class="fa-solid fa-arrows-rotate" :class="{'fa-spin': isRefreshingTrends}"></i>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Danh sách chủ đề tìm thấy tự động theo ngày -->
+              <div class="space-y-2">
+                <div class="flex items-center justify-between text-xs text-slate-400">
+                  <span class="font-medium text-slate-300">
+                    {{ topicModeTab === 'true_story' ? '🏛️ Các sự kiện & kỳ án có thật trong lịch sử ' + (trendingTopicsInfo.date_display || selectedDate) + ':' : '🔥 Chủ đề bàn tán nóng trên Threads ' + (trendingTopicsInfo.date_display || selectedDate) + ':' }}
+                  </span>
+                  <span v-if="isRefreshingTrends" class="text-amber-400 text-xs font-semibold">
+                    <i class="fa-solid fa-spinner fa-spin"></i> Đang quét qua AI...
+                  </span>
+                </div>
+
+                <div class="flex flex-wrap gap-2">
+                  <button v-for="(t, tIdx) in viralTopics" :key="tIdx" type="button"
+                    @click="selectDailyTopic(t)"
+                    class="px-3 py-1.5 rounded-xl text-xs font-medium transition cursor-pointer flex items-center gap-2 border text-left"
+                    :class="topicModeTab === 'true_story' ? 'bg-amber-950/40 hover:bg-amber-900/70 text-amber-200 border-amber-600/40 hover:border-amber-400' : 'bg-indigo-950/40 hover:bg-indigo-900/70 text-indigo-200 border-indigo-600/40 hover:border-indigo-400'">
+                    <span>{{ topicModeTab === 'true_story' ? '📜' : '💬' }}</span>
+                    <span>{{ t }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Chọn Phong cách câu chuyện: Đời thường vs Chuyện thật có tư liệu -->
+            <div class="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5 uppercase tracking-wide">
+                  <i class="fa-solid fa-book-open text-amber-400"></i> Phong cách nội dung:
+                </span>
+                <span class="text-xs text-slate-400 font-medium hidden sm:inline">
+                  {{ storyModeInput === 'true_story' ? 'Chuyện thật quốc tế: có video/ảnh tư liệu gốc phát ở giữa, tình tiết chuẩn xác' : 'Đời sống Gen Z: drama dí dỏm, đối đáp cà khịa đời thường' }}
+                </span>
+              </div>
+              <div class="grid grid-cols-2 gap-2.5">
+                <button type="button" @click="storyModeInput = 'auto'"
+                  :class="storyModeInput !== 'true_story' ? 'bg-gradient-to-r from-indigo-600 to-blue-600 text-white font-bold shadow-md ring-2 ring-indigo-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
+                  class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
+                  <span>☕ Đời Thường Gen Z</span>
+                </button>
+                <button type="button" @click="storyModeInput = 'true_story'"
+                  :class="storyModeInput === 'true_story' ? 'bg-gradient-to-r from-amber-600 to-red-600 text-white font-bold shadow-md ring-2 ring-amber-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
+                  class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
+                  <span>🌍 Chuyện Thật Quốc Tế (Tư Liệu)</span>
+                </button>
+              </div>
             </div>
 
             <!-- Chọn Nền tảng nội dung: Segmented Control rộng rãi, màu sắc trực quan -->
@@ -344,15 +461,21 @@ HTML_TEMPLATE = """
                   <i class="fa-solid fa-shapes text-sky-400"></i> Nền tảng nội dung & Phong cách hiển thị:
                 </span>
                 <span class="text-xs text-slate-400 font-medium hidden sm:inline">
-                  {{ settings.platform === 'auto' ? 'AI tự động chọn nền tảng tối ưu theo nội dung' : (settings.platform === 'facebook' ? 'Định dạng Facebook Confession / Post kèm tương tác' : (settings.platform === 'instagram' ? 'Định dạng Instagram Feed kèm Story Ring' : 'Định dạng Threads tối giản đối đáp nhanh')) }}
+                  {{ settings.platform === 'auto' ? 'AI tự động chọn nền tảng tối ưu theo nội dung' : (settings.platform === 'documentary' ? 'Định dạng Phim Tư Liệu: Video & Hình ảnh tư liệu xen kẽ toàn màn hình' : (settings.platform === 'facebook' ? 'Định dạng Facebook Confession / Post kèm tương tác' : (settings.platform === 'instagram' ? 'Định dạng Instagram Feed kèm Story Ring' : 'Định dạng Threads tối giản đối đáp nhanh'))) }}
                 </span>
               </div>
-              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div class="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                 <button type="button" @click="setPlatform('auto')"
                   :class="settings.platform === 'auto' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold shadow-md shadow-purple-600/35 ring-2 ring-purple-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
                   class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
                   <span class="text-base">🤖</span>
-                  <span>Tự động (AI chọn)</span>
+                  <span>Tự động</span>
+                </button>
+                <button type="button" @click="setPlatform('documentary')"
+                  :class="settings.platform === 'documentary' ? 'bg-gradient-to-r from-red-600 to-amber-600 text-white font-bold shadow-md shadow-red-600/35 ring-2 ring-amber-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
+                  class="py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer">
+                  <span class="text-base">🎬</span>
+                  <span>Hình + Video</span>
                 </button>
                 <button type="button" @click="setPlatform('threads')"
                   :class="settings.platform === 'threads' ? 'bg-indigo-600 text-white font-bold shadow-md shadow-indigo-600/35 ring-2 ring-indigo-400/50' : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60'"
@@ -375,7 +498,7 @@ HTML_TEMPLATE = """
               </div>
             </div>
 
-            <!-- Tùy chỉnh nhanh: Số lượng bình luận & Giọng đọc Adam / Brian -->
+            <!-- Tùy chỉnh nhanh: Số lượng bình luận & Giọng đọc truyền cảm -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 rounded-xl bg-slate-900/70 border border-slate-800">
               <div class="space-y-1.5">
                 <label class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
@@ -399,14 +522,17 @@ HTML_TEMPLATE = """
                   <span>Giọng đọc dẫn chuyện chính:</span>
                 </label>
                 <select v-model="authorVoiceInput" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                  <option value="adam">🎙️ Adam (Trầm ấm, nam tính, cuốn hút như Podcast - Khuyên dùng)</option>
-                  <option value="brian">🎬 Brian (Nam điện ảnh, truyền cảm sâu lắng)</option>
-                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn truyền cảm)</option>
-                  <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn biểu cảm, TikTok viral)</option>
-                  <option value="ava">🌸 Ava (Nữ hiện đại, sôi nổi)</option>
-                  <option value="emma">🌷 Emma (Nữ dịu dàng)</option>
+                  <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng, bắt trend - Khuyên dùng)</option>
+                  <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, xéo xắt duyên dáng, đỉnh Threads)</option>
+                  <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời, kiểu Độ Mixi / PewPew)</option>
+                  <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương, vui tươi, hài nhẹ)</option>
+                  <option value="chi_google">🤖 Chị Google (Meme robot hài hước)</option>
+                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn (Nghiêm túc, ấm áp)</option>
+                  <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn (Truyền cảm, tự nhiên)</option>
+                  <option value="adam">🎙️ Adam (Podcast quốc tế)</option>
+                  <option value="brian">🎙️ Brian (Điện ảnh quốc tế)</option>
                 </select>
-                <span class="text-xs text-slate-400 block">Giọng Adam & Brian lồng tiếng nam châm cực cuốn hút</span>
+                <span class="text-xs text-slate-400 block">Giọng đọc tiếng Việt tự nhiên 100%, rõ ràng, truyền cảm và chuẩn nhịp điệu</span>
               </div>
             </div>
 
@@ -431,46 +557,6 @@ HTML_TEMPLATE = """
               </button>
             </div>
 
-            <!-- Quick Viral Chips (Daily Fresh Trends) -->
-            <div class="space-y-2 pt-1">
-              <div class="flex items-center justify-between text-xs flex-wrap gap-2">
-                <div class="flex items-center gap-2">
-                  <span class="text-amber-400 font-bold flex items-center gap-1.5">
-                    <i class="fa-solid fa-fire text-amber-500"></i>
-                    <span>Trend Thịnh Hành Hôm Nay</span>
-                    <span v-if="trendingTopicsInfo.date_display" class="px-2 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-medium">
-                      {{ trendingTopicsInfo.date_display }}
-                    </span>
-                  </span>
-                  <span v-if="trendingTopicsInfo.updated_at" class="text-xs text-slate-500 hidden md:inline">
-                    (Cập nhật lúc: {{ trendingTopicsInfo.updated_at }})
-                  </span>
-                </div>
-                <div class="flex items-center gap-2">
-                  <button @click="crawlTrendingThreads(false)" :disabled="pipelineState.is_running || isCrawlingTrending"
-                    class="text-xs px-3 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-cyan-300 hover:text-cyan-200 border border-cyan-500/30 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
-                    title="Cào bài viết thật từ Threads đưa vào bảng duyệt">
-                    <i v-if="isCrawlingTrending" class="fa-solid fa-spinner fa-spin text-xs"></i>
-                    <i v-else class="fa-solid fa-hashtag text-xs"></i>
-                    <span>Quét bài thật Threads</span>
-                  </button>
-
-                  <button @click="loadDailyTrendingTopics(true)" :disabled="isRefreshingTrends"
-                    class="text-xs px-3 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-slate-700/60 transition flex items-center gap-1.5 disabled:opacity-50 shadow-sm cursor-pointer"
-                    title="Quét lại xu hướng thịnh hành mới nhất">
-                    <i class="fa-solid fa-arrows-rotate text-indigo-400" :class="{'fa-spin': isRefreshingTrends}"></i>
-                    <span class="font-medium">{{ isRefreshingTrends ? 'Đang quét...' : 'Làm mới trend' }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="flex items-center gap-2 flex-wrap">
-                <button v-for="t in viralTopics" :key="t" @click="pickTopic(t)"
-                  class="text-xs px-3 py-1.5 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition hover:border-amber-500/60 hover:text-amber-200 hover:shadow-sm cursor-pointer">
-                  {{ t }}
-                </button>
-              </div>
-            </div>
 
             <!-- Emotional Arc Badge -->
             <div v-if="post.emotional_arc" class="p-3 rounded-xl bg-indigo-950/40 border border-indigo-800/40 flex items-center justify-between text-xs">
@@ -495,8 +581,9 @@ HTML_TEMPLATE = """
             </button>
           </div>
 
-          <!-- Post Editor (Author) -->
-          <div class="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4 shadow-md">
+          <!-- Post Editor (Author) (Khi chọn Threads / FB / IG) -->
+          <template v-if="settings.platform !== 'documentary'">
+            <div class="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4 shadow-md">
             <div class="flex items-center justify-between border-b border-slate-800/80 pb-3 flex-wrap gap-2">
               <div class="flex items-center gap-2.5 flex-wrap">
                 <span class="text-xs font-bold text-amber-400 flex items-center gap-1.5 uppercase tracking-wide">
@@ -543,12 +630,15 @@ HTML_TEMPLATE = """
                   <i class="fa-solid fa-microphone text-pink-400"></i> Giọng đọc bài chính:
                 </label>
                 <select v-model="post.voice_id" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
-                  <option value="adam">🎙️ Adam (Trầm ấm podcast)</option>
-                  <option value="brian">🎬 Brian (Nam điện ảnh)</option>
-                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn)</option>
-                  <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ chuẩn)</option>
-                  <option value="ava">🌸 Ava (Nữ hiện đại)</option>
-                  <option value="emma">🌷 Emma (Nữ)</option>
+                  <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng)</option>
+                  <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, hài hước)</option>
+                  <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời)</option>
+                  <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương)</option>
+                  <option value="chi_google">🤖 Chị Google (Meme robot)</option>
+                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn</option>
+                  <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn</option>
+                  <option value="adam">🎙️ Adam (Podcast)</option>
+                  <option value="brian">🎙️ Brian (Điện ảnh)</option>
                 </select>
               </div>
 
@@ -757,12 +847,15 @@ HTML_TEMPLATE = """
                 <div>
                   <label class="text-xs font-semibold text-slate-400 block mb-1">Giọng đọc:</label>
                   <select v-model="cmt.voice_id" class="w-full glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
-                    <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ)</option>
-                    <option value="vi-VN-NamMinhNeural">Nam Minh (Nam)</option>
-                    <option value="adam">Adam (Nam trầm)</option>
-                    <option value="brian">Brian (Nam)</option>
-                    <option value="ava">Ava (Nữ)</option>
-                    <option value="emma">Emma (Nữ)</option>
+                    <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, hài)</option>
+                    <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng)</option>
+                    <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời)</option>
+                    <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương)</option>
+                    <option value="chi_google">🤖 Chị Google (Robot meme)</option>
+                    <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn</option>
+                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn</option>
+                    <option value="adam">🎙️ Adam (Podcast)</option>
+                    <option value="brian">🎙️ Brian (Điện ảnh)</option>
                   </select>
                 </div>
 
@@ -836,7 +929,161 @@ HTML_TEMPLATE = """
               placeholder="VD: Còn bạn thì sao? Nếu rơi vào tình huống này bạn sẽ xử lý thế nào?..."
               class="w-full glass-input rounded-xl px-4 py-2.5 text-xs text-purple-100 placeholder-purple-400/50 border border-purple-700/60 focus:border-purple-500 font-medium bg-purple-950/50">
           </div>
-        </div>
+        </template>
+
+        <!-- Phim Tư Liệu Editor (Hình Ảnh + Video Phân Cảnh) -->
+        <template v-else>
+          <!-- 1. Bối Cảnh & Header Phim Tư Liệu -->
+          <div class="p-5 rounded-2xl bg-gradient-to-r from-red-950/40 via-slate-900 to-amber-950/30 border border-red-500/40 space-y-4 shadow-xl">
+            <div class="flex items-center justify-between border-b border-red-500/30 pb-3 flex-wrap gap-2">
+              <span class="text-xs font-extrabold text-amber-300 flex items-center gap-2 uppercase tracking-wide">
+                <i class="fa-solid fa-film text-red-400"></i> BỐI CẢNH & TIÊU ĐỀ PHIM TƯ LIỆU
+              </span>
+              <span class="text-xs px-2.5 py-0.5 rounded-full font-bold bg-red-600/20 text-red-300 border border-red-500/40">
+                🎬 Visual Documentary 60 FPS
+              </span>
+            </div>
+
+            <!-- Tiêu đề & Nhãn Badge -->
+            <div class="flex items-center justify-between text-xs text-slate-400 border-b border-slate-800 pb-2">
+              <span class="flex items-center gap-1.5 text-amber-400 font-semibold">
+                <i class="fa-solid fa-calendar-day"></i> Sự kiện tư liệu theo ngày: {{ trendingTopicsInfo.date_display || selectedDate }}
+              </span>
+              <span class="text-[11px] text-slate-500 font-mono">Tự động cấu trúc hóa phân cảnh & lời dẫn chuyện</span>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              <div class="space-y-1">
+                <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                  <i class="fa-solid fa-heading text-red-400"></i> Tiêu đề phim (In hoa nổi bật):
+                </label>
+                <input v-model="post.video_title" @change="refreshCardPreview" type="text"
+                  placeholder="VD: CÚ LỪA 250 CHIẾC ÁO PHÔNG TÂN PHÁT XÍT"
+                  class="w-full glass-input rounded-xl px-3 py-2 text-xs font-bold text-white uppercase border border-red-500/40">
+              </div>
+
+              <div class="space-y-1">
+                <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                  <i class="fa-solid fa-tag text-amber-400"></i> Nhãn chuyên mục / Tổ chức:
+                </label>
+                <input v-model="post.story_badge" @change="refreshCardPreview" type="text"
+                  placeholder="VD: HỒ SƠ KỲ THÚ • EXIT DEUTSCHLAND"
+                  class="w-full glass-input rounded-xl px-3 py-2 text-xs font-semibold text-amber-300 border border-amber-500/40">
+              </div>
+            </div>
+
+            <!-- Lời mở đầu / Tóm tắt câu chuyện -->
+            <div class="space-y-1">
+              <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                <i class="fa-solid fa-feather text-sky-400"></i> Lời dẫn mở màn (Hook lôi cuốn):
+              </label>
+              <textarea v-model="post.content" rows="3"
+                class="w-full glass-input rounded-xl p-3 text-xs leading-relaxed text-slate-100 border border-slate-700/80"
+                placeholder="Lời dẫn tóm tắt câu chuyện..."></textarea>
+            </div>
+          </div>
+
+          <!-- 2. Danh Sách Phân Cảnh (Video Clips & Ảnh Tư Liệu Xen Kẽ) -->
+          <div class="space-y-4 pt-1">
+            <div class="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wide">
+              <span class="flex items-center gap-2 text-red-400 text-sm">
+                <i class="fa-solid fa-clapperboard"></i>
+                <span>Các Phân Cảnh Tư Liệu ({{ post.documentary_scenes ? post.documentary_scenes.length : 0 }} Cảnh)</span>
+              </span>
+              <button @click="addDocumentaryScene"
+                class="px-4 py-2 rounded-xl bg-gradient-to-r from-red-600 to-amber-600 hover:opacity-90 text-white font-bold text-xs flex items-center gap-2 transition shadow-md shadow-red-600/30 cursor-pointer">
+                <i class="fa-solid fa-plus"></i>
+                <span>➕ Thêm Phân Cảnh Mới</span>
+              </button>
+            </div>
+
+            <div v-for="(sc, sIdx) in (post.documentary_scenes || [])" :key="sIdx"
+              class="p-4 rounded-2xl bg-slate-900/70 hover:bg-slate-900/90 border border-slate-800 hover:border-red-500/40 transition shadow-lg space-y-3">
+              <!-- Row 1: Header (Badge, Type, Delete) -->
+              <div class="flex items-center justify-between gap-3 flex-wrap border-b border-slate-800/70 pb-2.5">
+                <div class="flex items-center gap-2.5 flex-wrap">
+                  <span class="w-7 h-7 rounded-lg bg-red-500/20 text-red-300 text-xs flex items-center justify-center font-bold border border-red-500/30">#{{ sIdx + 1 }}</span>
+                  <!-- Type Selector -->
+                  <select v-model="sc.type" class="glass-input rounded-xl px-2.5 py-1 text-xs font-bold"
+                    :class="sc.type === 'video' ? 'text-red-300 bg-red-950/40 border-red-500/40' : 'text-amber-300 bg-amber-950/40 border-amber-500/40'">
+                    <option value="video">🎬 Video Clip</option>
+                    <option value="image">🖼️ Hình Ảnh Tư Liệu (Ken Burns)</option>
+                  </select>
+                  <!-- Badge Label -->
+                  <input v-model="sc.badge" type="text" placeholder="Nhãn cảnh (VD: LỄ HỘI ROCK CỰC ĐOAN)"
+                    class="glass-input rounded-xl px-3 py-1 text-xs w-48 font-semibold text-slate-200">
+                </div>
+
+                <div class="flex items-center gap-3">
+                  <!-- SFX Selector -->
+                  <div class="flex items-center gap-1.5 text-xs text-slate-400">
+                    <span>SFX:</span>
+                    <select v-model="sc.sfx" class="glass-input rounded-lg px-2 py-1 text-xs bg-slate-800 text-slate-200 font-medium">
+                      <option value="none">✨ Không SFX</option>
+                      <option value="tension_riser">🎻 Căng thẳng dồn dập (Tension Riser)</option>
+                      <option value="ting">🔔 Crystal Ting (Phát hiện)</option>
+                      <option value="sub_drop">🔥 Sub Bass Drop (Bẻ lái sốc)</option>
+                      <option value="boom">💥 Mind Blown (Bùng nổ)</option>
+                      <option value="water_splash">🌊 Tiếng nước giặt (Foley)</option>
+                      <option value="applause">👏 Vỗ tay thán phục</option>
+                      <option value="scratch">💿 Scratch đĩa (Quay xe)</option>
+                    </select>
+                  </div>
+
+                  <!-- Delete button -->
+                  <button @click="removeDocumentaryScene(sIdx)" title="Xóa phân cảnh này"
+                    class="w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-400 flex items-center justify-center transition border border-rose-500/30 cursor-pointer">
+                    <i class="fa-solid fa-trash-can text-xs"></i>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Row 2: Media preview & Path -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                <div class="sm:col-span-3 h-20 rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-slate-800">
+                  <video v-if="sc.type === 'video' && sc.path" :src="'/api/documentary_media?path=' + sc.path" class="w-full h-full object-cover" muted loop autoplay></video>
+                  <img v-else-if="sc.type === 'image' && sc.path" :src="'/api/documentary_media?path=' + sc.path" class="w-full h-full object-cover">
+                  <div v-else class="text-[10px] text-slate-400 text-center px-2">
+                    <i class="fa-solid fa-clapperboard text-amber-400 text-sm block mb-1"></i>
+                    <span>Slide điện ảnh chữ nghệ thuật</span>
+                  </div>
+                </div>
+                <div class="sm:col-span-9 space-y-1">
+                  <div class="flex items-center justify-between">
+                    <label class="text-[11px] text-slate-400 font-mono">Đường dẫn file video/ảnh thật:</label>
+                    <label class="text-[11px] text-amber-300 hover:text-amber-200 cursor-pointer flex items-center gap-1 font-semibold">
+                      <i class="fa-solid fa-upload"></i> Tải file từ máy
+                      <input type="file" accept="image/*,video/*" class="hidden" @change="uploadSceneMedia($event, sIdx)">
+                    </label>
+                  </div>
+                  <input v-model="sc.path" type="text" placeholder="Để trống để dùng slide điện ảnh chữ nghệ thuật, hoặc nhập đường dẫn file thật..."
+                    class="w-full glass-input rounded-xl px-3 py-1.5 text-xs font-mono text-slate-300">
+                </div>
+              </div>
+
+              <!-- Row 3: Narration script -->
+              <div class="space-y-1">
+                <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                  <i class="fa-solid fa-microphone-lines text-pink-400"></i> Lời đọc phân cảnh (Giọng dẫn chuyện Nam Minh/Hoài My đọc đoạn này):
+                </label>
+                <textarea v-model="sc.text" rows="2"
+                  class="w-full glass-input rounded-xl p-3 text-xs leading-relaxed text-slate-100"
+                  placeholder="Lời dẫn chuyện cho phân cảnh này..."></textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- Nút Render Nhanh cho Phim Tư Liệu -->
+          <div class="pt-2">
+            <button @click="startRender" :disabled="pipelineState.is_running"
+              class="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-red-600 via-amber-600 to-indigo-600 hover:opacity-95 text-white font-extrabold text-sm shadow-xl shadow-red-600/30 transition flex items-center justify-center gap-3 cursor-pointer disabled:opacity-50">
+              <i v-if="pipelineState.is_running" class="fa-solid fa-spinner fa-spin text-lg"></i>
+              <i v-else class="fa-solid fa-clapperboard text-lg"></i>
+              <span>🎬 RENDER VIDEO PHIM TƯ LIỆU 60 FPS (HÌNH + VIDEO)</span>
+            </button>
+          </div>
+        </template>
+      </div>
 
         <!-- Section 3: Phong Cách Dựng Video & Bố Cục Đa Dạng (Không Bị Bó Lại) -->
         <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-5">
@@ -896,11 +1143,41 @@ HTML_TEMPLATE = """
                   <i class="fa-solid fa-table-columns text-indigo-400"></i> Bố cục khung hình:
                 </label>
                 <select v-model="settings.layout_preset" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                  <option value="center">🎯 Căn Giữa Chuẩn TikTok / Reels (Đẹp nhất, không bị che)</option>
+                  <option value="sandwich">🥪 Sandwich Viral: Thẻ Trên - Video Ở Giữa - Thẻ Dưới (Hot TikTok)</option>
+                  <option value="center">🎯 Căn Giữa Toàn Màn Hình (Focus Chuẩn TikTok/Reels)</option>
                   <option value="split_screen">📱 Nửa Trên Gameplay - Nửa Dưới Thẻ (Split-Screen)</option>
                   <option value="bottom_story">📖 Storyteller (Hơi thấp, tối giản)</option>
                 </select>
                 <span class="text-xs text-slate-500 block">Vị trí đặt thẻ chữ trên tỷ lệ dọc 9:16</span>
+              </div>
+
+              <!-- Tùy chọn Video ở giữa (Sandwich Center Video) -->
+              <div class="space-y-1.5 p-3 rounded-xl bg-slate-950/50 border border-slate-800/80">
+                <div class="flex items-center justify-between">
+                  <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-layer-group text-teal-400"></i> Video Kẹp Ở Giữa:
+                  </label>
+                  <label class="flex items-center gap-1.5 text-[11px] text-teal-300 cursor-pointer">
+                    <input type="checkbox" v-model="directorConfig.visual_layout.enable_center_satisfying_video" class="rounded bg-slate-800 border-slate-700 text-teal-500">
+                    <span>Bật video giữa</span>
+                  </label>
+                </div>
+                <select v-if="directorConfig.visual_layout.enable_center_satisfying_video || settings.layout_preset === 'sandwich'" 
+                  v-model="directorConfig.visual_layout.center_satisfying_category" 
+                  class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
+                  <option value="random">🤖 Tự Động Theo Chủ Đề (Viral Sandwich)</option>
+                  <option value="gameplay">🎮 Minecraft Parkour & Gameplay 60FPS</option>
+                  <option value="puzzle">🧩 3D Puzzle & Ghép Hình Thỏa Mãn</option>
+                  <option value="food">🍰 Mukbang / Đồ Ngọt / Nấu Ăn</option>
+                  <option value="asmr">🧼 Cắt Xà Phòng ASMR & Thư Giãn</option>
+                  <option value="kinetic_sand">⏳ Cát Động Lực (Kinetic Sand)</option>
+                  <option value="hypnotic">🌀 Hypnotic Neon Vòng Xoáy Thư Giãn</option>
+                  <option value="custom">📁 File Video Tư Liệu Riêng (Custom MP4)</option>
+                </select>
+                <div v-if="(directorConfig.visual_layout.enable_center_satisfying_video || settings.layout_preset === 'sandwich') && directorConfig.visual_layout.center_satisfying_category === 'custom'" class="pt-1">
+                  <input v-model="post.center_video_custom_path" type="text" placeholder="Nhập đường dẫn file MP4 trên máy (VD: assets/my_video.mp4)..." class="w-full glass-input rounded-xl px-3 py-1.5 text-xs text-slate-200 font-mono">
+                </div>
+                <span class="text-[10px] text-slate-500 block">Kẹp video cuốn hút ở giữa màn hình bo góc 26px mềm mại</span>
               </div>
 
               <!-- Chế độ nền video -->
@@ -922,6 +1199,9 @@ HTML_TEMPLATE = """
                   <option value="infinity_neon">🌀 3D Infinity Cyberpunk (Neon)</option>
                   <option value="infinity_dark">🌑 3D Infinity Dark Luxury (Kim loại)</option>
                   <option value="infinity_gold">✨ 3D Infinity Golden Matrix (Vàng)</option>
+                  <option value="kinetic_sand">⏳ Cát Động Học Thư Giãn (Kinetic Sand 9:16)</option>
+                  <option value="hypnotic">🌀 Vòng Xoáy Huyền Ảo Thư Giãn (Sacred Spiral 9:16)</option>
+                  <option value="puzzle">🔮 Kính Vạn Hoa Thư Giãn (Kaleidoscope 9:16)</option>
                   <option value="gradient_cyber">🌌 Gradient Dark Cyberpunk (Tĩnh)</option>
                   <option value="gradient_lofi">☕ Gradient Lofi Cozy (Ấm cúng)</option>
                 </select>
@@ -942,12 +1222,15 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc chính:
                   </label>
                   <select v-model="settings.voice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-                    <option value="adam">🎙️ Adam (Trầm ấm podcast)</option>
-                    <option value="brian">🎬 Brian (Nam điện ảnh)</option>
-                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam)</option>
-                    <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ)</option>
-                    <option value="ava">🌸 Ava (Nữ hiện đại)</option>
-                    <option value="emma">🌷 Emma (Nữ)</option>
+                    <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng, bắt trend - Khuyên dùng)</option>
+                    <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, hài hước, duyên dáng)</option>
+                    <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời, kiểu Độ Mixi)</option>
+                    <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương, vui tươi)</option>
+                    <option value="chi_google">🤖 Chị Google (Meme robot)</option>
+                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn (Ấm áp)</option>
+                    <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn (Truyền cảm)</option>
+                    <option value="adam">🎙️ Adam (Podcast)</option>
+                    <option value="brian">🎙️ Brian (Điện ảnh)</option>
                   </select>
                 </div>
 
@@ -985,10 +1268,13 @@ HTML_TEMPLATE = """
                 </select>
                 <div class="flex items-center gap-2 pt-1" v-if="settings.bgm_choice !== 'none'">
                   <i class="fa-solid fa-volume-low text-xs text-slate-400"></i>
-                  <input type="range" min="5" max="100" step="5" v-model.number="settings.bgm_volume"
+                  <input type="range" min="5" max="80" step="5" v-model.number="settings.bgm_volume"
                     class="w-full accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer">
                   <i class="fa-solid fa-volume-high text-xs text-slate-400"></i>
                 </div>
+                <span class="text-[10px] text-slate-500 block pt-0.5" v-if="settings.bgm_choice !== 'none'">
+                  Khuyên dùng 20% - 30% để nhạc êm ái, rõ tiếng làm nền tôn giọng đọc
+                </span>
               </div>
             </div>
           </div>
@@ -1073,6 +1359,62 @@ HTML_TEMPLATE = """
               </div>
             </div>
 
+            <!-- Xem trước khi là Phim Tư Liệu (Hình + Video) -->
+            <template v-else-if="settings.platform === 'documentary'">
+              <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs text-red-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                      <i class="fa-solid fa-clapperboard"></i> Phim Tư Liệu
+                    </span>
+                    <span class="px-2.5 py-0.5 rounded-full text-xs font-bold border bg-red-600/20 text-red-300 border-red-500/40">
+                      🎬 Hình + Video
+                    </span>
+                  </div>
+                  <button @click="refreshCardPreview" class="text-xs text-red-400 hover:text-red-300 font-semibold flex items-center gap-1 cursor-pointer">
+                    <i class="fa-solid fa-arrows-rotate"></i> Cập nhật
+                  </button>
+                </div>
+
+                <!-- Thẻ Tiêu Đề Header Badge -->
+                <div class="space-y-1.5">
+                  <div class="text-xs text-amber-300 font-semibold flex items-center justify-between">
+                    <span>Thẻ Tiêu Đề Phim Tư Liệu:</span>
+                    <span class="text-xs text-slate-400 font-mono">{{ post.story_badge || 'HỒ SƠ KỲ THÚ' }}</span>
+                  </div>
+                  <img :src="'/api/card/header_badge.png?t=' + cardTimestamp" alt="Header Badge" class="w-full rounded-2xl shadow-lg border border-red-500/40">
+                </div>
+
+                <!-- Timeline Phân Cảnh Video & Hình Ảnh -->
+                <div class="text-xs text-indigo-300 font-bold uppercase tracking-wider flex items-center justify-between pt-1">
+                  <span>Timeline Phân Cảnh ({{ (post.documentary_scenes || []).length }} Cảnh):</span>
+                </div>
+
+                <div v-for="(sc, sIdx) in (post.documentary_scenes || [])" :key="sIdx"
+                  class="p-3.5 rounded-2xl bg-slate-900/80 border border-slate-700/80 space-y-2 shadow-md hover:border-amber-500/50 transition">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="px-2 py-0.5 rounded-full font-bold text-[11px]"
+                      :class="sc.type === 'video' ? 'bg-red-500/20 text-red-300 border border-red-500/40' : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'">
+                      {{ sc.type === 'video' ? '🎬 Video Clip #' + (sIdx+1) : '🖼️ Hình Ảnh #' + (sIdx+1) }}
+                    </span>
+                    <span class="text-amber-300 font-bold text-[11px]">{{ sc.badge }}</span>
+                  </div>
+
+                  <!-- Media Preview thumbnail -->
+                  <div class="h-28 w-full rounded-xl overflow-hidden bg-black/80 flex items-center justify-center relative border border-slate-800">
+                    <video v-if="sc.type === 'video'" :src="'/api/documentary_media?path=' + sc.path" class="w-full h-full object-cover" muted loop autoplay></video>
+                    <img v-else :src="'/api/documentary_media?path=' + sc.path" class="w-full h-full object-cover">
+                    <span class="absolute bottom-1.5 right-2 px-1.5 py-0.5 rounded text-[10px] bg-black/70 text-white font-mono">
+                      SFX: {{ sc.sfx || 'none' }}
+                    </span>
+                  </div>
+
+                  <p class="text-xs text-slate-300 line-clamp-2 italic leading-relaxed">"{{ sc.text }}"</p>
+                </div>
+              </div>
+            </template>
+
+            <!-- Xem trước thẻ Threads / Facebook / Instagram -->
             <template v-else>
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-2">
@@ -1176,18 +1518,39 @@ HTML_TEMPLATE = """
             :style="{ width: pipelineState.progress_percent + '%' }"></div>
         </div>
 
-        <!-- Action Callout when Script is ready but Video is not rendered yet -->
-        <div v-if="pipelineState.steps[1] && pipelineState.steps[1].status === 'done' && pipelineState.steps[2] && pipelineState.steps[2].status === 'idle'"
+        <!-- Khi hệ thống ĐANG CHẠY (1-Click hoặc Render): Hiển thị trạng thái tự động A-Z, không giục bấm nút -->
+        <div v-if="pipelineState.is_running" class="p-4 rounded-2xl bg-indigo-950/60 border border-indigo-500/40 flex items-center justify-between gap-4 flex-wrap shadow-lg">
+          <div class="flex items-center gap-3">
+            <span class="w-8 h-8 rounded-xl bg-pink-500/20 text-pink-400 flex items-center justify-center text-sm">
+              <i class="fa-solid fa-bolt fa-spin"></i>
+            </span>
+            <div>
+              <h4 class="text-xs font-bold text-white flex items-center gap-2">
+                <span>⚡ ĐANG TỰ ĐỘNG SẢN XUẤT TRỌN GÓI 1-CLICK TỪ A ĐẾN Z...</span>
+                <span class="px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 text-[10px] font-mono">1-CLICK PIPELINE</span>
+              </h4>
+              <p class="text-[11px] text-indigo-200/70 mt-0.5">
+                Hệ thống đang tự động thu âm giọng đọc, mix nhạc nền và dựng video 60 FPS. Bạn KHÔNG cần bấm thêm bất cứ nút nào — video sẽ tự động phát khi xong!
+              </p>
+            </div>
+          </div>
+          <button @click="currentTab = 'studio'" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium cursor-pointer">
+            <i class="fa-solid fa-eye text-indigo-400 mr-1"></i> Xem kịch bản ở Tab 1
+          </button>
+        </div>
+
+        <!-- Action Callout CHỈ HIỆN khi người dùng bấm "TẠO KỊCH BẢN ĐỂ DUYỆT" (đã xong bước 1 & 2 và đang tạm dừng chờ duyệt) -->
+        <div v-else-if="!pipelineState.is_running && pipelineState.steps[1] && pipelineState.steps[1].status === 'done' && pipelineState.steps[2] && pipelineState.steps[2].status === 'idle'"
           class="p-5 rounded-2xl bg-gradient-to-r from-indigo-950 via-purple-950 to-slate-900 border-2 border-indigo-500/60 flex items-center justify-between gap-4 flex-wrap shadow-xl">
           <div class="space-y-1">
             <h3 class="text-sm font-extrabold text-white flex items-center gap-2">
               <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-bold border border-emerald-500/30">
-                ✅ ĐÃ XONG BƯỚC 1 & 2
+                ✅ ĐÃ TẠO XONG KỊCH BẢN & THẺ
               </span>
-              <span>Kịch bản & Thẻ Avatar người thật đã sẵn sàng!</span>
+              <span>Bạn đang ở chế độ Duyệt Kịch Bản!</span>
             </h3>
             <p class="text-xs text-indigo-200/80">
-              Bước 3 (Thu âm giọng đọc), Bước 4 (Nhạc Lofi & SFX) và Bước 5 (Dựng video 60 FPS) đang chờ bạn bấm bắt đầu.
+              Bạn có thể quay lại Tab 1 để kiểm tra/sửa câu chữ, hoặc bấm nút dưới đây để bắt đầu thu âm và dựng video:
             </p>
           </div>
 
@@ -1196,7 +1559,7 @@ HTML_TEMPLATE = """
               <i class="fa-solid fa-pen-to-square text-indigo-400"></i>
               <span>Xem/Sửa Kịch Bản (Tab 1)</span>
             </button>
-            <button @click="startRender" :disabled="isRenderingVideo"
+            <button @click="startRender" :disabled="pipelineState.is_running"
               class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-indigo-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-pink-500/30 transition flex items-center gap-2 animate-pulse cursor-pointer">
               <i class="fa-solid fa-play text-sm"></i>
               <span>BẤM RENDER VIDEO NGAY (BƯỚC 3 -> 6)</span>
@@ -1204,7 +1567,28 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
-        <!-- Quick Action Bar -->
+        <!-- Khi ĐÃ HOÀN THÀNH XUẤT XƯỞNG VIDEO: -->
+        <div v-else-if="pipelineState.current_step_id === 'done'" class="p-4 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 flex items-center justify-between gap-4 flex-wrap shadow-lg">
+          <div class="flex items-center gap-3">
+            <span class="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-300 flex items-center justify-center text-sm">
+              <i class="fa-solid fa-circle-check"></i>
+            </span>
+            <div>
+              <h4 class="text-xs font-bold text-emerald-200">🎉 VIDEO HOÀN CHỈNH ĐÃ XUẤT XƯỞNG THÀNH CÔNG (60 FPS)!</h4>
+              <p class="text-[11px] text-emerald-300/70 mt-0.5">Video đã được tối ưu hóa âm thanh, đồ họa và lưu vào thư mục output.</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button @click="openFinalFolder" class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition flex items-center gap-2 shadow-md shadow-emerald-600/30 cursor-pointer">
+              <i class="fa-regular fa-folder-open"></i> Mở Thư Mục Video
+            </button>
+            <button @click="currentTab = 'studio'" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold cursor-pointer">
+              <i class="fa-solid fa-rotate-left mr-1"></i> Tạo Video Khác
+            </button>
+          </div>
+        </div>
+
+        <!-- Quick Action Bar khi ở trạng thái nghỉ: -->
         <div v-else class="flex items-center justify-between pt-1 border-t border-slate-800/60 flex-wrap gap-2 text-xs">
           <div class="flex items-center gap-2">
             <button @click="currentTab = 'studio'" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition flex items-center gap-1.5 font-medium cursor-pointer">
@@ -1212,10 +1596,10 @@ HTML_TEMPLATE = """
               <span>Về Tab 1: Studio Sáng Tạo (Xem Kịch Bản & Thẻ)</span>
             </button>
           </div>
-          <button @click="startRender" :disabled="isRenderingVideo"
+          <button @click="startRender" :disabled="pipelineState.is_running"
             class="px-5 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-indigo-600 hover:opacity-90 text-white font-bold transition flex items-center gap-2 shadow-md shadow-pink-500/20 disabled:opacity-50 cursor-pointer">
             <i class="fa-solid fa-play"></i>
-            <span>Bấm Render Video Hoàn Chỉnh (60 FPS)</span>
+            <span>Bắt Đầu Render Video</span>
           </button>
         </div>
       </div>
@@ -1392,10 +1776,10 @@ HTML_TEMPLATE = """
               <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
                 <div class="flex items-center justify-between">
                   <label class="text-xs text-slate-400 font-semibold">Âm lượng nhạc nền:</label>
-                  <span class="text-xs font-mono font-bold text-rose-400">{{ Math.round((directorConfig.emotional_pacing.bgm_volume_normal || 0.45) * 100) }}%</span>
+                  <span class="text-xs font-mono font-bold text-rose-400">{{ Math.round((directorConfig.emotional_pacing.bgm_volume_normal || 0.25) * 100) }}%</span>
                 </div>
-                <input type="range" min="0.05" max="1.0" step="0.05" v-model.number="directorConfig.emotional_pacing.bgm_volume_normal" class="w-full accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer">
-                <span class="text-[10px] text-slate-500 block">Khuyên dùng 40% - 50% để không át giọng nói</span>
+                <input type="range" min="0.05" max="0.80" step="0.05" v-model.number="directorConfig.emotional_pacing.bgm_volume_normal" class="w-full accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer">
+                <span class="text-[10px] text-slate-500 block">Khuyên dùng 20% - 30% để làm nền êm ái, rõ tiếng</span>
               </div>
 
               <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
@@ -1422,12 +1806,15 @@ HTML_TEMPLATE = """
                 </div>
                 <div class="grid grid-cols-3 gap-2">
                   <select v-model="r.voice" class="col-span-2 glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200">
-                    <option value="adam">🎙️ Adam (Trầm ấm, nam tính - Podcast)</option>
-                    <option value="brian">🎬 Brian (Nam điện ảnh truyền cảm)</option>
-                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh (Nam chuẩn truyền cảm)</option>
-                    <option value="vi-VN-HoaiMyNeural">🇻🇳 Hoài My (Nữ truyền cảm, cuốn hút)</option>
-                    <option value="ava">🌸 Ava (Nữ hiện đại)</option>
-                    <option value="emma">🌷 Emma (Nữ dịu dàng)</option>
+                    <option value="nam_hai">🔥 Nam Hài Hước</option>
+                    <option value="nu_cakhia">🌸 Nữ Cà Khịa</option>
+                    <option value="nam_tram_hai">🎙️ Nam Trầm Hài</option>
+                    <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh</option>
+                    <option value="chi_google">🤖 Chị Google</option>
+                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh</option>
+                    <option value="vi-VN-HoaiMyNeural">🌸 Hoài My</option>
+                    <option value="adam">🎙️ Adam</option>
+                    <option value="brian">🎙️ Brian</option>
                   </select>
                   <input v-model="r.rate" type="text" placeholder="+10%" class="glass-input rounded-lg p-1.5 text-xs font-mono text-center">
                 </div>
@@ -1870,6 +2257,14 @@ HTML_TEMPLATE = """
       </div>
     </div>
 
+    <!-- Toast Notification (Floating, Non-intrusive) -->
+    <div v-if="toast.show" 
+         class="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-xl shadow-2xl backdrop-blur-md border flex items-center gap-3 transition-all transform animate-pulse"
+         :class="toast.type === 'error' ? 'bg-rose-950/90 border-rose-500/50 text-rose-100 shadow-rose-900/40' : 'bg-slate-900/95 border-emerald-500/50 text-emerald-100 shadow-emerald-900/40'">
+      <i :class="toast.type === 'error' ? 'fa-solid fa-circle-exclamation text-rose-400' : 'fa-solid fa-circle-check text-emerald-400'"></i>
+      <span class="text-xs font-semibold">{{ toast.message }}</span>
+    </div>
+
   </div>
 
   <script>
@@ -1878,10 +2273,12 @@ HTML_TEMPLATE = """
     createApp({
       data() {
         return {
+          toast: { show: false, message: '', type: 'success' },
           currentTab: 'studio',
           topicInput: '',
+          storyModeInput: 'auto',
           commentCountInput: 'auto',
-          authorVoiceInput: 'adam',
+          authorVoiceInput: 'nam_hai',
           isGeneratingScript: false,
           isCrawlingTrending: false,
           previewMode: 'cards',
@@ -1909,6 +2306,8 @@ HTML_TEMPLATE = """
             updated_at: '',
             is_cached: false
           },
+          selectedDate: new Date().toISOString().split('T')[0],
+          topicModeTab: 'true_story',
           isRefreshingTrends: false,
           viralTopics: [],
           post: {
@@ -1933,6 +2332,10 @@ HTML_TEMPLATE = """
             cta_question: '',
             pacing_tempo: 'normal',
             enable_illustration: false,
+            documentary_scenes: [],
+            story_badge: '',
+            video_title: '',
+            center_video_custom_path: '',
             comments: []
           },
           customImageQuery: '',
@@ -1942,13 +2345,17 @@ HTML_TEMPLATE = """
             layout_preset: 'center',
             bg_mode: 'auto',
             card_theme: 'auto',
-            voice: 'vi-VN-HoaiMyNeural',
-            rate: '+20%',
-            bgm_choice: 'random',
-            bgm_volume: 45
+            voice: 'adam',
+            rate: '+16%',
+            bgm_choice: 'gentle_piano_satie.mp3',
+            bgm_volume: 25
           },
           bgmList: [
-            { id: 'random', name: '🎲 Ngẫu nhiên (Kho nhạc nền TikTok/Lofi)' },
+            { id: 'gentle_piano_satie.mp3', name: '🎹 Erik Satie: Gymnopedie No.1 (Dịu êm, sâu lắng, chuẩn tâm sự)' },
+            { id: 'gentle_clair_de_lune.mp3', name: '🌙 Debussy: Clair De Lune (Thơ mộng, nhẹ nhàng, du dương)' },
+            { id: 'gentle_chopin_nocturne.mp3', name: '🎼 Chopin: Nocturne Op 9 No 2 (Ấm áp, êm ái, thư giãn)' },
+            { id: 'lofi_chill.mp3', name: '☕ Lofi Chill Cafe (Dịu êm, thư giãn nhẹ)' },
+            { id: 'random', name: '🎲 Ngẫu nhiên (Tự động chọn nhạc nhẹ)' },
             { id: 'none', name: '🔇 Tắt nhạc nền (Chỉ giọng đọc & SFX)' }
           ],
           pipelineState: {
@@ -1995,7 +2402,9 @@ HTML_TEMPLATE = """
         async loadDailyTrendingTopics(force = false) {
           this.isRefreshingTrends = true;
           try {
-            const res = await fetch(`/api/trending_topics?force=${force}`);
+            const d = this.selectedDate || '';
+            const m = this.topicModeTab || 'true_story';
+            const res = await fetch(`/api/trending_topics?date=${d}&mode=${m}&force=${force}`);
             const data = await res.json();
             if (data.topics && data.topics.length > 0) {
               this.viralTopics = data.topics;
@@ -2003,6 +2412,7 @@ HTML_TEMPLATE = """
             this.trendingTopicsInfo = {
               date: data.date || '',
               date_display: data.date_display || '',
+              mode: data.mode || m,
               updated_at: data.updated_at || '',
               is_cached: data.is_cached || false
             };
@@ -2010,6 +2420,15 @@ HTML_TEMPLATE = """
             console.error('Lỗi tải trending topics:', e);
           } finally {
             this.isRefreshingTrends = false;
+          }
+        },
+        selectDailyTopic(topicText) {
+          this.topicInput = topicText;
+          if (this.topicModeTab === 'true_story') {
+            this.storyModeInput = 'true_story';
+            this.setPlatform('documentary');
+          } else {
+            this.storyModeInput = 'auto';
           }
         },
         startStatusPolling() {
@@ -2030,14 +2449,133 @@ HTML_TEMPLATE = """
         },
         setPlatform(plat) {
           this.settings.platform = plat;
-          if (this.post && plat !== 'auto') {
+          if (!this.post) {
+            this.post = { platform: plat };
+          }
+          if (plat !== 'auto') {
             this.post.platform = plat;
-            if ((plat === 'facebook' || plat === 'instagram') && this.post.illustration_path) {
+            if (plat === 'documentary') {
+              if (!this.post.documentary_scenes || this.post.documentary_scenes.length === 0) {
+                if (this.post.comments && this.post.comments.length > 0) {
+                  this.convertCommentsToScenes();
+                } else if (this.topicInput && /trojan|tân phát xít|exit deutschland|hardcore rebels/i.test(this.topicInput)) {
+                  this.initTrojanScenes();
+                } else {
+                  this.initDocumentaryTemplate();
+                }
+              }
+            } else if ((plat === 'facebook' || plat === 'instagram') && this.post.illustration_path) {
               this.post.enable_illustration = true;
             }
             this.refreshCardPreview();
           }
           this.saveSettings();
+        },
+        convertCommentsToScenes() {
+          if (!this.post) this.post = {};
+          this.post.platform = 'documentary';
+          this.post.video_title = this.post.video_title || (this.topicInput ? this.topicInput.toUpperCase() : 'HỒ SƠ TƯ LIỆU QUỐC TẾ');
+          this.post.story_badge = this.post.story_badge || 'HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT';
+          const comments = this.post.comments || [];
+          this.post.documentary_scenes = comments.slice(0, 6).map((c, i) => ({
+            index: i + 1,
+            type: (i % 2 === 0) ? 'video' : 'image',
+            path: this.post.illustration_path || '',
+            badge: `PHÂN CẢNH #${i + 1}`,
+            text: c.content || '',
+            sfx: (c.sfx && c.sfx !== 'none') ? c.sfx : 'tension_riser'
+          }));
+        },
+        initDocumentaryTemplate() {
+          if (!this.post) this.post = {};
+          this.post.platform = 'documentary';
+          this.post.video_title = this.post.video_title || (this.topicInput ? this.topicInput.toUpperCase() : 'HỒ SƠ TƯ LIỆU QUỐC TẾ');
+          this.post.story_badge = this.post.story_badge || 'HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT';
+          this.post.content = this.post.content || 'Nhập lời mở đầu dẫn dắt câu chuyện kịch tính tại đây...';
+          this.post.documentary_scenes = [
+            { index: 1, type: 'video', path: '', badge: 'MỞ MÀN BÍ ẨN', text: 'Lời dẫn mở màn về sự kiện có thật chấn động...', sfx: 'tension_riser' },
+            { index: 2, type: 'image', path: '', badge: 'MANH MỐI ĐẦU TIÊN', text: 'Hình ảnh và bằng chứng đầu tiên của phi vụ...', sfx: 'ting' },
+            { index: 3, type: 'video', path: '', badge: 'DIỄN BIẾN CAO TRÀO', text: 'Tình huống phát triển bất ngờ ngoài tầm kiểm soát...', sfx: 'none' },
+            { index: 4, type: 'image', path: '', badge: 'BƯỚC NGOẶT ĐỊNH MỆNH', text: 'Thời khắc quan trọng quyết định kết cục sự việc...', sfx: 'sub_drop' },
+            { index: 5, type: 'video', path: '', badge: 'CÚ BẺ LÁI BẤT NGỜ', text: 'Sự thật hé lộ khiến toàn bộ dư luận kinh ngạc...', sfx: 'boom' }
+          ];
+        },
+        initTrojanScenes() {
+          if (!this.post) this.post = {};
+          this.post.platform = 'documentary';
+          this.post.video_title = this.post.video_title || 'CÚ LỪA 250 CHIẾC ÁO PHÔNG TÂN PHÁT XÍT';
+          this.post.story_badge = this.post.story_badge || 'HỒ SƠ KỲ THÚ • EXIT DEUTSCHLAND';
+          this.post.content = this.post.content || 'Năm 2011, tại Gera nước Đức, một cú lừa ngoạn mục đã biến 250 phần tử cực đoan thành những tấm biển quảng cáo chống lại chính họ sau lần giặt đầu tiên.';
+          this.post.documentary_scenes = [
+            {
+              index: 1,
+              type: 'video',
+              path: 'assets/documentary/trojan_tshirt/clips/clip1_festival.mp4',
+              badge: 'LỄ HỘI ROCK CỰC ĐOAN',
+              text: 'Năm 2011, tại Gera nước Đức, hơn 250 phần tử thuộc nhóm Tân Phát Xít đã đổ về một lễ hội nhạc Rock cực đoan.',
+              sfx: 'tension_riser'
+            },
+            {
+              index: 2,
+              type: 'image',
+              path: 'assets/documentary/trojan_tshirt/trojan_before.jpg',
+              badge: '250 ÁO MIỄN PHÍ',
+              text: 'Tại cổng vào, ban tổ chức bất ngờ phát miễn phí 250 chiếc áo phông đen cực ngầu, in hình đầu lâu cùng dòng chữ nổi loạn Hardcore Rebels.',
+              sfx: 'ting'
+            },
+            {
+              index: 3,
+              type: 'video',
+              path: 'assets/documentary/trojan_tshirt/clips/clip2_distribution.mp4',
+              badge: 'TRANH NHAU MẶC ÁO',
+              text: 'Tất cả các thành viên đều vô cùng hào hứng, tranh nhau nhận áo và mặc ngay tại chỗ mà không hề nghi ngờ bất kỳ điều gì.',
+              sfx: 'none'
+            },
+            {
+              index: 4,
+              type: 'video',
+              path: 'assets/documentary/trojan_tshirt/clips/clip3_washing.mp4',
+              badge: 'BÍ MẬT MÁY GIẶT',
+              text: 'Thế nhưng, sau đêm nhạc cuồng nhiệt, họ mang chiếc áo về nhà và cho vào máy giặt. Và điều kinh ngạc đã xảy ra ngay sau đó.',
+              sfx: 'sub_drop'
+            },
+            {
+              index: 5,
+              type: 'image',
+              path: 'assets/documentary/trojan_tshirt/trojan_after.jpg',
+              badge: 'CÚ LỪA THẾ KỶ',
+              text: 'Lớp mực đặc biệt trôi sạch, hình đầu lâu biến mất hoàn toàn, để lộ ra thông điệp: Chiếc áo đã giúp bạn thoát xác, và chúng tôi có thể giúp bạn từ bỏ chủ nghĩa cực đoan!',
+              sfx: 'boom'
+            },
+            {
+              index: 6,
+              type: 'video',
+              path: 'assets/documentary/trojan_tshirt/clips/clip4_media_reaction.mp4',
+              badge: 'CHẤN ĐỘNG TRUYỀN THÔNG',
+              text: 'Đây chính là chiến dịch Trojan T-Shirt chấn động nước Đức của tổ chức Exit Deutschland. Một pha bẻ lái thế kỷ khiến truyền thông toàn cầu ngả mũ thán phục!',
+              sfx: 'applause'
+            }
+          ];
+        },
+        addDocumentaryScene() {
+          if (!this.post.documentary_scenes) this.post.documentary_scenes = [];
+          const idx = this.post.documentary_scenes.length + 1;
+          this.post.documentary_scenes.push({
+            index: idx,
+            type: idx % 2 === 0 ? 'image' : 'video',
+            path: '',
+            badge: `PHÂN CẢNH #${idx}`,
+            text: 'Lời dẫn chuyện phân cảnh tiếp theo...',
+            sfx: 'tension_riser'
+          });
+        },
+        removeDocumentaryScene(idx) {
+          if (this.post.documentary_scenes && this.post.documentary_scenes.length > 1) {
+            this.post.documentary_scenes.splice(idx, 1);
+            this.post.documentary_scenes.forEach((sc, i) => sc.index = i + 1);
+          } else {
+            alert('Cần giữ lại ít nhất 1 phân cảnh!');
+          }
         },
         onPlatformChange() {
           this.setPlatform(this.settings.platform);
@@ -2045,14 +2583,21 @@ HTML_TEMPLATE = """
         async createVideoOneClick() {
           this.currentTab = 'pipeline';
           try {
+            const currentSettings = {
+              ...this.settings,
+              center_satisfying_category: this.directorConfig?.visual_layout?.center_satisfying_category || 'random',
+              enable_center_satisfying_video: this.directorConfig?.visual_layout?.enable_center_satisfying_video || false
+            };
             const res = await fetch('/api/create_video_one_click', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 topic: this.topicInput,
+                story_mode: this.storyModeInput,
                 comment_count: this.commentCountInput,
                 voice: this.authorVoiceInput,
-                settings: this.settings
+                settings: currentSettings,
+                post: this.post
               })
             });
             const data = await res.json();
@@ -2107,6 +2652,10 @@ HTML_TEMPLATE = """
             if (data.success && data.illustration_path) {
               this.post.illustration_path = data.illustration_path;
               this.post.enable_illustration = true;
+              this.post.has_visual_proof = true;
+              if (!this.post.visual_proof_placement || this.post.visual_proof_placement === 'none') {
+                this.post.visual_proof_placement = 'attached_in_post';
+              }
               this.cardTimestamp = Date.now();
               this.refreshCardPreview();
             } else {
@@ -2132,6 +2681,10 @@ HTML_TEMPLATE = """
             if (data.success && data.illustration_path) {
               this.post.illustration_path = data.illustration_path;
               this.post.enable_illustration = true;
+              this.post.has_visual_proof = true;
+              if (!this.post.visual_proof_placement || this.post.visual_proof_placement === 'none') {
+                this.post.visual_proof_placement = 'attached_in_post';
+              }
               this.cardTimestamp = Date.now();
               this.refreshCardPreview();
             } else {
@@ -2139,6 +2692,30 @@ HTML_TEMPLATE = """
             }
           } catch(e) {
             alert('Lỗi tải ảnh: ' + e);
+          }
+        },
+        async uploadSceneMedia(e, sceneIdx) {
+          const file = e.target.files[0];
+          if (!file) return;
+          const formData = new FormData();
+          formData.append('file', file);
+          try {
+            const res = await fetch('/api/upload_illustration', {
+              method: 'POST',
+              body: formData
+            });
+            const data = await res.json();
+            if (data.success && data.illustration_path) {
+              if (this.post.documentary_scenes && this.post.documentary_scenes[sceneIdx]) {
+                this.post.documentary_scenes[sceneIdx].path = data.illustration_path;
+                const isVid = ['.mp4', '.mov', '.webm', '.mkv'].some(ext => (data.illustration_path || '').toLowerCase().endsWith(ext));
+                this.post.documentary_scenes[sceneIdx].type = isVid ? 'video' : 'image';
+              }
+            } else {
+              alert('Lỗi tải file: ' + (data.error || 'Thử lại'));
+            }
+          } catch(err) {
+            alert('Lỗi tải file tư liệu: ' + err);
           }
         },
         openAvatarModal(targetType, commentIndex = 0) {
@@ -2196,7 +2773,7 @@ HTML_TEMPLATE = """
         },
         async crawlTrendingThreads(autoRender = false) {
           this.isCrawlingTrending = true;
-          if (autoRender) this.currentTab = 'pipeline';
+          if (autoRender === true) this.currentTab = 'pipeline';
           try {
             const res = await fetch('/api/crawl_trending_threads', {
               method: 'POST',
@@ -2208,14 +2785,14 @@ HTML_TEMPLATE = """
               this.post = data.post;
               this.cardTimestamp = Date.now();
               this.previewMode = 'cards';
-              if (autoRender) {
+              if (autoRender === true) {
                 // Tự động tiếp tục dựng toàn bộ video (Bước 3 -> 6) để người dùng có thành phẩm ngay!
                 await this.startRender();
               } else {
                 this.currentTab = 'studio';
               }
             } else {
-              alert('Lỗi quét trending Threads: ' + data.error);
+              this.notify('Lỗi quét trending Threads: ' + data.error, 'error');
             }
           } catch(e) {
             alert('Lỗi: ' + e);
@@ -2240,22 +2817,33 @@ HTML_TEMPLATE = """
             this.settings.layout_preset = data.layout_preset || 'center';
             this.settings.bg_mode = data.bg_mode || 'split_gameplay';
             this.settings.card_theme = data.card_theme || 'light';
-            this.settings.voice = data.voice || 'vi-VN-HoaiMyNeural';
-            this.settings.rate = data.rate || '+20%';
-            this.settings.bgm_choice = data.bgm_choice || 'random';
-            this.settings.bgm_volume = data.bgm_volume !== undefined ? data.bgm_volume : 45;
+            this.settings.voice = data.voice || 'nam_hai';
+            this.settings.rate = data.rate || '+0%';
+            this.settings.bgm_choice = data.bgm_choice || 'gentle_piano_satie.mp3';
+            this.settings.bgm_volume = data.bgm_volume !== undefined ? data.bgm_volume : 25;
           } catch(e) {}
         },
-        async saveSettings() {
+        notify(msg, type = 'success') {
+          this.toast = { show: true, message: msg, type: type };
+          if (this._toastTimer) clearTimeout(this._toastTimer);
+          this._toastTimer = setTimeout(() => {
+            this.toast.show = false;
+          }, 2500);
+        },
+        async saveSettings(manual = false) {
           try {
             await fetch('/api/settings', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(this.settings)
             });
-            alert('✅ Đã lưu cấu hình nhanh!');
+            if (manual === true) {
+              this.notify('✅ Đã lưu cấu hình nhanh!', 'success');
+            }
           } catch(e) {
-            alert('Lỗi: ' + e);
+            if (manual === true) {
+              this.notify('Lỗi lưu cấu hình: ' + e, 'error');
+            }
           }
         },
         async loadDirectorConfig() {
@@ -2311,6 +2899,7 @@ HTML_TEMPLATE = """
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 topic: this.topicInput,
+                story_mode: this.storyModeInput,
                 comment_count: this.commentCountInput,
                 voice: this.authorVoiceInput,
                 duration_mode: this.directorConfig?.ai_director?.duration_mode,
@@ -2348,12 +2937,17 @@ HTML_TEMPLATE = """
         async startRender() {
           this.currentTab = 'pipeline'; // Tự động chuyển sang tab Giám Sát Quy Trình
           try {
+            const currentSettings = {
+              ...this.settings,
+              center_satisfying_category: this.directorConfig?.visual_layout?.center_satisfying_category || 'random',
+              enable_center_satisfying_video: this.directorConfig?.visual_layout?.enable_center_satisfying_video || false
+            };
             const res = await fetch('/api/render_video', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 post: this.post,
-                settings: this.settings
+                settings: currentSettings
               })
             });
             const data = await res.json();
@@ -2400,7 +2994,7 @@ HTML_TEMPLATE = """
         copyCaption() {
           if (!this.latestCaption) return;
           navigator.clipboard.writeText(this.latestCaption);
-          alert('📋 Đã sao chép caption vào bộ nhớ tạm!');
+          this.notify('📋 Đã sao chép caption vào bộ nhớ tạm!', 'success');
         }
       }
     }).mount('#app');
@@ -2473,10 +3067,10 @@ def api_settings():
         layout_preset = data.get("layout_preset", "center")
         bg_mode = data.get("bg_mode", "split_gameplay")
         card_theme = data.get("card_theme", "light")
-        voice = data.get("voice", "vi-VN-HoaiMyNeural")
-        rate = data.get("rate", "+20%")
-        bgm_choice = data.get("bgm_choice", "random")
-        bgm_volume = data.get("bgm_volume", 45)
+        voice = data.get("voice", "nam_hai")
+        rate = data.get("rate", "+0%")
+        bgm_choice = data.get("bgm_choice", "gentle_piano_satie.mp3")
+        bgm_volume = data.get("bgm_volume", 25)
 
         lines = []
         if os.path.exists(ENV_PATH):
@@ -2500,10 +3094,10 @@ def api_settings():
         layout_preset = "center"
         bg_mode = "split_gameplay"
         card_theme = "light"
-        voice = "vi-VN-HoaiMyNeural"
-        rate = "+20%"
-        bgm_choice = "random"
-        bgm_volume = 45
+        voice = "nam_hai"
+        rate = "+0%"
+        bgm_choice = "gentle_piano_satie.mp3"
+        bgm_volume = 25
         if os.path.exists(ENV_PATH):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
@@ -2560,15 +3154,48 @@ def api_generate_script():
         tracker.start_step("script", f"Gemini AI đang sáng tạo kịch bản theo chủ đề: '{topic or 'ngẫu nhiên'}'...", 20)
 
         platform = data.get("platform", "threads")
+        story_mode = data.get("story_mode", "auto")
         post = ai_mod.generate_story_with_gemini(
             topic,
             duration_mode=duration_mode,
             target_comment_count=target_comment_count,
             platform=platform,
+            story_mode=story_mode,
             progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
         )
         if author_voice:
             post.voice_id = author_voice
+
+        # Tự động kết nối video và ảnh tư liệu thực tế nếu là True Story / Documentary
+        if platform == "documentary" or getattr(post, "story_mode", "") == "true_story":
+            from copy import deepcopy
+            post.platform = "documentary"
+            post.story_mode = "true_story"
+            doc_query = getattr(post, "documentary_query", "") or topic or ""
+            is_trojan = bool(topic) and any(k in doc_query.lower() or k in topic.lower() for k in ["trojan", "tân phát xít", "exit deutschland", "hardcore rebels"])
+            if not getattr(post, "video_title", ""):
+                post.video_title = "CÚ LỪA 250 CHIẾC ÁO PHÔNG TÂN PHÁT XÍT" if is_trojan else (topic[:60].upper() if topic else "HỒ SƠ KỲ THÚ CÓ THẬT")
+            if not getattr(post, "story_badge", ""):
+                post.story_badge = "HỒ SƠ KỲ THÚ • EXIT DEUTSCHLAND" if is_trojan else "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT"
+
+            # Chỉ fallback nếu AI chưa tạo sẵn documentary_scenes
+            if not getattr(post, "documentary_scenes", None):
+                if is_trojan:
+                    post.documentary_scenes = deepcopy(visual_builder_mod.DEFAULT_TROJAN_SCENES)
+                elif getattr(post, "comments", None):
+                    scs = []
+                    for idx, c in enumerate(post.comments, 1):
+                        is_even = (idx % 2 == 0)
+                        scs.append({
+                            "index": idx,
+                            "type": "image" if is_even else "video",
+                            "path": getattr(post, "illustration_path", ""),
+                            "badge": f"PHÂN CẢNH #{idx}",
+                            "text": c.content,
+                            "sfx": c.sfx if c.sfx != "none" else "tension_riser",
+                            "voice": post.voice_id or "adam"
+                        })
+                    post.documentary_scenes = scs
 
         sample_file = os.path.join(OUTPUT_DIR, "sample_post.json")
         content_mod.save_post_to_json(post, sample_file)
@@ -2604,6 +3231,9 @@ def api_generate_script():
                 "cta_question": getattr(post, "cta_question", ""),
                 "pacing_tempo": getattr(post, "pacing_tempo", "normal"),
                 "enable_illustration": getattr(post, "enable_illustration", False),
+                "documentary_scenes": getattr(post, "documentary_scenes", []),
+                "story_badge": getattr(post, "story_badge", ""),
+                "video_title": getattr(post, "video_title", ""),
                 "emotional_arc": getattr(post, "emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
                 "comments": [
                     {
@@ -2694,23 +3324,146 @@ def api_create_video_one_click():
     raw_vol = sets.get("bgm_volume")
     bgm_volume = (float(raw_vol) / 100.0) if raw_vol is not None else None
 
-    author_voice = data.get("voice") or sets.get("voice") or "adam"
+    author_voice = data.get("voice") or sets.get("voice") or "nam_hai"
 
     def _full_video_worker():
         try:
             tracker.reset()
-            # BƯỚC 1: KỊCH BẢN & CÀO AVATAR THẬT TỪ THREADS
-            tracker.start_step("script", f"AI đang sáng tạo kịch bản & phân tích Threads về: '{topic or 'thịnh hành'}'...", 15)
-            radar_mod = load_mod("threads_radar", "threads_radar.py")
-            post = radar_mod.crawl_trending_threads_story(
-                topic=topic,
-                progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
-            )
-            if author_voice:
-                post.voice_id = author_voice
-
             platform = sets.get("platform", "threads")
-            post.platform = platform
+            story_mode = data.get("story_mode", "auto")
+            post_data = data.get("post") or {}
+
+            # Xử lý riêng cho Phim Tư Liệu Hình + Video (Visual Documentary)
+            if platform == "documentary" or story_mode == "true_story":
+                post_scenes = post_data.get("documentary_scenes")
+                if post_scenes:
+                    tracker.start_step("script", f"Đang nạp kịch bản phân cảnh tư liệu cho: '{topic or 'Hồ sơ tư liệu'}'...", 25)
+                    post = content_mod.Post(
+                        username=post_data.get("username", "director"),
+                        content=post_data.get("content", ""),
+                        platform="documentary",
+                        story_mode="true_story",
+                        video_title=post_data.get("video_title") or (topic[:60].upper() if topic else "HỒ SƠ TƯ LIỆU QUỐC TẾ"),
+                        story_badge=post_data.get("story_badge") or "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT",
+                        documentary_scenes=post_scenes,
+                        voice_id=author_voice
+                    )
+                else:
+                    tracker.start_step("script", f"AI đang sáng tạo kịch bản phim tư liệu theo chủ đề: '{topic or 'thịnh hành'}'...", 20)
+                    ai_mod = load_mod("ai_content", "01_ai_content.py")
+                    post = ai_mod.generate_story_with_gemini(
+                        topic=topic,
+                        platform="documentary",
+                        story_mode="true_story",
+                        progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
+                    )
+                if author_voice:
+                    post.voice_id = author_voice
+                post.platform = "documentary"
+            else:
+                post_cmts = post_data.get("comments")
+                if post_cmts and len(post_cmts) > 0 and post_data.get("content"):
+                    tracker.start_step("script", "Đang nạp kịch bản hiện tại...", 15)
+                    post = content_mod.Post(
+                        username=post_data.get("username", "threads_user"),
+                        content=post_data.get("content", ""),
+                        likes=post_data.get("likes", "1.2K"),
+                        is_verified=post_data.get("is_verified", False),
+                        avatar_path=post_data.get("avatar_path", ""),
+                        avatar_url=post_data.get("avatar_url", ""),
+                        voice_id=author_voice or post_data.get("voice_id", "nam_hai"),
+                        illustration_path=post_data.get("illustration_path", ""),
+                        enable_illustration=post_data.get("enable_illustration", False),
+                        platform=platform,
+                        comments=[
+                            content_mod.Comment(
+                                username=c.get("username", "user"),
+                                reply_to=c.get("reply_to", post_data.get("username", "")),
+                                content=c.get("content", ""),
+                                likes=c.get("likes", "45"),
+                                avatar_path=c.get("avatar_path", ""),
+                                avatar_url=c.get("avatar_url", ""),
+                                sfx=c.get("sfx", "none"),
+                                emotion=c.get("emotion", "funny"),
+                                voice_id=c.get("voice_id", "")
+                            )
+                            for c in post_cmts
+                        ]
+                    )
+                else:
+                    # BƯỚC 1: KỊCH BẢN & CÀO AVATAR THẬT TỪ THREADS
+                    tracker.start_step("script", f"AI đang sáng tạo kịch bản & phân tích Threads về: '{topic or 'thịnh hành'}'...", 15)
+                    radar_mod = load_mod("threads_radar", "threads_radar.py")
+                    post = radar_mod.crawl_trending_threads_story(
+                        topic=topic,
+                        progress_cb=lambda msg, pct: tracker.update_progress(pct, msg)
+                    )
+                    if author_voice:
+                        post.voice_id = author_voice
+                    post.platform = platform
+                tracker.finish_step("script")
+
+            # Xử lý riêng cho Phim Tư Liệu Hình + Video (Visual Documentary)
+            if platform == "documentary":
+                from copy import deepcopy
+                post_data = data.get("post") or {}
+                scenes = post_data.get("documentary_scenes") or getattr(post, "documentary_scenes", [])
+                if not scenes:
+                    # Nếu có comments, chuyển thành scenes
+                    comments = getattr(post, "comments", []) or post_data.get("comments", [])
+                    if comments:
+                        scenes = []
+                        for idx, c in enumerate(comments, 1):
+                            c_txt = c.content if hasattr(c, "content") else (c.get("content", "") if isinstance(c, dict) else str(c))
+                            c_sfx = getattr(c, "sfx", "none") if hasattr(c, "sfx") else (c.get("sfx", "none") if isinstance(c, dict) else "none")
+                            scenes.append({
+                                "index": idx,
+                                "type": "image" if (idx % 2 == 0) else "video",
+                                "path": getattr(post, "illustration_path", ""),
+                                "badge": f"PHÂN CẢNH #{idx}",
+                                "text": c_txt,
+                                "sfx": c_sfx if c_sfx != "none" else "tension_riser",
+                                "voice": author_voice or getattr(post, "voice_id", "adam")
+                            })
+                    else:
+                        scenes = deepcopy(visual_builder_mod.DEFAULT_TROJAN_SCENES)
+
+                story_title = post_data.get("video_title") or getattr(post, "video_title", "") or (topic[:60].upper() if topic else "HỒ SƠ TƯ LIỆU QUỐC TẾ")
+                story_badge = post_data.get("story_badge") or getattr(post, "story_badge", "") or "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT"
+                for sc in scenes:
+                    if author_voice:
+                        sc["voice"] = author_voice
+
+                _render_all_cards_helper(post, theme=card_theme, platform="documentary")
+
+                out_name = f"final_doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+                visual_builder_mod.render_visual_documentary_video(
+                    story_title=story_title,
+                    story_badge=story_badge,
+                    scenes=scenes,
+                    output_filename=out_name,
+                    tracker=tracker
+                )
+                return
+
+            # Tự động kết nối video và ảnh tư liệu thực tế nếu là True Story Trojan T-Shirt
+            if any(k in (topic or "").lower() for k in ["trojan", "tân phát xít", "exit deutschland", "hardcore rebels"]):
+                center_doc = os.path.join(BASE_DIR, "assets", "documentary", "trojan_tshirt", "center_trojan_doc.mp4")
+                if os.path.exists(center_doc):
+                    post.center_video_custom_path = center_doc
+                    card1 = os.path.join(CARDS_DIR, "proof_trojan_before.png")
+                    card2 = os.path.join(CARDS_DIR, "proof_trojan_after.png")
+                    post.popup_illustrations = [
+                        {"path": card1, "target_comment_idx": 2, "badge": "TƯ LIỆU: BAN ĐẦU", "caption": "Chiếc áo đen in hình đầu lâu Hardcore Rebels"},
+                        {"path": card2, "target_comment_idx": 5, "badge": "CÚ TWIST: SAU KHI GIẶT", "caption": "Lớp mực tan biến lộ thông điệp của Exit Deutschland"}
+                    ]
+                    print("  🎬 [TRUE STORY]: Đã tự động gắn video & 2 thẻ tư liệu chiếc áo phông Trojan!")
+
+            if post_data.get("center_video_custom_path"):
+                post.center_video_custom_path = post_data["center_video_custom_path"]
+            if sets.get("center_satisfying_category") and sets.get("center_satisfying_category") != "random":
+                post.satisfying_category = sets.get("center_satisfying_category")
+
             # BƯỚC 2: RENDER BỘ THẺ CHUẨN NỀN TẢNG
             tracker.start_step("cards", f"Đang vẽ bộ thẻ {platform.upper()} chuẩn (Avatar người thật)...", 30)
             _render_all_cards_helper(post, theme=card_theme, platform=platform)
@@ -2743,30 +3496,39 @@ def api_create_video_one_click():
 
 @app.route("/api/trending_topics", methods=["GET", "POST"])
 def api_trending_topics():
-    """Lấy danh sách chủ đề trending hôm nay (tự động fetch mới mỗi ngày 1 lần hoặc ép buộc fetch mới)."""
+    """Lấy danh sách chủ đề theo ngày (tự động fetch sự kiện lịch sử hoặc drama Threads theo ngày)."""
     force = request.args.get("force", "false").lower() == "true"
+    target_date = request.args.get("date")
+    mode = request.args.get("mode", "true_story")
     if request.method == "POST":
         data = request.json or {}
         if data.get("force"):
             force = True
+        if data.get("date"):
+            target_date = data["date"]
+        if data.get("mode"):
+            mode = data["mode"]
     try:
         radar_mod = load_mod("threads_radar", "threads_radar.py")
-        result = radar_mod.get_daily_trending_topics(force_refresh=force)
+        result = radar_mod.get_daily_trending_topics(target_date=target_date, mode=mode, force_refresh=force)
         return jsonify(result)
     except Exception as e:
         import traceback
         traceback.print_exc()
+        import datetime
         return jsonify({
             "success": False,
             "error": str(e),
+            "date": target_date or datetime.date.today().strftime("%Y-%m-%d"),
             "topics": [
-                "Drama công ty khi Gen Z đòi nghỉ phép vì 'cần chữa lành'",
-                "Đi date chia đôi tiền, chàng trai đòi luôn tiền gửi xe",
-                "Đồng nghiệp mượn tiền không trả, còn chặn Threads của mình",
-                "Sếp giục làm report cuối tuần, mình từ chối thẳng thừng",
-                "Người yêu cũ bất ngờ nhắn tin hỏi thăm sau 2 năm chia tay",
-                "Trào lưu 'nghỉ việc đi du lịch bụi' liệu có thực tế không?",
-                "Tiền lương vừa về đã 'bay' hết vì 7749 khoản phí"
+                "Bí ẩn vụ không tặc D.B. Cooper ôm 200.000 USD nhảy dù mất tích năm 1971",
+                "Cú lừa ngoạn mục bán tháp Eiffel 2 lần của Victor Lustig năm 1925",
+                "Vụ trộm thế kỷ 100 triệu USD kim cương tại hầm kiên cố Antwerp năm 2003",
+                "Chiến dịch Trojan T-shirt biến 250 phần tử cực đoan thành biển quảng cáo",
+                "Vụ đánh cắp bức tranh Mona Lisa khỏi bảo tàng Louvre năm 1911",
+                "Vụ cướp đoàn tàu chở thư tín hoàng gia Anh chấn động thế giới năm 1963",
+                "Phi vụ đào tẩu không tưởng khỏi nhà tù trên đảo đá Alcatraz năm 1962",
+                "Bí ẩn bức thư đe dọa và danh tính thật của sát nhân Zodiac năm 1969"
             ]
         })
 
@@ -2868,9 +3630,25 @@ def api_upload_illustration():
     if file.filename == "":
         return jsonify({"success": False, "error": "File trống"}), 400
     try:
-        from PIL import Image, ImageOps
         illus_dir = os.path.join(OUTPUT_DIR, "illustrations")
         os.makedirs(illus_dir, exist_ok=True)
+        orig_ext = os.path.splitext(file.filename)[1].lower() or ".jpg"
+        
+        # Nếu là file video thì lưu trực tiếp, không qua xử lý Pillow
+        video_exts = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+        if orig_ext in video_exts:
+            filename = f"upload_{int(time.time())}{orig_ext}"
+            target_path = os.path.join(illus_dir, filename)
+            file.save(target_path)
+            return jsonify({
+                "success": True,
+                "illustration_path": target_path,
+                "filename": filename,
+                "preview_url": f"/api/illustration/{filename}?t={int(time.time())}"
+            })
+
+        # Nếu là ảnh thì chuẩn hóa kích thước 940x620
+        from PIL import Image, ImageOps
         filename = f"upload_{int(time.time())}.jpg"
         target_path = os.path.join(illus_dir, filename)
         with Image.open(file.stream) as im:
@@ -2921,6 +3699,47 @@ def api_reset_tracker():
 def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_screen", bgm_choice=None, bgm_volume=None, platform="threads"):
     """Hàm chạy nền cho pipeline để không bao giờ bị timeout trên browser."""
     try:
+        if platform == "documentary" or getattr(post_obj, "platform", "") == "documentary":
+            from copy import deepcopy
+            scenes = getattr(post_obj, "documentary_scenes", [])
+            if not scenes:
+                comments = getattr(post_obj, "comments", [])
+                if comments:
+                    scenes = []
+                    for idx, c in enumerate(comments, 1):
+                        c_txt = c.content if hasattr(c, "content") else (c.get("content", "") if isinstance(c, dict) else str(c))
+                        c_sfx = getattr(c, "sfx", "none") if hasattr(c, "sfx") else (c.get("sfx", "none") if isinstance(c, dict) else "none")
+                        scenes.append({
+                            "index": idx,
+                            "type": "image" if (idx % 2 == 0) else "video",
+                            "path": getattr(post_obj, "illustration_path", ""),
+                            "badge": f"PHÂN CẢNH #{idx}",
+                            "text": c_txt,
+                            "sfx": c_sfx if c_sfx != "none" else "tension_riser",
+                            "voice": getattr(post_obj, "voice_id", "adam")
+                        })
+                else:
+                    scenes = deepcopy(visual_builder_mod.DEFAULT_TROJAN_SCENES)
+
+            p_content = getattr(post_obj, "content", "")
+            story_title = getattr(post_obj, "video_title", "") or (p_content[:50].strip().upper() if p_content else "HỒ SƠ TƯ LIỆU QUỐC TẾ")
+            story_badge = getattr(post_obj, "story_badge", "") or "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT"
+
+            p_voice = getattr(post_obj, "voice_id", None) or "adam"
+            for sc in scenes:
+                if not sc.get("voice"):
+                    sc["voice"] = p_voice
+
+            out_name = f"final_doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            visual_builder_mod.render_visual_documentary_video(
+                story_title=story_title,
+                story_badge=story_badge,
+                scenes=scenes,
+                output_filename=out_name,
+                tracker=tracker
+            )
+            return
+
         pipeline_mod.run_pipeline(
             post_obj,
             bg_mode=bg_mode,
@@ -2931,6 +3750,8 @@ def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_scr
             platform=platform
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         tracker.set_error(str(e))
 
 
@@ -3000,6 +3821,12 @@ def api_render_video():
             platform=platform,
             comments=comments
         )
+        post_obj.documentary_scenes = p_data.get("documentary_scenes", [])
+        post_obj.story_badge = p_data.get("story_badge", "")
+        post_obj.video_title = p_data.get("video_title", "")
+        post_obj.center_video_custom_path = p_data.get("center_video_custom_path", "")
+        if sets.get("center_satisfying_category") and sets.get("center_satisfying_category") != "random":
+            post_obj.satisfying_category = sets.get("center_satisfying_category")
 
         layout_preset = sets.get("layout_preset", "center")
         bg_mode = sets.get("bg_mode", "auto")
@@ -3052,9 +3879,20 @@ def api_batch_render():
         return jsonify({"success": False, "error": str(e)})
 
 
+@app.route("/api/documentary_media")
+def api_documentary_media():
+    rel_path = request.args.get("path", "").strip()
+    if not rel_path:
+        return "Missing path", 400
+    full_path = os.path.abspath(os.path.join(BASE_DIR, rel_path) if not os.path.isabs(rel_path) else rel_path)
+    if not os.path.exists(full_path):
+        return "File not found", 404
+    return send_from_directory(os.path.dirname(full_path), os.path.basename(full_path))
+
+
 @app.route("/api/latest_video")
 def api_latest_video():
-    files = glob.glob(os.path.join(FINAL_DIR, "*.mp4"))
+    files = [f for f in glob.glob(os.path.join(FINAL_DIR, "*.mp4")) if not os.path.basename(f).startswith("_")]
     if not files:
         return jsonify({"exists": False})
     latest = max(files, key=os.path.getmtime)
@@ -3077,9 +3915,20 @@ def get_video_file(filename):
 
 @app.route("/api/open_folder")
 def api_open_folder():
-    if os.name == "nt":
-        os.startfile(FINAL_DIR)
-    return jsonify({"success": True})
+    try:
+        os.makedirs(FINAL_DIR, exist_ok=True)
+        if os.name == "nt":
+            try:
+                os.startfile(FINAL_DIR)
+            except Exception:
+                import subprocess
+                subprocess.Popen(["explorer", FINAL_DIR])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", FINAL_DIR])
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
 
 def start_studio(port=5000, auto_open=True):

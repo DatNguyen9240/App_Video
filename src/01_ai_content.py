@@ -70,13 +70,23 @@ class CommentSchema(BaseModel):
     )
 
 
+class DocumentarySceneSchema(BaseModel):
+    index: int = Field(default=1, description="Số thứ tự phân cảnh (1, 2, 3...)")
+    type: Literal["image", "video"] = Field(default="image", description="'image' (ảnh tư liệu chụp thực tế) hoặc 'video' (clip chuyển động)")
+    badge: str = Field(default="", description="Nhãn tiêu đề phân cảnh ngắn gọn in hoa (dưới 5 từ, vd: 'KẺ LỪA ĐẢO THẾ KỶ', 'BẢN HỢP ĐỒNG GIẢ', 'CÚ LẬT KÈO')")
+    search_query_en: str = Field(default="", description="Từ khóa tiếng Anh chính xác để tự động tìm và tải ảnh tư liệu thật trên Wikimedia/Web cho cảnh này (vd: 'Victor Lustig mugshot', 'Eiffel Tower 1925 scrap metal', 'Antwerp World Diamond Centre vault')")
+    narration: str = Field(default="", description="Lời dẫn chuyện lôi cuốn, truyền cảm của cảnh này bằng tiếng Việt (khoảng 20-35 từ) do giọng đọc AI diễn thuyết")
+    sfx: Literal["none", "tension_riser", "ting", "sub_drop", "boom", "water_splash", "applause", "scratch"] = Field(default="none", description="Âm thanh điểm nhấn cảm xúc của cảnh")
+
+
 class PostSchema(BaseModel):
     username: str = Field(description="Tên tác giả bài viết, ví dụ: genz.tamsu, chuyen.congso, dev_nghiep")
     content: str = Field(description="Câu chuyện Threads mở đầu cuốn hút, có bối cảnh chi tiết và tình huống rõ ràng (từ 35 đến 50 từ, 2-3 câu nhịp điệu mềm mại, nói trong 12-15 giây). Bắt đầu bằng Hook giật mình tò mò, nêu ngay mâu thuẫn cốt lõi, không dài dòng lan man.")
     avatar_color: str = Field(default="#8b5cf6", description="Mã màu hex cho avatar tác giả")
     is_verified: bool = Field(default=True, description="True nếu có tích xanh")
     likes: int = Field(default=35000, description="Lượt thích ước tính từ 15000 đến 85000")
-    video_title: str = Field(default="", description="Tiêu đề video ngắn gọn, giật gân hài hước")
+    video_title: str = Field(default="", description="Tiêu đề video ngắn gọn, giật gân hài hước hoặc tiêu đề hồ sơ kỳ thú")
+    story_badge: str = Field(default="HỒ SƠ KỲ THÚ", description="Nhãn chuyên mục hồ sơ kỳ thú / tổ chức (vd: 'HỒ SƠ KỲ THÚ • NƯỚC PHÁP 1925', 'VỤ ÁN THẾ KỶ • ANTWERP')")
     video_caption: str = Field(default="", description="Đoạn caption đăng TikTok/Reels cuốn hút kèm câu hỏi kêu gọi bình luận")
     hashtags: str = Field(default="", description="Chuỗi 5-7 hashtag viral")
     illustration_prompt: str = Field(
@@ -131,8 +141,20 @@ class PostSchema(BaseModel):
         default="normal",
         description="NHỊP ĐỘ ĐỌC: 'slow_emotional' (-3% đến +5%) cho tâm sự lắng đọng; 'fast_comedic' (+22% đến +26%) cho cãi vã, tấu hài nhanh."
     )
+    story_mode: Literal["everyday_life", "true_story"] = Field(
+        default="everyday_life",
+        description="Chế độ câu chuyện: 'everyday_life' (đời sống thường nhật) hoặc 'true_story' (sự kiện có thật quốc tế, cú lừa lịch sử, hồ sơ vụ án bóc phốt thực tế)"
+    )
+    documentary_query: str = Field(
+        default="",
+        description="Nếu là true_story: từ khóa tiếng Anh/quốc tế chính xác để tra cứu tư liệu gốc của sự kiện (ví dụ: 'Exit Deutschland trojan t-shirt neo-nazi festival')"
+    )
     emotional_arc: str = Field(default="Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời", description="Tóm tắt đường cong cảm xúc của video")
     hook_energy: Literal["high", "intense", "curious"] = Field(default="high", description="Mức năng lượng mở màn")
+    documentary_scenes: list[DocumentarySceneSchema] = Field(
+        default_factory=list,
+        description="Nếu là true_story hoặc documentary: danh sách từ 5 đến 6 phân cảnh tư liệu hoàn chỉnh với từ khóa tiếng Anh tìm ảnh thật và lời dẫn chuyện"
+    )
     comments: list[CommentSchema] = Field(
         description="Danh sách từ 7 đến 8 bình luận tiếng Việt tạo thành chuỗi drama/hội thoại cuốn hút dài trên 1 phút, tất cả cùng bàn luận, cà khịa, đối đáp xoay quanh tình huống của tác giả"
     )
@@ -204,6 +226,7 @@ def generate_story_with_gemini(
     duration_mode: str = None,
     target_comment_count: Optional[int] = None,
     platform: str = "threads",
+    story_mode: str = "auto",
     api_key: str = None,
     progress_cb: Optional[Callable[[str, int], None]] = None
 ) -> Post:
@@ -241,6 +264,14 @@ def generate_story_with_gemini(
 
     if not topic:
         topic = "câu chuyện thịnh hành và gây sốt nhất hôm nay trên mạng xã hội Threads"
+
+    # Nhận diện chế độ kể chuyện (Đời thường vs Chuyện có thật từ nguồn quốc tế/lịch sử)
+    is_true_story = (story_mode == "true_story")
+    if story_mode == "auto":
+        true_story_kws = ["có thật", "quốc tế", "nước ngoài", "lịch sử", "vụ án", "chiến dịch", "trojan", "tân phát xít", "phát xít đức", "exit deutschland", "sự kiện lịch sử", "bóc tách hồ sơ", "phi vụ lừa thế kỷ"]
+        if any(kw in topic.lower() for kw in true_story_kws):
+            is_true_story = True
+    final_story_mode = "true_story" if is_true_story else "everyday_life"
 
     system_instruction = ai_cfg.get("system_instruction", "")
     model_primary = ai_cfg.get("model", "gemini-3.5-flash")
@@ -327,13 +358,7 @@ def generate_story_with_gemini(
         f"- EMOJI VỪA PHẢI: Tối đa 0-1 emoji mỗi câu khi thật sự cần thiết (tránh spam emoji).\n"
         f"- USERNAME: Tên username tiếng Việt đời thường tự nhiên (ví dụ: 'linh.nguyen99', 'minh.triet01', 'hoang_anh.hr', 'tuan.oto').\n"
         f"- REPLY_TO: Ghi rõ username đang trả lời để tạo sự đối đáp sống động.\n"
-        f"- HÌNH ẢNH MINH HỌA BẰNG CHỨNG (LUÔN BẬT has_visual_proof = true):\n"
-        f"  + Luôn cung cấp từ khóa tìm ảnh chân thực (illustration_vietnamese_query và illustration_prompt) là 2-3 TỪ DANH TỪ CỤ THỂ chỉ đích danh vật phẩm hoặc bằng chứng đời thực (ví dụ: 'cọ rửa xe' / 'car wash brush', 'vết trầy xe' / 'car scratch', 'nồi chiên không dầu' / 'air fryer'). Tuyệt đối không ghép 2 địa điểm/hành động khác nhau.\n"
-        f"  + ĐỒNG BỘ ĐỐI ĐÁP VÀ HÌNH ẢNH KHỚP NHAU 100%:\n"
-        f"    Nếu có 1 bình luận hỏi xin ảnh/bằng chứng (ví dụ C1 hoặc C2: 'Có hình ảnh gì không bạn?'), thì bình luận TIẾP THEO (câu trả lời) BẮT BUỘC phải trực tiếp giới thiệu bằng chứng (ví dụ: 'Đây nè, tui chụp lại cái cọ này nè...', 'Nhìn cái vết trầy xót ruột chưa nè...'). Thẻ ảnh popup sẽ bung lên CHÍNH XÁC trong lúc câu trả lời này cất tiếng!\n"
-        f"  + illustration_caption: Viết câu chú thích ngắn gọn (dưới 8 từ) mô tả đúng bằng chứng trong câu trả lời (ví dụ: 'Cận cảnh cây cọ rửa xe xoay', 'Chiếc xe sau khi cọ rửa').\n"
-        f"  + Chọn visual_proof_placement = 'popup_at_twist' (bung ảnh nổi tại câu trả lời/cú bẻ lái) hoặc 'attached_in_post' (gắn trong bài).\n"
-        f"  + Chọn illustration_category: couple_photo_fail, cafe_lifestyle, food_cooking, office_work, shopping_tech, student_exam, general_life.\n"
+        f"- HÌNH ẢNH MINH HỌA BẰNG CHỨNG: Mặc định TẮT (has_visual_proof = false) để video tập trung 100% vào hội thoại đời thực, nhịp đọc tự nhiên và hiệu ứng SFX. Tuyệt đối KHÔNG tự vẽ ảnh hay bịa ảnh AI ảo.\n"
         f"- PHONG CÁCH HIỆN CÂU (SENTENCE REVEAL): Mặc định chọn sentence_reveal_mode = 'progressive_line_reveal' để từng dòng mở ra theo nhịp đọc của giọng nói, tạo cảm giác cuốn hút và giữ chân người xem!\n"
         f"- HIỆU ỨNG MEME, SFX & CAMERA MOTION: Phân bổ 2 đến 3 comment có SFX tương ứng cảm xúc để kích hoạt MEME REACTION (sfx='laugh' cho meme cười, sfx='bruh'/'huh' cho bất lực ngơ ngác, sfx='side_eye' cho liếc xéo bóc mẽ, sfx='sub_drop'/'boom' cho bẻ lái rung lắc camera, sfx='ting' cho mách nước đắt giá).\n"
         f"- KHỚP VIDEO NỀN Ở GIỮA (satisfying_category): Chọn 'food' nếu nói về ăn uống/bếp núc; 'gameplay' nếu là IT/công sở/gay cấn; 'asmr' nếu là tâm sự chia sẻ; 'puzzle' nếu là trinh thám/bóc phốt.\n"
@@ -352,6 +377,22 @@ def generate_story_with_gemini(
         f"- C6: 'Sáng nay tui phát hiện ổng lén tháo pin giấu vào ngăn kéo rồi, bảo mệt tim quá chịu hết nổi' (reply C5, sfx='sub_drop')\n"
         f"- C7: 'Đèn thì thông minh mà người mua thì bất lực toàn tập luôn' (reply C6, sfx='none')\n"
     )
+
+    if is_true_story:
+        prompt += (
+            f"\n\n🔥 ĐẶC BIỆT: CHẾ ĐỘ KỂ CHUYỆN CÓ THẬT TỪ NGUỒN QUỐC TẾ / PHIM TƯ LIỆU (TRUE STORY & DOCUMENTARY):\n"
+            f"- Chủ đề câu chuyện là một sự việc có thật ngoài đời hoặc phi vụ/cú lừa kinh điển quốc tế (ví dụ: {topic or 'cú lừa lịch sử / kỳ án thế giới'}). Hãy kể lại ĐÚNG 100% bản chất và diễn biến sự kiện thật.\n"
+            f"- TIÊU ĐỀ VIDEO (video_title): Đặt tiêu đề in hoa giật gân, tò mò (dưới 10 từ, ví dụ: 'CÚ LỪA 250 CHIẾC ÁO PHÔNG TÂN PHÁT XÍT', 'VỤ ÁN BÁN THÁP EIFFEL 2 LẦN').\n"
+            f"- NHÃN CHUYÊN MỤC (story_badge): Nhãn phân loại hồ sơ (ví dụ: 'HỒ SƠ KỲ THÚ • EXIT DEUTSCHLAND', 'SIÊU LỪA ĐẢO THẾ KỶ • NƯỚC PHÁP').\n"
+            f"- THẺ MỞ ĐẦU (POST): Đặt hook cực sốc, nêu bật sự thật kỳ lạ hoặc kết quả không ai ngờ tới của sự kiện để người xem dừng tay nghe tiếp.\n"
+            f"- PHÂN CẢNH TƯ LIỆU (documentary_scenes): BẮT BUỘC tạo đúng từ 5 đến 6 phân cảnh tư liệu hoàn chỉnh:\n"
+            f"  + Mỗi cảnh có 'badge': nhãn in hoa ngắn gọn (dưới 5 từ, vd: 'LỄ HỘI ROCK', 'CÚ LỪA THẾ KỶ', 'BẢN HỢP ĐỒNG GIẢ', 'MÁY GIẶT KÍCH HOẠT').\n"
+            f"  + 'search_query_en': từ khóa tiếng Anh cực chuẩn xác của nhân vật, sự kiện hoặc đồ vật để tìm ảnh chụp thực tế trên Wikimedia/Web (vd: 'Victor Lustig mugshot', 'Eiffel tower scrap metal 1925').\n"
+            f"  + 'narration': lời dẫn chuyện lôi cuốn bằng tiếng Việt do giọng đọc AI đọc (từ 20-35 từ).\n"
+            f"  + 'sfx': âm thanh kịch tính phù hợp ('tension_riser', 'ting', 'sub_drop', 'boom', 'water_splash', 'applause', 'scratch').\n"
+            f"- TƯ LIỆU QUỐC TẾ: Điền 'documentary_query' là từ khóa tiếng Anh chính xác để tra cứu tư liệu gốc.\n"
+            f"- Đặt story_mode = 'true_story'."
+        )
 
     if progress_cb:
         progress_cb(f"Gemini AI ({model_primary}) đang sáng tạo kịch bản...", 30)
@@ -403,16 +444,16 @@ def generate_story_with_gemini(
     roles = voice_cfg.get("roles", {})
     author_role = roles.get("author", {})
     female_presets = voice_cfg.get("female_voice_presets", [
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "+20%", "pitch": "+6Hz", "style": "cheerful"},
-        {"voice": "ava", "rate": "+16%", "pitch": "+4Hz",  "style": "chat"},
-        {"voice": "vi-VN-HoaiMyNeural", "rate": "+24%", "pitch": "+10Hz", "style": "excited"},
-        {"voice": "emma", "rate": "+14%", "pitch": "+2Hz",  "style": "sad"}
+        {"voice": "nu_cakhia", "rate": "+0%", "pitch": "+0Hz", "style": "sarcastic"},
+        {"voice": "nu_nhinhanh", "rate": "+0%", "pitch": "+0Hz",  "style": "cheerful"},
+        {"voice": "nu_cakhia", "rate": "+0%", "pitch": "+0Hz", "style": "excited"},
+        {"voice": "nu_nhinhanh", "rate": "+0%", "pitch": "+0Hz",  "style": "sad"}
     ])
     male_presets = voice_cfg.get("male_voice_presets", [
-        {"voice": "adam", "rate": "+14%", "pitch": "-4Hz", "style": "dramatic"},
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+20%", "pitch": "+4Hz",  "style": "cheerful"},
-        {"voice": "brian", "rate": "+16%", "pitch": "-2Hz",  "style": "chat"},
-        {"voice": "vi-VN-NamMinhNeural", "rate": "+22%", "pitch": "+2Hz",  "style": "angry"}
+        {"voice": "nam_hai", "rate": "+0%", "pitch": "+0Hz", "style": "cheerful"},
+        {"voice": "nam_tram_hai", "rate": "+0%", "pitch": "+0Hz",  "style": "dramatic"},
+        {"voice": "nam_hai", "rate": "+0%", "pitch": "+0Hz",  "style": "chat"},
+        {"voice": "nam_tram_hai", "rate": "+0%", "pitch": "+0Hz",  "style": "angry"}
     ])
 
     female_keywords = {"linh", "trang", "mai", "be", "hoa", "ngoc", "lan", "anh", "girl", "cute", "thao", "vy", "my", "phuong", "giang", "nhung", "quynh", "huyen", "nga"}
@@ -436,9 +477,9 @@ def generate_story_with_gemini(
     author_is_female = any(k in author_username for k in female_keywords)
     author_avatar_default = f_avatar_pool[0] if author_is_female else m_avatar_pool[0]
     if author_is_female:
-        author_voice_final = author_role.get("voice") if (author_role.get("voice") and author_role.get("voice") != "adam") else "vi-VN-HoaiMyNeural"
+        author_voice_final = author_role.get("voice") or "nu_cakhia"
     else:
-        author_voice_final = author_role.get("voice") or voice_cfg.get("default_author_voice", "adam")
+        author_voice_final = author_role.get("voice") or "nam_hai"
 
     for idx, c in enumerate(raw_comments, 1):
         u_name = c.get("username", f"user_{idx}").strip().lower()
@@ -458,7 +499,7 @@ def generate_story_with_gemini(
 
             preset_list = female_presets if is_female else male_presets
             preset = preset_list[((idx - 1) // 2) % len(preset_list)]
-            assigned_voice = c.get("voice_id") or role_info.get("voice") or preset.get("voice", "vi-VN-HoaiMyNeural" if is_female else "vi-VN-NamMinhNeural")
+            assigned_voice = c.get("voice_id") or role_info.get("voice") or preset.get("voice", "nu_cakhia" if is_female else "nam_hai")
             chosen_c_pool = f_avatar_pool if is_female else m_avatar_pool
             c_avatar_file = chosen_c_pool[(idx - 1) % len(chosen_c_pool)]
 
@@ -517,51 +558,61 @@ def generate_story_with_gemini(
     else:
         chosen_plat = plat_choice
 
-    # Xử lý ảnh minh họa bằng chứng chuẩn ngữ cảnh
-    has_proof = bool(data.get("has_visual_proof", True))
-    default_placement = "attached_in_post" if chosen_plat in ["facebook", "instagram"] else "popup_at_twist"
-    placement = data.get("visual_proof_placement") or default_placement
-    if placement == "none" or not placement:
-        placement = default_placement
+    # TỰ ĐỘNG TẢI HOẶC GÁN ẢNH MINH HỌA THẬT CHUẨN NGỮ CẢNH:
+    has_proof = True
+    placement = data.get("visual_proof_placement", "attached_in_post")
+    if placement not in ["attached_in_post", "popup_at_twist"]:
+        placement = "attached_in_post"
 
-    illus_prompt = data.get("illustration_prompt", "") or topic
-    illus_vn = data.get("illustration_vietnamese_query", "") or topic
+    illus_prompt = data.get("illustration_prompt", "") or topic or "candid real photo"
+    illus_vn = data.get("illustration_vietnamese_query", "") or topic or "ảnh đời thực"
     illus_cat = data.get("illustration_category", "general_life")
     illus_path = ""
 
-    candidate_queries = [q for q in [illus_vn, illus_prompt] if q]
-    if candidate_queries:
-        try:
-            import importlib.util
-            real_img_spec = importlib.util.spec_from_file_location("real_image_search", os.path.join(SRC_DIR, "real_image_search.py"))
-            real_img_mod = importlib.util.module_from_spec(real_img_spec)
-            real_img_spec.loader.exec_module(real_img_mod)
+    try:
+        from src.real_image_search import search_and_download_real_image
+        search_terms = [t for t in [illus_prompt, illus_vn, topic] if t]
+        illus_path = search_and_download_real_image(
+            queries=search_terms,
+            category=illus_cat,
+            target_width=940,
+            target_height=620,
+            fallback_to_category=True
+        )
+    except Exception as e:
+        print(f"  ⚠️ Lỗi khi tìm ảnh thật trực tuyến ({e})")
 
-            illus_dir = os.path.join(OUT_DIR, "illustrations")
-            os.makedirs(illus_dir, exist_ok=True)
-            illus_filename = f"real_web_{int(time.time())}_{random.randint(100, 999)}.jpg"
-            target_file = os.path.join(illus_dir, illus_filename)
-
-            found_img = real_img_mod.search_and_download_real_image(
-                queries=candidate_queries,
-                category=illus_cat,
-                output_path=target_file,
-                target_width=940,
-                target_height=620
-            )
-            if found_img and os.path.exists(found_img):
-                illus_path = found_img
-                print(f"  [✓] Đã tải thành công ảnh thật chuẩn ngữ cảnh (940x620): {illus_path}")
-        except Exception as e:
-            print(f"  ⚠️ Lỗi khi tìm ảnh thật trực tuyến ({e})")
-
-    # Tuyệt đối không fallback sang ảnh chung cư/nhà hàng không liên quan
+    # Fallback an toàn: nếu chưa có ảnh web, lấy ngay ảnh chuẩn từ assets/illustrations
     if not illus_path or not os.path.exists(illus_path):
-        illus_path = ""
+        cat_file = os.path.join(BASE_DIR, "assets", "illustrations", f"{illus_cat}.jpg")
+        if os.path.exists(cat_file):
+            illus_path = cat_file
+        else:
+            gen_file = os.path.join(BASE_DIR, "assets", "illustrations", "general_life.jpg")
+            if os.path.exists(gen_file):
+                illus_path = gen_file
 
     enable_illus = bool(illus_path and os.path.exists(illus_path))
     if not enable_illus:
-        print("  ℹ️ Không có ảnh minh họa xác thực 100%, hệ thống tự động tắt thẻ popup proof để tránh ảnh lạc đề!")
+        has_proof = False
+        placement = "none"
+
+    # Xử lý các phân cảnh phim tư liệu nếu là Documentary / True Story
+    raw_doc_scenes = data.get("documentary_scenes", [])
+    doc_scenes = []
+    if raw_doc_scenes:
+        for idx, sc in enumerate(raw_doc_scenes, 1):
+            if isinstance(sc, dict):
+                sc_text = sc.get("narration") or sc.get("text") or ""
+                doc_scenes.append({
+                    "index": sc.get("index", idx),
+                    "type": sc.get("type", "image"),
+                    "badge": sc.get("badge", f"CẢNH #{idx}"),
+                    "search_query_en": sc.get("search_query_en", ""),
+                    "text": sc_text,
+                    "sfx": sc.get("sfx", "none"),
+                    "path": ""
+                })
 
     post = Post(
         username=data.get("username", "threads.user"),
@@ -569,7 +620,9 @@ def generate_story_with_gemini(
         avatar_color=clean_hex_color(data.get("avatar_color", "")),
         is_verified=data.get("is_verified", True),
         likes=data.get("likes", random.randint(25000, 75000)),
-        video_title=data.get("video_title", ""),
+        video_title=data.get("video_title", "") or (topic[:60].upper() if topic else "HỒ SƠ KỲ THÚ"),
+        story_badge=data.get("story_badge", "") or "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT",
+        documentary_scenes=doc_scenes,
         video_caption=data.get("video_caption", ""),
         hashtags=data.get("hashtags", ""),
         illustration_prompt=illus_prompt,
@@ -577,7 +630,7 @@ def generate_story_with_gemini(
         illustration_caption=data.get("illustration_caption", "") or f"Minh họa thực tế: {topic[:30]}",
         illustration_category=illus_cat,
         enable_illustration=enable_illus,
-        has_visual_proof=True,
+        has_visual_proof=has_proof,
         visual_proof_placement=placement,
         sentence_reveal_mode=data.get("sentence_reveal_mode", "standard_full"),
         satisfying_category=data.get("satisfying_category", "gameplay"),
@@ -585,6 +638,8 @@ def generate_story_with_gemini(
         story_context_type=ctx_type,
         cta_question=data.get("cta_question", ""),
         pacing_tempo=data.get("pacing_tempo", "normal"),
+        story_mode=data.get("story_mode", final_story_mode),
+        documentary_query=data.get("documentary_query", ""),
         avatar_url=author_avatar_default,
         emotional_arc=data.get("emotional_arc", "Tò mò -> Đẩy cao trào -> Cú bẻ lái sốc -> Cạn lời"),
         hook_energy=data.get("hook_energy", "high"),

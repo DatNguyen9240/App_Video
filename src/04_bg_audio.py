@@ -10,7 +10,6 @@ Chức năng:
   - Trộn nhạc nền lofi nhẹ nhàng
 """
 
-import math
 import os
 import random
 import re
@@ -263,13 +262,7 @@ def generate_split_screen_background(duration_sec: float, output_path: str) -> s
             "-ss", str(start_sec),
             "-t", f"{duration_sec:.2f}",
             "-i", bg_video_path,
-            "-f", "lavfi",
-            "-i", "color=c=0x0a0e17:s=1080x1920:r=60",
-            "-filter_complex",
-            "[0:v]scale=1080:720:force_original_aspect_ratio=increase,crop=1080:720[top];"
-            "[1:v][top]overlay=0:0[bg];"
-            "[bg]drawbox=y=716:color=0x6366f1@0.95:width=1080:height=4:t=fill[out]",
-            "-map", "[out]",
+            "-vf", "crop=ih*9/16:ih:(iw-ow)/2:0,scale=1080:1920:flags=lanczos,eq=brightness=-0.08:contrast=1.05",
             "-t", f"{duration_sec:.2f}",
             "-c:v", "libx264",
             "-preset", "ultrafast",
@@ -315,17 +308,35 @@ def prepare_background(duration_sec: float, output_path: str, mode: str = "infin
     - infinity_neon / infinity: 3D Infinity Cyberpunk Neon
     - infinity_dark: 3D Infinity Dark Luxury
     - infinity_gold: 3D Infinity Golden Matrix
+    - kinetic_sand: Cát Động Học Thư Giãn 9:16
+    - hypnotic: Vòng Xoáy Thôi Miên Thư Giãn 9:16
+    - puzzle: Kính Vạn Hoa Thư Giãn 9:16
     - minecraft / video: Gameplay toàn màn hình 9:16
     - gradient_cyber: Nền tối Neon tĩnh cao cấp
     - gradient_lofi: Nền cà phê Lofi ấm cúng
     """
-    m = (mode or "minecraft").lower()
+    m = (mode or "infinity_neon").lower()
     if m in ["minecraft", "mc"]:
         return cut_background_video(duration_sec, output_path, category="minecraft")
     elif m in ["gta", "gta5"]:
         return cut_background_video(duration_sec, output_path, category="gta5")
     elif m in ["subway", "subway_surfers"]:
         return cut_background_video(duration_sec, output_path, category="subway")
+    elif m in ["kinetic_sand", "sand"]:
+        sand_path = os.path.join(BASE_DIR, "assets", "satisfying", "kinetic_sand", "kinetic_sand_satisfying_loop.mp4")
+        if os.path.exists(sand_path):
+            return cut_background_video(duration_sec, output_path, bg_video_path=sand_path)
+        return cut_background_video(duration_sec, output_path, category="asmr")
+    elif m in ["hypnotic", "spiral"]:
+        hyp_path = os.path.join(BASE_DIR, "assets", "satisfying", "hypnotic", "sacred_spiral.mp4")
+        if os.path.exists(hyp_path):
+            return cut_background_video(duration_sec, output_path, bg_video_path=hyp_path)
+        return generate_infinity_background(duration_sec, output_path, "neon")
+    elif m in ["puzzle", "kaleidoscope"]:
+        puz_path = os.path.join(BASE_DIR, "assets", "satisfying", "puzzle", "hypnotic_kaleidoscope.mp4")
+        if os.path.exists(puz_path):
+            return cut_background_video(duration_sec, output_path, bg_video_path=puz_path)
+        return generate_infinity_background(duration_sec, output_path, "neon")
     elif m in ["asmr", "satisfying"]:
         return cut_background_video(duration_sec, output_path, category="asmr")
     elif m in ["random_gameplay", "gameplay", "video", "parkour"]:
@@ -340,7 +351,7 @@ def prepare_background(duration_sec: float, output_path: str, mode: str = "infin
         return generate_infinity_background(duration_sec, output_path, "dark")
     elif m in ["infinity_gold", "gold"]:
         return generate_infinity_background(duration_sec, output_path, "gold")
-    elif m in ["infinity_neon", "infinity", "tunnel", "wormhole"]:
+    elif m in ["infinity_neon", "infinity", "tunnel", "wormhole", "auto", "default"]:
         return generate_infinity_background(duration_sec, output_path, "neon")
     else:
         return cut_background_video(duration_sec, output_path)
@@ -409,8 +420,8 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
                 vol = item.get("vol", 0.35)
                 foley_filters.append(f"[{j+1}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={vol},adelay={delay_ms}|{delay_ms}[ov{j}]")
             ov_streams = "".join(f"[ov{j}]" for j in range(len(valid_overlays)))
-            # QUAN TRỌNG: normalize=0 giữ nguyên 100% âm lượng giọng đọc, tuyệt đối không bị giảm nhỏ tiếng!
-            foley_filters.append(f"[0:a]{ov_streams}amix=inputs={1+len(valid_overlays)}:duration=first:dropout_transition=0:normalize=0[v_foley]")
+            # QUAN TRỌNG: normalize=0 giữ nguyên 100% âm lượng giọng đọc, kèm alimiter ngăn ngừa triệt để méo rè/clipping
+            foley_filters.append(f"[0:a]{ov_streams}amix=inputs={1+len(valid_overlays)}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=-1.0dB:attack=5:release=50[v_foley]")
             foley_out = os.path.join(audio_dir, "_voice_foley_merged.mp3")
             foley_cmd.extend(["-filter_complex", ";".join(foley_filters), "-map", "[v_foley]", "-c:a", "libmp3lame", "-b:a", "192k", foley_out])
             res_foley = subprocess.run(foley_cmd, capture_output=True)
@@ -425,27 +436,28 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
         if bg_volume is not None:
             bg_vol = float(bg_volume)
         else:
-            bg_vol = pacing.get("bgm_volume_normal", 0.45)
+            bg_vol = pacing.get("bgm_volume_normal", 0.25)
         bg_vol = max(0.0, min(1.0, bg_vol))
 
         duck_enabled = pacing.get("enable_bgm_ducking", True)
 
         if bg_vol > 0.01:
-            print(f"  🎵 Trộn nhạc nền TikTok (volume={bg_vol:.2f}, ducking={duck_enabled}): {os.path.basename(bg_music_path)}")
+            print(f"  🎵 Trộn nhạc nền êm dịu (volume={bg_vol:.2f}, ducking={duck_enabled}): {os.path.basename(bg_music_path)}")
 
             if duck_enabled:
-                # Dynamic ducking qua sidechaincompress cân chỉnh tự nhiên:
-                # threshold=0.10: chỉ giọng nói thực thụ mới kích hoạt ducking
-                # ratio=2.2: hạ nhạc nền xuống mức êm dịu (~ -30dB), vừa đủ nghe làm nền sau lời nói
-                # attack=40ms, release=350ms: nhả nhạc nền nhanh và mượt mà ngay khi dứt câu thoại
+                # Dynamic ducking qua sidechaincompress:
+                # highpass=f=80 cắt dải siêu trầm gây rung ù tai
+                # lowpass=f=9500 giữ âm sắc piano/lofi ấm áp, mộc mạc
+                # threshold=0.15, ratio=2.2: hạ nhẹ nhạc nền khi có giọng nói nhưng vẫn nghe rõ giai điệu
+                # attack=40ms, release=400ms: chuyển tiếp nhịp nhàng, êm ái
                 filter_str = (
-                    f"[1:a]volume={bg_vol:.3f}[bg];"
+                    f"[1:a]highpass=f=80,lowpass=f=9500,volume={bg_vol:.3f}[bg];"
                     f"[0:a]asplit=2[v_main][v_side];"
-                    f"[bg][v_side]sidechaincompress=threshold=0.10:ratio=2.2:attack=40:release=350[ducked_bg];"
+                    f"[bg][v_side]sidechaincompress=threshold=0.15:ratio=2.2:attack=40:release=400[ducked_bg];"
                     f"[v_main][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
                 )
             else:
-                filter_str = f"[1:a]volume={(bg_vol * 0.7):.3f}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
+                filter_str = f"[1:a]highpass=f=80,lowpass=f=9500,volume={(bg_vol * 0.85):.3f}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
 
             run_ffmpeg(
                 "-i", voice_sfx_merged,
@@ -462,12 +474,12 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
     else:
         shutil.copy(voice_sfx_merged, temp_pre_master)
 
-    # MASTERING ÂM THANH CHUẨN TIKTOK/REELS (-14 LUFS BROADCAST STANDARD):
-    # Đảm bảo giọng đọc luôn to rõ, đanh chắc, không bao giờ bị nghẹt hay chìm dưới nhạc nền
+    # MASTERING ÂM THANH CHUẨN TIKTOK/REELS:
+    # Áp dụng peak limiter trong suốt để bảo vệ chống méo rè (clipping), không nén bẹp tiếng
     try:
         run_ffmpeg(
             "-i", temp_pre_master,
-            "-af", "loudnorm=I=-14:LRA=7:TP=-1.5",
+            "-af", "alimiter=limit=-1.0dB:attack=5:release=50",
             "-c:a", "libmp3lame",
             "-b:a", "192k",
             output_path
@@ -476,10 +488,10 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
             try: os.remove(temp_pre_master)
             except OSError: pass
     except Exception as e:
-        print(f"  ⚠️ Loudnorm fallback: {e}")
+        print(f"  ⚠️ Limiter fallback: {e}")
         shutil.copy(temp_pre_master, output_path)
 
-    print(f"  [✓] Audio tổng Studio Mastered (-14 LUFS): {output_path}")
+    print(f"  [✓] Audio tổng Studio Mastered (Clean Limiter -1.0dB): {output_path}")
 
     print(f"  [✓] Audio tổng (đã có SFX meme): {output_path}")
     return output_path

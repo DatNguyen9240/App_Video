@@ -12,11 +12,10 @@ CÁCH DÙNG: python src/06_generator.py
 
 import os
 import sys
-import json
-import random
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SRC_DIR)
+OUT_DIR = os.path.join(BASE_DIR, "output")
 sys.path.insert(0, SRC_DIR)
 
 import importlib.util

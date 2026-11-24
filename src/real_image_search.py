@@ -42,7 +42,8 @@ BLACKLIST_URL_PATTERNS = [
     "pollinations", "shutterstock", "gettyimages", "alamy", "dreamstime", "depositphotos",
     "vector", "clipart", "istockphoto", "123rf", "canva", "freepik", "watermark", "stock-photo",
     "i.ytimg.com", "youtube.com", "funny_fail", "funny-fails", "maxresdefault", "hqdefault", "sddefault",
-    "logo", "icon", "badge", "schematic", "diagram", "component", "catalog"
+    "logo", "icon", "badge", "schematic", "diagram", "component", "catalog",
+    "dealeraccelerate", "carfax", "autotrader", "volocars", "classiccars", "cars.com"
 ]
 
 
@@ -198,10 +199,15 @@ def generate_wikimedia_visual_queries(topic: str, context: str = "") -> List[str
         )
         terms = json.loads(res.text)
         if isinstance(terms, list):
-            return [t.strip() for t in terms if isinstance(t, str) and t.strip()]
+            res_terms = [t.strip() for t in terms if isinstance(t, str) and t.strip()]
+            if res_terms:
+                return res_terms
     except Exception as e:
         print(f"  ⚠️ Lỗi khi sinh từ khóa Wikimedia ({e})")
-    return []
+
+    # Fallback ngoại tuyến: chuẩn hóa và sinh từ khóa dự phòng từ topic
+    cleaned = clean_search_term(topic)
+    return [cleaned, f"{cleaned} photo"] if cleaned else ["documentary archive"]
 
 
 def normalize_query_terms(term: str) -> List[str]:
@@ -302,7 +308,8 @@ def search_and_download_real_image(
     category: str = "general_life",
     output_path: str = None,
     target_width: int = 940,
-    target_height: int = 620
+    target_height: int = 620,
+    fallback_to_category: bool = True
 ) -> str:
     """
     Tìm kiếm ảnh thật trên web theo ngữ cảnh chính xác và lưu về máy.
@@ -376,6 +383,23 @@ def search_and_download_real_image(
                 print(f"  📸 [ẢNH THẬT CHUẨN XÁC BING]: {os.path.basename(output_path)} ({target_width}x{target_height})")
                 return output_path
 
-    # 4. TUYỆT ĐỐI KHÔNG FALLBACK sang ảnh nhà hàng/tòa nhà không liên quan
+    # 4. Dự phòng ảnh thật chất lượng cao từ kho assets theo phân loại ngữ cảnh nếu web không có
+    if fallback_to_category:
+        cat_file = os.path.join(ASSETS_DIR, f"{category}.jpg")
+        if os.path.exists(cat_file):
+            print(f"  📸 [DỰ PHÒNG CHUẨN NGỮ CẢNH ASSETS]: Sử dụng ảnh {category}.jpg")
+            try:
+                shutil.copy2(cat_file, output_path)
+                return output_path
+            except Exception:
+                return cat_file
+        gen_file = os.path.join(ASSETS_DIR, "general_life.jpg")
+        if os.path.exists(gen_file):
+            try:
+                shutil.copy2(gen_file, output_path)
+                return output_path
+            except Exception:
+                return gen_file
+
     print(f"  ⚠️ Không tìm thấy ảnh thực tế phù hợp 100% với ngữ cảnh '{context_str}', tắt thẻ popup để bảo vệ trải nghiệm xem!")
     return ""
