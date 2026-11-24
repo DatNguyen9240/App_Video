@@ -144,19 +144,8 @@ def verify_and_standardize_mp3(filepath: str, apply_mastering: bool = True, extr
     if extra_filter:
         af_filters.append(extra_filter)
 
-    if apply_mastering and mast.get("enable_vocal_chain", True):
-        hp = mast.get("vocal_highpass_hz", 75)
-        boost = mast.get("vocal_presence_boost_db", 0.8)
-        lufs = mast.get("target_lufs", -15)
-        af_filters.append(f"highpass=f={hp}")
-        af_filters.append(f"equalizer=f=2200:t=q:w=1.2:g={boost}")
-        if mast.get("enable_compression", True):
-            # Attack 25ms bảo toàn chu kỳ âm trầm của giọng nam, loại bỏ triệt để méo rè
-            af_filters.append("acompressor=threshold=-15dB:ratio=2.0:attack=25:release=120")
-        af_filters.append(f"loudnorm=I={lufs}:TP=-1.5:LRA=8")
-        # Audio Noise Gate tự động đóng băng đuôi khoảng lặng, triệt tiêu 100% tiếng xì/rè ở đuôi câu
-        af_filters.append("agate=threshold=-38dB:ratio=4:range=-60dB:attack=15:release=80")
-
+    # Giữ nguyên độ trong trẻo 100% nguyên bản từ phòng thu Neural TTS của Microsoft,
+    # không dùng compressor, equalizer hay loudnorm làm méo sóng hay gây tiếng rè.
     cmd = [
         exe, "-y",
         "-i", filepath,
@@ -165,7 +154,7 @@ def verify_and_standardize_mp3(filepath: str, apply_mastering: bool = True, extr
         "-ac", "2",
         *(["-af", ",".join(af_filters)] if af_filters else []),
         "-c:a", "libmp3lame",
-        "-b:a", bitrate,
+        "-b:a", "320k",
         clean_temp
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -199,34 +188,34 @@ def generate_silence_mp3(duration_sec: float, output_path: str) -> str:
 
 # ─── BỘ HÌNH TƯỢNG GIỌNG ĐỌC HÀI HƯỚC & ĐA VAI DIỄN VIỆT NAM (GEN Z / MEME) ─
 VOICE_PROFILES = {
-    # 1. Chị Google: Robot meme hài hước kinh điển, tốc độ TikTok nhanh nhẹn (+30%)
+    # 1. Chị Google / Nữ Dẫn Chuyện: Hoài My tốc độ lướt TikTok (+18% native neural), trong trẻo 100%, không rè
     "chi_google": {
-        "base_voice": "chi_google",
-        "rate": "+0%",
-        "af_filter": "atempo=1.30",
-        "name": "Chị Google (Meme robot nhanh nhẹn, bắt trend)",
+        "base_voice": "vi-VN-HoaiMyNeural",
+        "rate": "+18%",
+        "af_filter": "",
+        "name": "Hoài My Gen Z (Tự nhiên, sắc nét, hoàn toàn không rè)",
         "gender": "female"
     },
-    # 2. Nữ Cà Khịa Gen Z: Hoài My tốc độ TikTok (+26%), đanh đá, sắc bén, dứt khoát
+    # 2. Nữ Cà Khịa Gen Z: Hoài My tốc độ TikTok (+18%), đanh đá, sắc bén, dứt khoát
     "nu_cakhia": {
         "base_voice": "vi-VN-HoaiMyNeural",
-        "rate": "+0%",
-        "af_filter": "atempo=1.26",
+        "rate": "+18%",
+        "af_filter": "",
         "name": "Nữ Cà Khịa Gen Z (Đanh đá, hài hước, tốc độ cao)",
         "gender": "female"
     },
-    # 3. Nữ Nhí Nhảnh: Hoài My vui tươi, nhanh nhẹn (+26%)
+    # 3. Nữ Nhí Nhảnh: Hoài My vui tươi, nhanh nhẹn (+18%)
     "nu_nhinhanh": {
         "base_voice": "vi-VN-HoaiMyNeural",
-        "rate": "+0%",
-        "af_filter": "atempo=1.26",
+        "rate": "+18%",
+        "af_filter": "",
         "name": "Nữ Nhí Nhảnh (Vui tươi, dễ thương, hài nhẹ)",
         "gender": "female"
     },
-    # 4. Nam Hài: Giọng Nam Minh chuẩn Việt, tốc độ nói tự nhiên +12%, âm sắc ấm áp, rõ ràng không rè
+    # 4. Nam Hài: Giọng Nam Minh chuẩn Việt, tốc độ nói tự nhiên +15%, âm sắc ấm áp, rõ ràng không rè
     "nam_hai": {
         "base_voice": "vi-VN-NamMinhNeural",
-        "rate": "+12%",
+        "rate": "+15%",
         "af_filter": "",
         "name": "Nam Hài Hước (Dí dỏm, nhanh nhảu, âm thanh sạch không rè)",
         "gender": "male"
@@ -234,7 +223,7 @@ VOICE_PROFILES = {
     # 5. Nam Trầm Hài: Giọng Andrew Multilingual hoặc Nam Minh trầm ấm, điện ảnh
     "nam_tram_hai": {
         "base_voice": "en-US-AndrewMultilingualNeural",
-        "rate": "+8%",
+        "rate": "+10%",
         "af_filter": "",
         "name": "Nam Trầm Hài (Podcast, truyền cảm, trầm ấm)",
         "gender": "male"
@@ -242,16 +231,16 @@ VOICE_PROFILES = {
     # 6. Nam Minh: Giọng nam chuẩn Việt Nam rõ ràng, truyền cảm
     "nam_minh": {
         "base_voice": "vi-VN-NamMinhNeural",
-        "rate": "+12%",
+        "rate": "+15%",
         "af_filter": "",
         "name": "Nam Minh (Chuẩn tiếng Việt, rõ nét không rè)",
         "gender": "male"
     },
-    # 7. Hoài My Chuẩn: Hoài My Gen Z tốc độ lướt TikTok (+25%)
+    # 7. Hoài My Chuẩn: Hoài My Gen Z tốc độ lướt TikTok (+18%)
     "hoai_my": {
         "base_voice": "vi-VN-HoaiMyNeural",
-        "rate": "+0%",
-        "af_filter": "atempo=1.25",
+        "rate": "+18%",
+        "af_filter": "",
         "name": "Hoài My Gen Z (Tự nhiên, tốc độ lướt TikTok)",
         "gender": "female"
     }
@@ -405,9 +394,9 @@ async def _run_edge_tts_chunk_async(text: str, output_path: str, voice: str, rat
 def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0%", pitch: str = "+0Hz", style: str = "", extra_filter: str = "") -> bool:
     """
     Tạo audio Edge-TTS tự nhiên 100%:
-    - Tự động tách câu theo dấu chấm/phẩy để tránh lỗi NoAudioReceived trên câu dài.
-    - Cơ chế thử lại chống rớt kết nối WebSocket.
-    - Nối các câu liền mạch và áp dụng bộ Mastering âm thanh chuẩn LUFS -14.
+    - Với câu chuẩn Threads / bình luận (< 500 ký tự): Gọi trực tiếp Edge-TTS 1 lượt duy nhất,
+      bảo toàn toàn bộ dấu câu, hơi thở và ngữ điệu tự nhiên, loại bỏ hoàn toàn việc cắt ghép gây rè/tách tiếng.
+    - Dự phòng nối câu qua audio filter re-encode nếu gặp đoạn văn cực dài (> 500 ký tự).
     """
     try:
         if os.path.exists(output_path):
@@ -415,8 +404,17 @@ def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0
             except OSError: pass
 
         cleaned = clean_for_tts(text)
-        # Tách theo câu để đảm bảo TTS không bị quá tải
-        raw_sentences = [s.strip() for s in re.split(r"[.!?]+", cleaned) if len(s.strip()) > 3]
+        if not cleaned:
+            return False
+
+        # Tối ưu cho Threads: 100% bài đăng và bình luận dưới 500 ký tự được sinh trực tiếp nguyên khối
+        if len(cleaned) < 500:
+            ok = asyncio.run(_run_edge_tts_chunk_async(cleaned, output_path, voice, rate=rate))
+            if ok and os.path.exists(output_path) and os.path.getsize(output_path) > 400:
+                return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
+
+        # Dự phòng cho kịch bản cực dài: Tách theo câu và ghép qua filter nối sạch
+        raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if len(s.strip()) > 3]
         if not raw_sentences:
             raw_sentences = [cleaned]
 
@@ -435,23 +433,22 @@ def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0
         if len(temp_files) == 1:
             shutil.move(temp_files[0], output_path)
         else:
-            # Ghép nối các câu mượt mà
-            concat_txt = f"{output_path}.concat.txt"
-            with open(concat_txt, "w", encoding="utf-8") as f:
-                for tf in temp_files:
-                    f.write(f"file '{os.path.abspath(tf)}'\n")
-
-            cmd = [exe, "-y", "-f", "concat", "-safe", "0", "-i", concat_txt, "-c", "copy", output_path]
-            res = subprocess.run(cmd, capture_output=True)
-            try: os.remove(concat_txt)
-            except OSError: pass
+            # Ghép nối mượt mà bằng ffmpeg concat filter re-encoding (loại trừ 100% lỗi MP3 stream header pop/click)
+            inputs = []
+            filter_parts = []
+            for idx, tf in enumerate(temp_files):
+                inputs.extend(["-i", tf])
+                filter_parts.append(f"[{idx}:a]")
+            concat_filter = f"{''.join(filter_parts)}concat=n={len(temp_files)}:v=0:a=1[out]"
+            cmd = [exe, "-y"] + inputs + ["-filter_complex", concat_filter, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "320k", output_path]
+            subprocess.run(cmd, capture_output=True)
 
         for tf in temp_files:
             if os.path.exists(tf):
                 try: os.remove(tf)
                 except OSError: pass
 
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 500:
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
             return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
 
         return False
@@ -544,6 +541,16 @@ def text_to_speech(text: str, output_path: str,
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     cleaned = clean_for_tts(text)
 
+    # Tự động đồng bộ tốc độ nói tự nhiên theo hình tượng giọng đọc nếu chưa truyền tốc độ đặc thù
+    if rate in ["+0%", "0%", "", None]:
+        v_clean = voice.lower().strip()
+        if v_clean in VOICE_PROFILES:
+            rate = VOICE_PROFILES[v_clean].get("rate", "+18%")
+        elif v_clean in VOICE_MAP and VOICE_MAP[v_clean] in VOICE_PROFILES:
+            rate = VOICE_PROFILES[VOICE_MAP[v_clean]].get("rate", "+18%")
+        else:
+            rate = "+18%" if any(k in v_clean for k in ["female", "nu", "hoai"]) else "+15%"
+
     # Lấy filter định hình giọng hài hước nếu chưa được truyền tường minh
     if extra_filter is None:
         extra_filter = get_voice_filter(voice) or ""
@@ -559,10 +566,10 @@ def text_to_speech(text: str, output_path: str,
         if synthesize_elevenlabs(cleaned, output_path, eleven_id):
             return output_path
 
-    # 0b. Tạo giọng Chị Google meme kinh điển nếu chỉ định
+    # 0b. Chỉ dùng gTTS nếu người dùng cố ý chỉ định gtts / legacy_gtts (không dùng cho chi_google vì chi_google là Hoài My sắc nét)
     actual_voice = resolve_voice_id(voice)
-    if v_lower in ["chi_google", "google", "gtts"] or actual_voice == "chi_google":
-        print(f"     🤖 [CHỊ GOOGLE MEME]: Đang tạo giọng Chị Google nguyên bản cho {os.path.basename(output_path)}...")
+    if v_lower in ["gtts", "legacy_gtts", "robot_google"]:
+        print(f"     🤖 [LEGACY GTTS]: Đang tạo giọng Google TTS nguyên bản cho {os.path.basename(output_path)}...")
         if synthesize_gtts(cleaned, output_path, extra_filter=extra_filter):
             return output_path
     for attempt in range(1, max_retries + 1):
