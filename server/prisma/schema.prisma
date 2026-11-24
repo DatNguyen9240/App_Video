@@ -1,0 +1,165 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Platform {
+  FACEBOOK
+  YOUTUBE
+  INSTAGRAM
+  TIKTOK
+}
+
+enum AccountStatus {
+  CONNECTED
+  EXPIRED
+  REVOKED
+  DISCONNECTED
+}
+
+enum ContentStatus {
+  DRAFT
+  SCHEDULED
+  PROCESSING
+  PUBLISHED
+  PARTIALLY_PUBLISHED
+  FAILED
+  CANCELLED
+}
+
+enum TaskStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id           String          @id @default(uuid())
+  email        String          @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  socialAccounts SocialAccount[]
+  contents       Content[]
+
+  @@map("users")
+}
+
+model SocialAccount {
+  id                    String        @id @default(uuid())
+  userId                String
+  platform              Platform
+  platformAccountId     String        // Facebook Page ID or YouTube Channel ID
+  accountName           String
+  avatarUrl             String?
+  accessTokenEncrypted  String        // AES-256-GCM encrypted
+  refreshTokenEncrypted String?       // AES-256-GCM encrypted (for Google OAuth)
+  tokenExpiresAt        DateTime?
+  scopes                String?       // Space-separated or JSON list of authorized scopes
+  status                AccountStatus @default(CONNECTED)
+  metadata              Json?         // Custom platform metadata (e.g. category, subscriberCount)
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  publishingTasks PublishingTask[]
+
+  @@unique([userId, platform, platformAccountId])
+  @@index([userId])
+  @@index([platform])
+  @@index([status])
+  @@map("social_accounts")
+}
+
+model Content {
+  id              String        @id @default(uuid())
+  userId          String
+  title           String?
+  caption         String?       // Used primarily for Facebook / Instagram
+  description     String?       // Used primarily for YouTube description
+  hashtags        String?       // e.g. "#viral #tech #shorts"
+  status          ContentStatus @default(DRAFT)
+  targetPlatforms Json          // Array of strings, e.g. ["FACEBOOK", "YOUTUBE"]
+  targetAccountIds Json?        // Optional specific account IDs selected
+  scheduledAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaItems      Media[]
+  publishingTasks PublishingTask[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@map("contents")
+}
+
+model Media {
+  id           String   @id @default(uuid())
+  contentId    String?
+  storageKey   String   // S3 / MinIO object key
+  originalName String
+  mimeType     String
+  fileSize     Int
+  duration     Float?   // Duration in seconds for videos
+  width        Int?
+  height       Int?
+  thumbnailKey String?  // Generated thumbnail image key
+  createdAt    DateTime @default(now())
+
+  content Content? @relation(fields: [contentId], references: [id], onDelete: SetNull)
+
+  @@index([contentId])
+  @@map("media")
+}
+
+model PublishingTask {
+  id               String     @id @default(uuid())
+  contentId        String
+  socialAccountId  String
+  platform         Platform
+  scheduledAt      DateTime?
+  publishedAt      DateTime?
+  status           TaskStatus @default(PENDING)
+  externalPostId   String?    // Facebook post ID or YouTube video ID
+  externalPostUrl  String?    // Direct permalink to the published content
+  errorCode        String?
+  errorMessage     String?
+  retryCount       Int        @default(0)
+  idempotencyKey   String     @unique // Hash or unique identifier preventing double-publishing
+  platformMetadata Json?      // Execution response payload, upload details
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  content       Content       @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+
+  @@index([contentId])
+  @@index([socialAccountId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@map("publishing_tasks")
+}
+
+model OAuthState {
+  id          String   @id @default(uuid())
+  state       String   @unique
+  userId      String
+  platform    Platform
+  redirectUri String?
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([state])
+  @@index([expiresAt])
+  @@map("oauth_states")
+}
