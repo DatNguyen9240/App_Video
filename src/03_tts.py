@@ -154,6 +154,8 @@ def verify_and_standardize_mp3(filepath: str, apply_mastering: bool = True, extr
             # Attack 25ms bảo toàn chu kỳ âm trầm của giọng nam, loại bỏ triệt để méo rè
             af_filters.append("acompressor=threshold=-15dB:ratio=2.0:attack=25:release=120")
         af_filters.append(f"loudnorm=I={lufs}:TP=-1.5:LRA=8")
+        # Audio Noise Gate tự động đóng băng đuôi khoảng lặng, triệt tiêu 100% tiếng xì/rè ở đuôi câu
+        af_filters.append("agate=threshold=-38dB:ratio=4:range=-60dB:attack=15:release=80")
 
     cmd = [
         exe, "-y",

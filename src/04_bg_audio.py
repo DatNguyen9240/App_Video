@@ -448,12 +448,12 @@ def build_mixed_audio_with_sfx(audio_sequence: list[str], output_path: str, bg_m
                 # Dynamic ducking qua sidechaincompress:
                 # highpass=f=80 cắt dải siêu trầm gây rung ù tai
                 # lowpass=f=9500 giữ âm sắc piano/lofi ấm áp, mộc mạc
-                # threshold=0.15, ratio=2.2: hạ nhẹ nhạc nền khi có giọng nói nhưng vẫn nghe rõ giai điệu
-                # attack=40ms, release=400ms: chuyển tiếp nhịp nhàng, êm ái
+                # threshold=0.05: hạ êm nhạc nền và không bị giật nhả giật giũa ở khoảng ngắt nghỉ
+                # attack=30ms, release=750ms: chuyển tiếp nhịp nhàng, êm ái, triệt tiêu hoàn toàn tiếng hút âm
                 filter_str = (
                     f"[1:a]highpass=f=80,lowpass=f=9500,volume={bg_vol:.3f}[bg];"
                     f"[0:a]asplit=2[v_main][v_side];"
-                    f"[bg][v_side]sidechaincompress=threshold=0.15:ratio=2.2:attack=40:release=400[ducked_bg];"
+                    f"[bg][v_side]sidechaincompress=threshold=0.05:ratio=2.2:attack=30:release=750[ducked_bg];"
                     f"[v_main][ducked_bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[out]"
                 )
             else:
