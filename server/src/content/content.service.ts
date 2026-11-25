@@ -48,11 +48,16 @@ export class ContentService {
   }
 
   async getContentList(userId: string, filter?: { status?: ContentStatus; page?: number; limit?: number }) {
-    const { status, page = 1, limit = 20 } = filter || {};
-    const skip = (Number(page) - 1) * Number(limit);
+    const pageVal = Number(filter?.page);
+    const limitVal = Number(filter?.limit);
+    const pageNum = (!isNaN(pageVal) && pageVal > 0) ? pageVal : 1;
+    const limitNum = (!isNaN(limitVal) && limitVal > 0) ? limitVal : 20;
+    const skip = (pageNum - 1) * limitNum;
 
     const where: any = { userId };
-    if (status) where.status = status;
+    if (filter?.status && (filter.status as any) !== 'ALL' && (filter.status as any) !== 'undefined') {
+      where.status = filter.status;
+    }
 
     const [items, total] = await Promise.all([
       this.prisma.content.findMany({
@@ -72,7 +77,7 @@ export class ContentService {
         },
         orderBy: { updatedAt: 'desc' },
         skip,
-        take: Number(limit),
+        take: limitNum,
       }),
       this.prisma.content.count({ where }),
     ]);
@@ -80,9 +85,9 @@ export class ContentService {
     return {
       data: items,
       total,
-      page: Number(page),
-      limit: Number(limit),
-      totalPages: Math.ceil(total / Number(limit)),
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
     };
   }
 

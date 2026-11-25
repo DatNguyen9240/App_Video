@@ -333,15 +333,22 @@ export class PublishingService {
    * Lists tasks with filtering and pagination.
    */
   async getTasks(filter: any, userId: string) {
-    const { platform, status, page = 1, limit = 20 } = filter;
-    const skip = (Number(page) - 1) * Number(limit);
+    const pageVal = Number(filter?.page);
+    const limitVal = Number(filter?.limit);
+    const pageNum = (!isNaN(pageVal) && pageVal > 0) ? pageVal : 1;
+    const limitNum = (!isNaN(limitVal) && limitVal > 0) ? limitVal : 20;
+    const skip = (pageNum - 1) * limitNum;
 
     const where: any = {
       content: { userId },
     };
 
-    if (platform) where.platform = platform;
-    if (status) where.status = status;
+    if (filter?.platform && filter.platform !== 'ALL' && filter.platform !== 'undefined') {
+      where.platform = filter.platform;
+    }
+    if (filter?.status && filter.status !== 'ALL' && filter.status !== 'undefined') {
+      where.status = filter.status;
+    }
 
     const [tasks, total] = await Promise.all([
       this.prisma.publishingTask.findMany({
@@ -365,7 +372,7 @@ export class PublishingService {
         },
         orderBy: { createdAt: 'desc' },
         skip,
-        take: Number(limit),
+        take: limitNum,
       }),
       this.prisma.publishingTask.count({ where }),
     ]);
@@ -373,9 +380,9 @@ export class PublishingService {
     return {
       data: tasks,
       total,
-      page: Number(page),
-      limit: Number(limit),
-      totalPages: Math.ceil(total / Number(limit)),
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
     };
   }
 

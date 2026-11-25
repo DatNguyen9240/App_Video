@@ -104,7 +104,11 @@ export class MediaService {
   }
 
   async getMediaList(userId: string, page: number = 1, limit: number = 20) {
-    const skip = (Number(page) - 1) * Number(limit);
+    const pageVal = Number(page);
+    const limitVal = Number(limit);
+    const pageNum = (!isNaN(pageVal) && pageVal > 0) ? pageVal : 1;
+    const limitNum = (!isNaN(limitVal) && limitVal > 0) ? limitVal : 20;
+    const skip = (pageNum - 1) * limitNum;
 
     // List media belonging to content created by user or unassigned uploaded by user
     const [items, total] = await Promise.all([
@@ -117,7 +121,7 @@ export class MediaService {
         },
         orderBy: { createdAt: 'desc' },
         skip,
-        take: Number(limit),
+        take: limitNum,
       }),
       this.prisma.media.count({
         where: {
@@ -137,9 +141,9 @@ export class MediaService {
     return {
       data: formatted,
       total,
-      page: Number(page),
-      limit: Number(limit),
-      totalPages: Math.ceil(total / Number(limit)),
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
     };
   }
 
