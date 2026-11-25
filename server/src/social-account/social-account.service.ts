@@ -96,11 +96,11 @@ export class SocialAccountService {
       },
     });
 
-    const scopes = [
+    const configuredScopes = this.configService.get<string>('META_OAUTH_SCOPES');
+    const scopes = configuredScopes || [
       'pages_show_list',
       'pages_read_engagement',
       'pages_manage_posts',
-      'pages_manage_metadata',
       'public_profile',
     ].join(',');
 
