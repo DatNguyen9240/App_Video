@@ -19,6 +19,8 @@ export const getFacebookAuthUrl = () => api.get('/social-accounts/facebook/conne
 export const getYouTubeAuthUrl = () => api.get('/social-accounts/youtube/connect').then((r) => r.data);
 export const getThreadsAuthUrl = () => api.get('/social-accounts/threads/connect').then((r) => r.data);
 export const connectThreadsManualToken = (token: string) => api.post('/social-accounts/threads/manual-token', { token }).then((r) => r.data);
+export const getTikTokAuthUrl = () => api.get('/social-accounts/tiktok/connect').then((r) => r.data);
+export const connectTikTokManualToken = (token: string) => api.post('/social-accounts/tiktok/manual-token', { token }).then((r) => r.data);
 export const disconnectSocialAccount = (id: string) => api.delete(`/social-accounts/${id}`).then((r) => r.data);
 export const refreshSocialAccountToken = (id: string) => api.post(`/social-accounts/${id}/refresh`).then((r) => r.data);
 

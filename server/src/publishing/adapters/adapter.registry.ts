@@ -4,6 +4,7 @@ import { SocialPlatformAdapter } from './social-platform.adapter.interface';
 import { FacebookAdapter } from './facebook.adapter';
 import { YouTubeAdapter } from './youtube.adapter';
 import { ThreadsAdapter } from './threads.adapter';
+import { TikTokAdapter } from './tiktok.adapter';
 
 @Injectable()
 export class PlatformAdapterRegistry {
@@ -14,10 +15,12 @@ export class PlatformAdapterRegistry {
     private readonly facebookAdapter: FacebookAdapter,
     private readonly youtubeAdapter: YouTubeAdapter,
     private readonly threadsAdapter: ThreadsAdapter,
+    private readonly tiktokAdapter: TikTokAdapter,
   ) {
     this.registerAdapter(this.facebookAdapter);
     this.registerAdapter(this.youtubeAdapter);
     this.registerAdapter(this.threadsAdapter);
+    this.registerAdapter(this.tiktokAdapter);
   }
 
   registerAdapter(adapter: SocialPlatformAdapter) {

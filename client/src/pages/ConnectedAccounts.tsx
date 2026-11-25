@@ -6,6 +6,8 @@ import {
   getYouTubeAuthUrl,
   getThreadsAuthUrl,
   connectThreadsManualToken,
+  getTikTokAuthUrl,
+  connectTikTokManualToken,
   disconnectSocialAccount,
   refreshSocialAccountToken,
 } from '../api/client';
@@ -76,6 +78,27 @@ export const ConnectedAccounts: React.FC = () => {
     }
   };
 
+  const handleConnectTikTok = async () => {
+    const manualToken = prompt('Dán TikTok Access Token (từ TikTok Developer Portal) hoặc bấm Cancel để mở OAuth popup:');
+    if (manualToken && manualToken.trim()) {
+      try {
+        await connectTikTokManualToken(manualToken.trim());
+        queryClient.invalidateQueries({ queryKey: ['social-accounts'] });
+        alert('🎉 Kết nối tài khoản TikTok thành công!');
+        return;
+      } catch (err: any) {
+        alert(`Lỗi kết nối TikTok: ${err.response?.data?.message || err.message}`);
+        return;
+      }
+    }
+    try {
+      const res = await getTikTokAuthUrl();
+      if (res.url) window.location.href = res.url;
+    } catch (err: any) {
+      alert(`Failed to start TikTok OAuth: ${err.response?.data?.message || err.message}`);
+    }
+  };
+
   return (
     <div className="space-y-8 max-w-6xl mx-auto">
       {/* ─── HEADER ───────────────────────────────────────────────────────── */}
@@ -83,31 +106,38 @@ export const ConnectedAccounts: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Connected Social Accounts</h2>
           <p className="text-sm text-slate-500 mt-1">
-            Authorize Meta Facebook Pages, Google YouTube Channels, and Threads via official OAuth 2.0.
+            Authorize Meta Facebook Pages, Google YouTube Channels, Meta Threads, and TikTok via official APIs.
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={handleConnectFacebook}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#1877F2] hover:bg-[#166fe5] text-white text-xs font-semibold shadow-sm transition-all"
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-[#1877F2] hover:bg-[#166fe5] text-white text-xs font-semibold shadow-sm transition-all"
           >
             <Share2 className="w-3.5 h-3.5" />
-            Connect Facebook Page
+            Connect Facebook
           </button>
           <button
             onClick={handleConnectThreads}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-black hover:bg-neutral-800 text-white text-xs font-semibold shadow-sm transition-all"
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-black hover:bg-neutral-800 text-white text-xs font-semibold shadow-sm transition-all"
           >
             <span className="font-bold">@</span>
             Connect Threads
           </button>
           <button
+            onClick={handleConnectTikTok}
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-[#010101] hover:bg-[#1a1a1a] text-[#00f2fe] border border-neutral-700 text-xs font-semibold shadow-sm transition-all"
+          >
+            <span className="text-[#fe2c55] font-extrabold text-sm">♪</span>
+            <span className="text-white">Connect TikTok</span>
+          </button>
+          <button
             onClick={handleConnectYouTube}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#FF0000] hover:bg-[#e60000] text-white text-xs font-semibold shadow-sm transition-all"
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-[#FF0000] hover:bg-[#e60000] text-white text-xs font-semibold shadow-sm transition-all"
           >
             <Share2 className="w-3.5 h-3.5" />
-            Connect YouTube Channel
+            Connect YouTube
           </button>
         </div>
       </div>
@@ -163,10 +193,16 @@ export const ConnectedAccounts: React.FC = () => {
                     />
                     <span
                       className={`absolute -bottom-1 -right-1 w-5 h-5 rounded-full flex items-center justify-center text-[10px] text-white font-bold shadow-sm ${
-                        acc.platform === 'FACEBOOK' ? 'bg-[#1877F2]' : acc.platform === 'THREADS' ? 'bg-black' : 'bg-[#FF0000]'
+                        acc.platform === 'FACEBOOK'
+                          ? 'bg-[#1877F2]'
+                          : acc.platform === 'THREADS'
+                          ? 'bg-black'
+                          : acc.platform === 'TIKTOK'
+                          ? 'bg-black text-[#00f2fe]'
+                          : 'bg-[#FF0000]'
                       }`}
                     >
-                      {acc.platform === 'FACEBOOK' ? 'f' : acc.platform === 'THREADS' ? '@' : '▶'}
+                      {acc.platform === 'FACEBOOK' ? 'f' : acc.platform === 'THREADS' ? '@' : acc.platform === 'TIKTOK' ? '♪' : '▶'}
                     </span>
                   </div>
 

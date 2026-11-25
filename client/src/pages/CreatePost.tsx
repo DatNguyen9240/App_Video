@@ -42,7 +42,7 @@ export const CreatePost: React.FC = () => {
   const [isUploading, setIsUploading] = useState(false);
 
   // Preview Tab
-  const [previewTab, setPreviewTab] = useState<'FACEBOOK' | 'YOUTUBE'>('FACEBOOK');
+  const [previewTab, setPreviewTab] = useState<'FACEBOOK' | 'YOUTUBE' | 'TIKTOK'>('FACEBOOK');
 
   // Load connected accounts
   const { data: accounts } = useQuery({
@@ -128,6 +128,10 @@ export const CreatePost: React.FC = () => {
     (a: any) => a.platform === 'YOUTUBE' && (selectedAccountIds.length === 0 || selectedAccountIds.includes(a.id)),
   );
 
+  const activeTikTokAccount = accounts?.find(
+    (a: any) => a.platform === 'TIKTOK' && (selectedAccountIds.length === 0 || selectedAccountIds.includes(a.id)),
+  );
+
   const activeMedia = uploadedMedia[0];
   const isVideo = activeMedia?.mimeType?.startsWith('video/');
 
@@ -148,53 +152,69 @@ export const CreatePost: React.FC = () => {
             <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
               1. Target Platforms
             </label>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <button
                 type="button"
                 onClick={() => togglePlatform('FACEBOOK')}
-                className={`flex items-center gap-3 p-3 rounded-lg border text-sm font-semibold transition-all ${
+                className={`flex items-center gap-2.5 p-3 rounded-lg border text-sm font-semibold transition-all ${
                   selectedPlatforms.includes('FACEBOOK')
                     ? 'border-[#1877F2] bg-blue-50/60 text-[#1877F2] ring-2 ring-[#1877F2]/20'
                     : 'border-slate-200 text-slate-600 hover:bg-slate-50'
                 }`}
               >
-                <span className="w-6 h-6 rounded bg-[#1877F2] text-white flex items-center justify-center text-xs font-bold">
+                <span className="w-6 h-6 rounded bg-[#1877F2] text-white flex items-center justify-center text-xs font-bold shrink-0">
                   f
                 </span>
-                <span>Facebook Pages</span>
-                {selectedPlatforms.includes('FACEBOOK') && <Check className="w-4 h-4 ml-auto" />}
+                <span className="truncate">Facebook</span>
+                {selectedPlatforms.includes('FACEBOOK') && <Check className="w-4 h-4 ml-auto shrink-0" />}
               </button>
 
               <button
                 type="button"
                 onClick={() => togglePlatform('THREADS')}
-                className={`flex items-center gap-3 p-3 rounded-lg border text-sm font-semibold transition-all ${
+                className={`flex items-center gap-2.5 p-3 rounded-lg border text-sm font-semibold transition-all ${
                   selectedPlatforms.includes('THREADS')
                     ? 'border-black bg-neutral-100 text-black ring-2 ring-black/20'
                     : 'border-slate-200 text-slate-600 hover:bg-slate-50'
                 }`}
               >
-                <span className="w-6 h-6 rounded bg-black text-white flex items-center justify-center text-xs font-bold">
+                <span className="w-6 h-6 rounded bg-black text-white flex items-center justify-center text-xs font-bold shrink-0">
                   @
                 </span>
-                <span>Threads</span>
-                {selectedPlatforms.includes('THREADS') && <Check className="w-4 h-4 ml-auto" />}
+                <span className="truncate">Threads</span>
+                {selectedPlatforms.includes('THREADS') && <Check className="w-4 h-4 ml-auto shrink-0" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => togglePlatform('TIKTOK')}
+                className={`flex items-center gap-2.5 p-3 rounded-lg border text-sm font-semibold transition-all ${
+                  selectedPlatforms.includes('TIKTOK')
+                    ? 'border-neutral-900 bg-neutral-900 text-[#00f2fe] ring-2 ring-neutral-800'
+                    : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <span className="w-6 h-6 rounded bg-black text-[#fe2c55] flex items-center justify-center text-xs font-bold border border-neutral-700 shrink-0">
+                  ♪
+                </span>
+                <span className="truncate">TikTok</span>
+                {selectedPlatforms.includes('TIKTOK') && <Check className="w-4 h-4 ml-auto shrink-0 text-white" />}
               </button>
 
               <button
                 type="button"
                 onClick={() => togglePlatform('YOUTUBE')}
-                className={`flex items-center gap-3 p-3 rounded-lg border text-sm font-semibold transition-all ${
+                className={`flex items-center gap-2.5 p-3 rounded-lg border text-sm font-semibold transition-all ${
                   selectedPlatforms.includes('YOUTUBE')
                     ? 'border-[#FF0000] bg-red-50/60 text-[#FF0000] ring-2 ring-[#FF0000]/20'
                     : 'border-slate-200 text-slate-600 hover:bg-slate-50'
                 }`}
               >
-                <span className="w-6 h-6 rounded bg-[#FF0000] text-white flex items-center justify-center text-xs font-bold">
+                <span className="w-6 h-6 rounded bg-[#FF0000] text-white flex items-center justify-center text-xs font-bold shrink-0">
                   ▶
                 </span>
-                <span>YouTube Channels</span>
-                {selectedPlatforms.includes('YOUTUBE') && <Check className="w-4 h-4 ml-auto" />}
+                <span className="truncate">YouTube</span>
+                {selectedPlatforms.includes('YOUTUBE') && <Check className="w-4 h-4 ml-auto shrink-0" />}
               </button>
             </div>
           </div>
@@ -432,6 +452,15 @@ export const CreatePost: React.FC = () => {
               </button>
               <button
                 type="button"
+                onClick={() => setPreviewTab('TIKTOK')}
+                className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${
+                  previewTab === 'TIKTOK' ? 'bg-black text-[#00f2fe] shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                TikTok
+              </button>
+              <button
+                type="button"
                 onClick={() => setPreviewTab('YOUTUBE')}
                 className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${
                   previewTab === 'YOUTUBE' ? 'bg-[#FF0000] text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
@@ -553,6 +582,96 @@ export const CreatePost: React.FC = () => {
                   <p className="font-semibold text-slate-700">Description Box Preview</p>
                   <p className="line-clamp-2">{description || 'No description provided'}</p>
                   {hashtags && <p className="text-blue-600 font-medium">{hashtags}</p>}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ─── TIKTOK PREVIEW CARD ───────────────────────────────────────── */}
+          {previewTab === 'TIKTOK' && (
+            <div className="bg-neutral-950 rounded-2xl border border-neutral-800 shadow-xl overflow-hidden text-white relative max-w-sm mx-auto aspect-[9/16] flex flex-col justify-between p-4">
+              {/* Background Video / Placeholder */}
+              <div className="absolute inset-0 z-0 bg-neutral-900 flex items-center justify-center overflow-hidden">
+                {activeMedia && isVideo ? (
+                  <video src={activeMedia.url} controls className="w-full h-full object-cover" />
+                ) : (
+                  <div className="flex flex-col items-center justify-center text-neutral-500 text-xs px-4 text-center">
+                    <div className="w-16 h-16 rounded-full bg-neutral-800 flex items-center justify-center mb-3">
+                      <Play className="w-8 h-8 text-[#00f2fe] ml-1" />
+                    </div>
+                    <span className="font-semibold text-neutral-300">TikTok Video Preview (9:16)</span>
+                    <span className="text-[11px] text-neutral-500 mt-1">Upload an MP4 video to preview playback</span>
+                  </div>
+                )}
+                {/* Subtle dark gradient overlay on bottom for text readability */}
+                <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-black/80 via-black/40 to-transparent pointer-events-none" />
+              </div>
+
+              {/* TikTok Top Header */}
+              <div className="relative z-10 flex items-center justify-between text-xs font-semibold px-2 pt-2 text-white/90 drop-shadow">
+                <span>LIVE</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-white/60">Following</span>
+                  <span className="text-white border-b-2 border-white pb-0.5">For You</span>
+                </div>
+                <span>🔍</span>
+              </div>
+
+              {/* TikTok Right Action Sidebar */}
+              <div className="absolute right-3 bottom-16 z-10 flex flex-col items-center gap-4 text-white">
+                <div className="relative">
+                  <img
+                    src={activeTikTokAccount?.avatarUrl || 'https://via.placeholder.com/44'}
+                    alt=""
+                    className="w-10 h-10 rounded-full border-2 border-white object-cover"
+                  />
+                  <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-[#fe2c55] text-white flex items-center justify-center text-[11px] font-bold">
+                    +
+                  </div>
+                </div>
+
+                <div className="flex flex-col items-center">
+                  <button type="button" className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white hover:text-[#fe2c55] transition-colors">
+                    <ThumbsUp className="w-5 h-5" />
+                  </button>
+                  <span className="text-[10px] font-semibold mt-0.5">142.5K</span>
+                </div>
+
+                <div className="flex flex-col items-center">
+                  <button type="button" className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white">
+                    <MessageCircle className="w-5 h-5" />
+                  </button>
+                  <span className="text-[10px] font-semibold mt-0.5">1,280</span>
+                </div>
+
+                <div className="flex flex-col items-center">
+                  <button type="button" className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white">
+                    <Share className="w-5 h-5" />
+                  </button>
+                  <span className="text-[10px] font-semibold mt-0.5">Share</span>
+                </div>
+
+                <div className="w-9 h-9 rounded-full bg-neutral-800 border-2 border-neutral-600 flex items-center justify-center text-xs">
+                  🎵
+                </div>
+              </div>
+
+              {/* TikTok Bottom Left Metadata Overlay */}
+              <div className="relative z-10 space-y-2 pr-16 pb-1">
+                <h4 className="font-bold text-sm text-white drop-shadow">
+                  @{activeTikTokAccount?.accountName ? activeTikTokAccount.accountName.replace(/^@/, '') : 'creator'}
+                </h4>
+                <p className="text-xs text-white/90 leading-snug line-clamp-3 drop-shadow">
+                  {caption || title || 'Check out our new video!'}
+                </p>
+                {hashtags && (
+                  <p className="text-xs font-semibold text-white drop-shadow">
+                    {hashtags}
+                  </p>
+                )}
+                <div className="flex items-center gap-2 text-[11px] text-white/80 pt-1">
+                  <span>♪</span>
+                  <span className="truncate">original sound - @{activeTikTokAccount?.accountName?.replace(/^@/, '') || 'creator'}</span>
                 </div>
               </div>
             </div>

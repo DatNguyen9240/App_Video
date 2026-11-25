@@ -530,6 +530,228 @@ export class SocialAccountService {
   }
 
   /**
+   * Generates secure OAuth authorization URL for TikTok Content Posting API.
+   */
+  async generateTikTokAuthUrl(userId: string, redirectUriOverride?: string): Promise<{ url: string; state: string }> {
+    const clientKey = this.configService.get<string>('TIKTOK_CLIENT_KEY');
+    const redirectUri = redirectUriOverride || this.configService.get<string>('TIKTOK_OAUTH_REDIRECT_URI');
+
+    if (!clientKey) {
+      throw new BadRequestException('TIKTOK_CLIENT_KEY is not configured in server environment.');
+    }
+
+    const state = crypto.randomBytes(24).toString('hex');
+    await this.prisma.oAuthState.create({
+      data: {
+        state,
+        userId,
+        platform: Platform.TIKTOK,
+        redirectUri,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      },
+    });
+
+    const scopes = 'user.info.basic,video.publish,video.upload';
+    const params = new URLSearchParams({
+      client_key: clientKey,
+      scope: scopes,
+      response_type: 'code',
+      redirect_uri: redirectUri || 'http://localhost:3000/api/social-accounts/tiktok/callback',
+      state,
+    });
+
+    const url = `https://www.tiktok.com/v2/auth/authorize/?${params.toString()}`;
+    return { url, state };
+  }
+
+  /**
+   * Handles TikTok OAuth callback: exchanges authorization code for tokens and fetches user info.
+   */
+  async handleTikTokCallback(code: string, state: string) {
+    if (!code) {
+      throw new BadRequestException('Authorization code is missing from TikTok callback.');
+    }
+
+    const oauthState = await this.validateAndConsumeState(state, Platform.TIKTOK);
+    const clientKey = this.configService.get<string>('TIKTOK_CLIENT_KEY');
+    const clientSecret = this.configService.get<string>('TIKTOK_CLIENT_SECRET');
+    const redirectUri = oauthState.redirectUri || this.configService.get<string>('TIKTOK_OAUTH_REDIRECT_URI');
+
+    try {
+      const tokenUrl = 'https://open.tiktokapis.com/v2/oauth/token/';
+      const params = new URLSearchParams();
+      params.append('client_key', clientKey || '');
+      params.append('client_secret', clientSecret || '');
+      params.append('code', code);
+      params.append('grant_type', 'authorization_code');
+      params.append('redirect_uri', redirectUri || '');
+
+      const tokenRes = await axios.post(tokenUrl, params.toString(), {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Cache-Control': 'no-cache',
+        },
+      });
+
+      const tokenData = tokenRes.data?.data || tokenRes.data;
+      if (!tokenData?.access_token) {
+        throw new Error(`Failed to obtain access token from TikTok: ${JSON.stringify(tokenRes.data)}`);
+      }
+
+      const accessToken = tokenData.access_token;
+      const refreshToken = tokenData.refresh_token || null;
+      const expiresIn = tokenData.expires_in || 86400;
+      const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+      const openId = tokenData.open_id;
+
+      // Fetch user profile info
+      let accountName = `TikTok User (${openId ? openId.slice(-6) : 'Account'})`;
+      let avatarUrl: string | null = null;
+
+      try {
+        const userInfoRes = await axios.get(
+          'https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name',
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          },
+        );
+        const userData = userInfoRes.data?.data?.user || userInfoRes.data?.user;
+        if (userData?.display_name) {
+          accountName = userData.display_name;
+        }
+        if (userData?.avatar_url) {
+          avatarUrl = userData.avatar_url;
+        }
+      } catch (userErr: any) {
+        this.logger.warn(`Could not fetch TikTok user details: ${userErr.message}`);
+      }
+
+      const accessTokenEncrypted = this.encryptionService.encrypt(accessToken);
+      const refreshTokenEncrypted = refreshToken ? this.encryptionService.encrypt(refreshToken) : null;
+
+      const account = await this.prisma.socialAccount.upsert({
+        where: {
+          userId_platform_platformAccountId: {
+            userId: oauthState.userId,
+            platform: Platform.TIKTOK,
+            platformAccountId: String(openId || 'tiktok_account'),
+          },
+        },
+        create: {
+          userId: oauthState.userId,
+          platform: Platform.TIKTOK,
+          platformAccountId: String(openId || 'tiktok_account'),
+          accountName,
+          avatarUrl,
+          accessTokenEncrypted,
+          refreshTokenEncrypted,
+          tokenExpiresAt,
+          status: AccountStatus.CONNECTED,
+          scopes: tokenData.scope || 'user.info.basic,video.publish,video.upload',
+          metadata: {
+            openId,
+          },
+        },
+        update: {
+          accountName,
+          avatarUrl,
+          accessTokenEncrypted,
+          refreshTokenEncrypted,
+          tokenExpiresAt,
+          status: AccountStatus.CONNECTED,
+          updatedAt: new Date(),
+        },
+      });
+
+      this.logger.log(`Successfully connected TikTok account '${accountName}' (${account.id})`);
+      return {
+        success: true,
+        account: {
+          id: account.id,
+          platform: account.platform,
+          accountName: account.accountName,
+          avatarUrl: account.avatarUrl,
+          status: account.status,
+        },
+      };
+    } catch (err: any) {
+      const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+      this.logger.error(`TikTok OAuth error: ${msg}`);
+      throw new BadRequestException(`TikTok API authentication failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Connects TikTok account directly using an Access Token (supports Sandbox or Developer tokens).
+   */
+  async connectTikTokWithToken(userId: string, token: string) {
+    const cleanToken = token.trim();
+    try {
+      const userInfoRes = await axios.get(
+        'https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name',
+        {
+          headers: {
+            Authorization: `Bearer ${cleanToken}`,
+          },
+        },
+      );
+
+      const userData = userInfoRes.data?.data?.user || userInfoRes.data?.user;
+      const openId = userData?.open_id || crypto.randomBytes(8).toString('hex');
+      const accountName = userData?.display_name || `TikTok (${openId.slice(-6)})`;
+      const avatarUrl = userData?.avatar_url || null;
+      const accessTokenEncrypted = this.encryptionService.encrypt(cleanToken);
+
+      const account = await this.prisma.socialAccount.upsert({
+        where: {
+          userId_platform_platformAccountId: {
+            userId,
+            platform: Platform.TIKTOK,
+            platformAccountId: String(openId),
+          },
+        },
+        create: {
+          userId,
+          platform: Platform.TIKTOK,
+          platformAccountId: String(openId),
+          accountName,
+          avatarUrl,
+          accessTokenEncrypted,
+          tokenExpiresAt: new Date(Date.now() + 86400 * 1000),
+          status: AccountStatus.CONNECTED,
+          scopes: 'user.info.basic,video.publish,video.upload',
+          metadata: { openId },
+        },
+        update: {
+          accountName,
+          avatarUrl,
+          accessTokenEncrypted,
+          status: AccountStatus.CONNECTED,
+          updatedAt: new Date(),
+        },
+      });
+
+      this.logger.log(`Successfully connected TikTok account via manual token: ${accountName}`);
+      return {
+        success: true,
+        account: {
+          id: account.id,
+          platform: account.platform,
+          accountName: account.accountName,
+          avatarUrl: account.avatarUrl,
+          status: account.status,
+        },
+      };
+    } catch (err: any) {
+      const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+      this.logger.error(`TikTok Manual Token Error: ${msg}`);
+      throw new BadRequestException(`TikTok token verification failed: ${msg}`);
+    }
+  }
+
+  /**
    * Connects Threads directly using token from Meta User Token Generator (Bypasses HTTPS requirement on localhost)
    */
   async connectThreadsWithToken(userId: string, token: string) {
@@ -674,6 +896,54 @@ export class SocialAccountService {
       }
     }
 
+    if (account.platform === Platform.TIKTOK && account.refreshTokenEncrypted) {
+      const refreshToken = this.encryptionService.decrypt(account.refreshTokenEncrypted);
+      const clientKey = this.configService.get<string>('TIKTOK_CLIENT_KEY');
+      const clientSecret = this.configService.get<string>('TIKTOK_CLIENT_SECRET');
+
+      try {
+        const tokenUrl = 'https://open.tiktokapis.com/v2/oauth/token/';
+        const params = new URLSearchParams();
+        params.append('client_key', clientKey || '');
+        params.append('client_secret', clientSecret || '');
+        params.append('grant_type', 'refresh_token');
+        params.append('refresh_token', refreshToken);
+
+        const tokenRes = await axios.post(tokenUrl, params.toString(), {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        });
+
+        const tokenData = tokenRes.data?.data || tokenRes.data;
+        const newAccessToken = tokenData.access_token;
+        const newRefreshToken = tokenData.refresh_token;
+        const expiresIn = tokenData.expires_in || 86400;
+        const newExpiry = new Date(Date.now() + expiresIn * 1000);
+
+        await this.prisma.socialAccount.update({
+          where: { id: accountId },
+          data: {
+            accessTokenEncrypted: this.encryptionService.encrypt(newAccessToken),
+            refreshTokenEncrypted: newRefreshToken ? this.encryptionService.encrypt(newRefreshToken) : account.refreshTokenEncrypted,
+            tokenExpiresAt: newExpiry,
+            status: AccountStatus.CONNECTED,
+            updatedAt: new Date(),
+          },
+        });
+
+        this.logger.log(`Successfully refreshed TikTok access token for account ${account.accountName}`);
+        return newAccessToken;
+      } catch (err: any) {
+        this.logger.error(`Failed to refresh TikTok token for account ${accountId}: ${err.message}`);
+        await this.prisma.socialAccount.update({
+          where: { id: accountId },
+          data: { status: AccountStatus.REVOKED },
+        });
+        throw new UnauthorizedException(`TikTok token revoked or expired: ${err.message}`);
+      }
+    }
+
     // For Facebook, Page Access tokens from long-lived user tokens do not expire
     return this.encryptionService.decrypt(account.accessTokenEncrypted);
   }
@@ -700,10 +970,10 @@ export class SocialAccountService {
    * Internal helper: returns decrypted tokens for publishing adapter use.
    */
   async getDecryptedTokens(account: SocialAccount): Promise<{ accessToken: string; refreshToken?: string }> {
-    // Check if token is expired (for YouTube)
-    if (account.platform === Platform.YOUTUBE && account.tokenExpiresAt) {
+    // Check if token is expired (for YouTube or TikTok)
+    if ((account.platform === Platform.YOUTUBE || account.platform === Platform.TIKTOK) && account.tokenExpiresAt) {
       const isExpiringSoon = account.tokenExpiresAt.getTime() - Date.now() < 5 * 60 * 1000;
-      if (isExpiringSoon) {
+      if (isExpiringSoon && account.refreshTokenEncrypted) {
         const freshToken = await this.refreshAccountToken(account.id);
         return { accessToken: freshToken };
       }

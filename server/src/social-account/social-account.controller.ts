@@ -132,6 +132,43 @@ export class SocialAccountController {
     return this.socialAccountService.connectThreadsWithToken(userId, token);
   }
 
+  @Get('tiktok/connect')
+  @ApiOperation({ summary: 'Initiate TikTok OAuth flow' })
+  async connectTikTok(
+    @Query('redirect') redirectOverride?: string,
+    @Headers('x-user-id') userIdHeader?: string,
+  ) {
+    const userId = userIdHeader || DEFAULT_USER_ID;
+    return this.socialAccountService.generateTikTokAuthUrl(userId, redirectOverride);
+  }
+
+  @Get('tiktok/callback')
+  @ApiOperation({ summary: 'TikTok OAuth callback handler' })
+  async tiktokCallback(
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Res() res: Response,
+  ) {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL', 'http://localhost:5173');
+    try {
+      await this.socialAccountService.handleTikTokCallback(code, state);
+      return res.redirect(`${frontendUrl}/accounts?status=success&platform=tiktok`);
+    } catch (err: any) {
+      const errMsg = encodeURIComponent(err.message || 'TikTok authorization failed');
+      return res.redirect(`${frontendUrl}/accounts?status=error&platform=tiktok&message=${errMsg}`);
+    }
+  }
+
+  @Post('tiktok/manual-token')
+  @ApiOperation({ summary: 'Connect TikTok via direct Access Token' })
+  async connectTikTokManual(
+    @Body('token') token: string,
+    @Headers('x-user-id') userIdHeader?: string,
+  ) {
+    const userId = userIdHeader || DEFAULT_USER_ID;
+    return this.socialAccountService.connectTikTokWithToken(userId, token);
+  }
+
   @Post(':id/refresh')
   @ApiOperation({ summary: 'Force refresh account OAuth access token' })
   async refreshToken(@Param('id') id: string) {
