@@ -3,6 +3,7 @@ import { Platform } from '@prisma/client';
 import { SocialPlatformAdapter } from './social-platform.adapter.interface';
 import { FacebookAdapter } from './facebook.adapter';
 import { YouTubeAdapter } from './youtube.adapter';
+import { ThreadsAdapter } from './threads.adapter';
 
 @Injectable()
 export class PlatformAdapterRegistry {
@@ -12,9 +13,11 @@ export class PlatformAdapterRegistry {
   constructor(
     private readonly facebookAdapter: FacebookAdapter,
     private readonly youtubeAdapter: YouTubeAdapter,
+    private readonly threadsAdapter: ThreadsAdapter,
   ) {
     this.registerAdapter(this.facebookAdapter);
     this.registerAdapter(this.youtubeAdapter);
+    this.registerAdapter(this.threadsAdapter);
   }
 
   registerAdapter(adapter: SocialPlatformAdapter) {

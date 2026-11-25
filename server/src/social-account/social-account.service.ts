@@ -380,6 +380,247 @@ export class SocialAccountService {
   }
 
   /**
+   * Generates secure OAuth authorization URL for Threads (Threads API).
+   */
+  async generateThreadsAuthUrl(userId: string, redirectUriOverride?: string): Promise<{ url: string; state: string }> {
+    const appId = this.configService.get<string>('THREADS_APP_ID') || this.configService.get<string>('META_APP_ID');
+    const redirectUri = redirectUriOverride || this.configService.get<string>('THREADS_OAUTH_REDIRECT_URI', 'http://localhost:3000/api/social-accounts/threads/callback');
+
+    if (!appId) {
+      throw new BadRequestException('THREADS_APP_ID or META_APP_ID is not configured in server environment.');
+    }
+
+    const state = crypto.randomBytes(24).toString('hex');
+    await this.prisma.oAuthState.create({
+      data: {
+        state,
+        userId,
+        platform: Platform.THREADS,
+        redirectUri,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 mins expiry
+      },
+    });
+
+    const scopes = ['threads_basic', 'threads_content_publish'].join(',');
+    const url = `https://threads.net/oauth/authorize?client_id=${appId}&redirect_uri=${encodeURIComponent(
+      redirectUri,
+    )}&scope=${encodeURIComponent(scopes)}&response_type=code&state=${state}`;
+
+    return { url, state };
+  }
+
+  /**
+   * Handles OAuth callback from Threads, exchanges for long-lived user token, and saves Threads profile.
+   */
+  async handleThreadsCallback(code: string, state: string) {
+    const oauthState = await this.validateAndConsumeState(state, Platform.THREADS);
+
+    const appId = this.configService.get<string>('THREADS_APP_ID') || this.configService.get<string>('META_APP_ID');
+    const appSecret = this.configService.get<string>('THREADS_APP_SECRET') || this.configService.get<string>('META_APP_SECRET');
+    const redirectUri = oauthState.redirectUri;
+
+    try {
+      // 1. Exchange authorization code for short-lived Threads user token
+      const tokenForm = new URLSearchParams({
+        client_id: appId,
+        client_secret: appSecret,
+        grant_type: 'authorization_code',
+        redirect_uri: redirectUri,
+        code,
+      });
+
+      const tokenRes = await axios.post('https://graph.threads.net/oauth/access_token', tokenForm.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+
+      const shortLivedToken = tokenRes.data.access_token;
+      const threadsUserId = tokenRes.data.user_id;
+
+      // 2. Exchange short-lived token for 60-day Long-Lived Token
+      let longLivedToken = shortLivedToken;
+      let tokenExpiresAt: Date | null = null;
+
+      try {
+        const longLivedRes = await axios.get('https://graph.threads.net/access_token', {
+          params: {
+            grant_type: 'th_exchange_token',
+            client_secret: appSecret,
+            access_token: shortLivedToken,
+          },
+        });
+        if (longLivedRes.data.access_token) {
+          longLivedToken = longLivedRes.data.access_token;
+          const expiresIn = longLivedRes.data.expires_in || 5184000;
+          tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+        }
+      } catch (err) {
+        this.logger.warn(`Could not exchange Threads long-lived token, using short-lived: ${err.message}`);
+      }
+
+      // 3. Query Threads User Profile
+      let username = `threads_user_${threadsUserId}`;
+      let avatarUrl: string | null = null;
+      try {
+        const profileRes = await axios.get('https://graph.threads.net/v1.0/me', {
+          params: {
+            fields: 'id,username,name,threads_profile_picture_url,threads_biography',
+            access_token: longLivedToken,
+          },
+        });
+        if (profileRes.data) {
+          username = profileRes.data.username || profileRes.data.name || username;
+          avatarUrl = profileRes.data.threads_profile_picture_url || null;
+        }
+      } catch (err) {
+        this.logger.warn(`Could not fetch Threads profile info: ${err.message}`);
+      }
+
+      const accessTokenEncrypted = this.encryptionService.encrypt(longLivedToken);
+
+      const account = await this.prisma.socialAccount.upsert({
+        where: {
+          userId_platform_platformAccountId: {
+            userId: oauthState.userId,
+            platform: Platform.THREADS,
+            platformAccountId: String(threadsUserId),
+          },
+        },
+        create: {
+          userId: oauthState.userId,
+          platform: Platform.THREADS,
+          platformAccountId: String(threadsUserId),
+          accountName: `@${username.replace(/^@/, '')}`,
+          avatarUrl,
+          accessTokenEncrypted,
+          tokenExpiresAt,
+          status: AccountStatus.CONNECTED,
+          scopes: 'threads_basic,threads_content_publish',
+          metadata: {
+            threadsUserId: String(threadsUserId),
+            username,
+          },
+        },
+        update: {
+          accountName: `@${username.replace(/^@/, '')}`,
+          avatarUrl,
+          accessTokenEncrypted,
+          tokenExpiresAt,
+          status: AccountStatus.CONNECTED,
+          updatedAt: new Date(),
+        },
+      });
+
+      this.logger.log(`Successfully connected Threads Account '@${username}' (${threadsUserId}) for user ${oauthState.userId}`);
+      return {
+        success: true,
+        account: {
+          id: account.id,
+          platform: account.platform,
+          platformAccountId: account.platformAccountId,
+          accountName: account.accountName,
+          avatarUrl: account.avatarUrl,
+          status: account.status,
+        },
+      };
+    } catch (err) {
+      const msg = err.response?.data?.error_message || err.response?.data?.error?.message || err.message;
+      this.logger.error(`Threads OAuth error: ${msg}`);
+      throw new BadRequestException(`Meta Threads API authentication failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Connects Threads directly using token from Meta User Token Generator (Bypasses HTTPS requirement on localhost)
+   */
+  async connectThreadsWithToken(userId: string, token: string) {
+    const appSecret = this.configService.get<string>('THREADS_APP_SECRET') || this.configService.get<string>('META_APP_SECRET');
+    let longLivedToken = token.trim();
+    let tokenExpiresAt: Date | null = null;
+
+    try {
+      const longLivedRes = await axios.get('https://graph.threads.net/access_token', {
+        params: {
+          grant_type: 'th_exchange_token',
+          client_secret: appSecret,
+          access_token: longLivedToken,
+        },
+      });
+      if (longLivedRes.data?.access_token) {
+        longLivedToken = longLivedRes.data.access_token;
+        const expiresIn = longLivedRes.data.expires_in || 5184000;
+        tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+      }
+    } catch (err) {
+      this.logger.warn(`Could not exchange Threads token to long-lived: ${err.message}`);
+    }
+
+    try {
+      const profileRes = await axios.get('https://graph.threads.net/v1.0/me', {
+        params: {
+          fields: 'id,username,name,threads_profile_picture_url',
+          access_token: longLivedToken,
+        },
+      });
+
+      const profile = profileRes.data;
+      const threadsUserId = profile.id;
+      const username = profile.username || profile.name || `threads_${threadsUserId}`;
+      const avatarUrl = profile.threads_profile_picture_url || null;
+      const accessTokenEncrypted = this.encryptionService.encrypt(longLivedToken);
+
+      const account = await this.prisma.socialAccount.upsert({
+        where: {
+          userId_platform_platformAccountId: {
+            userId,
+            platform: Platform.THREADS,
+            platformAccountId: String(threadsUserId),
+          },
+        },
+        create: {
+          userId,
+          platform: Platform.THREADS,
+          platformAccountId: String(threadsUserId),
+          accountName: `@${username.replace(/^@/, '')}`,
+          avatarUrl,
+          accessTokenEncrypted,
+          tokenExpiresAt,
+          status: AccountStatus.CONNECTED,
+          scopes: 'threads_basic,threads_content_publish',
+          metadata: {
+            threadsUserId: String(threadsUserId),
+            username,
+          },
+        },
+        update: {
+          accountName: `@${username.replace(/^@/, '')}`,
+          avatarUrl,
+          accessTokenEncrypted,
+          tokenExpiresAt,
+          status: AccountStatus.CONNECTED,
+          updatedAt: new Date(),
+        },
+      });
+
+      this.logger.log(`Successfully connected Threads Account '@${username}' via Token Generator for user ${userId}`);
+      return {
+        success: true,
+        account: {
+          id: account.id,
+          platform: account.platform,
+          platformAccountId: account.platformAccountId,
+          accountName: account.accountName,
+          avatarUrl: account.avatarUrl,
+          status: account.status,
+        },
+      };
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      this.logger.error(`Threads Token Error: ${msg}`);
+      throw new BadRequestException(`Threads token verification failed: ${msg}`);
+    }
+  }
+
+  /**
    * Refreshes access token for Google / YouTube accounts.
    */
   async refreshAccountToken(accountId: string): Promise<string> {

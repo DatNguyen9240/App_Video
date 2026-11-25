@@ -4,6 +4,8 @@ import {
   getSocialAccounts,
   getFacebookAuthUrl,
   getYouTubeAuthUrl,
+  getThreadsAuthUrl,
+  connectThreadsManualToken,
   disconnectSocialAccount,
   refreshSocialAccountToken,
 } from '../api/client';
@@ -53,6 +55,27 @@ export const ConnectedAccounts: React.FC = () => {
     }
   };
 
+  const handleConnectThreads = async () => {
+    const manualToken = prompt('Dán Threads Access Token (từ mục "Công cụ tạo mã người dùng" trên Meta Dashboard) hoặc bấm Cancel để mở OAuth popup:');
+    if (manualToken && manualToken.trim()) {
+      try {
+        await connectThreadsManualToken(manualToken.trim());
+        queryClient.invalidateQueries({ queryKey: ['social-accounts'] });
+        alert('🎉 Kết nối tài khoản Threads thành công!');
+        return;
+      } catch (err: any) {
+        alert(`Lỗi kết nối Threads: ${err.response?.data?.message || err.message}`);
+        return;
+      }
+    }
+    try {
+      const res = await getThreadsAuthUrl();
+      if (res.url) window.location.href = res.url;
+    } catch (err: any) {
+      alert(`Failed to start Threads OAuth: ${err.response?.data?.message || err.message}`);
+    }
+  };
+
   return (
     <div className="space-y-8 max-w-6xl mx-auto">
       {/* ─── HEADER ───────────────────────────────────────────────────────── */}
@@ -60,7 +83,7 @@ export const ConnectedAccounts: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Connected Social Accounts</h2>
           <p className="text-sm text-slate-500 mt-1">
-            Authorize Meta Facebook Pages and Google YouTube Channels via official OAuth 2.0.
+            Authorize Meta Facebook Pages, Google YouTube Channels, and Threads via official OAuth 2.0.
           </p>
         </div>
 
@@ -71,6 +94,13 @@ export const ConnectedAccounts: React.FC = () => {
           >
             <Share2 className="w-3.5 h-3.5" />
             Connect Facebook Page
+          </button>
+          <button
+            onClick={handleConnectThreads}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-black hover:bg-neutral-800 text-white text-xs font-semibold shadow-sm transition-all"
+          >
+            <span className="font-bold">@</span>
+            Connect Threads
           </button>
           <button
             onClick={handleConnectYouTube}
@@ -133,10 +163,10 @@ export const ConnectedAccounts: React.FC = () => {
                     />
                     <span
                       className={`absolute -bottom-1 -right-1 w-5 h-5 rounded-full flex items-center justify-center text-[10px] text-white font-bold shadow-sm ${
-                        acc.platform === 'FACEBOOK' ? 'bg-[#1877F2]' : 'bg-[#FF0000]'
+                        acc.platform === 'FACEBOOK' ? 'bg-[#1877F2]' : acc.platform === 'THREADS' ? 'bg-black' : 'bg-[#FF0000]'
                       }`}
                     >
-                      {acc.platform === 'FACEBOOK' ? 'f' : '▶'}
+                      {acc.platform === 'FACEBOOK' ? 'f' : acc.platform === 'THREADS' ? '@' : '▶'}
                     </span>
                   </div>
 

@@ -148,7 +148,7 @@ export const CreatePost: React.FC = () => {
             <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
               1. Target Platforms
             </label>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <button
                 type="button"
                 onClick={() => togglePlatform('FACEBOOK')}
@@ -163,6 +163,22 @@ export const CreatePost: React.FC = () => {
                 </span>
                 <span>Facebook Pages</span>
                 {selectedPlatforms.includes('FACEBOOK') && <Check className="w-4 h-4 ml-auto" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => togglePlatform('THREADS')}
+                className={`flex items-center gap-3 p-3 rounded-lg border text-sm font-semibold transition-all ${
+                  selectedPlatforms.includes('THREADS')
+                    ? 'border-black bg-neutral-100 text-black ring-2 ring-black/20'
+                    : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <span className="w-6 h-6 rounded bg-black text-white flex items-center justify-center text-xs font-bold">
+                  @
+                </span>
+                <span>Threads</span>
+                {selectedPlatforms.includes('THREADS') && <Check className="w-4 h-4 ml-auto" />}
               </button>
 
               <button

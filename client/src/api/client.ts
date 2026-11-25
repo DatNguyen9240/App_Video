@@ -17,6 +17,8 @@ export const getUpcomingQueue = (limit = 10) =>
 export const getSocialAccounts = () => api.get('/social-accounts').then((r) => r.data);
 export const getFacebookAuthUrl = () => api.get('/social-accounts/facebook/connect').then((r) => r.data);
 export const getYouTubeAuthUrl = () => api.get('/social-accounts/youtube/connect').then((r) => r.data);
+export const getThreadsAuthUrl = () => api.get('/social-accounts/threads/connect').then((r) => r.data);
+export const connectThreadsManualToken = (token: string) => api.post('/social-accounts/threads/manual-token', { token }).then((r) => r.data);
 export const disconnectSocialAccount = (id: string) => api.delete(`/social-accounts/${id}`).then((r) => r.data);
 export const refreshSocialAccountToken = (id: string) => api.post(`/social-accounts/${id}/refresh`).then((r) => r.data);
 

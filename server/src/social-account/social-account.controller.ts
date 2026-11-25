@@ -3,6 +3,7 @@ import {
   Get,
   Delete,
   Post,
+  Body,
   Param,
   Query,
   Res,
@@ -92,6 +93,43 @@ export class SocialAccountController {
       const errMsg = encodeURIComponent(err.message || 'YouTube authorization failed');
       return res.redirect(`${frontendUrl}/accounts?status=error&platform=youtube&message=${errMsg}`);
     }
+  }
+
+  @Get('threads/connect')
+  @ApiOperation({ summary: 'Initiate Meta Threads OAuth flow' })
+  async connectThreads(
+    @Query('redirect') redirectOverride?: string,
+    @Headers('x-user-id') userIdHeader?: string,
+  ) {
+    const userId = userIdHeader || DEFAULT_USER_ID;
+    return this.socialAccountService.generateThreadsAuthUrl(userId, redirectOverride);
+  }
+
+  @Get('threads/callback')
+  @ApiOperation({ summary: 'Meta Threads OAuth callback handler' })
+  async threadsCallback(
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Res() res: Response,
+  ) {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL', 'http://localhost:5173');
+    try {
+      await this.socialAccountService.handleThreadsCallback(code, state);
+      return res.redirect(`${frontendUrl}/accounts?status=success&platform=threads`);
+    } catch (err) {
+      const errMsg = encodeURIComponent(err.message || 'Threads authorization failed');
+      return res.redirect(`${frontendUrl}/accounts?status=error&platform=threads&message=${errMsg}`);
+    }
+  }
+
+  @Post('threads/manual-token')
+  @ApiOperation({ summary: 'Connect Threads via direct Token from Meta User Token Generator' })
+  async connectThreadsManual(
+    @Body('token') token: string,
+    @Headers('x-user-id') userIdHeader?: string,
+  ) {
+    const userId = userIdHeader || DEFAULT_USER_ID;
+    return this.socialAccountService.connectThreadsWithToken(userId, token);
   }
 
   @Post(':id/refresh')
