@@ -556,6 +556,172 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertEqual(reports_after[0]["run_id"], "run-20261127-new")
         self.assertTrue(reports_after[0]["is_corrected"])
 
+    def test_threads_trend_v31_real_drive_fixtures_and_backward_compatibility(self):
+        """V3.1: Real threads_trend_* + trend_report_* + data_contract_v3 coexist with V1/V2 history without overwriting or duplicating."""
+        from market_intelligence.report_normalizer import normalize_muse_report
+
+        # 1. Seed V1/V2 historical records first
+        poc2_bytes = self._load_fixture_bytes("threads_crawl_poc_002.json")
+        r_old = self.store.ingest_raw_file(
+            "drv_old_poc2",
+            "threads_crawl_poc_002.json",
+            poc2_bytes,
+            modified_time="2026-11-26T03:15:20Z",
+        )
+        hist_count = self.store.get_stats()["total_items"]
+        self.assertEqual(hist_count, 10)
+        self.assertEqual(r_old["inserted"], 10)
+
+        # 2. V3.1 non-crawl governance / capability / discovery files MUST NOT insert items or create fake market reports
+        contract_v3_bytes = self._load_fixture_bytes("data_contract_v3.json")
+        discovery_doc = {"report": "Nghien cuu nguon", "sources": [{"rank": 1, "source": "threads-cli"}]}
+        cap_test_doc = {"report": "Kiem chung threads-cli", "results": [{"command": "trends"}], "engagement_verification_map": {"likes": "Co"}}
+        strategy_v3_doc = {"strategy": "Crawl V3", "version": "3.1", "trend_tiers": {"very_hot": "likes >= 1000"}}
+
+        for fid, fname, raw_b, role in [
+            ("f_c_v3", "data_contract_v3.json", contract_v3_bytes, "data_contract"),
+            ("f_s_v3", "crawl_strategy_v3.json", json.dumps(strategy_v3_doc).encode("utf-8"), "crawl_strategy"),
+            ("f_disc", "threads_discovery_sources_20261126.json", json.dumps(discovery_doc).encode("utf-8"), "research_doc"),
+            ("f_cap", "threads_cli_capability_test_20261126.json", json.dumps(cap_test_doc).encode("utf-8"), "capability_test"),
+        ]:
+            n_res = self.store.ingest_raw_file(fid, fname, raw_b, modified_time="2026-11-26T15:51:31Z")
+            self.assertEqual(n_res["file_role"], role)
+            self.assertEqual(n_res["inserted"], 0)
+        self.assertEqual(self.store.list_reports(limit=5), [])
+
+        # 3. Ingest REAL threads_trend_20261126.json from Drive -> preserves 10 historical V1/V2 + adds 8 V3.1
+        v3_trend_bytes = self._load_fixture_bytes("threads_trend_20261126.json")
+        r_v3 = self.store.ingest_raw_file(
+            "f_v3_trend",
+            "threads_trend_20261126.json",
+            v3_trend_bytes,
+            modified_time="2026-11-26T15:51:33Z",
+            folder_path="Threads",
+        )
+        self.assertEqual(r_v3["file_role"], "crawl_data")
+        self.assertEqual(r_v3["parsed"], 8)
+        self.assertEqual(r_v3["inserted"], 8)
+        self.assertEqual(self.store.get_stats()["total_items"], hist_count + 8)
+
+        # Duplicate ingest of the same V3.1 file inserts/updates ZERO new records
+        r_v3_dup = self.store.ingest_raw_file(
+            "f_v3_trend_dup",
+            "threads_trend_20261126.json",
+            v3_trend_bytes,
+            modified_time="2026-11-26T15:51:33Z",
+            folder_path="Threads",
+        )
+        self.assertEqual(r_v3_dup["inserted"], 0)
+        self.assertEqual(r_v3_dup["updated"], 0)
+        self.assertEqual(r_v3_dup["deduped"], 8)
+        self.assertEqual(self.store.get_stats()["total_items"], hist_count + 8)
+
+        # Verify distinct metrics: reposts_count & quotes_count preserved while shares/views stay None
+        hoang_dung = self.store.query_items(platform="threads", trend_tier="very_hot", sort_by="engagement")["items"]
+        self.assertEqual(len(hoang_dung), 4)
+        self.assertEqual(hoang_dung[0]["post_id"], "DgM4DJRGhGL")
+        self.assertEqual(hoang_dung[0]["likes_count"], 14906)
+        self.assertEqual(hoang_dung[0]["reposts_count"], 1579)
+        self.assertEqual(hoang_dung[0]["quotes_count"], 48)
+        self.assertIsNone(hoang_dung[0]["shares_count"])  # Never conflated with reposts
+        self.assertIsNone(hoang_dung[0]["views_count"])
+        self.assertEqual(hoang_dung[0]["verification_status"], "cross_verified_web")
+        self.assertEqual(hoang_dung[0]["trend_group"], "trend_toan_thi_truong")
+        self.assertIn("velocity_note", hoang_dung[0]["extra_meta"]["viral_analysis"])
+
+        # Add 1 hot + 1 unverified record in another test run to verify strict 5-tier separation & exclusion of unverified
+        extra_v3 = {
+            "run_id": "threads-trend-v3-extra",
+            "run_status": "completed",
+            "records": [
+                {
+                    "post_id": "HotPost1",
+                    "post_url": "https://www.threads.com/@hot/post/HotPost1",
+                    "author_handle": "@hot",
+                    "content_summary_vi": "Bài đạt ngưỡng Hot (>= 300 likes).",
+                    "likes": 450,
+                    "comment_count": 30,
+                    "reposts": 12,
+                    "quotes": 2,
+                    "shares": None,
+                    "views": None,
+                    "verification_status": "connector_verified",
+                    "trend_tier": "hot",
+                    "trend_group": "trend_affiliate",
+                    "purchase_intent": "cao",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_id": "UnverifPost1",
+                    "post_url": "https://www.threads.com/@unv/post/UnverifPost1",
+                    "author_handle": "@unv",
+                    "content_summary_vi": "Bài chưa xác minh.",
+                    "likes": 2500,
+                    "verification_status": "unverified",
+                    "trend_tier": "unverified",
+                    "trend_group": "trend_affiliate",
+                    "purchase_intent": "cao",
+                    "data_quality": "needs_verification",
+                },
+            ],
+        }
+        self.store.ingest_raw_file("f_v3_extra", "threads_trend_20261127.json", json.dumps(extra_v3).encode("utf-8"))
+        self.assertEqual(self.store.query_items(platform="threads", trend_tier="hot")["total"], 1)
+        self.assertEqual(self.store.query_items(platform="threads", trend_tier="emerging")["total"], 2)
+        self.assertEqual(self.store.query_items(platform="threads", trend_tier="watchlist")["total"], 2)
+        self.assertEqual(self.store.query_items(platform="threads", trend_tier="unverified")["total"], 1)
+        # Historical V1/V2 rows remain queryable under `legacy`
+        self.assertEqual(self.store.query_items(platform="threads", trend_tier="legacy")["total"], 10)
+        # Unverified post with likes=2500 MUST NEVER leak into very_hot or affiliate_only
+        vh_ids = {x["post_id"] for x in self.store.query_items(platform="threads", trend_tier="very_hot")["items"]}
+        self.assertNotIn("UnverifPost1", vh_ids)
+        aff_ids = {x["post_id"] for x in self.store.query_items(platform="threads", affiliate_only=True, limit=100)["items"]}
+        self.assertIn("HotPost1", aff_ids)
+        self.assertNotIn("UnverifPost1", aff_ids)
+
+        # 4. Ingest REAL trend_report_v3_20261126.json from Drive -> normalizes all 9 sections
+        v3_rpt_bytes = self._load_fixture_bytes("trend_report_v3_20261126.json")
+        r_rpt = self.store.ingest_raw_file(
+            "f_v3_rpt",
+            "trend_report_v3_20261126.json",
+            v3_rpt_bytes,
+            modified_time="2026-11-26T15:52:00Z",
+            folder_path="Reports",
+        )
+        self.assertEqual(r_rpt["file_role"], "market_report")
+        self.assertEqual(r_rpt["parsed"], 0)
+        ev = self.store.build_evidence_report(platform="threads")
+        self.assertEqual(ev["schema_version"], "v3.1")
+        self.assertEqual(ev["run_status"], "completed")
+        self.assertFalse(ev["is_source_error"])
+        self.assertEqual(ev["screening"]["scanned_count"], 14)
+        self.assertEqual(ev["screening"]["qualified_count"], 8)
+        self.assertEqual(ev["tier_distribution"]["tiers"]["very_hot"], 4)
+        self.assertEqual(len(ev["top_viral"]), 4)
+        self.assertGreaterEqual(len(ev["affiliate_opportunities"]), 3)
+        self.assertEqual(ev["affiliate_opportunities"][0]["priority"], "cao nhất")
+        self.assertGreaterEqual(len(ev["priority_actions"]), 3)
+        self.assertTrue(ev["telegram_summary"].startswith("TRẠNG THÁI: completed"))
+        self.assertIn("Dr.Althea 345", ev["telegram_summary"])
+        self.assertGreater(len(ev["trends_snapshot"]["topics"]), 10)
+
+        # 5. Distinguish source_error vs no_qualifying_posts explicitly
+        err_rep = normalize_muse_report(
+            {"run_id": "r_err", "run_status": "source_error", "telegram_summary": "TRẠNG THÁI: source_error"},
+            file_name="trend_report_err.json",
+        )
+        self.assertTrue(err_rep["is_source_error"])
+        self.assertFalse(err_rep["is_empty_market_valid"])
+        self.assertIn("Lỗi nguồn", err_rep["run_status_label_vi"])
+
+        empty_ok_rep = normalize_muse_report(
+            {"run_id": "r_empty", "run_status": "no_qualifying_posts", "sections": {"1_screening": {"scanned_count": 20, "qualified_count": 0}}},
+            file_name="trend_report_empty.json",
+        )
+        self.assertFalse(empty_ok_rep["is_source_error"])
+        self.assertTrue(empty_ok_rep["is_empty_market_valid"])
+        self.assertIn("Không có bài đạt chuẩn", empty_ok_rep["run_status_label_vi"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

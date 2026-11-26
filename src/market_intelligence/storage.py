@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .normalizer import NON_CRAWL_ROLES, normalize_payload
+from .normalizer import NON_CRAWL_ROLES, is_archive_path, normalize_payload
 from .report_normalizer import (
     build_evidence_report_from_items,
     has_muse_report_sections,
@@ -193,11 +193,23 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("market_items", "is_corrected", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("market_items", "summary_vi", "TEXT")
         self._add_column_if_missing("market_items", "run_id", "TEXT")
+        self._add_column_if_missing("market_items", "reposts_count", "INTEGER")
+        self._add_column_if_missing("market_items", "quotes_count", "INTEGER")
+        self._add_column_if_missing("market_items", "trend_tier", "TEXT")
+        self._add_column_if_missing("market_items", "trend_group", "TEXT")
+        self._add_column_if_missing("market_items", "verification_status", "TEXT")
+        self._add_column_if_missing("market_items", "metrics_source", "TEXT")
+        self._add_column_if_missing("market_items", "post_pk", "TEXT")
+        self._add_column_if_missing("market_items", "evidence_url", "TEXT")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_quality ON market_items(data_quality);")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_tier ON market_items(trend_tier);")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_group ON market_items(trend_group);")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_verif ON market_items(verification_status);")
 
         self._add_column_if_missing("market_reports", "is_corrected", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("market_reports", "corrects_report", "TEXT")
         self._add_column_if_missing("market_reports", "request_id", "TEXT")
+        self._add_column_if_missing("market_reports", "run_status", "TEXT")
         self._add_column_if_missing("market_reports", "run_id", "TEXT")
         self._add_column_if_missing("market_reports", "technical_status", "TEXT")
         self._add_column_if_missing("market_reports", "data_quality_status", "TEXT")
@@ -340,14 +352,22 @@ class MarketIntelligenceStore:
         items = normalized["items"]
 
         run_meta = {
-            "platform": envelope.get("platform"),
+            "platform": envelope.get("platform") or ("threads" if str(file_name or "").lower().startswith(("threads_trend", "trend_report")) else None),
             "run_id": envelope.get("run_id"),
             "request_id": envelope.get("request_id"),
+            "run_status": envelope.get("run_status"),
             "source": envelope.get("source"),
+            "crawl": envelope.get("crawl"),
             "notes": envelope.get("notes"),
             "run_quality_note": envelope.get("run_quality_note"),
             "engagement_completeness": envelope.get("engagement_completeness"),
             "bucket_counts": envelope.get("bucket_counts"),
+            "screening": envelope.get("screening"),
+            "tier_counts": envelope.get("tier_counts"),
+            "group_counts": envelope.get("group_counts"),
+            "cross_verified_posts": envelope.get("cross_verified_posts"),
+            "trends_snapshot": envelope.get("trends_snapshot"),
+            "thresholds": envelope.get("thresholds"),
             "upcoming_vouchers": envelope.get("upcoming_vouchers"),
             "trending_context": envelope.get("trending_context"),
         }
@@ -400,7 +420,7 @@ class MarketIntelligenceStore:
                     file_role,
                     1 if is_corrected else 0,
                     envelope.get("corrects_file") or envelope.get("corrects_report"),
-                    envelope.get("technical_status") or envelope.get("status"),
+                    envelope.get("technical_status") or envelope.get("status") or envelope.get("run_status"),
                     envelope.get("data_quality_status"),
                     envelope.get("business_usable_records"),
                     json.dumps(run_meta, ensure_ascii=False),
@@ -410,9 +430,10 @@ class MarketIntelligenceStore:
             for item in items:
                 existing = self._conn.execute(
                     """
-                    SELECT id, content_group, purchase_intent, text_content, summary_vi, title, url,
-                           likes_count, comments_count, shares_count, views_count, price, sold_count, rating,
-                           data_quality, quality_issues_json, source_priority, is_corrected,
+                    SELECT id, content_group, purchase_intent, text_content, summary_vi, title, url, evidence_url,
+                           likes_count, comments_count, shares_count, reposts_count, quotes_count, views_count,
+                           price, sold_count, rating, trend_tier, trend_group, verification_status, metrics_source, post_pk,
+                           data_quality, quality_issues_json, source_priority, is_corrected, run_id, crawled_at, published_at,
                            raw_payload_json, extra_meta_json, metrics_json
                     FROM market_items
                     WHERE dedup_key = ?
@@ -429,17 +450,19 @@ class MarketIntelligenceStore:
                     self._conn.execute(
                         """
                         INSERT INTO market_items (
-                            id, dedup_key, platform, external_id, post_id, item_id, shop_id,
-                            author_handle, author_name, title, text_content, summary_vi, url,
+                            id, dedup_key, platform, external_id, post_id, post_pk, item_id, shop_id,
+                            author_handle, author_name, title, text_content, summary_vi, url, evidence_url,
                             content_group, purchase_intent, language, published_at, crawled_at,
-                            likes_count, comments_count, shares_count, views_count, price, sold_count, rating,
+                            likes_count, comments_count, shares_count, reposts_count, quotes_count, views_count,
+                            price, sold_count, rating, trend_tier, trend_group, verification_status, metrics_source,
                             data_quality, quality_issues_json, source_priority, is_corrected, run_id,
                             metrics_json, extra_meta_json, schema_version, raw_file_id, raw_item_index,
                             raw_payload_json, first_seen_at, last_seen_at, updated_at
                         ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?,
@@ -452,6 +475,7 @@ class MarketIntelligenceStore:
                             item["platform"],
                             item["external_id"],
                             item["post_id"],
+                            item.get("post_pk"),
                             item["item_id"],
                             item["shop_id"],
                             item["author_handle"],
@@ -460,6 +484,7 @@ class MarketIntelligenceStore:
                             item["text_content"],
                             item["summary_vi"],
                             item["url"],
+                            item.get("evidence_url"),
                             item["content_group"],
                             item["purchase_intent"],
                             item["language"],
@@ -468,10 +493,16 @@ class MarketIntelligenceStore:
                             item["likes_count"],
                             item["comments_count"],
                             item["shares_count"],
+                            item.get("reposts_count"),
+                            item.get("quotes_count"),
                             item["views_count"],
                             item["price"],
                             item["sold_count"],
                             item["rating"],
+                            item.get("trend_tier"),
+                            item.get("trend_group"),
+                            item.get("verification_status"),
+                            item.get("metrics_source"),
                             item["data_quality"],
                             quality_issues_json,
                             incoming_prio,
@@ -491,8 +522,20 @@ class MarketIntelligenceStore:
                     inserted += 1
                 else:
                     existing_prio = int(existing["source_priority"] or 1)
-                    # Original files must NEVER overwrite a corrected_v2 record
-                    if incoming_prio < existing_prio:
+                    existing_run = existing["run_id"] or ""
+                    incoming_run = item.get("run_id") or ""
+                    same_run = bool(existing_run and incoming_run and existing_run == incoming_run)
+                    same_or_unknown_run = same_run or not existing_run or not incoming_run
+                    existing_ts = self._parse_iso_ts(existing["crawled_at"] or existing["published_at"])
+                    incoming_ts = self._parse_iso_ts(item.get("crawled_at") or item.get("published_at") or modified_time)
+                    is_newer_distinct_run = bool(
+                        existing_run and incoming_run and existing_run != incoming_run and incoming_ts >= existing_ts
+                    )
+
+                    # Original files must NEVER overwrite corrected_v2 within the same run or from an older run
+                    if (incoming_prio < existing_prio and not is_newer_distinct_run) or (
+                        not same_or_unknown_run and existing_ts > 0 and incoming_ts > 0 and incoming_ts < existing_ts
+                    ):
                         self._conn.execute(
                             "UPDATE market_items SET last_seen_at = ? WHERE id = ?",
                             (now_iso, existing["id"]),
@@ -500,40 +543,35 @@ class MarketIntelligenceStore:
                         deduped += 1
                         continue
 
-                    if incoming_prio > existing_prio:
-                        # Authoritative upgrade from original -> corrected_v2
-                        merged_cg = item["content_group"] if item["content_group"] is not None else existing["content_group"]
-                        merged_pi = item["purchase_intent"] if item["purchase_intent"] is not None else existing["purchase_intent"]
-                        merged_title = item["title"] if item["title"] is not None else existing["title"]
-                        merged_text = item["text_content"] if item["text_content"] is not None else existing["text_content"]
-                        merged_svi = item["summary_vi"] if item["summary_vi"] is not None else existing["summary_vi"]
-                        merged_url = item["url"] if item["url"] is not None else existing["url"]
-                        merged_dq = item["data_quality"]
+                    merged_cg = item["content_group"] if item["content_group"] is not None else existing["content_group"]
+                    merged_pi = item["purchase_intent"] if item["purchase_intent"] is not None else existing["purchase_intent"]
+                    merged_title = item["title"] if item["title"] is not None else existing["title"]
+                    merged_text = item["text_content"] if item["text_content"] is not None else existing["text_content"]
+                    merged_svi = item["summary_vi"] if item["summary_vi"] is not None else existing["summary_vi"]
+                    merged_url = item["url"] if item["url"] is not None else existing["url"]
+                    merged_ev_url = item.get("evidence_url") if item.get("evidence_url") is not None else existing["evidence_url"]
+                    merged_post_pk = item.get("post_pk") if item.get("post_pk") is not None else existing["post_pk"]
+                    merged_tier = item.get("trend_tier") if item.get("trend_tier") is not None else existing["trend_tier"]
+                    merged_group = item.get("trend_group") if item.get("trend_group") is not None else existing["trend_group"]
+                    merged_verif = item.get("verification_status") if item.get("verification_status") is not None else existing["verification_status"]
+                    merged_msrc = item.get("metrics_source") if item.get("metrics_source") is not None else existing["metrics_source"]
+                    merged_likes = item["likes_count"] if item["likes_count"] is not None else existing["likes_count"]
+                    merged_comments = item["comments_count"] if item["comments_count"] is not None else existing["comments_count"]
+                    merged_shares = item["shares_count"] if item["shares_count"] is not None else existing["shares_count"]
+                    merged_reposts = item.get("reposts_count") if item.get("reposts_count") is not None else existing["reposts_count"]
+                    merged_quotes = item.get("quotes_count") if item.get("quotes_count") is not None else existing["quotes_count"]
+                    merged_views = item["views_count"] if item["views_count"] is not None else existing["views_count"]
+                    merged_price = item["price"] if item["price"] is not None else existing["price"]
+                    merged_sold = item["sold_count"] if item["sold_count"] is not None else existing["sold_count"]
+                    merged_rating = item["rating"] if item["rating"] is not None else existing["rating"]
+
+                    if incoming_prio > existing_prio or is_newer_distinct_run:
+                        merged_dq = item["data_quality"] if item["data_quality"] is not None else existing["data_quality"]
                         merged_qi = quality_issues_json
-                        merged_likes = item["likes_count"] if item["likes_count"] is not None else existing["likes_count"]
-                        merged_comments = item["comments_count"] if item["comments_count"] is not None else existing["comments_count"]
-                        merged_shares = item["shares_count"] if item["shares_count"] is not None else existing["shares_count"]
-                        merged_views = item["views_count"] if item["views_count"] is not None else existing["views_count"]
-                        merged_price = item["price"] if item["price"] is not None else existing["price"]
-                        merged_sold = item["sold_count"] if item["sold_count"] is not None else existing["sold_count"]
-                        merged_rating = item["rating"] if item["rating"] is not None else existing["rating"]
                         force_update = True
                     else:
-                        merged_cg = item["content_group"] if item["content_group"] is not None else existing["content_group"]
-                        merged_pi = item["purchase_intent"] if item["purchase_intent"] is not None else existing["purchase_intent"]
-                        merged_title = item["title"] if item["title"] is not None else existing["title"]
-                        merged_text = item["text_content"] if item["text_content"] is not None else existing["text_content"]
-                        merged_svi = item["summary_vi"] if item["summary_vi"] is not None else existing["summary_vi"]
-                        merged_url = item["url"] if item["url"] is not None else existing["url"]
                         merged_dq = item["data_quality"] if item["data_quality"] is not None else existing["data_quality"]
                         merged_qi = quality_issues_json if item["quality_issues"] else (existing["quality_issues_json"] or "[]")
-                        merged_likes = item["likes_count"] if item["likes_count"] is not None else existing["likes_count"]
-                        merged_comments = item["comments_count"] if item["comments_count"] is not None else existing["comments_count"]
-                        merged_shares = item["shares_count"] if item["shares_count"] is not None else existing["shares_count"]
-                        merged_views = item["views_count"] if item["views_count"] is not None else existing["views_count"]
-                        merged_price = item["price"] if item["price"] is not None else existing["price"]
-                        merged_sold = item["sold_count"] if item["sold_count"] is not None else existing["sold_count"]
-                        merged_rating = item["rating"] if item["rating"] is not None else existing["rating"]
                         force_update = any(
                             [
                                 merged_cg != existing["content_group"],
@@ -542,11 +580,17 @@ class MarketIntelligenceStore:
                                 merged_text != existing["text_content"],
                                 merged_svi != existing["summary_vi"],
                                 merged_url != existing["url"],
+                                merged_ev_url != existing["evidence_url"],
+                                merged_tier != existing["trend_tier"],
+                                merged_group != existing["trend_group"],
+                                merged_verif != existing["verification_status"],
                                 merged_dq != existing["data_quality"],
                                 merged_qi != (existing["quality_issues_json"] or "[]"),
                                 merged_likes != existing["likes_count"],
                                 merged_comments != existing["comments_count"],
                                 merged_shares != existing["shares_count"],
+                                merged_reposts != existing["reposts_count"],
+                                merged_quotes != existing["quotes_count"],
                                 merged_views != existing["views_count"],
                                 merged_price != existing["price"],
                                 merged_sold != existing["sold_count"],
@@ -560,11 +604,12 @@ class MarketIntelligenceStore:
                         self._conn.execute(
                             """
                             UPDATE market_items
-                            SET title = ?, text_content = ?, summary_vi = ?, url = ?,
-                                language = COALESCE(?, language), published_at = COALESCE(?, published_at),
+                            SET title = ?, text_content = ?, summary_vi = ?, url = ?, evidence_url = ?, post_pk = COALESCE(?, post_pk),
+                                language = COALESCE(?, language), published_at = COALESCE(?, published_at), crawled_at = COALESCE(?, crawled_at),
                                 content_group = ?, purchase_intent = ?,
-                                likes_count = ?, comments_count = ?, shares_count = ?, views_count = ?,
+                                likes_count = ?, comments_count = ?, shares_count = ?, reposts_count = ?, quotes_count = ?, views_count = ?,
                                 price = ?, sold_count = ?, rating = ?,
+                                trend_tier = ?, trend_group = ?, verification_status = ?, metrics_source = ?,
                                 data_quality = ?, quality_issues_json = ?,
                                 source_priority = ?, is_corrected = ?, run_id = COALESCE(?, run_id),
                                 metrics_json = ?, extra_meta_json = ?, schema_version = ?,
@@ -577,17 +622,26 @@ class MarketIntelligenceStore:
                                 merged_text,
                                 merged_svi,
                                 merged_url,
+                                merged_ev_url,
+                                merged_post_pk,
                                 item["language"],
                                 item["published_at"],
+                                item["crawled_at"],
                                 merged_cg,
                                 merged_pi,
                                 merged_likes,
                                 merged_comments,
                                 merged_shares,
+                                merged_reposts,
+                                merged_quotes,
                                 merged_views,
                                 merged_price,
                                 merged_sold,
                                 merged_rating,
+                                merged_tier,
+                                merged_group,
+                                merged_verif,
+                                merged_msrc,
                                 merged_dq,
                                 merged_qi,
                                 incoming_prio,
@@ -613,7 +667,7 @@ class MarketIntelligenceStore:
 
             self._conn.commit()
 
-        if file_role not in ("data_contract", "crawl_strategy", "quality_audit") and has_muse_report_sections(raw_obj):
+        if file_role not in ("data_contract", "crawl_strategy", "quality_audit", "research_doc", "capability_test") and has_muse_report_sections(raw_obj):
             try:
                 norm_report = normalize_muse_report(raw_obj, file_name=file_name, modified_time=modified_time)
                 self.save_report(norm_report, raw_file_id=file_id, raw_payload=raw_obj)
@@ -655,6 +709,8 @@ class MarketIntelligenceStore:
 
         reprocessed = 0
         for row in sorted_rows:
+            if is_archive_path(row.get("folder_path")):
+                continue
             rp = row.get("raw_path")
             if not rp or not os.path.exists(rp):
                 continue
@@ -670,6 +726,43 @@ class MarketIntelligenceStore:
             )
             reprocessed += 1
         return {"files_reprocessed": reprocessed}
+
+    def backfill_v31_metadata(self) -> Dict[str, int]:
+        """
+        Non-destructively upgrade already-cached V3.1 files (`threads_trend_*` and `trend_report_*`)
+        from their local raw JSON archives without deleting any historical V1/V2 rows.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT file_id, file_name, folder_path, modified_time, md5_checksum, raw_path
+                FROM raw_drive_files
+                WHERE status = 'synced'
+                  AND (lower(file_name) LIKE 'threads_trend%' OR lower(file_name) LIKE 'trend_report%')
+                ORDER BY COALESCE(modified_time, synced_at) ASC
+                """
+            ).fetchall()
+
+        updated_files = 0
+        for r in rows:
+            row = dict(r)
+            if is_archive_path(row.get("folder_path")):
+                continue
+            rp = row.get("raw_path")
+            if not rp or not os.path.exists(rp):
+                continue
+            with open(rp, "rb") as f:
+                raw_bytes = f.read()
+            self.ingest_raw_file(
+                file_id=row["file_id"],
+                file_name=row["file_name"],
+                raw_bytes=raw_bytes,
+                modified_time=row.get("modified_time"),
+                md5_checksum=row.get("md5_checksum"),
+                folder_path=row.get("folder_path"),
+            )
+            updated_files += 1
+        return {"files_backfilled": updated_files}
 
     # ─── Sync Runs ─────────────────────────────────────────────────────────────
 
@@ -747,6 +840,9 @@ class MarketIntelligenceStore:
         content_group: Optional[str] = None,
         purchase_intent: Optional[str] = None,
         data_quality: Optional[str] = None,
+        trend_tier: Optional[str] = None,
+        trend_group: Optional[str] = None,
+        verification_status: Optional[str] = None,
         search: Optional[str] = None,
         sort_by: str = "recent",
         affiliate_only: bool = False,
@@ -781,24 +877,61 @@ class MarketIntelligenceStore:
                 clauses.append("m.data_quality = ?")
                 params.append(data_quality)
 
+        if trend_tier and trend_tier != "all":
+            tier_norm = trend_tier.lower().strip()
+            if tier_norm == "legacy":
+                clauses.append("m.trend_tier IS NULL")
+            elif tier_norm == "unverified":
+                clauses.append("(m.trend_tier = 'unverified' OR m.verification_status = 'unverified')")
+            else:
+                clauses.append("m.trend_tier = ? AND COALESCE(m.verification_status, '') != 'unverified'")
+                params.append(tier_norm)
+
+        if trend_group and trend_group != "all":
+            if trend_group == "__none__":
+                clauses.append("m.trend_group IS NULL")
+            else:
+                clauses.append("m.trend_group = ?")
+                params.append(trend_group.lower().strip())
+
+        if verification_status and verification_status != "all":
+            if verification_status == "__none__":
+                clauses.append("m.verification_status IS NULL")
+            else:
+                clauses.append("m.verification_status = ?")
+                params.append(verification_status.lower().strip())
+
         if affiliate_only:
-            clauses.append("(m.data_quality IS NULL OR m.data_quality != 'needs_verification')")
+            clauses.append(
+                "(m.data_quality IS NULL OR m.data_quality != 'needs_verification') "
+                "AND COALESCE(m.verification_status, '') != 'unverified' "
+                "AND COALESCE(m.trend_tier, '') != 'unverified'"
+            )
 
         if search and search.strip():
             like = f"%{search.strip()}%"
             clauses.append(
                 "(m.title LIKE ? OR m.text_content LIKE ? OR m.summary_vi LIKE ? OR m.author_handle LIKE ? "
-                "OR m.post_id LIKE ? OR m.item_id LIKE ? OR m.extra_meta_json LIKE ?)"
+                "OR m.post_id LIKE ? OR m.item_id LIKE ? OR m.trend_tier LIKE ? OR m.trend_group LIKE ? OR m.extra_meta_json LIKE ?)"
             )
-            params.extend([like, like, like, like, like, like, like])
+            params.extend([like, like, like, like, like, like, like, like, like])
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         lim = max(1, min(int(limit), 200))
         off = max(0, int(offset))
 
         sort_map = {
-            "engagement": "COALESCE(m.views_count, 0) + (COALESCE(m.likes_count, 0) * 10) + (COALESCE(m.comments_count, 0) * 20) DESC, m.rowid DESC",
+            "engagement": (
+                "COALESCE(m.views_count, 0) + (COALESCE(m.likes_count, 0) * 10) "
+                "+ (COALESCE(m.comments_count, 0) * 20) + (COALESCE(m.reposts_count, 0) * 15) "
+                "+ (COALESCE(m.quotes_count, 0) * 10) DESC, m.rowid DESC"
+            ),
             "views": "COALESCE(m.views_count, -1) DESC, COALESCE(m.likes_count, -1) DESC, m.rowid DESC",
+            "tier": (
+                "CASE m.trend_tier WHEN 'very_hot' THEN 5 WHEN 'hot' THEN 4 WHEN 'emerging' THEN 3 "
+                "WHEN 'watchlist' THEN 2 WHEN 'unverified' THEN 1 ELSE 0 END DESC, "
+                "COALESCE(m.likes_count, 0) + COALESCE(m.comments_count, 0) DESC, m.rowid DESC"
+            ),
             "intent": (
                 "CASE m.purchase_intent WHEN 'cao' THEN 4 WHEN 'trung_binh' THEN 3 WHEN 'thap' THEN 2 WHEN 'khong_ro' THEN 1 ELSE 0 END DESC, "
                 "COALESCE(m.likes_count, 0) + COALESCE(m.comments_count, 0) DESC, m.rowid DESC"
@@ -815,10 +948,12 @@ class MarketIntelligenceStore:
 
             rows = self._conn.execute(
                 f"""
-                SELECT m.id, m.dedup_key, m.platform, m.external_id, m.post_id, m.item_id, m.shop_id,
-                       m.author_handle, m.author_name, m.title, m.text_content, m.summary_vi, m.url,
+                SELECT m.id, m.dedup_key, m.platform, m.external_id, m.post_id, m.post_pk, m.item_id, m.shop_id,
+                       m.author_handle, m.author_name, m.title, m.text_content, m.summary_vi, m.url, m.evidence_url,
                        m.content_group, m.purchase_intent, m.language, m.published_at, m.crawled_at,
-                       m.likes_count, m.comments_count, m.shares_count, m.views_count, m.price, m.sold_count, m.rating,
+                       m.likes_count, m.comments_count, m.shares_count, m.reposts_count, m.quotes_count, m.views_count,
+                       m.price, m.sold_count, m.rating,
+                       m.trend_tier, m.trend_group, m.verification_status, m.metrics_source,
                        m.data_quality, m.quality_issues_json, m.source_priority, m.is_corrected, m.run_id,
                        m.metrics_json, m.extra_meta_json, m.schema_version, m.raw_file_id, m.first_seen_at, m.last_seen_at,
                        r.file_name AS source_file_name
@@ -918,6 +1053,8 @@ class MarketIntelligenceStore:
                     SUM(CASE WHEN comments_count IS NOT NULL THEN 1 ELSE 0 END) AS with_comments,
                     SUM(CASE WHEN views_count IS NOT NULL THEN 1 ELSE 0 END) AS with_views,
                     SUM(CASE WHEN shares_count IS NOT NULL THEN 1 ELSE 0 END) AS with_shares,
+                    SUM(CASE WHEN reposts_count IS NOT NULL THEN 1 ELSE 0 END) AS with_reposts,
+                    SUM(CASE WHEN quotes_count IS NOT NULL THEN 1 ELSE 0 END) AS with_quotes,
                     SUM(CASE WHEN price IS NOT NULL THEN 1 ELSE 0 END) AS with_price
                 FROM market_items
                 """
@@ -929,11 +1066,41 @@ class MarketIntelligenceStore:
                 "with_comments": eng_row["with_comments"] or 0,
                 "with_views": eng_row["with_views"] or 0,
                 "with_shares": eng_row["with_shares"] or 0,
+                "with_reposts": eng_row["with_reposts"] or 0,
+                "with_quotes": eng_row["with_quotes"] or 0,
                 "with_price": eng_row["with_price"] or 0,
                 "likes_pct": round(((eng_row["with_likes"] or 0) * 100.0) / denom, 1) if total_items else None,
                 "comments_pct": round(((eng_row["with_comments"] or 0) * 100.0) / denom, 1) if total_items else None,
                 "views_pct": round(((eng_row["with_views"] or 0) * 100.0) / denom, 1) if total_items else None,
             }
+
+            by_trend_tier = {"very_hot": 0, "hot": 0, "emerging": 0, "watchlist": 0, "unverified": 0, "legacy": 0}
+            threads_by_trend_tier = {"very_hot": 0, "hot": 0, "emerging": 0, "watchlist": 0, "unverified": 0, "legacy": 0}
+            for r in self._conn.execute(
+                """
+                SELECT platform,
+                       CASE WHEN verification_status = 'unverified' THEN 'unverified' ELSE trend_tier END AS eff_tier,
+                       COUNT(*) AS c
+                FROM market_items
+                GROUP BY platform, eff_tier
+                """
+            ).fetchall():
+                tkey = r["eff_tier"] if r["eff_tier"] in by_trend_tier else "legacy"
+                by_trend_tier[tkey] += r["c"]
+                if r["platform"] == "threads":
+                    threads_by_trend_tier[tkey] += r["c"]
+
+            by_trend_group = {"trend_toan_thi_truong": 0, "trend_affiliate": 0, "trend_moi_noi": 0}
+            for r in self._conn.execute(
+                "SELECT trend_group, COUNT(*) AS c FROM market_items WHERE trend_group IS NOT NULL GROUP BY trend_group"
+            ).fetchall():
+                by_trend_group[r["trend_group"]] = r["c"]
+
+            by_verification_status = {"cross_verified_web": 0, "connector_verified": 0, "unverified": 0}
+            for r in self._conn.execute(
+                "SELECT verification_status, COUNT(*) AS c FROM market_items WHERE verification_status IS NOT NULL GROUP BY verification_status"
+            ).fetchall():
+                by_verification_status[r["verification_status"]] = r["c"]
 
             by_content_group = {}
             for r in self._conn.execute(
@@ -954,6 +1121,7 @@ class MarketIntelligenceStore:
                 SELECT file_name, is_corrected, run_meta_json
                 FROM raw_drive_files
                 WHERE file_role = 'crawl_data' AND lower(file_name) LIKE '%shopee%'
+                  AND lower(COALESCE(folder_path, '')) NOT LIKE '%archive%'
                 ORDER BY is_corrected DESC, COALESCE(modified_time, synced_at) DESC
                 LIMIT 3
                 """
@@ -966,6 +1134,41 @@ class MarketIntelligenceStore:
                 except Exception:
                     pass
 
+            # Latest V3.1 Trends Snapshot & Screening from latest threads_trend_* run_meta_json
+            trends_snapshot = None
+            latest_v3_screening = None
+            for r in self._conn.execute(
+                """
+                SELECT file_name, modified_time, run_meta_json
+                FROM raw_drive_files
+                WHERE file_role = 'crawl_data' AND lower(file_name) LIKE 'threads_trend%'
+                  AND lower(COALESCE(folder_path, '')) NOT LIKE '%archive%'
+                ORDER BY COALESCE(modified_time, synced_at) DESC
+                LIMIT 3
+                """
+            ).fetchall():
+                try:
+                    meta = json.loads(r["run_meta_json"] or "{}")
+                    if not trends_snapshot and isinstance(meta.get("trends_snapshot"), dict):
+                        trends_snapshot = meta["trends_snapshot"]
+                    if not latest_v3_screening and (meta.get("screening") or meta.get("tier_counts") or meta.get("run_status")):
+                        latest_v3_screening = {
+                            "file_name": r["file_name"],
+                            "run_id": meta.get("run_id"),
+                            "run_status": meta.get("run_status"),
+                            "source": meta.get("source"),
+                            "screening": meta.get("screening"),
+                            "tier_counts": meta.get("tier_counts"),
+                            "group_counts": meta.get("group_counts"),
+                            "cross_verified_posts": meta.get("cross_verified_posts"),
+                            "thresholds": meta.get("thresholds"),
+                            "notes": meta.get("notes"),
+                        }
+                    if trends_snapshot and latest_v3_screening:
+                        break
+                except Exception:
+                    pass
+
             non_crawl_files = [
                 {
                     "file_name": r["file_name"],
@@ -973,7 +1176,12 @@ class MarketIntelligenceStore:
                     "synced_at": r["synced_at"],
                 }
                 for r in self._conn.execute(
-                    "SELECT file_name, file_role, synced_at FROM raw_drive_files WHERE file_role IN ('data_contract', 'crawl_strategy', 'quality_audit') ORDER BY synced_at DESC"
+                    """
+                    SELECT file_name, file_role, synced_at
+                    FROM raw_drive_files
+                    WHERE file_role IN ('data_contract', 'crawl_strategy', 'quality_audit', 'research_doc', 'capability_test')
+                    ORDER BY synced_at DESC
+                    """
                 ).fetchall()
             ]
 
@@ -985,6 +1193,12 @@ class MarketIntelligenceStore:
             "by_platform": by_platform,
             "by_quality": by_quality,
             "by_platform_quality": by_platform_quality,
+            "by_trend_tier": by_trend_tier,
+            "threads_by_trend_tier": threads_by_trend_tier,
+            "by_trend_group": by_trend_group,
+            "by_verification_status": by_verification_status,
+            "trends_snapshot": trends_snapshot,
+            "latest_v3_screening": latest_v3_screening,
             "engagement_completeness": engagement_completeness,
             "by_content_group": by_content_group,
             "by_purchase_intent": by_purchase_intent,
@@ -1017,10 +1231,31 @@ class MarketIntelligenceStore:
                     "SELECT DISTINCT purchase_intent FROM market_items WHERE purchase_intent IS NOT NULL ORDER BY purchase_intent"
                 ).fetchall()
             ]
+            trend_tiers = [
+                r["trend_tier"]
+                for r in self._conn.execute(
+                    "SELECT DISTINCT trend_tier FROM market_items WHERE trend_tier IS NOT NULL ORDER BY trend_tier"
+                ).fetchall()
+            ]
+            trend_groups = [
+                r["trend_group"]
+                for r in self._conn.execute(
+                    "SELECT DISTINCT trend_group FROM market_items WHERE trend_group IS NOT NULL ORDER BY trend_group"
+                ).fetchall()
+            ]
+            verification_statuses = [
+                r["verification_status"]
+                for r in self._conn.execute(
+                    "SELECT DISTINCT verification_status FROM market_items WHERE verification_status IS NOT NULL ORDER BY verification_status"
+                ).fetchall()
+            ]
         return {
             "platforms": platforms,
             "content_groups": content_groups,
             "purchase_intents": purchase_intents,
+            "trend_tiers": trend_tiers,
+            "trend_groups": trend_groups,
+            "verification_statuses": verification_statuses,
         }
 
     def list_raw_files(self, limit: int = 30) -> List[Dict[str, Any]]:
@@ -1187,8 +1422,8 @@ class MarketIntelligenceStore:
                 INSERT INTO market_reports
                 (id, report_key, source_type, title, platform, raw_file_id, report_json, raw_payload_json,
                  generated_at, created_at, updated_at, is_corrected, corrects_report, request_id, run_id,
-                 technical_status, data_quality_status, business_usable_records, source_priority)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 run_status, technical_status, data_quality_status, business_usable_records, source_priority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(report_key) DO UPDATE SET
                     source_type = excluded.source_type,
                     title = excluded.title,
@@ -1202,6 +1437,7 @@ class MarketIntelligenceStore:
                     corrects_report = excluded.corrects_report,
                     request_id = excluded.request_id,
                     run_id = excluded.run_id,
+                    run_status = excluded.run_status,
                     technical_status = excluded.technical_status,
                     data_quality_status = excluded.data_quality_status,
                     business_usable_records = excluded.business_usable_records,
@@ -1223,6 +1459,7 @@ class MarketIntelligenceStore:
                     report.get("corrects_report"),
                     report.get("request_id"),
                     report.get("run_id"),
+                    report.get("run_status"),
                     report.get("technical_status"),
                     report.get("data_quality_status"),
                     report.get("business_usable_records"),
@@ -1245,16 +1482,17 @@ class MarketIntelligenceStore:
             return 0.0
 
     def list_reports(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Return reports ordered by newest run first, preferring corrected only within the same run/request."""
+        """Return non-archived reports ordered by newest run first, preferring corrected only within the same run/request."""
         with self._lock:
             rows = self._conn.execute(
                 """
                 SELECT mr.id, mr.report_key, mr.source_type, mr.title, mr.platform, mr.raw_file_id, mr.report_json,
                        mr.generated_at, mr.updated_at, mr.is_corrected, mr.corrects_report, mr.request_id, mr.run_id,
-                       mr.technical_status, mr.data_quality_status, mr.business_usable_records, mr.source_priority,
+                       mr.run_status, mr.technical_status, mr.data_quality_status, mr.business_usable_records, mr.source_priority,
                        r.modified_time AS raw_modified_time
                 FROM market_reports mr
                 LEFT JOIN raw_drive_files r ON mr.raw_file_id = r.file_id
+                WHERE lower(COALESCE(r.folder_path, '')) NOT LIKE '%archive%'
                 ORDER BY COALESCE(mr.generated_at, r.modified_time, mr.updated_at) DESC, mr.updated_at DESC
                 LIMIT 100
                 """
@@ -1309,20 +1547,29 @@ class MarketIntelligenceStore:
 
     def build_evidence_report(self, platform: str = "all") -> Dict[str, Any]:
         """
-        Build canonical 5-section report prioritizing the latest corrected Muse report
-        (falling back to local evidence only when no valid Muse report matches).
+        Build canonical report prioritizing the newest valid Muse report (V3.1 `trend_report_*`
+        or V1/V2 `market_report_*`), falling back to local evidence when no valid report matches.
         """
         plat = (platform or "all").lower()
         res = self.query_items(platform=plat, limit=250, offset=0)
         evidence = build_evidence_report_from_items(res["items"], platform=plat)
+        stats = self.get_stats()
+        if stats.get("trends_snapshot"):
+            evidence["trends_snapshot"] = stats["trends_snapshot"]
 
         stored = self.list_reports(limit=20)
-        # Prefer corrected Muse report matching requested scope (or latest corrected overall report)
+        # Prefer newest Muse report matching requested scope (V3.1 trend_report_* or V1/V2 market_report_*)
         chosen = None
         for entry in stored:
             rep = entry.get("report") or {}
             rep_plat = (rep.get("platform") or "").lower()
-            has_core = bool(rep.get("telegram_summary") or rep.get("platform_results") or rep.get("trending_highlights"))
+            has_core = bool(
+                rep.get("telegram_summary")
+                or rep.get("platform_results")
+                or rep.get("trending_highlights")
+                or rep.get("screening")
+                or rep.get("run_status")
+            )
             if not has_core:
                 continue
             if plat == "all" or rep_plat == plat or rep_plat == "all":
@@ -1333,6 +1580,12 @@ class MarketIntelligenceStore:
 
         if chosen:
             evidence["latest_muse_report"] = chosen
+            evidence["schema_version"] = chosen.get("schema_version") or "v2"
+            evidence["run_id"] = chosen.get("run_id")
+            evidence["run_status"] = chosen.get("run_status")
+            evidence["run_status_label_vi"] = chosen.get("run_status_label_vi")
+            evidence["is_source_error"] = bool(chosen.get("is_source_error"))
+            evidence["is_empty_market_valid"] = bool(chosen.get("is_empty_market_valid"))
             evidence["muse_signals"] = chosen.get("trending_highlights") or []
             evidence["muse_affiliate_opportunities"] = chosen.get("affiliate_opportunities") or []
             evidence["telegram_summary"] = chosen.get("telegram_summary")
@@ -1343,17 +1596,29 @@ class MarketIntelligenceStore:
                     evidence["data_quality"]["technical_status"] = chosen.get("technical_status")
                 if chosen.get("data_quality_status"):
                     evidence["data_quality"]["data_quality_status"] = chosen.get("data_quality_status")
+                if chosen.get("run_status"):
+                    evidence["data_quality"]["run_status"] = chosen.get("run_status")
             evidence["platform_results"] = chosen.get("platform_results") or {}
             evidence["totals"] = chosen.get("totals") or {}
+            evidence["screening"] = chosen.get("screening")
+            evidence["tier_distribution"] = chosen.get("tier_distribution")
+            evidence["top_viral"] = chosen.get("top_viral") or []
+            evidence["emerging_and_signals"] = chosen.get("emerging_and_signals")
+            evidence["priority_actions"] = chosen.get("priority_actions") or []
+            evidence["verification_detail"] = chosen.get("verification_detail")
             evidence["is_corrected"] = bool(chosen.get("is_corrected"))
             if chosen.get("source_label"):
                 evidence["source_label"] = f"{chosen['source_label']} + Dữ liệu chuẩn hóa"
-            if chosen.get("trending_highlights") and not evidence["trending_highlights"]:
+            if chosen.get("trending_highlights"):
                 evidence["trending_highlights"] = chosen["trending_highlights"]
-            if chosen.get("consumer_needs_problems") and not evidence["consumer_needs_problems"]:
+            if chosen.get("consumer_needs_problems"):
                 evidence["consumer_needs_problems"] = chosen["consumer_needs_problems"]
+            if chosen.get("affiliate_opportunities") or chosen.get("schema_version") == "v3.1":
+                evidence["affiliate_opportunities"] = chosen.get("affiliate_opportunities") or []
             if chosen.get("content_suggestions", {}).get("text_posts"):
                 evidence["content_suggestions"]["text_posts"] = chosen["content_suggestions"]["text_posts"]
             if chosen.get("content_suggestions", {}).get("short_videos"):
                 evidence["content_suggestions"]["short_videos"] = chosen["content_suggestions"]["short_videos"]
+            if chosen.get("source_links"):
+                evidence["source_links"] = chosen["source_links"]
         return evidence

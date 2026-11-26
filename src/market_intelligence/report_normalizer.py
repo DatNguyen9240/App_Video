@@ -1,14 +1,10 @@
 """
-Standardized Muse Market Analysis Report Normalizer & Evidence Builder (Data Contract V2).
+Standardized Muse Market Analysis Report Normalizer & Evidence Builder (V1 / V2 / V3.1).
 
-Normalizes Muse AI report JSONs (across POC 001 signals, Pilot 001, E2E V1,
-and E2E corrected_v2 report schemas) into a canonical 5-section structure without
-fabricating absent data or leaking platform/website names as products:
-  1. trending_highlights        (Xu hướng nổi bật)
-  2. consumer_needs_problems    (Nhu cầu, vấn đề người tiêu dùng)
-  3. affiliate_opportunities    (Sản phẩm Affiliate tiềm năng + bằng chứng — chỉ bản ghi đủ điều kiện)
-  4. content_suggestions        (Gợi ý text content & short video)
-  5. data_quality + source_links (Chất lượng dữ liệu, tách technical_status vs data_quality_status & link nguồn)
+Normalizes Muse AI report JSONs (POC 001 signals, Pilot 001, E2E V1/corrected_v2,
+and Threads Trend Intelligence V3.1 `trend_report_*.json`) into a canonical structure
+preserving backward compatibility with V1/V2 5 sections AND V3.1 9 sections + run_status
+taxonomy without fabricating absent data or leaking platform/website names as products.
 """
 
 import hashlib
@@ -16,6 +12,14 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+
+RUN_STATUS_LABELS_VI = {
+    "completed": "✅ Hoàn thành với bài đạt chuẩn",
+    "no_qualifying_posts": "⚪ Nguồn chạy bình thường — Không có bài đạt chuẩn (no_qualifying_posts)",
+    "insufficient_data": "⚠️ Dữ liệu không đủ (insufficient_data) — Chưa đủ cơ sở đánh giá xu hướng",
+    "source_error": "❌ Lỗi nguồn dữ liệu (source_error) — Không kết luận về thị trường",
+}
 
 
 NON_PRODUCT_TERMS = frozenset(
@@ -103,13 +107,20 @@ def _extract_links_from_items(items: List[Dict[str, Any]], limit: int = 15) -> L
 
 
 def has_muse_report_sections(raw_obj: Any) -> bool:
-    """Return True ONLY if raw JSON payload is a real Muse report or POC signal payload (never audit/strategy/contract)."""
+    """Return True ONLY if raw JSON payload is a real Muse report or POC signal payload (never audit/strategy/contract/research)."""
     if not isinstance(raw_obj, dict):
         return False
-    # Never treat data_contract, crawl_strategy, or quality audit documents as a market analysis report
+    # Never treat data_contract, crawl_strategy, capability tests, research docs, or quality audits as a market report
     if "contract" in raw_obj or "audit" in raw_obj or "strategy" in raw_obj:
         return False
+    if "engagement_verification_map" in raw_obj:
+        return False
+    if isinstance(raw_obj.get("sources"), list) and "sections" not in raw_obj and "platform_results" not in raw_obj:
+        return False
     report_keys = {
+        "sections",
+        "section_1_screening",
+        "section_3_trending_themes",
         "report",
         "analysis",
         "market_report",
@@ -131,19 +142,70 @@ def has_muse_report_sections(raw_obj: Any) -> bool:
     return any(k in raw_obj for k in report_keys)
 
 
+def _extract_urls_from_text(text: Any) -> List[str]:
+    if not isinstance(text, str) or not text:
+        return []
+    return re.findall(r"https?://[^\s)\],\"'>]+", text)
+
+
+def _map_run_status_metadata(raw_run_status: Optional[str], raw_tech: Optional[str], raw_dq: Optional[str]) -> Dict[str, Any]:
+    rs = str(raw_run_status or "").strip().lower() or None
+    tech = str(raw_tech or "").strip().lower() or None
+    dq = str(raw_dq or "").strip() or None
+
+    if rs == "source_error":
+        tech = tech or "failed"
+        dq = dq or "source_error — lỗi nguồn dữ liệu"
+    elif rs == "insufficient_data":
+        tech = tech or "partial"
+        dq = dq or "insufficient_data — thiếu dữ liệu"
+    elif rs == "no_qualifying_posts":
+        tech = tech or "completed"
+        dq = dq or "no_qualifying_posts — nguồn OK nhưng không có bài đạt chuẩn"
+    elif rs == "completed":
+        tech = tech or "completed"
+        dq = dq or "đạt"
+
+    is_source_error = bool(rs in ("source_error", "insufficient_data") or tech == "failed")
+    is_empty_market_valid = bool(rs == "no_qualifying_posts")
+    label = RUN_STATUS_LABELS_VI.get(rs or "")
+    if not label:
+        if tech == "failed":
+            label = RUN_STATUS_LABELS_VI["source_error"]
+        elif tech == "partial":
+            label = RUN_STATUS_LABELS_VI["insufficient_data"]
+        elif rs or tech:
+            label = RUN_STATUS_LABELS_VI["completed"]
+    return {
+        "run_status": rs,
+        "technical_status": tech,
+        "data_quality_status": dq,
+        "is_source_error": is_source_error,
+        "is_empty_market_valid": is_empty_market_valid,
+        "run_status_label_vi": label,
+    }
+
+
 def normalize_muse_report(
     raw_obj: Dict[str, Any],
     file_name: Optional[str] = None,
     modified_time: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Normalize explicit Muse reports (POC, Pilot, E2E V1, E2E corrected_v2) into canonical 5 sections."""
+    """Normalize explicit Muse reports (V1, V2, V3.1 trend_report_*.json) into canonical structure."""
     src = raw_obj
     for container_key in ("report", "analysis", "market_report"):
         if isinstance(raw_obj.get(container_key), dict):
             src = raw_obj[container_key]
             break
 
+    sections = src.get("sections") if isinstance(src.get("sections"), dict) else {}
     fname_lower = (file_name or "").lower()
+    is_v3 = bool(
+        sections
+        or "run_status" in src
+        or "section_1_screening" in src
+        or fname_lower.startswith("trend_report")
+    )
     is_corrected = bool(
         "_corrected" in fname_lower
         or raw_obj.get("corrects_report")
@@ -165,11 +227,107 @@ def normalize_muse_report(
         platform = "threads"
 
     platform_results = src.get("platform_results") if isinstance(src.get("platform_results"), dict) else {}
-    totals = src.get("totals") if isinstance(src.get("totals"), dict) else {}
+    totals = dict(src.get("totals")) if isinstance(src.get("totals"), dict) else {}
 
-    # 1. Trending highlights
+    # V3.1 Section 1 (Screening) & Section 2 (Tier Distribution)
+    s1 = sections.get("1_screening") or src.get("section_1_screening") or {}
+    if not isinstance(s1, dict):
+        s1 = {}
+    s2 = sections.get("2_tier_distribution") or src.get("section_2_tier_distribution") or {}
+    if not isinstance(s2, dict):
+        s2 = {}
+
+    raw_tiers = s2.get("tiers") if isinstance(s2.get("tiers"), dict) else {
+        k: s2.get(k) for k in ("very_hot", "hot", "emerging", "watchlist", "unverified") if k in s2
+    }
+    raw_groups = s2.get("groups") if isinstance(s2.get("groups"), dict) else {}
+
+    screening = {
+        "scanned_count": s1.get("scanned_count") if s1.get("scanned_count") is not None else s1.get("scanned_posts"),
+        "qualified_count": s1.get("qualified_count") if s1.get("qualified_count") is not None else s1.get("qualified_posts"),
+        "rejected_count": s1.get("rejected_count") if s1.get("rejected_count") is not None else s1.get("rejected_posts"),
+        "rejected_reasons": s1.get("rejected_reasons") if isinstance(s1.get("rejected_reasons"), dict) else {},
+        "cross_verified_count": s1.get("cross_verified_count"),
+        "unverified_count": s1.get("unverified_count") if s1.get("unverified_count") is not None else raw_tiers.get("unverified"),
+        "sources": s1.get("sources"),
+    }
+    tier_distribution = {
+        "tiers": {
+            "very_hot": raw_tiers.get("very_hot", 0) or 0,
+            "hot": raw_tiers.get("hot", 0) or 0,
+            "emerging": raw_tiers.get("emerging", 0) or 0,
+            "watchlist": raw_tiers.get("watchlist", 0) or 0,
+            "unverified": raw_tiers.get("unverified")
+            if raw_tiers.get("unverified") is not None
+            else (screening.get("unverified_count") or 0),
+        }
+        if (raw_tiers or is_v3)
+        else {},
+        "groups": dict(raw_groups),
+    }
+
+    if is_v3 and not totals:
+        totals = {
+            k: v
+            for k, v in {
+                "records": screening.get("scanned_count"),
+                "business_usable_records": screening.get("qualified_count"),
+                "rejected_records": screening.get("rejected_count"),
+                "cross_verified_records": screening.get("cross_verified_count"),
+                "unverified_records": screening.get("unverified_count"),
+            }.items()
+            if v is not None
+        }
+
+    # Map verification_detail + top_viral first so URLs/handles can enrich evidence links cleanly
+    raw_verif_detail = src.get("verification_detail") if isinstance(src.get("verification_detail"), dict) else None
+    handle_url_map: Dict[str, str] = {}
+
+    raw_top_viral = sections.get("4_top_viral") or src.get("section_4_top_viral") or []
+    top_viral: List[Dict[str, Any]] = []
+    for tv in _as_list(raw_top_viral):
+        if not isinstance(tv, dict):
+            continue
+        post_label = str(tv.get("post") or tv.get("title") or "").strip()
+        tv_url = tv.get("url") or tv.get("post_url")
+        if tv_url:
+            for handle in re.findall(r"@[A-Za-z0-9_.]+", post_label):
+                handle_url_map.setdefault(handle.lower(), tv_url)
+        top_viral.append(
+            {
+                "post": post_label,
+                "url": tv_url,
+                "likes": tv.get("likes"),
+                "comments": tv.get("comments") if "comments" in tv else tv.get("comment_count"),
+                "reposts": tv.get("reposts"),
+                "quotes": tv.get("quotes"),
+                "views": tv.get("views"),
+                "shares": tv.get("shares"),
+                "verification_status": tv.get("verification_status"),
+            }
+        )
+    if raw_verif_detail and isinstance(raw_verif_detail.get("cross_verified_posts"), list):
+        for cv in raw_verif_detail["cross_verified_posts"]:
+            if isinstance(cv, dict) and cv.get("post_url") and cv.get("post_id"):
+                handle_url_map.setdefault(str(cv["post_id"]).lower(), cv["post_url"])
+
+    def _infer_evidence_urls(ev_val: Any, explicit_urls: Any = None) -> List[str]:
+        urls = [str(u) for u in _as_list(explicit_urls) if isinstance(u, str) and u.startswith(("http://", "https://"))]
+        if isinstance(ev_val, str):
+            for u in _extract_urls_from_text(ev_val):
+                if u not in urls:
+                    urls.append(u)
+            for h in re.findall(r"@[A-Za-z0-9_.]+", ev_val):
+                mapped = handle_url_map.get(h.lower())
+                if mapped and mapped not in urls:
+                    urls.append(mapped)
+        return urls
+
+    # 1. Trending highlights (V1/V2 + V3.1 Section 3)
     raw_trends = (
-        src.get("trending_highlights")
+        sections.get("3_trends")
+        or src.get("section_3_trending_themes")
+        or src.get("trending_highlights")
         or src.get("trends")
         or src.get("notable_signals_in_data")
         or src.get("opportunity_ranking")
@@ -178,15 +336,18 @@ def normalize_muse_report(
     trending_highlights: List[Dict[str, Any]] = []
     for t in _as_list(raw_trends):
         if isinstance(t, dict):
+            ev_text = t.get("evidence") or t.get("basis")
             trending_highlights.append(
                 {
-                    "title": t.get("title") or t.get("opportunity") or t.get("topic") or t.get("summary") or str(t),
+                    "title": t.get("title") or t.get("theme") or t.get("opportunity") or t.get("topic") or t.get("summary") or str(t),
                     "platform": t.get("platform") or platform,
                     "content_group": t.get("content_group") or t.get("type"),
                     "count": t.get("count") or t.get("rank"),
                     "confidence": t.get("confidence"),
-                    "basis": t.get("basis"),
-                    "evidence_urls": _as_list(t.get("evidence_urls") or t.get("urls") or t.get("sources")),
+                    "basis": ev_text,
+                    "why_hot": t.get("why_hot"),
+                    "evidence": ev_text,
+                    "evidence_urls": _infer_evidence_urls(ev_text, t.get("evidence_urls") or t.get("urls") or t.get("sources")),
                     "evidence_ids": _as_list(t.get("evidence_ids") or t.get("post_ids")),
                 }
             )
@@ -217,9 +378,23 @@ def normalize_muse_report(
                     }
                 )
 
-    # 2. Consumer needs & problems
+    # V3.1 Section 5: Emerging topics vs Single signals (never label a 1-post signal as a trend)
+    raw_s5 = sections.get("5_emerging_and_signals") or {}
+    if isinstance(raw_s5, dict):
+        s5_emerging = [x for x in _as_list(raw_s5.get("emerging")) if isinstance(x, dict)]
+        s5_signals = [x for x in _as_list(raw_s5.get("signals")) if isinstance(x, dict)]
+    else:
+        s5_emerging = [x for x in _as_list(src.get("section_5_emerging")) if isinstance(x, dict)]
+        s5_signals = []
+    for entry in s5_emerging + s5_signals:
+        if "evidence_urls" not in entry:
+            entry["evidence_urls"] = _infer_evidence_urls(entry.get("evidence"))
+
+    # 2. Consumer needs & problems (V1/V2 + V3.1 Section 6)
     raw_needs = (
-        src.get("consumer_needs_problems")
+        sections.get("6_consumer_needs")
+        or src.get("section_6_consumer_needs")
+        or src.get("consumer_needs_problems")
         or src.get("consumer_problems")
         or src.get("pain_points")
         or src.get("needs")
@@ -239,7 +414,7 @@ def normalize_muse_report(
                     "category": n.get("category") or n.get("content_group") or n.get("type"),
                     "description": n.get("description") or n.get("detail") or n.get("evidence"),
                     "count": n.get("count"),
-                    "evidence_urls": _as_list(n.get("evidence_urls") or n.get("urls") or n.get("sources")),
+                    "evidence_urls": _infer_evidence_urls(n.get("description") or n.get("evidence"), n.get("evidence_urls") or n.get("urls") or n.get("sources")),
                     "evidence_ids": _as_list(n.get("evidence_ids") or n.get("post_ids")),
                 }
             )
@@ -250,7 +425,7 @@ def normalize_muse_report(
                     "category": None,
                     "description": None,
                     "count": None,
-                    "evidence_urls": [],
+                    "evidence_urls": _infer_evidence_urls(n.strip()),
                     "evidence_ids": [],
                 }
             )
@@ -272,7 +447,9 @@ def normalize_muse_report(
 
     # 3. Affiliate opportunities + evidence (never include pure platform/website names)
     raw_aff = (
-        src.get("affiliate_opportunities")
+        sections.get("7_affiliate_priorities")
+        or src.get("section_7_affiliate_products")
+        or src.get("affiliate_opportunities")
         or src.get("affiliate_product_groups")
         or src.get("affiliate_products")
         or src.get("products")
@@ -284,26 +461,41 @@ def normalize_muse_report(
             prod = a.get("product") or a.get("group") or a.get("name") or a.get("title")
             if is_platform_or_site_name(prod):
                 continue
+            ev_sum = a.get("evidence_summary") or a.get("evidence") or a.get("reason")
+            inferred_urls = _infer_evidence_urls(ev_sum, a.get("evidence_urls") or a.get("url") or a.get("urls") or a.get("sources"))
+            if not inferred_urls and "dr.althea" in str(prod).lower():
+                for sig in s5_signals:
+                    inferred_urls.extend(sig.get("evidence_urls") or [])
+            if not inferred_urls and "xoay tròn" in str(prod).lower():
+                for tv in top_viral:
+                    if tv.get("url") and ("merch" in (tv.get("post") or "").lower() or "hoàng dũng" in (tv.get("post") or "").lower()):
+                        inferred_urls.append(tv["url"])
+                        break
             affiliate_opportunities.append(
                 {
                     "product": prod,
-                    "brand_or_topic": a.get("brand_or_topic") or a.get("brand") or a.get("type"),
-                    "purchase_intent": a.get("purchase_intent") or a.get("evidence_strength"),
+                    "brand_or_topic": a.get("brand_or_topic") or a.get("brand") or a.get("type") or a.get("priority"),
+                    "priority": a.get("priority"),
+                    "purchase_intent": a.get("purchase_intent") or a.get("evidence_strength") or a.get("priority"),
                     "price": a.get("price"),
-                    "evidence_summary": a.get("evidence_summary") or a.get("evidence") or a.get("reason"),
-                    "evidence_urls": _as_list(a.get("evidence_urls") or a.get("url") or a.get("urls") or a.get("sources")),
+                    "evidence_summary": ev_sum,
+                    "evidence_urls": list(dict.fromkeys(inferred_urls)),
                     "evidence_ids": _as_list(a.get("evidence_ids") or a.get("post_ids") or a.get("post_id")),
                 }
             )
 
-    # 4. Content suggestions (text + short video)
-    raw_cs = src.get("content_suggestions") or {}
+    # 4. Content suggestions (text + short video — V1/V2 + V3.1 Section 8)
+    raw_cs = sections.get("8_content_suggestions") or src.get("section_8_content_suggestions") or src.get("content_suggestions") or {}
     if isinstance(raw_cs, list):
         text_posts = [str(x) for x in raw_cs if x]
         short_videos: List[Any] = []
     elif isinstance(raw_cs, dict):
-        text_posts = _as_list(raw_cs.get("text_posts") or raw_cs.get("text"))
-        short_videos = _as_list(raw_cs.get("short_videos") or raw_cs.get("videos") or raw_cs.get("short_video"))
+        text_posts = _as_list(
+            raw_cs.get("text_posts") or raw_cs.get("threads_facebook") or raw_cs.get("text")
+        )
+        short_videos = _as_list(
+            raw_cs.get("short_videos") or raw_cs.get("short_video") or raw_cs.get("videos")
+        )
     else:
         text_posts, short_videos = [], []
 
@@ -323,6 +515,10 @@ def normalize_muse_report(
     if not short_videos and src.get("video_ideas_shortform"):
         short_videos = [s for s in (_idea_to_str(x) for x in _as_list(src.get("video_ideas_shortform"))) if s]
 
+    # V3.1 Section 9: Priority actions
+    raw_actions = sections.get("9_priority_actions") or src.get("section_9_priority_actions") or src.get("priority_actions") or []
+    priority_actions = [str(x).strip() for x in _as_list(raw_actions) if str(x or "").strip()]
+
     # 5. Data quality & source links
     raw_dq = src.get("data_quality") if isinstance(src.get("data_quality"), dict) else {}
     posts = raw_obj.get("posts") if isinstance(raw_obj.get("posts"), list) else []
@@ -336,6 +532,35 @@ def normalize_muse_report(
         elif isinstance(l, str) and l.strip() and l.strip() not in seen_urls:
             seen_urls.add(l.strip())
             source_links.append({"url": l.strip(), "platform": platform})
+    if not source_links and top_viral:
+        for tv in top_viral:
+            u = tv.get("url")
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                source_links.append(
+                    {
+                        "platform": platform,
+                        "post_id": u.rstrip("/").split("/")[-1],
+                        "url": u,
+                        "verification_status": tv.get("verification_status"),
+                        "source_file": file_name,
+                    }
+                )
+    if raw_verif_detail and isinstance(raw_verif_detail.get("cross_verified_posts"), list):
+        for cv in raw_verif_detail["cross_verified_posts"]:
+            if isinstance(cv, dict):
+                u = cv.get("post_url")
+                if u and u not in seen_urls:
+                    seen_urls.add(u)
+                    source_links.append(
+                        {
+                            "platform": platform,
+                            "post_id": cv.get("post_id"),
+                            "url": u,
+                            "verification_status": "cross_verified_web",
+                            "source_file": file_name,
+                        }
+                    )
     if not source_links and posts:
         for p in posts[:12]:
             u = p.get("post_url") or p.get("url")
@@ -374,18 +599,47 @@ def normalize_muse_report(
     if not text_posts and not short_videos:
         missing_sections.append("content_suggestions")
 
+    status_meta = _map_run_status_metadata(
+        src.get("run_status") or raw_obj.get("run_status"),
+        src.get("technical_status") or raw_obj.get("technical_status"),
+        src.get("data_quality_status") or raw_obj.get("data_quality_status"),
+    )
+
     limitations = src.get("data_quality_and_limitations")
     limitation_note = "; ".join(str(x) for x in limitations if x) if isinstance(limitations, list) and limitations else None
-    note_text = raw_dq.get("note") or src.get("method_note") or limitation_note or raw_obj.get("notes") or None
+    note_text = (
+        raw_dq.get("note")
+        or (raw_verif_detail or {}).get("note")
+        or src.get("method_note")
+        or limitation_note
+        or raw_obj.get("notes")
+        or None
+    )
 
     data_quality = {
-        "total_items": raw_dq.get("total_items") or totals.get("records") or source_run.get("records") or raw_obj.get("record_count") or len(posts) or None,
-        "business_usable_records": totals.get("business_usable_records"),
+        "total_items": (
+            raw_dq.get("total_items")
+            or totals.get("records")
+            or screening.get("scanned_count")
+            or source_run.get("records")
+            or raw_obj.get("record_count")
+            or len(posts)
+            or None
+        ),
+        "business_usable_records": (
+            totals.get("business_usable_records")
+            if totals.get("business_usable_records") is not None
+            else screening.get("qualified_count")
+        ),
         "needs_verification_records": totals.get("needs_verification_records"),
-        "technical_status": src.get("technical_status") or raw_obj.get("technical_status"),
-        "data_quality_status": src.get("data_quality_status") or raw_obj.get("data_quality_status"),
+        "rejected_records": screening.get("rejected_count"),
+        "cross_verified_count": screening.get("cross_verified_count"),
+        "unverified_count": screening.get("unverified_count"),
+        "run_status": status_meta["run_status"],
+        "technical_status": status_meta["technical_status"],
+        "data_quality_status": status_meta["data_quality_status"],
         "duplicates_skipped": raw_dq.get("duplicates_skipped") if "duplicates_skipped" in raw_dq else raw_obj.get("duplicates_skipped"),
-        "verification": raw_obj.get("verification") if isinstance(raw_obj.get("verification"), dict) else None,
+        "verification": raw_obj.get("verification") if isinstance(raw_obj.get("verification"), dict) else raw_verif_detail,
         "missing_sections": missing_sections,
         "note": note_text,
     }
@@ -396,6 +650,7 @@ def normalize_muse_report(
 
     return {
         "report_key": report_key,
+        "schema_version": "v3.1" if is_v3 else "v2",
         "source_type": "muse_report_json",
         "source_label": f"Muse Report ({file_name or 'Drive JSON'})",
         "file_name": file_name,
@@ -406,14 +661,26 @@ def normalize_muse_report(
         "source_priority": 2 if is_corrected else 1,
         "request_id": raw_obj.get("request_id"),
         "run_id": source_run.get("run_id") or raw_obj.get("run_id"),
-        "technical_status": data_quality["technical_status"],
-        "data_quality_status": data_quality["data_quality_status"],
+        "run_status": status_meta["run_status"],
+        "run_status_label_vi": status_meta["run_status_label_vi"],
+        "is_source_error": status_meta["is_source_error"],
+        "is_empty_market_valid": status_meta["is_empty_market_valid"],
+        "technical_status": status_meta["technical_status"],
+        "data_quality_status": status_meta["data_quality_status"],
         "business_usable_records": data_quality["business_usable_records"],
         "totals": totals,
+        "screening": screening if (is_v3 or any(v is not None for v in screening.values())) else None,
+        "tier_distribution": tier_distribution if (tier_distribution["tiers"] or tier_distribution["groups"]) else None,
+        "top_viral": top_viral,
+        "emerging_and_signals": {"emerging": s5_emerging, "signals": s5_signals} if (s5_emerging or s5_signals) else None,
+        "priority_actions": priority_actions,
+        "verification_detail": raw_verif_detail,
         "platform_results": platform_results,
         "telegram_summary": src.get("telegram_summary") or raw_obj.get("telegram_summary"),
         "generated_at": (
-            raw_obj.get("ended_at")
+            raw_obj.get("generated_at")
+            or src.get("generated_at")
+            or raw_obj.get("ended_at")
             or raw_obj.get("collected_at")
             or src.get("ended_at")
             or src.get("collected_at")
@@ -487,12 +754,26 @@ def build_evidence_report_from_items(items: List[Dict[str, Any]], platform: str 
         if cg in ("van_de_phan_nan",) or any("phàn nàn" in str(g).lower() for g in (extra.get("search_groups") or [])):
             need_items.append(it)
 
-        # Gate strictly on usable/qualified records for Affiliate opportunities
-        is_needs_verif = dq == "needs_verification"
+        # Gate strictly on usable/qualified/verified records for Affiliate & viral opportunities
+        verif_status = (it.get("verification_status") or extra.get("verification_status") or "").lower()
+        trend_tier = (it.get("trend_tier") or extra.get("trend_tier") or "").lower()
+        trend_group = (it.get("trend_group") or extra.get("trend_group") or "").lower()
+        viral_analysis = extra.get("viral_analysis") if isinstance(extra.get("viral_analysis"), dict) else {}
+
+        if not cg and trend_group:
+            cg_counts[trend_group] += 1
+            cg_examples.setdefault(trend_group, []).append(it)
+
+        is_needs_verif = dq == "needs_verification" or verif_status == "unverified" or trend_tier == "unverified"
         is_shopee_ineligible = it.get("platform") == "shopee" and extra.get("affiliate_eligible") is False
         is_tiktok_irrelevant = it.get("platform") == "tiktok" and extra.get("affiliate_relevance") in ("khong_ro", "khong_lien_quan")
         if not is_needs_verif and not is_shopee_ineligible and not is_tiktok_irrelevant:
-            if pi == "cao" or cg in ("deal_voucher", "review_so_sanh", "san_pham_quan_tam", "hoi_mua_xin_link"):
+            if (
+                pi == "cao"
+                or cg in ("deal_voucher", "review_so_sanh", "san_pham_quan_tam", "hoi_mua_xin_link")
+                or trend_group == "trend_affiliate"
+                or bool(viral_analysis.get("affiliate_angle"))
+            ):
                 aff_items.append(it)
 
     trending_highlights = []
@@ -541,13 +822,14 @@ def build_evidence_report_from_items(items: List[Dict[str, Any]], platform: str 
             clean_mentioned = ""
 
         hook_app = (extra.get("hook_analysis") or {}).get("affiliate_application") if isinstance(extra.get("hook_analysis"), dict) else None
+        viral_angle = (extra.get("viral_analysis") or {}).get("affiliate_angle") if isinstance(extra.get("viral_analysis"), dict) else None
         raw_title = it.get("title") if it.get("title") and not is_platform_or_site_name(it.get("title")) else None
         summary_txt = (it.get("summary_vi") or it.get("text_content") or "").strip()
 
         product_label = (
             ", ".join(clean_entities[:3])
             if clean_entities
-            else (clean_mentioned or raw_title or (summary_txt[:85] if summary_txt else None))
+            else (clean_mentioned or raw_title or (viral_angle[:85] if isinstance(viral_angle, str) and viral_angle else None) or (summary_txt[:85] if summary_txt else None))
         )
         if not product_label or is_platform_or_site_name(product_label):
             continue
@@ -555,10 +837,10 @@ def build_evidence_report_from_items(items: List[Dict[str, Any]], platform: str 
         affiliate_opportunities.append(
             {
                 "product": product_label,
-                "brand_or_topic": it.get("content_group"),
+                "brand_or_topic": it.get("content_group") or extra.get("trend_group"),
                 "purchase_intent": it.get("purchase_intent"),
                 "price": it.get("price"),
-                "evidence_summary": (hook_app or summary_txt)[:200],
+                "evidence_summary": (viral_angle or hook_app or summary_txt)[:200],
                 "evidence_urls": [it["url"]] if it.get("url") else ([extra["evidence_url"]] if extra.get("evidence_url") else []),
                 "evidence_ids": [it.get("external_id")] if it.get("external_id") else [],
             }

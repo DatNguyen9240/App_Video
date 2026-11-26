@@ -1136,4 +1136,203 @@ for (const pf of paginationFiles) {
 }
 assert.equal(collectedIds.size, 108); // 105 Threads files + 3 Reports files
 
+// 10. Threads Trend Intelligence V3.1: trend_report_*.json, Archive/ exclusion, real Telegram summary, dedup, source_error vs no_qualifying_posts
+paginationFiles = [];
+extraReportsEnabled = false;
+
+const realV3ReportJson = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "../tests/fixtures/market/trend_report_v3_20261126.json"), "utf8")
+);
+const REPORTS_ARCHIVE_ID = "1ReportsArchiveFolderId111";
+const THREADS_ARCHIVE_ID = "1ThreadsArchiveFolderId222";
+const ARCHIVED_RPT_ID = "1ArchivedTrendReportId333";
+const ARCHIVED_THR_ID = "1ArchivedThreadsTrendId444";
+const ACTIVE_V3_RPT_ID = "1ActiveV3TrendReportId555";
+const DISCOVERY_DOC_ID = "1DiscoverySourcesDocId666";
+const CAP_TEST_DOC_ID = "1CapabilityTestDocId777";
+const ACTIVE_V3_THR_ID = "1ActiveThreadsTrendId888";
+
+const v3FetchBase = globalThis.fetch;
+let v3TestMode = true;
+let v3StatusVariant = "real"; // "real" | "source_error" | "no_qualifying_posts"
+
+globalThis.fetch = async (url, init = {}) => {
+  if (!v3TestMode) return v3FetchBase(url, init);
+  const sUrl = String(url);
+  if (sUrl.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+    const u = new URL(sUrl);
+    const q = u.searchParams.get("q") || "";
+    if (q.includes(`'${MARKET_ID}' in parents`) && !q.includes("'Reports'")) {
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: THREADS_ID, name: "Threads", mimeType: "application/vnd.google-apps.folder" },
+            { id: REPORTS_ID, name: "Reports", mimeType: "application/vnd.google-apps.folder" },
+            { id: "1RootArchiveFolder999", name: "Archive", mimeType: "application/vnd.google-apps.folder" },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+    if (q.includes(`'${REPORTS_ID}' in parents`) && !q.includes("vnd.google-apps.document")) {
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: REPORTS_ARCHIVE_ID, name: "Archive", mimeType: "application/vnd.google-apps.folder" },
+            { id: DISCOVERY_DOC_ID, name: "threads_discovery_sources_20261126.json", mimeType: "application/json", size: "500", modifiedTime: "2026-11-26T15:09:30Z", md5Checksum: "d1" },
+            { id: CAP_TEST_DOC_ID, name: "threads_cli_capability_test_20261126.json", mimeType: "application/json", size: "600", modifiedTime: "2026-11-26T15:38:08Z", md5Checksum: "c1" },
+            { id: ACTIVE_V3_RPT_ID, name: "trend_report_v3_20261126.json", mimeType: "application/json", size: "9749", modifiedTime: "2026-11-26T15:51:34Z", md5Checksum: "r_v3" },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+    if (q.includes(`'${THREADS_ID}' in parents`)) {
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: THREADS_ARCHIVE_ID, name: "Archive", mimeType: "application/vnd.google-apps.folder" },
+            { id: ACTIVE_V3_THR_ID, name: "threads_trend_20261126.json", mimeType: "application/json", size: "16378", modifiedTime: "2026-11-26T15:51:33Z", md5Checksum: "t_v3" },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+    if (q.includes(`'${REPORTS_ARCHIVE_ID}' in parents`) || q.includes(`'${THREADS_ARCHIVE_ID}' in parents`) || q.includes("1RootArchiveFolder999")) {
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: ARCHIVED_RPT_ID, name: "trend_report_v3_archived.json", mimeType: "application/json", size: "5000", modifiedTime: "2026-11-26T23:59:59Z", md5Checksum: "arch_r" },
+            { id: ARCHIVED_THR_ID, name: "threads_trend_archived.json", mimeType: "application/json", size: "5000", modifiedTime: "2026-11-26T23:59:59Z", md5Checksum: "arch_t" },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+  }
+  if (sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${ARCHIVED_RPT_ID}?alt=media`)) {
+    return new Response(JSON.stringify({ report: "ARCHIVED MUST NOT BE READ", run_id: "arch-fail", run_status: "source_error", generated_at: "2026-11-27T00:00:00Z", telegram_summary: "ARCHIVED_BAD" }), { status: 200 });
+  }
+  if (sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${DISCOVERY_DOC_ID}?alt=media`)) {
+    return new Response(JSON.stringify({ report: "Research Doc", sources: [{ rank: 1, source: "threads-cli" }] }), { status: 200 });
+  }
+  if (sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${CAP_TEST_DOC_ID}?alt=media`)) {
+    return new Response(JSON.stringify({ report: "Capability Test", results: [], engagement_verification_map: {} }), { status: 200 });
+  }
+  if (sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${ACTIVE_V3_RPT_ID}?alt=media`)) {
+    if (v3StatusVariant === "source_error") {
+      return new Response(JSON.stringify({
+        report: "V3.1 Source Error Report",
+        run_id: "threads-trend-v3-err-1",
+        run_status: "source_error",
+        generated_at: "2026-11-26T23:10:00+07:00",
+        error_message: "threads-cli rate limit 429",
+        sections: { "1_screening": { scanned_count: 0, qualified_count: 0, rejected_count: 0 } },
+        telegram_summary: "TRẠNG THÁI: source_error — Nguồn threads-cli gặp lỗi 429, chưa kết luận thị trường.",
+      }), { status: 200 });
+    }
+    if (v3StatusVariant === "no_qualifying_posts") {
+      return new Response(JSON.stringify({
+        report: "V3.1 Empty Qualifying Posts Report",
+        run_id: "threads-trend-v3-empty-1",
+        run_status: "no_qualifying_posts",
+        generated_at: "2026-11-26T23:20:00+07:00",
+        sections: { "1_screening": { scanned_count: 25, qualified_count: 0, rejected_count: 25 } },
+        telegram_summary: "TRẠNG THÁI: no_qualifying_posts — Đã quét 25 bài hợp lệ nhưng không có bài nào đạt chuẩn V3.1.",
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify(realV3ReportJson), { status: 200 });
+  }
+  return v3FetchBase(url, init);
+};
+
+// Verify `/api/app/market/files` excludes Archive/ folders & files completely
+const v3FilesRes = await worker.fetch(new Request("https://example.workers.dev/api/app/market/files", { headers: authHeaders }), env);
+assert.equal(v3FilesRes.status, 200);
+const v3FilesJson = await v3FilesRes.json();
+const v3ListedNames = v3FilesJson.files.map((f) => f.name);
+assert.ok(v3ListedNames.includes("threads_trend_20261126.json"));
+assert.ok(v3ListedNames.includes("trend_report_v3_20261126.json"));
+assert.ok(!v3ListedNames.includes("trend_report_v3_archived.json"));
+assert.ok(!v3ListedNames.includes("threads_trend_archived.json"));
+
+// Verify Telegram `rpt:summary` and `rpt:full` display V3.1 real report, ignore Archive/ & research docs, and preserve no-raw policy
+const v3RptSummaryRes = await worker.fetch(
+  new Request("https://example.workers.dev/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+    body: JSON.stringify({
+      update_id: 6001,
+      callback_query: { id: "cq_v3_1", from: { id: 999001 }, message: { message_id: 50, chat: { id: 999001, type: "private" } }, data: "rpt:summary" },
+    }),
+  }),
+  env
+);
+assert.equal(v3RptSummaryRes.status, 200);
+const v3SummaryBody = String(telegramCalls[telegramCalls.length - 1].body);
+assert.ok(v3SummaryBody.includes("Vũ Trụ Say Hi"));
+assert.ok(v3SummaryBody.includes("Quét 14 | Đạt chuẩn 8"));
+assert.ok(v3SummaryBody.includes("Very Hot 4"));
+assert.ok(!v3SummaryBody.includes("ARCHIVED_BAD"));
+
+const v3RptFullRes = await worker.fetch(
+  new Request("https://example.workers.dev/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+    body: JSON.stringify({
+      update_id: 6002,
+      callback_query: { id: "cq_v3_2", from: { id: 999001 }, message: { message_id: 50, chat: { id: 999001, type: "private" } }, data: "rpt:full" },
+    }),
+  }),
+  env
+);
+assert.equal(v3RptFullRes.status, 200);
+const v3FullBody = String(telegramCalls[telegramCalls.length - 1].body);
+assert.ok(v3FullBody.includes("XU HƯỚNG NỔI BẬT"));
+assert.ok(v3FullBody.includes("Dr.Althea 345 Relief Cream"));
+assert.ok(v3FullBody.includes("HÀNH ĐỘNG ƯU TIÊN"));
+
+// Cron notifies V3.1 `trend_report_v3_20261126.json` once with telegram_summary, then deduplicates on second cron
+const callsBeforeV3Cron = telegramCalls.length;
+await worker.scheduled({}, env, {});
+assert.equal(telegramCalls.length, callsBeforeV3Cron + 1);
+const v3NotifBody = String(telegramCalls[telegramCalls.length - 1].body);
+assert.ok(v3NotifBody.includes("BÁO CÁO XU HƯỚNG THREADS V3.1"));
+assert.ok(v3NotifBody.includes("Dr.Althea 345 Relief Cream"));
+assert.ok(env.DB.notifications.some((n) => n.run_id === "threads-trend-v3-20261126-2241" && n.status === "sent"));
+
+// Re-running cron MUST NOT send duplicate Telegram notification
+await worker.scheduled({}, env, {});
+assert.equal(telegramCalls.length, callsBeforeV3Cron + 1);
+
+// Verify `source_error` vs `no_qualifying_posts` distinction in Telegram notifications
+v3StatusVariant = "source_error";
+await worker.scheduled({}, env, {});
+const errNotifBody = String(telegramCalls[telegramCalls.length - 1].body);
+assert.ok(errNotifBody.includes("LỖI NGUỒN DỮ LIỆU (source_error)"));
+assert.ok(errNotifBody.includes("source_error"));
+
+v3StatusVariant = "no_qualifying_posts";
+await worker.scheduled({}, env, {});
+const emptyNotifBody = String(telegramCalls[telegramCalls.length - 1].body);
+assert.ok(emptyNotifBody.includes("KHÔNG CÓ BÀI ĐẠT CHUẨN (no_qualifying_posts)"));
+assert.ok(!emptyNotifBody.includes("LỖI NGUỒN DỮ LIỆU"));
+
+// Verify /start still keeps exact 6 buttons and zero /sendDocument ever sent
+assert.equal(telegramCalls.some((c) => c.url.includes("/sendDocument")), false);
+const v3StartBefore = telegramCalls.length;
+await worker.fetch(
+  new Request("https://example.workers.dev/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+    body: JSON.stringify({
+      update_id: 6003,
+      message: { message_id: 51, from: { id: 999001 }, chat: { id: 999001, type: "private" }, text: "/start" },
+    }),
+  }),
+  env
+);
+const v3StartBtns = JSON.parse(telegramCalls[v3StartBefore].body).reply_markup.inline_keyboard.flat().map((b) => b.text);
+assert.equal(v3StartBtns.length, 6);
+
 console.log("WORKER_V2_CONTRACT_TESTS_OK");

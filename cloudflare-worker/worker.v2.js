@@ -72,10 +72,20 @@ function formatVnTime(isoOrDate) {
 
 function inferPlatformHint(pathOrName) {
     const lower = String(pathOrName || "").toLowerCase();
-    if (lower.includes("threads")) return "threads";
+    if (lower.includes("threads") || lower.startsWith("trend_report") || lower.includes("/trend_report")) return "threads";
     if (lower.includes("tiktok")) return "tiktok";
     if (lower.includes("shopee")) return "shopee";
     return null;
+}
+
+function isArchiveFolderName(name) {
+    return String(name || "").trim().toLowerCase() === "archive";
+}
+
+function isArchiveRelPath(relPath) {
+    return String(relPath || "")
+        .split(/[\\/]+/)
+        .some(seg => seg.trim().toLowerCase() === "archive");
 }
 
 function genId(prefix) {
@@ -365,11 +375,16 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
                 const isFolder = f.mimeType === "application/vnd.google-apps.folder";
                 const childPath = current.relPath ? `${current.relPath}/${f.name}` : f.name;
                 if (isFolder) {
+                    // Strictly exclude Archive/ directories from Auto Sync & manual discovery
+                    if (isArchiveFolderName(f.name) || isArchiveRelPath(childPath)) {
+                        continue;
+                    }
                     if (current.depth < maxDepth) {
                         nextFrontier.push({ id: f.id, relPath: childPath, depth: current.depth + 1 });
                     }
                     continue;
                 }
+                if (isArchiveRelPath(current.relPath)) continue;
                 const isJson =
                     (f.name && f.name.toLowerCase().endsWith(".json")) ||
                     f.mimeType === "application/json";
@@ -411,7 +426,13 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
 
 function isNonReportDocName(fileName) {
     const low = String(fileName || "").toLowerCase();
-    return low.includes("data_contract") || low.includes("strategy") || low.includes("audit");
+    return (
+        low.includes("data_contract") ||
+        low.includes("strategy") ||
+        low.includes("audit") ||
+        low.includes("discovery_sources") ||
+        low.includes("capability_test")
+    );
 }
 
 function getReportStem(fileName) {
@@ -419,6 +440,131 @@ function getReportStem(fileName) {
         .toLowerCase()
         .replace(/\.json$/i, "")
         .replace(/_corrected(_v\d+)?$/i, "");
+}
+
+function extractMuseReportStats(d) {
+    if (!d || typeof d !== "object") return null;
+    const s1 = d.sections?.["1_screening"] || d.section_1_screening || {};
+    const s2 = d.sections?.["2_tier_distribution"] || d.section_2_tier_distribution || {};
+    const tiers = s2.tiers || s2 || {};
+    const groups = s2.groups || {};
+    const isV3 = Boolean(d.sections || d.run_status || d.section_1_screening);
+    const rawRunStatus = d.run_status ? String(d.run_status).trim().toLowerCase() : null;
+    const rawTechStatus = d.technical_status ? String(d.technical_status).trim().toLowerCase() : null;
+    const effStatus = rawRunStatus || rawTechStatus || "completed";
+
+    const scanned = s1.scanned_count ?? s1.scanned_posts ?? d.totals?.records ?? null;
+    const qualified = s1.qualified_count ?? s1.qualified_posts ?? d.totals?.business_usable_records ?? null;
+    const rejected = s1.rejected_count ?? s1.rejected_posts ?? null;
+    const crossVerified = s1.cross_verified_count ?? null;
+    const unverified = s1.unverified_count ?? tiers.unverified ?? null;
+
+    const trends = d.sections?.["3_trends"] || d.section_3_trending_themes || d.trending_highlights || [];
+    const topViral = d.sections?.["4_top_viral"] || d.section_4_top_viral || [];
+    const s5 = d.sections?.["5_emerging_and_signals"] || {};
+    const emerging = Array.isArray(s5.emerging) ? s5.emerging : (Array.isArray(d.section_5_emerging) ? d.section_5_emerging : []);
+    const signals = Array.isArray(s5.signals) ? s5.signals : [];
+    const needs = d.sections?.["6_consumer_needs"] || d.section_6_consumer_needs || d.consumer_needs_problems || [];
+    const aff = d.sections?.["7_affiliate_priorities"] || d.section_7_affiliate_products || d.affiliate_opportunities || [];
+    const actions = d.sections?.["9_priority_actions"] || d.section_9_priority_actions || d.priority_actions || [];
+
+    return {
+        isV3,
+        rawRunStatus,
+        rawTechStatus,
+        effStatus,
+        s1,
+        tiers: {
+            very_hot: tiers.very_hot ?? 0,
+            hot: tiers.hot ?? 0,
+            emerging: tiers.emerging ?? 0,
+            watchlist: tiers.watchlist ?? 0,
+            unverified: unverified ?? 0
+        },
+        groups,
+        scanned,
+        qualified,
+        rejected,
+        crossVerified,
+        unverified: unverified ?? 0,
+        trends: Array.isArray(trends) ? trends : [],
+        topViral: Array.isArray(topViral) ? topViral : [],
+        emerging,
+        signals,
+        needs: Array.isArray(needs) ? needs : [],
+        aff: Array.isArray(aff) ? aff : [],
+        actions: Array.isArray(actions) ? actions : []
+    };
+}
+
+function getReportStatusBadge(effStatus, isCorr, isV3) {
+    if (effStatus === "source_error" || effStatus === "failed") {
+        return "❌ LỖI NGUỒN DỮ LIỆU (source_error) — Không kết luận về thị trường";
+    }
+    if (effStatus === "insufficient_data" || effStatus === "partial") {
+        return "⚠️ THIẾU DỮ LIỆU (insufficient_data) — Chưa đủ cơ sở kết luận xu hướng";
+    }
+    if (effStatus === "no_qualifying_posts") {
+        return "⚪ NGUỒN OK — KHÔNG CÓ BÀI ĐẠT CHUẨN (no_qualifying_posts)";
+    }
+    if (isCorr) return "🔔 BÁO CÁO MUSE (BẢN CORRECTED V2)";
+    return isV3 ? "🔔 BÁO CÁO XU HƯỚNG THREADS V3.1" : "🔔 BÁO CÁO MUSE MỚI";
+}
+
+function buildMuseTelegramNotificationText(d, fileName, isCorr) {
+    const meta = extractMuseReportStats(d) || {};
+    const effStatus = meta.effStatus || "completed";
+    const statusBadge = getReportStatusBadge(effStatus, isCorr, meta.isV3);
+    const rawSummary = String(d?.telegram_summary || "").trim();
+
+    let qualityLine = "";
+    if (meta.isV3 && meta.scanned !== null) {
+        qualityLine =
+            `📊 Chất lượng crawl: quét ${meta.scanned} | đạt chuẩn ${meta.qualified ?? 0}` +
+            ` (Very Hot: ${meta.tiers.very_hot}, Hot: ${meta.tiers.hot}, Emerging: ${meta.tiers.emerging}, Watchlist: ${meta.tiers.watchlist}, Unverified: ${meta.unverified})` +
+            (meta.crossVerified !== null ? ` | Web xác minh chéo: ${meta.crossVerified}` : "");
+    } else if (d?.totals) {
+        const recCount = d.totals.records ?? 0;
+        const usableCount = d.totals.business_usable_records ?? recCount;
+        qualityLine = `📊 Bản ghi usable: ${usableCount}/${recCount} | Chất lượng: ${d.data_quality_status || "N/A"}`;
+    }
+
+    const parts = [`${statusBadge}\n━━━━━━━━━━━━━━━━━━━━`];
+    if (rawSummary) {
+        parts.push(rawSummary);
+        const lowSum = rawSummary.toLowerCase();
+        if (qualityLine && !lowSum.includes("quét") && !lowSum.includes("usable") && !lowSum.includes("chất lượng")) {
+            parts.push(qualityLine);
+        }
+        if (effStatus === "completed" && meta.trends.length && !lowSum.includes("toàn thị trường") && !lowSum.includes("xu hướng")) {
+            const topThemes = meta.trends.slice(0, 3).map(t => `• ${t.theme || t.title || t.topic || t}`).join("\n");
+            parts.push(`🔥 Xu hướng nổi bật:\n${topThemes}`);
+        }
+        if (effStatus === "completed" && meta.actions.length && !lowSum.includes("ưu tiên") && !lowSum.includes("hành động")) {
+            const topActs = meta.actions.slice(0, 3).map(a => `• ${a}`).join("\n");
+            parts.push(`🎯 Hành động đề xuất:\n${topActs}`);
+        }
+    } else {
+        const rawRunId = String(d?.run_id || fileName || "report");
+        parts.push(`🆔 Run: ${rawRunId}`);
+        if (qualityLine) parts.push(qualityLine);
+        if (effStatus === "source_error" || effStatus === "insufficient_data") {
+            const errNote = d?.error_message || meta.s1?.sources || "Nguồn trả lỗi hoặc thiếu dữ liệu";
+            parts.push(`❗ Chi tiết: ${String(errNote).slice(0, 300)}\n⚠️ Tuyệt đối không kết luận thị trường không có trend khi nguồn lỗi/thiếu dữ liệu.`);
+        } else if (effStatus === "no_qualifying_posts") {
+            parts.push("ℹ️ Nguồn chạy bình thường nhưng không có bài đạt chuẩn trong cửa sổ hiện tại.");
+        } else {
+            if (meta.trends.length) {
+                const topThemes = meta.trends.slice(0, 3).map(t => `• ${t.theme || t.title || t.topic || t}`).join("\n");
+                parts.push(`🔥 Xu hướng nổi bật:\n${topThemes}`);
+            }
+            if (meta.actions.length) {
+                const topActs = meta.actions.slice(0, 3).map(a => `• ${a}`).join("\n");
+                parts.push(`🎯 Hành động đề xuất:\n${topActs}`);
+            }
+        }
+    }
+    return parts.join("\n\n").slice(0, 4000);
 }
 
 async function resolveReportsFolderId(token, env) {
@@ -445,10 +591,11 @@ async function listValidMuseReportsOnDrive(env) {
     do {
         const listing = await listFolderChildren(token, reportsFolderId, pageToken, 100);
         for (const f of (listing.files || [])) {
+            if (f.mimeType === "application/vnd.google-apps.folder" || isArchiveFolderName(f.name)) continue;
             const low = String(f.name || "").toLowerCase();
             if (!low.endsWith(".json")) continue;
             if (isNonReportDocName(low)) continue;
-            if (low.startsWith("market_report") || low.includes("report")) {
+            if (low.startsWith("trend_report") || low.startsWith("market_report") || low.includes("report")) {
                 allReportFiles.push(f);
             }
         }
@@ -468,9 +615,17 @@ async function listValidMuseReportsOnDrive(env) {
             );
             if (!rawRes.ok) continue;
             const parsed = await rawRes.json();
-            if (isNonReportDocName(candidate.name) || parsed.contract || parsed.audit || parsed.strategy) continue;
+            if (
+                isNonReportDocName(candidate.name) ||
+                parsed.contract ||
+                parsed.audit ||
+                parsed.strategy ||
+                parsed.engagement_verification_map ||
+                (Array.isArray(parsed.sources) && !parsed.sections && !parsed.platform_results)
+            ) continue;
             const isCorr = String(candidate.name || "").toLowerCase().includes("_corrected") || Boolean(parsed.corrects_report);
             const effTs = Math.max(
+                Date.parse(parsed.generated_at || "") || 0,
                 Date.parse(parsed.ended_at || "") || 0,
                 Date.parse(parsed.collected_at || "") || 0,
                 Date.parse(candidate.modifiedTime || "") || 0
@@ -624,26 +779,14 @@ async function notifyNewCrawl(env) {
         for (const item of winningReports) {
             const d = item.data || {};
             if (item.effTs && item.effTs < cutoffMs) continue;
-            const techStatus = String(d.technical_status || "completed").toLowerCase();
-            if (!["completed", "partial", "failed"].includes(techStatus)) continue;
+            const effStatus = String(d.run_status || d.technical_status || "completed").toLowerCase();
+            if (!["completed", "partial", "failed", "source_error", "no_qualifying_posts", "insufficient_data"].includes(effStatus)) continue;
 
             const rawRunId = String(d.run_id || item.file?.name || "report").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 96);
             const notifKey = item.isCorr ? `${rawRunId}_corrected` : rawRunId;
-            const totals = d.totals || {};
-            const recCount = Number(totals.records ?? 0);
-            const usableCount = Number(totals.business_usable_records ?? recCount);
-
-            const statusBadge = techStatus === "failed"
-                ? "❌ CRAWL THẤT BẠI"
-                : (item.isCorr ? "🔔 BÁO CÁO MUSE (BẢN CORRECTED V2)" : "🔔 BÁO CÁO MUSE MỚI");
-            const summaryText = d.telegram_summary
-                ? `${statusBadge}\n━━━━━━━━━━━━━━━━━━━━\n${d.telegram_summary}`
-                : `${statusBadge}\n━━━━━━━━━━━━━━━━━━━━\n` +
-                  `🆔 Run: ${rawRunId}\n` +
-                  `⚙️ Kỹ thuật: ${d.technical_status || techStatus}\n` +
-                  `🎯 Chất lượng: ${d.data_quality_status || "N/A"}\n` +
-                  `📊 Bản ghi usable: ${usableCount}/${recCount}` +
-                  (d.error_message ? `\n❗ Lỗi: ${String(d.error_message).slice(0, 300)}` : "");
+            const stats = extractMuseReportStats(d) || {};
+            const recCount = Number(stats.qualified ?? stats.scanned ?? d.totals?.records ?? 0);
+            const summaryText = buildMuseTelegramNotificationText(d, item.file?.name, item.isCorr);
 
             const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText);
             if (d.request_id) {
@@ -715,6 +858,7 @@ async function notifyNewCrawl(env) {
         const list = await res.json();
         const candidates = (list.files || []).slice().reverse();
         for (const file of candidates) {
+            if (file.mimeType === "application/vnd.google-apps.folder" || isArchiveFolderName(file.name)) continue;
             if (!file.size || Number(file.size) > MAX_MARKET_JSON_BYTES) continue;
             const dataRes = await fetch(
                 `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`,
@@ -1510,54 +1654,103 @@ async function buildAnalysisReportBundle(env) {
 
     if (museData && typeof museData === "object") {
         const isCorr = String(museDrive.file?.name || "").toLowerCase().includes("_corrected") || Boolean(museData.corrects_report);
+        const meta = extractMuseReportStats(museData) || {};
         const totals = museData.totals || {};
         const pr = museData.platform_results || {};
-        const headerBadge = isCorr ? "BẢN CORRECTED V2" : "MUSE DRIVE REPORT";
-        sendFileName = museDrive.file?.name || "market_report_muse.json";
+        sendFileName = museDrive.file?.name || (meta.isV3 ? "trend_report_v3.json" : "market_report_muse.json");
         sendJsonPayload = museData;
+        const appStatusTag = appState.online ? "🖥️ App_Video: 🟢 ONLINE" : "🖥️ App_Video: 🔴 OFFLINE (đọc trực tiếp Drive)";
 
-        const platLines = [];
-        for (const pKey of ["threads", "tiktok", "shopee"]) {
-            const p = pr[pKey];
-            if (!p) continue;
-            platLines.push(
-                `• ${pKey.toUpperCase()}: ${p.business_usable_records ?? 0}/${p.records ?? 0} dùng được` +
-                ` | KT: ${p.technical_status || p.status || "—"} | CL: ${p.data_quality_status || "—"}`
-            );
-        }
+        if (meta.isV3) {
+            const badge = getReportStatusBadge(meta.effStatus, isCorr, true);
+            const v3Header = [
+                badge,
+                `📄 File: ${sendFileName} | ${appStatusTag}`,
+                `📊 Sàng lọc V3.1: Quét ${meta.scanned ?? "N/A"} | Đạt chuẩn ${meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}` +
+                    (meta.crossVerified !== null ? ` | Xác minh chéo Web: ${meta.crossVerified}` : ""),
+                `🔥 Phân tầng: Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`
+            ];
+            summaryText = museData.telegram_summary
+                ? `${v3Header.join("\n")}\n\n${museData.telegram_summary}`
+                : buildMuseTelegramNotificationText(museData, sendFileName, isCorr);
 
-        const headerLines = [
-            `📊 PHÂN TÍCH THỊ TRƯỜNG (${headerBadge})`,
-            `📄 File: ${sendFileName}` + (appState.online ? " | 🖥️ App_Video: 🟢 ONLINE" : " | 🖥️ App_Video: 🔴 OFFLINE (đọc trực tiếp Drive)"),
-            `Tổng crawl: ${totals.records ?? "N/A"} | Dùng được (usable): ${totals.business_usable_records ?? "N/A"} | Cần xác minh: ${totals.needs_verification_records ?? "N/A"}`,
-            `Kỹ thuật: ${museData.technical_status || "—"} | Chất lượng: ${museData.data_quality_status || "—"}`
-        ];
-        if (platLines.length) headerLines.push(platLines.join("\n"));
-
-        if (museData.telegram_summary) {
-            summaryText = `${headerLines.join("\n")}\n\n${museData.telegram_summary}`;
+            const detailParts = [
+                `📖 BÁO CÁO CHI TIẾT V3.1: ${museData.report || sendFileName}`,
+                `⚙️ Trạng thái lượt chạy: ${meta.effStatus}`,
+                v3Header[2],
+                v3Header[3]
+            ];
+            if (meta.trends.length) {
+                detailParts.push(
+                    "🔥 XU HƯỚNG NỔI BẬT:\n" +
+                    meta.trends.slice(0, 4).map(t => `• ${t.theme || t.title || t}\n  Bằng chứng: ${t.evidence || t.basis || "—"}`).join("\n")
+                );
+            }
+            if (meta.topViral.length) {
+                detailParts.push(
+                    "🚀 TOP BÀI VIRAL:\n" +
+                    meta.topViral.slice(0, 4).map(v => `• ${v.post} (${v.likes ?? "—"} likes, ${v.comments ?? "—"} cmt)\n  ${v.url || ""}`).join("\n")
+                );
+            }
+            if (meta.signals.length || meta.emerging.length) {
+                const sigLines = meta.signals.slice(0, 3).map(s => `• [TÍN HIỆU] ${s.signal || s.topic}: ${s.evidence || ""}`);
+                const emLines = meta.emerging.slice(0, 2).map(e => `• [MỚI NỔI] ${e.topic}: ${e.evidence || ""}`);
+                detailParts.push("🌱 MỚI NỔI & TÍN HIỆU ĐƠN LẺ:\n" + [...emLines, ...sigLines].join("\n"));
+            }
+            if (meta.aff.length) {
+                detailParts.push(
+                    "🛒 CƠ HỘI AFFILIATE ƯU TIÊN:\n" +
+                    meta.aff.slice(0, 4).map(a => `• ${a.product} [${a.priority || "—"}]: ${a.evidence || a.evidence_summary || ""}`).join("\n")
+                );
+            }
+            if (meta.actions.length) {
+                detailParts.push("🎯 HÀNH ĐỘNG ƯU TIÊN:\n" + meta.actions.slice(0, 4).map(a => `• ${a}`).join("\n"));
+            }
+            fullText = detailParts.join("\n\n");
         } else {
-            summaryText = headerLines.join("\n\n");
-        }
+            const headerBadge = isCorr ? "BẢN CORRECTED V2" : "MUSE DRIVE REPORT";
+            const platLines = [];
+            for (const pKey of ["threads", "tiktok", "shopee"]) {
+                const p = pr[pKey];
+                if (!p) continue;
+                platLines.push(
+                    `• ${pKey.toUpperCase()}: ${p.business_usable_records ?? 0}/${p.records ?? 0} dùng được` +
+                    ` | KT: ${p.technical_status || p.status || "—"} | CL: ${p.data_quality_status || "—"}`
+                );
+            }
 
-        // Detailed breakdown for "Xem báo cáo đầy đủ"
-        const detailSections = [`📖 BÁO CÁO ĐẦY ĐỦ: ${museData.report || sendFileName}`];
-        for (const pKey of ["threads", "tiktok", "shopee"]) {
-            const p = pr[pKey];
-            if (!p) continue;
-            const corrs = Array.isArray(p.corrections) ? p.corrections.slice(0, 3).map(c => `  + ${c}`).join("\n") : "";
-            const issues = Array.isArray(p.remaining_issues) ? p.remaining_issues.slice(0, 3).map(i => `  - ${i}`).join("\n") : "";
-            detailSections.push(
-                `[${pKey.toUpperCase()}] ${p.business_usable_records ?? 0}/${p.records ?? 0} usable (KT: ${p.technical_status || p.status}, CL: ${p.data_quality_status || "—"})` +
-                (corrs ? `\nĐã chuẩn hóa:\n${corrs}` : "") +
-                (issues ? `\nHạn chế còn lại:\n${issues}` : "")
-            );
+            const headerLines = [
+                `📊 PHÂN TÍCH THỊ TRƯỜNG (${headerBadge})`,
+                `📄 File: ${sendFileName} | ${appStatusTag}`,
+                `Tổng crawl: ${totals.records ?? "N/A"} | Dùng được (usable): ${totals.business_usable_records ?? "N/A"} | Cần xác minh: ${totals.needs_verification_records ?? "N/A"}`,
+                `Kỹ thuật: ${museData.technical_status || "—"} | Chất lượng: ${museData.data_quality_status || "—"}`
+            ];
+            if (platLines.length) headerLines.push(platLines.join("\n"));
+
+            if (museData.telegram_summary) {
+                summaryText = `${headerLines.join("\n")}\n\n${museData.telegram_summary}`;
+            } else {
+                summaryText = headerLines.join("\n\n");
+            }
+
+            const detailSections = [`📖 BÁO CÁO ĐẦY ĐỦ: ${museData.report || sendFileName}`];
+            for (const pKey of ["threads", "tiktok", "shopee"]) {
+                const p = pr[pKey];
+                if (!p) continue;
+                const corrs = Array.isArray(p.corrections) ? p.corrections.slice(0, 3).map(c => `  + ${c}`).join("\n") : "";
+                const issues = Array.isArray(p.remaining_issues) ? p.remaining_issues.slice(0, 3).map(i => `  - ${i}`).join("\n") : "";
+                detailSections.push(
+                    `[${pKey.toUpperCase()}] ${p.business_usable_records ?? 0}/${p.records ?? 0} usable (KT: ${p.technical_status || p.status}, CL: ${p.data_quality_status || "—"})` +
+                    (corrs ? `\nĐã chuẩn hóa:\n${corrs}` : "") +
+                    (issues ? `\nHạn chế còn lại:\n${issues}` : "")
+                );
+            }
+            const lims = Array.isArray(museData.data_quality_and_limitations)
+                ? museData.data_quality_and_limitations.slice(0, 4).map(l => `• ${l}`).join("\n")
+                : "";
+            if (lims) detailSections.push(`⚠️ Giới hạn dữ liệu:\n${lims}`);
+            fullText = detailSections.join("\n\n");
         }
-        const lims = Array.isArray(museData.data_quality_and_limitations)
-            ? museData.data_quality_and_limitations.slice(0, 4).map(l => `• ${l}`).join("\n")
-            : "";
-        if (lims) detailSections.push(`⚠️ Giới hạn dữ liệu:\n${lims}`);
-        fullText = detailSections.join("\n\n");
     } else if (hbReport && typeof hbReport === "object") {
         // Fallback strictly when NO Muse report JSON exists in 01_Market_Data/Reports/
         const cleanAff = filterCleanProductItems(hbReport.affiliate_opportunities).slice(0, 3);

@@ -64,11 +64,20 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
         self.api_token = (self._explicit_token or "").strip()
         self.client_id = self._explicit_client_id or "test-client"
 
-    def add_drive_file(self, file_id: str, name: str, raw_bytes: bytes, modified_time: str, md5: str, platform_hint: str = "threads"):
+    def add_drive_file(
+        self,
+        file_id: str,
+        name: str,
+        raw_bytes: bytes,
+        modified_time: str,
+        md5: str,
+        platform_hint: str = "threads",
+        folder_path: str = "Threads",
+    ):
         self.mock_files[file_id] = {
             "file_id": file_id,
             "name": name,
-            "folder_path": "Threads",
+            "folder_path": folder_path,
             "modified_time": modified_time,
             "md5_checksum": md5,
             "platform_hint": platform_hint,
@@ -643,6 +652,92 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         self.assertEqual(res["status"], "completed")
         self.assertEqual(res["files_checked"], 125)
         self.assertEqual(self.store.get_stats()["total_items"], 125)
+
+    def test_flask_v31_threads_tiers_archive_exclusion_and_real_report(self):
+        """V3.1: Excludes Archive/ from Auto Sync, preserves historical V1/V2, exposes 5 Threads tiers & real trend_report_* via Flask."""
+        with open(os.path.join(FIXTURES_DIR, "threads_trend_20261126.json"), "rb") as f:
+            v3_trend_bytes = f.read()
+        with open(os.path.join(FIXTURES_DIR, "trend_report_v3_20261126.json"), "rb") as f:
+            v3_report_bytes = f.read()
+        archived_old_report = {
+            "report": "Old Draft Inside Archive Should Be Ignored",
+            "run_id": "threads-trend-v3-archived",
+            "run_status": "source_error",
+            "generated_at": "2026-11-26T23:59:59+07:00",  # even newer timestamp inside Archive must NEVER win!
+            "telegram_summary": "ARCHIVED DRAFT SHOULD NOT APPEAR",
+        }
+        # Historical V1/V2 + Active V3.1 + Archived drafts
+        self.client.add_drive_file("f_hist_poc2", "threads_crawl_poc_002.json", self.poc2_bytes, "2026-11-26T03:15:20Z", "m_old", folder_path="Threads")
+        self.client.add_drive_file("f_v3_th", "threads_trend_20261126.json", v3_trend_bytes, "2026-11-26T15:51:33Z", "m_v3t", folder_path="Threads")
+        self.client.add_drive_file("f_v3_rp", "trend_report_v3_20261126.json", v3_report_bytes, "2026-11-26T15:51:34Z", "m_v3r", folder_path="Reports")
+        self.client.add_drive_file(
+            "f_arch_th",
+            "threads_trend_archived.json",
+            json.dumps({"run_id": "arch_run", "records": [{"post_id": "ARCH_ONLY_1", "post_url": "https://www.threads.com/@a/post/ARCH_ONLY_1", "trend_tier": "very_hot", "likes": 99999}]}).encode("utf-8"),
+            "2026-11-26T16:00:00Z",
+            "m_at",
+            folder_path="Threads/Archive",
+        )
+        self.client.add_drive_file(
+            "f_arch_rp",
+            "trend_report_v3_archived.json",
+            json.dumps(archived_old_report).encode("utf-8"),
+            "2026-11-26T16:59:59Z",
+            "m_ar",
+            folder_path="Reports/Archive",
+        )
+
+        flask_tmp = tempfile.TemporaryDirectory()
+        app_ui.reset_market_runtime_for_tests(data_dir=flask_tmp.name, client=self.client)
+        app_ui.app.config["TESTING"] = True
+        flask_client = app_ui.app.test_client()
+
+        try:
+            html = flask_client.get("/").get_data(as_text=True)
+            for label in ["Very Hot", "Hot", "Emerging", "Watchlist", "Unverified", "trend_toan_thi_truong"]:
+                self.assertIn(label, html)
+
+            sync_resp = flask_client.post("/api/market/sync?wait=1")
+            self.assertEqual(sync_resp.status_code, 200)
+            sync_data = sync_resp.get_json()["result"]
+            self.assertEqual(sync_data["files_checked"], 3)  # Archive/ files skipped!
+            self.assertEqual(sync_data["records_inserted"], 18)  # 10 V1/V2 + 8 V3.1
+
+            # Second sync MUST NOT re-download or duplicate records
+            sync_resp2 = flask_client.post("/api/market/sync?wait=1")
+            sync_data2 = sync_resp2.get_json()["result"]
+            self.assertEqual(sync_data2["files_downloaded"], 0)
+            self.assertEqual(sync_data2["records_inserted"], 0)
+
+            # Query each tier explicitly via Flask API
+            vh = flask_client.get("/api/market/items?platform=threads&trend_tier=very_hot&sort_by=engagement").get_json()
+            self.assertEqual(vh["total"], 4)
+            self.assertEqual(vh["items"][0]["post_id"], "DgM4DJRGhGL")
+            self.assertEqual(vh["items"][0]["reposts_count"], 1579)
+            self.assertNotIn("ARCH_ONLY_1", [it["post_id"] for it in vh["items"]])
+
+            self.assertEqual(flask_client.get("/api/market/items?platform=threads&trend_tier=hot").get_json()["total"], 0)
+            self.assertEqual(flask_client.get("/api/market/items?platform=threads&trend_tier=emerging").get_json()["total"], 2)
+            self.assertEqual(flask_client.get("/api/market/items?platform=threads&trend_tier=watchlist").get_json()["total"], 2)
+            self.assertEqual(flask_client.get("/api/market/items?platform=threads&trend_tier=unverified").get_json()["total"], 0)
+            self.assertEqual(flask_client.get("/api/market/items?platform=threads&trend_tier=legacy").get_json()["total"], 10)
+
+            rpt = flask_client.get("/api/market/report?platform=threads").get_json()["report"]
+            self.assertEqual(rpt["run_id"], "threads-trend-v3-20261126-2241")
+            self.assertEqual(rpt["run_status"], "completed")
+            self.assertNotIn("ARCHIVED DRAFT", str(rpt.get("telegram_summary") or ""))
+
+            stats = flask_client.get("/api/market/status").get_json()["stats"]
+            self.assertEqual(stats["threads_by_trend_tier"]["very_hot"], 4)
+            self.assertEqual(stats["threads_by_trend_tier"]["legacy"], 10)
+            self.assertGreater(len(stats["trends_snapshot"]["topics"]), 10)
+        finally:
+            rt = app_ui.get_market_runtime()
+            rt["remote_poller"].stop(timeout=1.0)
+            rt["sync_service"].stop(timeout=1.0)
+            rt["store"].close()
+            app_ui._market_runtime = None
+            flask_tmp.cleanup()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from .cloudflare_client import CloudflareBridgeClient
+from .normalizer import is_archive_path
 from .storage import MarketIntelligenceStore
 
 
@@ -79,9 +80,9 @@ class MarketSyncService:
     def _background_loop(self, sync_on_startup: bool):
         if sync_on_startup and not self._stop_event.is_set():
             try:
-                if self.store.get_state("data_contract_v2_reconciled") != "2":
-                    self.store.reconcile_cached_raw_files()
-                    self.store.set_state("data_contract_v2_reconciled", "2")
+                if self.store.get_state("data_contract_v31_backfilled") != "1":
+                    self.store.backfill_v31_metadata()
+                    self.store.set_state("data_contract_v31_backfilled", "1")
             except Exception:
                 pass
             try:
@@ -190,7 +191,6 @@ class MarketSyncService:
 
                 file_errors = []
                 for fmeta in files:
-                    files_checked += 1
                     fid = fmeta.get("file_id") or fmeta.get("id")
                     fname = fmeta.get("name") or f"{fid}.json"
                     mtime = fmeta.get("modified_time") or fmeta.get("modifiedTime")
@@ -198,6 +198,12 @@ class MarketSyncService:
                     folder_path = fmeta.get("folder_path")
                     platform_hint = fmeta.get("platform_hint")
 
+                    if is_archive_path(folder_path):
+                        if mtime and (not latest_mtime or mtime > latest_mtime):
+                            latest_mtime = mtime
+                        continue
+
+                    files_checked += 1
                     if not fid:
                         continue
 

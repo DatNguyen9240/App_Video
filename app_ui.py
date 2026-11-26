@@ -2284,7 +2284,7 @@ HTML_TEMPLATE = """
           <div>
             <h2 class="text-base font-bold text-white flex items-center gap-2.5 flex-wrap">
               <i class="fa-solid fa-magnifying-glass-chart text-emerald-400"></i>
-              <span>Market Intelligence — Data Contract V2</span>
+              <span>Market Intelligence — V3.1 (Tương thích V1/V2)</span>
               <span class="text-[11px] px-2.5 py-0.5 rounded-full font-semibold border"
                 :class="marketStatus.cloudflare?.token_configured ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-amber-500/15 text-amber-300 border-amber-500/30'">
                 {{ marketStatus.cloudflare?.token_configured ? 'Cloudflare Auth OK' : 'Chưa cấu hình CLOUDFLARE_APP_TOKEN' }}
@@ -2295,7 +2295,7 @@ HTML_TEMPLATE = """
               </span>
             </h2>
             <p class="text-xs text-slate-400 mt-1">
-              Đồng bộ từ <span class="font-mono text-slate-300">AI_WORKSPACE/01_Market_Data/</span> • Cập nhật gần nhất:
+              Đồng bộ từ <span class="font-mono text-slate-300">AI_WORKSPACE/01_Market_Data/</span> (tự loại trừ <span class="font-mono text-slate-300">Archive/</span>, giữ nguyên lịch sử V1/V2) • Cập nhật gần nhất:
               <strong class="text-slate-200">{{ formatIsoTime(marketStatus.stats?.last_sync_at) || 'Chưa đồng bộ' }}</strong>
             </p>
             <p v-if="marketStatus.stats?.last_error" class="text-[11px] text-rose-300 mt-1">
@@ -2370,6 +2370,36 @@ HTML_TEMPLATE = """
 
       <!-- SUB-TAB 1: TỔNG QUAN -->
       <div v-show="marketSubTab === 'overview'" class="space-y-5">
+        <!-- V3.1 Run Status & Source Error Distinction Banner -->
+        <div v-if="marketReport?.run_status || marketStatus.stats?.latest_v3_screening?.run_status"
+          class="p-4 rounded-2xl border text-xs flex flex-col md:flex-row md:items-center justify-between gap-3"
+          :class="marketReport?.is_source_error ? 'bg-rose-950/60 border-rose-500/50 text-rose-200' : (marketReport?.is_empty_market_valid ? 'bg-slate-900/90 border-slate-700 text-slate-200' : 'bg-emerald-950/35 border-emerald-500/35 text-emerald-100')">
+          <div class="space-y-1">
+            <div class="font-bold flex items-center gap-2 flex-wrap">
+              <span>{{ marketReport?.run_status_label_vi || '✅ Threads Trend Intelligence V3.1' }}</span>
+              <span v-if="marketReport?.run_id || marketStatus.stats?.latest_v3_screening?.run_id" class="text-[10px] font-mono px-2 py-0.5 rounded bg-black/30 text-slate-300">
+                {{ marketReport?.run_id || marketStatus.stats?.latest_v3_screening?.run_id }}
+              </span>
+            </div>
+            <div v-if="marketReport?.is_source_error" class="text-[11px] text-rose-300">
+              ⚠️ Trạng thái nguồn lỗi/thiếu dữ liệu — không kết luận "thị trường không có trend".
+            </div>
+            <div v-else-if="marketReport?.is_empty_market_valid" class="text-[11px] text-slate-300">
+              ℹ️ Nguồn chạy bình thường và đã quét đủ ứng viên nhưng không có bài đạt chuẩn V3.1 trong cửa sổ hiện tại.
+            </div>
+            <div v-if="marketReport?.screening" class="text-[11px] text-slate-300 font-mono">
+              Sàng lọc: Quét {{ marketReport.screening.scanned_count ?? '—' }} • Đạt chuẩn {{ marketReport.screening.qualified_count ?? '—' }} • Loại {{ marketReport.screening.rejected_count ?? '—' }} • Xác minh chéo Web {{ marketReport.screening.cross_verified_count ?? '—' }}
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-1.5 text-[11px]">
+            <button @click="jumpToThreadsTier('very_hot')" class="px-2.5 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-200 font-bold cursor-pointer hover:bg-rose-500/30">🔥 Very Hot: {{ marketStatus.stats?.threads_by_trend_tier?.very_hot ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('hot')" class="px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-200 font-bold cursor-pointer hover:bg-amber-500/30">⚡ Hot: {{ marketStatus.stats?.threads_by_trend_tier?.hot ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('emerging')" class="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 font-bold cursor-pointer hover:bg-emerald-500/30">🌱 Emerging: {{ marketStatus.stats?.threads_by_trend_tier?.emerging ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('watchlist')" class="px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-200 font-bold cursor-pointer hover:bg-sky-500/30">👀 Watchlist: {{ marketStatus.stats?.threads_by_trend_tier?.watchlist ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('unverified')" class="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-600 text-slate-300 font-bold cursor-pointer hover:bg-slate-700">❓ Unverified: {{ marketStatus.stats?.threads_by_trend_tier?.unverified ?? 0 }}</button>
+          </div>
+        </div>
+
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div class="glass-panel rounded-2xl p-4 space-y-1.5">
             <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Số bản ghi theo nền tảng</div>
@@ -2417,21 +2447,29 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
-        <!-- Top Cơ hội có bằng chứng (chỉ bản ghi đủ điều kiện) -->
+        <!-- Top Cơ hội có bằng chứng & Chủ đề Trending V3.1 -->
         <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-3">
           <div class="flex items-center justify-between gap-2 flex-wrap">
             <h3 class="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
-              <i class="fa-solid fa-bullseye"></i> Top Cơ Hội Có Bằng Chứng (Đã loại needs_verification & tên nền tảng)
+              <i class="fa-solid fa-bullseye"></i> Top Cơ Hội Có Bằng Chứng (Đã loại unverified / needs_verification & tên nền tảng)
             </h3>
             <button @click="switchMarketSubTab('reports')" class="text-xs text-indigo-300 hover:underline cursor-pointer">Xem báo cáo đầy đủ →</button>
+          </div>
+          <div v-if="(marketStatus.stats?.trends_snapshot?.topics || []).length" class="flex flex-wrap items-center gap-1.5 text-[11px] pb-1">
+            <span class="text-[10px] uppercase font-bold text-indigo-300 mr-1">🔥 Chủ đề Trending VN:</span>
+            <span v-for="(tp, idx) in marketStatus.stats.trends_snapshot.topics.slice(0, 10)" :key="'ov-tp-'+idx"
+              class="px-2 py-0.5 rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-indigo-200">
+              {{ tp.topic }} <span v-if="tp.posts_label" class="text-[10px] text-indigo-300/80">({{ tp.posts_label }})</span>
+            </span>
           </div>
           <div v-if="(marketReport?.affiliate_opportunities || []).length" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
             <div v-for="(a, i) in (marketReport.affiliate_opportunities || []).slice(0, 6)" :key="'ov-aff-'+i"
               class="p-3 rounded-xl bg-slate-900/75 border border-slate-800 space-y-1">
               <div class="font-bold text-white line-clamp-1">{{ a.product || a.brand_or_topic }}</div>
-              <div class="flex items-center gap-1.5 text-[10px]">
-                <span v-if="a.purchase_intent" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">intent: {{ a.purchase_intent }}</span>
-                <span v-if="a.brand_or_topic" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">{{ a.brand_or_topic }}</span>
+              <div class="flex items-center gap-1.5 text-[10px] flex-wrap">
+                <span v-if="a.priority" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">ưu tiên: {{ a.priority }}</span>
+                <span v-if="a.purchase_intent && a.purchase_intent !== a.priority" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">intent: {{ a.purchase_intent }}</span>
+                <span v-if="a.brand_or_topic && a.brand_or_topic !== a.priority" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">{{ a.brand_or_topic }}</span>
               </div>
               <p v-if="a.evidence_summary" class="text-[11px] text-slate-300 line-clamp-2">{{ a.evidence_summary }}</p>
               <a v-if="(a.evidence_urls || []).length" :href="a.evidence_urls[0]" target="_blank" rel="noreferrer"
@@ -2550,20 +2588,69 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
-      <!-- SUB-TAB 2: THREADS -->
+      <!-- SUB-TAB 2: THREADS (V3.1 TIERS & LEGACY V1/V2 BACKWARD COMPATIBLE) -->
       <div v-show="marketSubTab === 'threads'" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+        <!-- Trending Themes Snapshot from Threads -->
+        <div v-if="(marketStatus.stats?.trends_snapshot?.topics || []).length" class="p-3.5 rounded-xl bg-indigo-950/35 border border-indigo-500/30 space-y-2">
+          <div class="flex items-center justify-between gap-2 flex-wrap text-xs">
+            <span class="font-bold text-indigo-300 uppercase tracking-wider">🔥 Chủ đề đang thịnh hành trên Threads ({{ formatIsoTime(marketStatus.stats.trends_snapshot.captured_at) || 'mới nhất' }})</span>
+            <span v-if="marketStatus.stats?.latest_v3_screening?.run_id" class="text-[10px] font-mono text-slate-400">{{ marketStatus.stats.latest_v3_screening.run_id }}</span>
+          </div>
+          <div class="flex flex-wrap gap-1.5 text-[11px]">
+            <button v-for="(tp, idx) in marketStatus.stats.trends_snapshot.topics" :key="'th-tp-'+idx"
+              @click="marketFilters.search = tp.topic; loadMarketItems(0);"
+              class="px-2.5 py-1 rounded-lg bg-slate-900/90 hover:bg-indigo-600/30 border border-slate-700 text-slate-200 cursor-pointer transition">
+              {{ tp.topic }} <span v-if="tp.posts_label" class="text-[10px] text-indigo-300 font-semibold">• {{ tp.posts_label }}</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Tier Quick Filter Pills (Very Hot, Hot, Emerging, Watchlist, Unverified + Legacy V1/V2) -->
+        <div class="flex flex-wrap items-center gap-1.5 text-xs">
+          <button @click="marketFilters.trend_tier = 'all'; loadMarketItems(0);"
+            :class="marketFilters.trend_tier === 'all' ? 'bg-indigo-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800'"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">Tất cả theo 5 phân tầng</button>
+          <button @click="marketFilters.trend_tier = 'very_hot'; loadMarketItems(0);"
+            :class="marketFilters.trend_tier === 'very_hot' ? 'bg-rose-600 text-white font-bold shadow' : 'bg-rose-950/40 text-rose-200 border border-rose-500/30'"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">🔥 Very Hot ({{ marketStatus.stats?.threads_by_trend_tier?.very_hot ?? 0 }})</button>
+          <button @click="marketFilters.trend_tier = 'hot'; loadMarketItems(0);"
+            :class="marketFilters.trend_tier === 'hot' ? 'bg-amber-600 text-white font-bold shadow' : 'bg-amber-950/40 text-amber-200 border border-amber-500/30'"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">⚡ Hot ({{ marketStatus.stats?.threads_by_trend_tier?.hot ?? 0 }})</button>
+          <button @click="marketFilters.trend_tier = 'emerging'; loadMarketItems(0);"
+            :class="marketFilters.trend_tier === 'emerging' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">🌱 Emerging ({{ marketStatus.stats?.threads_by_trend_tier?.emerging ?? 0 }})</button>
+          <button @click="marketFilters.trend_tier = 'watchlist'; loadMarketItems(0);"
+            :class="marketFilters.trend_tier === 'watchlist' ? 'bg-sky-600 text-white font-bold shadow' : 'bg-sky-950/40 text-sky-200 border border-sky-500/30'"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">👀 Watchlist ({{ marketStatus.stats?.threads_by_trend_tier?.watchlist ?? 0 }})</button>
+          <button @click="marketFilters.trend_tier = 'unverified'; loadMarketItems(0);"
+            :class="marketFilters.trend_tier === 'unverified' ? 'bg-slate-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-700'"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">❓ Unverified ({{ marketStatus.stats?.threads_by_trend_tier?.unverified ?? 0 }})</button>
+          <button v-if="(marketStatus.stats?.threads_by_trend_tier?.legacy ?? 0) > 0"
+            @click="marketFilters.trend_tier = 'legacy'; loadMarketItems(0);"
+            :class="marketFilters.trend_tier === 'legacy' ? 'bg-purple-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-400 border border-slate-800'"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">📜 Lịch sử V1/V2 ({{ marketStatus.stats?.threads_by_trend_tier?.legacy ?? 0 }})</button>
+        </div>
+
         <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
-          <div class="md:col-span-4 relative">
+          <div class="md:col-span-3 relative">
             <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
             <input v-model="marketFilters.search" @keyup.enter="loadMarketItems(0)" type="text"
-              placeholder="Tìm nội dung Threads, @tác giả, entities..."
+              placeholder="Tìm nội dung Threads, chủ đề, @tác giả, entities..."
               class="w-full glass-input rounded-xl pl-8 pr-3 py-2 text-xs text-slate-100">
           </div>
-          <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
+          <select v-model="marketFilters.trend_group" @change="loadMarketItems(0)"
             class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-            <option value="all">Mọi chất lượng</option>
-            <option value="usable">Chỉ usable</option>
-            <option value="needs_verification">Cần xác minh</option>
+            <option value="all">Mọi nhóm trend</option>
+            <option value="trend_toan_thi_truong">Trend toàn thị trường</option>
+            <option value="trend_affiliate">Trend Affiliate</option>
+            <option value="trend_moi_noi">Trend mới nổi</option>
+          </select>
+          <select v-model="marketFilters.verification_status" @change="loadMarketItems(0)"
+            class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="all">Mọi xác minh</option>
+            <option value="cross_verified_web">Cross-verified Web</option>
+            <option value="connector_verified">Connector verified</option>
+            <option value="unverified">Unverified</option>
           </select>
           <select v-model="marketFilters.purchase_intent" @change="loadMarketItems(0)"
             class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
@@ -2574,81 +2661,116 @@ HTML_TEMPLATE = """
             <option value="khong_ro">khong_ro</option>
           </select>
           <select v-model="marketFilters.sort_by" @change="loadMarketItems(0)"
-            class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="tier">Sắp xếp: Phân tầng V3.1</option>
             <option value="engagement">Sắp xếp: Tương tác cao nhất</option>
             <option value="intent">Sắp xếp: Ý định mua cao nhất</option>
-            <option value="recent">Sắp xếp: Mới nhất / Corrected</option>
+            <option value="recent">Sắp xếp: Mới nhất</option>
           </select>
           <button @click="loadMarketItems(0)" class="md:col-span-1 py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">Lọc</button>
         </div>
 
-        <div class="overflow-x-auto rounded-xl border border-slate-800">
-          <table class="w-full text-left text-xs">
-            <thead class="bg-slate-900/90 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800">
-              <tr>
-                <th class="px-3 py-3">Tác giả & Bucket</th>
-                <th class="px-3 py-3">Tóm tắt tiếng Việt & URL gốc</th>
-                <th class="px-3 py-3">Buyer Intent & Quality</th>
-                <th class="px-3 py-3">Hook / Insight / Content Angle</th>
-                <th class="px-3 py-3">Tương tác</th>
-                <th class="px-3 py-3 text-right">Thao tác</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800/70 text-slate-200">
-              <tr v-if="!marketItems.length">
-                <td colspan="6" class="px-4 py-10 text-center text-slate-500">Không có bản ghi Threads khớp bộ lọc.</td>
-              </tr>
-              <tr v-for="item in marketItems" :key="item.id" class="hover:bg-slate-900/60">
-                <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
-                  <div class="font-bold text-indigo-200">{{ item.author_handle || '—' }}</div>
-                  <div class="text-[10px] text-slate-400">Loại: {{ item.extra_meta?.author_type || '—' }}</div>
-                  <div v-if="item.extra_meta?.crawl_bucket" class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                    {{ item.extra_meta.crawl_bucket }}
-                  </div>
-                  <div v-if="item.is_corrected" class="text-[10px] text-emerald-300 font-semibold">✓ corrected_v2</div>
-                </td>
-                <td class="px-3 py-3 align-top max-w-md space-y-1">
-                  <p class="text-slate-100 leading-relaxed">{{ item.summary_vi || item.text_content || '—' }}</p>
-                  <div v-if="item.url" class="text-[10px]">
-                    <a :href="item.url" target="_blank" rel="noreferrer" class="text-sky-400 hover:underline break-all">🔗 {{ item.url }}</a>
-                  </div>
-                  <div v-if="(item.extra_meta?.entities_mentioned || []).length" class="flex flex-wrap gap-1">
-                    <span v-for="ent in item.extra_meta.entities_mentioned.slice(0, 4)" :key="ent"
-                      class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">{{ ent }}</span>
-                  </div>
-                </td>
-                <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
-                  <div>
-                    <span class="px-2 py-0.5 rounded-full text-[10px] border"
-                      :class="item.purchase_intent === 'cao' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : (item.purchase_intent === 'trung_binh' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800 text-slate-300 border-slate-700')">
-                      intent: {{ item.purchase_intent || 'null' }}
-                    </span>
-                  </div>
-                  <div>
-                    <span class="px-2 py-0.5 rounded-full text-[10px] border"
-                      :class="item.data_quality === 'usable' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : (item.data_quality === 'needs_verification' ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-slate-800 text-slate-400 border-slate-700')">
-                      {{ item.data_quality || 'legacy' }}
-                    </span>
-                  </div>
-                  <div class="text-[10px] text-slate-400">{{ item.content_group || '—' }}</div>
-                </td>
-                <td class="px-3 py-3 align-top max-w-sm text-[11px] space-y-1">
-                  <div v-if="item.extra_meta?.hook_analysis?.hook"><strong class="text-amber-300">Hook:</strong> {{ item.extra_meta.hook_analysis.hook }}</div>
-                  <div v-if="item.extra_meta?.hook_analysis?.insight"><strong class="text-cyan-300">Insight:</strong> {{ item.extra_meta.hook_analysis.insight }}</div>
-                  <div v-if="item.extra_meta?.hook_analysis?.content_angle"><strong class="text-emerald-300">Angle:</strong> {{ item.extra_meta.hook_analysis.content_angle }}</div>
-                  <div v-if="!item.extra_meta?.hook_analysis" class="text-slate-500 italic">—</div>
-                </td>
-                <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap">
-                  <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count : '—' }}</div>
-                  <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count : '—' }}</div>
-                </td>
-                <td class="px-3 py-3 align-top text-right whitespace-nowrap space-x-1">
-                  <button @click="openMarketRawModal(item.id)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] cursor-pointer">Raw</button>
-                  <button @click="useMarketItemInStudio(item)" class="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer">Nạp Studio</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <!-- Separated Tier Sections: Very Hot / Hot / Emerging / Watchlist / Unverified (+ Historical V1/V2) -->
+        <div class="space-y-4">
+          <div v-for="sec in visibleThreadsTierSections" :key="'sec-'+sec.key"
+            class="rounded-xl border overflow-hidden" :class="sec.borderClass">
+            <div class="px-4 py-2.5 flex items-center justify-between gap-2 flex-wrap border-b border-slate-800" :class="sec.headerClass">
+              <div class="flex items-center gap-2 text-xs font-bold">
+                <span>{{ sec.label }}</span>
+                <span class="px-2 py-0.5 rounded-full bg-black/30 font-mono text-[11px]">{{ sec.items.length }} bài</span>
+              </div>
+              <span class="text-[11px] opacity-85">{{ sec.subtitle }}</span>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-xs">
+                <thead class="bg-slate-900/90 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800">
+                  <tr>
+                    <th class="px-3 py-2.5">Tác giả & Phân loại</th>
+                    <th class="px-3 py-2.5">Chủ đề Trending, Tóm tắt & URL Bằng chứng</th>
+                    <th class="px-3 py-2.5">Tương tác & Xác minh</th>
+                    <th class="px-3 py-2.5">Phân tích Viral & Cơ hội Affiliate</th>
+                    <th class="px-3 py-2.5 text-right">Thao tác</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/70 text-slate-200">
+                  <tr v-if="!sec.items.length">
+                    <td colspan="5" class="px-4 py-5 text-center text-slate-500 italic">Không có bài thuộc phân tầng {{ sec.label }} khớp bộ lọc hiện tại.</td>
+                  </tr>
+                  <tr v-for="item in sec.items" :key="item.id" class="hover:bg-slate-900/60">
+                    <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
+                      <div class="font-bold text-indigo-200">{{ item.author_handle || '—' }}</div>
+                      <div class="text-[10px] text-slate-400">Loại: {{ item.extra_meta?.author_type || '—' }}</div>
+                      <div v-if="item.trend_group" class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        {{ item.trend_group }}
+                      </div>
+                      <div v-else-if="item.extra_meta?.crawl_bucket" class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                        {{ item.extra_meta.crawl_bucket }}
+                      </div>
+                      <div>
+                        <span class="px-1.5 py-0.5 rounded-full text-[10px] border"
+                          :class="item.purchase_intent === 'cao' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : (item.purchase_intent === 'trung_binh' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800 text-slate-300 border-slate-700')">
+                          intent: {{ item.purchase_intent || 'null' }}
+                        </span>
+                      </div>
+                    </td>
+                    <td class="px-3 py-3 align-top max-w-md space-y-1.5">
+                      <div v-if="(item.extra_meta?.theme_tags || []).length" class="flex flex-wrap gap-1">
+                        <span v-for="tg in item.extra_meta.theme_tags" :key="tg"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">#{{ tg }}</span>
+                      </div>
+                      <p class="text-slate-100 leading-relaxed">{{ item.summary_vi || item.text_content || '—' }}</p>
+                      <div v-if="item.url || item.evidence_url" class="text-[10px]">
+                        <a :href="item.url || item.evidence_url" target="_blank" rel="noreferrer" class="text-sky-400 hover:underline break-all">🔗 Bằng chứng: {{ item.url || item.evidence_url }}</a>
+                      </div>
+                      <div v-if="(item.extra_meta?.entities_mentioned || []).length" class="flex flex-wrap gap-1">
+                        <span v-for="ent in item.extra_meta.entities_mentioned.slice(0, 5)" :key="ent"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">{{ ent }}</span>
+                      </div>
+                    </td>
+                    <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
+                      <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count.toLocaleString('vi-VN') : '—' }}</div>
+                      <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count.toLocaleString('vi-VN') : '—' }}</div>
+                      <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ item.reposts_count.toLocaleString('vi-VN') }}</div>
+                      <div v-if="item.quotes_count !== null && item.quotes_count !== undefined">🗣️ Quotes: {{ item.quotes_count.toLocaleString('vi-VN') }}</div>
+                      <div v-if="item.views_count !== null && item.views_count !== undefined">👁️ Views: {{ formatCompactMetric(item.views_count) }}</div>
+                      <div class="pt-1">
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-sans border"
+                          :class="item.verification_status === 'cross_verified_web' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : (item.verification_status === 'unverified' ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30')">
+                          {{ item.verification_status || item.data_quality || 'legacy' }}
+                        </span>
+                      </div>
+                      <div v-if="item.extra_meta?.viral_analysis?.velocity_note" class="text-[10px] font-sans text-emerald-300 max-w-[180px] whitespace-normal">
+                        📈 {{ item.extra_meta.viral_analysis.velocity_note }}
+                      </div>
+                    </td>
+                    <td class="px-3 py-3 align-top max-w-sm text-[11px] space-y-1">
+                      <template v-if="item.extra_meta?.viral_analysis">
+                        <div v-if="item.extra_meta.viral_analysis.hook"><strong class="text-amber-300">Hook:</strong> {{ item.extra_meta.viral_analysis.hook }}</div>
+                        <div v-if="item.extra_meta.viral_analysis.viral_reason"><strong class="text-cyan-300">Lý do viral:</strong> {{ item.extra_meta.viral_analysis.viral_reason }}</div>
+                        <div v-if="item.extra_meta.viral_analysis.content_structure"><strong class="text-indigo-300">Cấu trúc:</strong> {{ item.extra_meta.viral_analysis.content_structure }}</div>
+                        <div v-if="item.extra_meta.viral_analysis.viewer_need"><strong class="text-slate-300">Nhu cầu xem:</strong> {{ item.extra_meta.viral_analysis.viewer_need }}</div>
+                        <div v-if="item.extra_meta.viral_analysis.adaptation_potential"><strong class="text-purple-300">Chuyển thể:</strong> {{ item.extra_meta.viral_analysis.adaptation_potential }}</div>
+                        <div v-if="item.extra_meta.viral_analysis.affiliate_angle" class="p-1.5 rounded bg-emerald-950/60 border border-emerald-500/30 text-emerald-200">
+                          <strong>💰 Cơ hội Affiliate:</strong> {{ item.extra_meta.viral_analysis.affiliate_angle }}
+                        </div>
+                      </template>
+                      <template v-else-if="item.extra_meta?.hook_analysis">
+                        <div v-if="item.extra_meta.hook_analysis.hook"><strong class="text-amber-300">Hook:</strong> {{ item.extra_meta.hook_analysis.hook }}</div>
+                        <div v-if="item.extra_meta.hook_analysis.insight"><strong class="text-cyan-300">Insight:</strong> {{ item.extra_meta.hook_analysis.insight }}</div>
+                        <div v-if="item.extra_meta.hook_analysis.content_angle"><strong class="text-emerald-300">Angle:</strong> {{ item.extra_meta.hook_analysis.content_angle }}</div>
+                      </template>
+                      <div v-else class="text-slate-500 italic">—</div>
+                    </td>
+                    <td class="px-3 py-3 align-top text-right whitespace-nowrap space-x-1">
+                      <button @click="openMarketRawModal(item.id)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] cursor-pointer">Raw</button>
+                      <button @click="useMarketItemInStudio(item)" class="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer">Nạp Studio</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
         <div class="flex items-center justify-between text-xs text-slate-400">
           <span>Hiển thị {{ marketItems.length }} / {{ marketTotal }} bản ghi Threads</span>
@@ -2867,11 +2989,16 @@ HTML_TEMPLATE = """
             <h3 class="text-sm font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2 flex-wrap">
               <i class="fa-solid fa-file-chart-column"></i>
               <span>{{ marketReport?.latest_muse_report?.title || marketReport?.title || 'Báo Cáo Phân Tích Thị Trường' }}</span>
+              <span v-if="marketReport?.schema_version === 'v3.1'"
+                class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">THREADS V3.1</span>
               <span v-if="marketReport?.is_corrected || marketReport?.latest_muse_report?.is_corrected"
                 class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">CORRECTED V2</span>
             </h3>
             <p class="text-xs text-slate-400 mt-0.5">
-              {{ marketReport?.source_label || 'Ưu tiên báo cáo Muse corrected mới nhất' }}
+              {{ marketReport?.source_label || 'Ưu tiên báo cáo Muse mới nhất' }}
+              <span v-if="marketReport?.run_status">
+                • Trạng thái: <strong :class="marketReport?.is_source_error ? 'text-rose-300' : 'text-emerald-300'">{{ marketReport.run_status }}</strong>
+              </span>
               <span v-if="marketReport?.technical_status || marketReport?.data_quality_status">
                 • Kỹ thuật: <strong class="text-cyan-300">{{ marketReport.technical_status || '—' }}</strong>
                 • Chất lượng dữ liệu: <strong class="text-amber-300">{{ marketReport.data_quality_status || '—' }}</strong>
@@ -2893,8 +3020,46 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
+        <div v-if="marketReport?.run_status_label_vi" class="p-3 rounded-xl border text-xs"
+          :class="marketReport?.is_source_error ? 'bg-rose-950/50 border-rose-500/40 text-rose-200' : (marketReport?.is_empty_market_valid ? 'bg-slate-900 border-slate-700 text-slate-300' : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200')">
+          <strong>{{ marketReport.run_status_label_vi }}</strong>
+          <span v-if="marketReport?.is_source_error"> — Không dùng kết quả này để kết luận "thị trường không có trend".</span>
+        </div>
+
         <div v-if="marketReport?.telegram_summary" class="p-4 rounded-xl bg-indigo-950/35 border border-indigo-500/30 text-xs text-slate-100 whitespace-pre-line leading-relaxed">
           {{ marketReport.telegram_summary }}
+        </div>
+
+        <!-- V3.1 Screening & Tier Distribution -->
+        <div v-if="marketReport?.screening || marketReport?.tier_distribution" class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          <div v-if="marketReport?.screening" class="p-4 rounded-xl bg-slate-900/75 border border-slate-800 space-y-1.5">
+            <div class="font-bold text-indigo-300 uppercase text-[11px]">Sàng lọc dữ liệu V3.1</div>
+            <div class="font-mono text-slate-200">
+              Quét: <strong>{{ marketReport.screening.scanned_count ?? '—' }}</strong> •
+              Đạt chuẩn: <strong class="text-emerald-300">{{ marketReport.screening.qualified_count ?? '—' }}</strong> •
+              Loại: <strong class="text-rose-300">{{ marketReport.screening.rejected_count ?? '—' }}</strong> •
+              Xác minh chéo Web: <strong class="text-cyan-300">{{ marketReport.screening.cross_verified_count ?? '—' }}</strong>
+            </div>
+            <div v-if="marketReport.screening.sources" class="text-[11px] text-slate-400">Nguồn: {{ marketReport.screening.sources }}</div>
+            <div v-if="Object.keys(marketReport.screening.rejected_reasons || {}).length" class="flex flex-wrap gap-1.5 pt-1">
+              <span v-for="(cnt, rsn) in marketReport.screening.rejected_reasons" :key="'rr-'+rsn"
+                class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">{{ rsn }}: {{ cnt }}</span>
+            </div>
+          </div>
+          <div v-if="marketReport?.tier_distribution" class="p-4 rounded-xl bg-slate-900/75 border border-slate-800 space-y-2">
+            <div class="font-bold text-amber-300 uppercase text-[11px]">Phân bố 5 phân tầng & 3 nhóm Trend</div>
+            <div class="flex flex-wrap gap-1.5 text-[11px]">
+              <span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-200 border border-rose-500/30">🔥 Very Hot: {{ marketReport.tier_distribution.tiers?.very_hot ?? 0 }}</span>
+              <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/30">⚡ Hot: {{ marketReport.tier_distribution.tiers?.hot ?? 0 }}</span>
+              <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-500/30">🌱 Emerging: {{ marketReport.tier_distribution.tiers?.emerging ?? 0 }}</span>
+              <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-200 border border-sky-500/30">👀 Watchlist: {{ marketReport.tier_distribution.tiers?.watchlist ?? 0 }}</span>
+              <span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">❓ Unverified: {{ marketReport.tier_distribution.tiers?.unverified ?? 0 }}</span>
+            </div>
+            <div v-if="Object.keys(marketReport.tier_distribution.groups || {}).length" class="flex flex-wrap gap-1.5 text-[10px] text-slate-300">
+              <span v-for="(cnt, gKey) in marketReport.tier_distribution.groups" :key="'tg-'+gKey"
+                class="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-200 border border-indigo-500/30">{{ gKey }}: {{ cnt }}</span>
+            </div>
+          </div>
         </div>
 
         <div v-if="marketReport && Object.keys(marketReport.platform_results || {}).length" class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
@@ -2913,46 +3078,79 @@ HTML_TEMPLATE = """
 
         <div v-if="marketReport" class="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
-            <div class="font-bold text-amber-300 uppercase text-[11px]">1. Xu hướng nổi bật</div>
-            <ul class="space-y-1.5 text-slate-200" v-if="(marketReport.trending_highlights || []).length">
-              <li v-for="(t, i) in marketReport.trending_highlights.slice(0, 5)" :key="'tr-'+i">• {{ t.title || t }}</li>
+            <div class="font-bold text-amber-300 uppercase text-[11px]">1. Xu hướng nổi bật (Đủ điều kiện Trend)</div>
+            <ul class="space-y-2 text-slate-200" v-if="(marketReport.trending_highlights || []).length">
+              <li v-for="(t, i) in marketReport.trending_highlights.slice(0, 6)" :key="'tr-'+i" class="space-y-0.5">
+                <div class="font-semibold">• {{ t.title || t }}</div>
+                <div v-if="t.why_hot" class="text-[11px] text-slate-300 pl-3">{{ t.why_hot }}</div>
+                <div v-if="t.evidence" class="text-[10px] text-slate-400 pl-3">{{ t.evidence }}</div>
+              </li>
             </ul>
             <div v-else class="text-slate-500 italic">Chưa có xu hướng nổi bật từ dữ liệu hiện tại.</div>
+            <div v-if="(marketReport.top_viral || []).length" class="pt-2 border-t border-slate-800 space-y-1.5">
+              <div class="font-bold text-rose-300 uppercase text-[10px]">Top bài Viral (ghi rõ mức xác minh)</div>
+              <div v-for="(tv, i) in marketReport.top_viral.slice(0, 5)" :key="'tv-'+i" class="p-2 rounded bg-slate-950/60 border border-slate-800/80 space-y-0.5">
+                <div class="font-semibold text-white">{{ tv.post }}</div>
+                <div class="text-[10px] font-mono text-slate-300">❤️ {{ tv.likes ?? '—' }} • 💬 {{ tv.comments ?? '—' }} • 🔁 {{ tv.reposts ?? '—' }} • 🗣️ {{ tv.quotes ?? '—' }}</div>
+                <div class="text-[10px] text-cyan-300">{{ tv.verification_status }}</div>
+                <a v-if="tv.url" :href="tv.url" target="_blank" rel="noreferrer" class="text-[10px] text-sky-400 hover:underline break-all">🔗 {{ tv.url }}</a>
+              </div>
+            </div>
           </div>
 
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
             <div class="font-bold text-rose-300 uppercase text-[11px]">2. Nhu cầu & Vấn đề người tiêu dùng</div>
             <ul class="space-y-1.5 text-slate-200" v-if="(marketReport.consumer_needs_problems || []).length">
-              <li v-for="(n, i) in marketReport.consumer_needs_problems.slice(0, 5)" :key="'nd-'+i">
+              <li v-for="(n, i) in marketReport.consumer_needs_problems.slice(0, 6)" :key="'nd-'+i">
                 • {{ n.title || n }}
                 <a v-if="(n.evidence_urls || []).length" :href="n.evidence_urls[0]" target="_blank" rel="noreferrer" class="ml-1 text-[10px] text-sky-400 hover:underline">[link]</a>
               </li>
             </ul>
             <div v-else class="text-slate-500 italic">Chưa phát hiện nhóm vấn đề/phàn nàn nổi bật.</div>
+            <div v-if="marketReport.emerging_and_signals" class="pt-2 border-t border-slate-800 space-y-1.5">
+              <div class="font-bold text-emerald-300 uppercase text-[10px]">Mới nổi & Tín hiệu đơn lẻ (chưa phải Trend)</div>
+              <div v-for="(sig, i) in (marketReport.emerging_and_signals.signals || []).slice(0, 3)" :key="'sg-'+i" class="p-2 rounded bg-emerald-950/40 border border-emerald-500/30 space-y-0.5">
+                <div class="font-semibold text-emerald-200">[TÍN HIỆU] {{ sig.signal || sig.topic }}</div>
+                <div class="text-[10px] text-slate-300">{{ sig.evidence }}</div>
+              </div>
+              <div v-for="(em, i) in (marketReport.emerging_and_signals.emerging || []).slice(0, 3)" :key="'em-'+i" class="p-2 rounded bg-slate-950/60 border border-slate-800 space-y-0.5">
+                <div class="font-semibold text-sky-200">[MỚI NỔI] {{ em.topic }}</div>
+                <div class="text-[10px] text-slate-400">{{ em.evidence }}</div>
+              </div>
+            </div>
           </div>
 
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
             <div class="font-bold text-emerald-300 uppercase text-[11px]">3. Sản phẩm Affiliate đủ điều kiện & Bằng chứng</div>
             <div class="space-y-2" v-if="(marketReport.affiliate_opportunities || []).length">
-              <div v-for="(a, i) in marketReport.affiliate_opportunities.slice(0, 4)" :key="'af-'+i"
+              <div v-for="(a, i) in marketReport.affiliate_opportunities.slice(0, 6)" :key="'af-'+i"
                 class="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80 space-y-1">
-                <div class="font-semibold text-white">{{ a.product || a.brand_or_topic }}</div>
-                <div v-if="a.evidence_summary" class="text-[11px] text-slate-400 line-clamp-2">{{ a.evidence_summary }}</div>
+                <div class="font-semibold text-white flex items-center justify-between gap-2">
+                  <span>{{ a.product || a.brand_or_topic }}</span>
+                  <span v-if="a.priority" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 shrink-0">{{ a.priority }}</span>
+                </div>
+                <div v-if="a.evidence_summary" class="text-[11px] text-slate-400">{{ a.evidence_summary }}</div>
                 <a v-if="(a.evidence_urls || []).length" :href="a.evidence_urls[0]" target="_blank" rel="noreferrer" class="text-[10px] text-sky-400 hover:underline">{{ a.evidence_urls[0] }}</a>
               </div>
             </div>
             <div v-else class="text-slate-500 italic">Chưa có sản phẩm Affiliate đủ điều kiện.</div>
+            <div v-if="(marketReport.priority_actions || []).length" class="pt-2 border-t border-slate-800 space-y-1">
+              <div class="font-bold text-amber-300 uppercase text-[10px]">Hành động ưu tiên hôm nay</div>
+              <ul class="space-y-1 text-[11px] text-slate-200">
+                <li v-for="(act, i) in marketReport.priority_actions" :key="'pa-'+i">{{ act }}</li>
+              </ul>
+            </div>
           </div>
 
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
             <div class="space-y-1.5">
               <div class="font-bold text-indigo-300 uppercase text-[11px]">4. Gợi ý Text Content & Short Video</div>
-              <div v-for="(txt, i) in (marketReport.content_suggestions?.text_posts || []).slice(0, 2)" :key="'tp-'+i"
+              <div v-for="(txt, i) in (marketReport.content_suggestions?.text_posts || []).slice(0, 4)" :key="'tp-'+i"
                 class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-950/50 border border-slate-800">
                 <span class="text-slate-200 line-clamp-2">✍️ {{ txt }}</span>
                 <button @click="topicInput = txt; currentTab = 'studio';" class="px-2 py-1 rounded bg-indigo-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo bài</button>
               </div>
-              <div v-for="(vid, i) in (marketReport.content_suggestions?.short_videos || []).slice(0, 2)" :key="'sv-'+i"
+              <div v-for="(vid, i) in (marketReport.content_suggestions?.short_videos || []).slice(0, 4)" :key="'sv-'+i"
                 class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-950/50 border border-slate-800">
                 <span class="text-slate-200 line-clamp-2">🎬 {{ vid }}</span>
                 <button @click="topicInput = vid; currentTab = 'studio';" class="px-2 py-1 rounded bg-pink-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo Video</button>
@@ -2961,7 +3159,7 @@ HTML_TEMPLATE = """
             <div class="pt-2 border-t border-slate-800 space-y-1">
               <div class="font-bold text-cyan-300 uppercase text-[11px]">5. Link nguồn tiêu biểu</div>
               <div class="flex flex-wrap gap-2">
-                <a v-for="(lnk, i) in (marketReport.source_links || []).slice(0, 6)" :key="'sl-'+i"
+                <a v-for="(lnk, i) in (marketReport.source_links || []).slice(0, 8)" :key="'sl-'+i"
                   :href="lnk.url" target="_blank" rel="noreferrer"
                   class="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700">
                   {{ lnk.platform || 'src' }}:{{ lnk.post_id || (i+1) }} ↗
@@ -3168,7 +3366,7 @@ HTML_TEMPLATE = """
           marketOffset: 0,
           marketLimit: 25,
           marketConfigInterval: 300,
-          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', sort_by: 'recent', search: '' },
+          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', trend_tier: 'all', trend_group: 'all', verification_status: 'all', sort_by: 'recent', search: '' },
           marketSubTab: 'overview',
           shopeeAffiliateOnly: false,
           selectedMarketDetail: null,
@@ -3191,6 +3389,72 @@ HTML_TEMPLATE = """
           if (!this.pipelineState) return false;
           const runningSteps = ['tts', 'audio', 'composite', 'export'];
           return Boolean(this.pipelineState.is_running && runningSteps.includes(this.pipelineState.current_step_id));
+        },
+        visibleThreadsTierSections() {
+          const defs = [
+            {
+              key: 'very_hot',
+              label: '🔥 VERY HOT',
+              subtitle: 'likes >= 1.000 hoặc views >= 50.000 (đã xác minh)',
+              borderClass: 'border-rose-500/40',
+              headerClass: 'bg-rose-950/50 text-rose-200',
+            },
+            {
+              key: 'hot',
+              label: '⚡ HOT',
+              subtitle: 'likes >= 300 hoặc views >= 10.000 (đã xác minh)',
+              borderClass: 'border-amber-500/40',
+              headerClass: 'bg-amber-950/50 text-amber-200',
+            },
+            {
+              key: 'emerging',
+              label: '🌱 EMERGING',
+              subtitle: 'Mới nổi <= 24h hoặc chủ đề trend chính thức (>= 20 likes / >= 5 cmt)',
+              borderClass: 'border-emerald-500/40',
+              headerClass: 'bg-emerald-950/45 text-emerald-200',
+            },
+            {
+              key: 'watchlist',
+              label: '👀 WATCHLIST',
+              subtitle: 'Chưa đạt ngưỡng nhưng hook mạnh / mật độ bình luận cao',
+              borderClass: 'border-sky-500/40',
+              headerClass: 'bg-sky-950/45 text-sky-200',
+            },
+            {
+              key: 'unverified',
+              label: '❓ UNVERIFIED',
+              subtitle: 'Chưa xác minh được — không tính vào đạt chuẩn hoặc viral/Affiliate',
+              borderClass: 'border-slate-700',
+              headerClass: 'bg-slate-900 text-slate-300',
+            },
+          ];
+          const byTier = { very_hot: [], hot: [], emerging: [], watchlist: [], unverified: [], legacy: [] };
+          for (const it of (this.marketItems || [])) {
+            const vs = String(it.verification_status || '').toLowerCase();
+            const tt = String(it.trend_tier || '').toLowerCase();
+            if (vs === 'unverified' || tt === 'unverified') {
+              byTier.unverified.push(it);
+            } else if (tt && byTier[tt] !== undefined) {
+              byTier[tt].push(it);
+            } else {
+              byTier.legacy.push(it);
+            }
+          }
+          const activeFilter = String(this.marketFilters?.trend_tier || 'all').toLowerCase();
+          const sections = defs
+            .filter(d => activeFilter === 'all' || activeFilter === d.key)
+            .map(d => ({ ...d, items: byTier[d.key] || [] }));
+          if ((activeFilter === 'all' && byTier.legacy.length > 0) || activeFilter === 'legacy') {
+            sections.push({
+              key: 'legacy',
+              label: '📜 DỮ LIỆU LỊCH SỬ V1/V2',
+              subtitle: 'Bản ghi lịch sử giữ nguyên tương thích ngược (threads_crawl_*)',
+              borderClass: 'border-purple-500/35',
+              headerClass: 'bg-purple-950/35 text-purple-200',
+              items: byTier.legacy,
+            });
+          }
+          return sections;
         }
       },
       mounted() {
@@ -3882,11 +4146,18 @@ HTML_TEMPLATE = """
           if (num >= 1000000) return (num / 1000000).toFixed(1).replace(/\\.0$/, '') + 'M (' + num.toLocaleString('vi-VN') + ')';
           return num.toLocaleString('vi-VN');
         },
+        jumpToThreadsTier(tier) {
+          this.marketSubTab = 'threads';
+          this.marketFilters.platform = 'threads';
+          this.marketFilters.trend_tier = tier || 'all';
+          this.marketFilters.sort_by = 'tier';
+          this.loadMarketItems(0);
+        },
         switchMarketSubTab(subTab) {
           this.marketSubTab = subTab;
           if (subTab === 'threads' || subTab === 'tiktok' || subTab === 'shopee') {
             this.marketFilters.platform = subTab;
-            this.marketFilters.sort_by = subTab === 'tiktok' ? 'views' : (subTab === 'threads' ? 'engagement' : 'recent');
+            this.marketFilters.sort_by = subTab === 'tiktok' ? 'views' : (subTab === 'threads' ? 'tier' : 'recent');
             this.loadMarketItems(0);
           } else if (subTab === 'reports') {
             this.loadMarketReport();
@@ -3897,16 +4168,20 @@ HTML_TEMPLATE = """
         },
         async loadMarketItems(offset = 0) {
           this.marketOffset = Math.max(0, offset);
+          const effLimit = this.marketSubTab === 'threads' ? Math.max(this.marketLimit, 100) : this.marketLimit;
           try {
             const qs = new URLSearchParams({
               platform: this.marketFilters.platform || 'all',
               content_group: this.marketFilters.content_group || 'all',
               purchase_intent: this.marketFilters.purchase_intent || 'all',
               data_quality: this.marketFilters.data_quality || 'all',
+              trend_tier: this.marketFilters.trend_tier || 'all',
+              trend_group: this.marketFilters.trend_group || 'all',
+              verification_status: this.marketFilters.verification_status || 'all',
               sort_by: this.marketFilters.sort_by || 'recent',
               affiliate_only: (this.marketSubTab === 'shopee' && this.shopeeAffiliateOnly) ? '1' : '0',
               search: this.marketFilters.search || '',
-              limit: String(this.marketLimit),
+              limit: String(effLimit),
               offset: String(this.marketOffset),
             });
             const res = await fetch('/api/market/items?' + qs.toString());
@@ -5043,6 +5318,9 @@ def api_market_items():
     content_group = request.args.get("content_group", "all")
     purchase_intent = request.args.get("purchase_intent", "all")
     data_quality = request.args.get("data_quality", "all")
+    trend_tier = request.args.get("trend_tier", "all")
+    trend_group = request.args.get("trend_group", "all")
+    verification_status = request.args.get("verification_status", "all")
     sort_by = request.args.get("sort_by", "recent")
     affiliate_only = request.args.get("affiliate_only", "0") in ("1", "true", "True")
     search = request.args.get("search", "")
@@ -5060,6 +5338,9 @@ def api_market_items():
             content_group=content_group,
             purchase_intent=purchase_intent,
             data_quality=data_quality,
+            trend_tier=trend_tier,
+            trend_group=trend_group,
+            verification_status=verification_status,
             search=search,
             sort_by=sort_by,
             affiliate_only=affiliate_only,

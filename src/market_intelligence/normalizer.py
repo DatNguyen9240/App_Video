@@ -1,10 +1,11 @@
 """
-Multi-version Market Intelligence JSON Normalizer (Data Contract V2).
+Multi-version Market Intelligence JSON Normalizer (Data Contract V1 / V2 / V3.1).
 
-Supports Threads, TikTok, and Shopee payloads across schema variants (including
-Muse AI POC 001, POC 002, Pilot 001, E2E V1, and Data Contract V2 corrected_v2).
+Supports Threads (including V3.1 `threads_trend_*.json`), TikTok, and Shopee payloads
+across schema variants (POC 001, POC 002, Pilot 001, E2E V1/corrected_v2, and V3.1).
 Strictly preserves missing fields as None (never fabricates absent data, never turns null into 0).
-Distinguishes crawl payloads from strategy / audit / data_contract files.
+Distinguishes crawl payloads from strategy / audit / data_contract / research docs,
+and ignores Archive/ folders cleanly.
 """
 
 import hashlib
@@ -15,7 +16,22 @@ from urllib.parse import urlparse
 
 
 SUPPORTED_PLATFORMS = {"threads", "tiktok", "shopee"}
-NON_CRAWL_ROLES = {"data_contract", "crawl_strategy", "quality_audit", "market_report"}
+NON_CRAWL_ROLES = {
+    "data_contract",
+    "crawl_strategy",
+    "quality_audit",
+    "market_report",
+    "research_doc",
+    "capability_test",
+}
+
+
+def is_archive_path(folder_path: Optional[str]) -> bool:
+    """Return True if folder_path points anywhere inside an Archive/ directory."""
+    if not folder_path:
+        return False
+    parts = [p.strip().lower() for p in re.split(r"[\\/]+", str(folder_path)) if p.strip()]
+    return "archive" in parts
 
 
 def _clean_str(val: Any) -> Optional[str]:
@@ -89,39 +105,54 @@ def classify_json_file(
     folder_path: Optional[str] = None,
 ) -> str:
     """
-    Classify JSON file role strictly so data_contract, strategy, audit, and report
-    files are never mixed into crawl_data records.
+    Classify JSON file role strictly so data_contract, strategy, audit, research/test docs,
+    and report files are never mixed into crawl_data records.
     """
     fname = (file_name or "").lower()
     if isinstance(raw_obj, dict):
         if "data_contract" in fname or (
-            "contract" in raw_obj and ("global_rules" in raw_obj or "update_rules_for_app_video" in raw_obj)
+            "contract" in raw_obj
+            and ("global_rules" in raw_obj or "update_rules_for_app_video" in raw_obj or "threads_trend_record" in raw_obj)
         ):
             return "data_contract"
         if "strategy" in fname or (
             "strategy" in raw_obj
-            and ("schema_changes_additive_only" in raw_obj or "buckets" in raw_obj or "target_metrics" in raw_obj)
+            and (
+                "schema_changes_additive_only" in raw_obj
+                or "buckets" in raw_obj
+                or "target_metrics" in raw_obj
+                or "trend_tiers" in raw_obj
+            )
         ):
             return "crawl_strategy"
         if "audit" in fname or ("audit" in raw_obj and "verdict" in raw_obj):
             return "quality_audit"
+        if "capability_test" in fname or "engagement_verification_map" in raw_obj:
+            return "capability_test"
+        if "discovery_sources" in fname or (
+            isinstance(raw_obj.get("sources"), list)
+            and "sections" not in raw_obj
+            and "platform_results" not in raw_obj
+            and "telegram_summary" not in raw_obj
+        ):
+            return "research_doc"
 
         has_item_list = any(
             isinstance(raw_obj.get(k), list)
             for k in ("posts", "items", "records", "products", "videos", "threads")
         )
-        if not has_item_list and (
-            fname.startswith("market_report")
-            or any(
-                k in raw_obj
-                for k in (
-                    "report",
-                    "analysis",
-                    "market_report",
-                    "platform_results",
-                    "opportunity_ranking",
-                    "telegram_summary",
-                )
+        if fname.startswith(("market_report", "trend_report")) and not has_item_list:
+            return "market_report"
+        if not has_item_list and any(
+            k in raw_obj
+            for k in (
+                "sections",
+                "report",
+                "analysis",
+                "market_report",
+                "platform_results",
+                "opportunity_ranking",
+                "telegram_summary",
             )
         ):
             return "market_report"
@@ -129,7 +160,7 @@ def classify_json_file(
 
 
 def is_corrected_payload(raw_obj: Any, file_name: Optional[str] = None) -> bool:
-    """Return True if payload or filename represents a corrected_v2 version."""
+    """Return True if payload or filename represents a corrected_v2/corrected revision."""
     fname = (file_name or "").lower()
     if "_corrected" in fname:
         return True
@@ -166,8 +197,10 @@ def detect_platform(
 
     for candidate in (
         item.get("source_query"),
+        item.get("metrics_source"),
         item.get("source"),
         envelope.get("source"),
+        envelope.get("crawl"),
         envelope.get("poc"),
     ):
         found = _normalize_platform_token(_clean_str(candidate))
@@ -182,16 +215,30 @@ def detect_platform(
     return "unknown"
 
 
-def detect_schema_version(raw_obj: Any, file_role: str = "crawl_data") -> str:
+def detect_schema_version(raw_obj: Any, file_role: str = "crawl_data", file_name: Optional[str] = None) -> str:
     """Identify the JSON schema variant for auditability."""
+    fname = (file_name or "").lower()
     if file_role != "crawl_data":
-        if isinstance(raw_obj, dict) and (raw_obj.get("version") or raw_obj.get("schema_version")):
-            return f"{file_role}:{raw_obj.get('schema_version') or raw_obj.get('version')}"
+        if isinstance(raw_obj, dict):
+            if file_role == "market_report" and (
+                fname.startswith("trend_report") or isinstance(raw_obj.get("sections"), dict) or "run_status" in raw_obj
+            ):
+                return f"{file_role}:v3.1"
+            if raw_obj.get("version") or raw_obj.get("schema_version"):
+                return f"{file_role}:{raw_obj.get('schema_version') or raw_obj.get('version')}"
         return file_role
     if isinstance(raw_obj, dict):
         explicit = _clean_str(raw_obj.get("schema_version") or raw_obj.get("version"))
         if explicit:
             return explicit
+        if fname.startswith("threads_trend") or any(
+            k in raw_obj for k in ("tier_counts", "group_counts", "trends_snapshot", "screening")
+        ):
+            return "data_contract_v3_1"
+        records = raw_obj.get("records")
+        if isinstance(records, list) and records and isinstance(records[0], dict):
+            if any(k in records[0] for k in ("trend_tier", "verification_status", "viral_analysis", "post_pk")):
+                return "data_contract_v3_1"
         if str(raw_obj.get("file_version") or "").lower() == "corrected_v2":
             return "data_contract_v2_corrected"
         if "poc" in raw_obj and isinstance(raw_obj.get("posts"), list):
@@ -419,9 +466,9 @@ def normalize_record(
         if "comment_count" in item
         else (item.get("replies_or_comments_count") if "replies_or_comments_count" in item else item.get("comments_count"))
     )
-    shares_count = _clean_int(
-        item.get("shares") if "shares" in item else (item.get("reposts") if "reposts" in item else item.get("shares_count"))
-    )
+    shares_count = _clean_int(item.get("shares") if "shares" in item else item.get("shares_count"))
+    reposts_count = _clean_int(item.get("reposts") if "reposts" in item else item.get("repost_count"))
+    quotes_count = _clean_int(item.get("quotes") if "quotes" in item else item.get("quote_count"))
     views_count = _clean_int(item.get("views") if "views" in item else (item.get("play_count") if "play_count" in item else item.get("views_count")))
     price = _clean_float(item.get("price_vnd") if "price_vnd" in item else item.get("price"))
     sold_count = _clean_int(
@@ -430,6 +477,25 @@ def normalize_record(
         else (item.get("sold") if "sold" in item else item.get("historical_sold"))
     )
     rating = _clean_float(item.get("rating") if "rating" in item else item.get("rating_star"))
+
+    # Data Contract V3.1 first-class fields (kept None on V1/V2 if absent)
+    post_pk = _clean_str(item.get("post_pk") or item.get("pk"))
+    trend_tier = _clean_str(item.get("trend_tier"))
+    if trend_tier:
+        trend_tier = trend_tier.lower()
+    trend_group = _clean_str(item.get("trend_group"))
+    if trend_group:
+        trend_group = trend_group.lower()
+    verification_status = _clean_str(item.get("verification_status"))
+    if verification_status:
+        verification_status = verification_status.lower()
+    metrics_source = _clean_str(item.get("metrics_source"))
+    viral_analysis = item.get("viral_analysis") if isinstance(item.get("viral_analysis"), dict) else None
+    evidence_url = _clean_str(
+        item.get("evidence_url")
+        or ((viral_analysis or {}).get("evidence_url"))
+        or url
+    )
 
     data_quality = _clean_str(item.get("data_quality"))
     raw_issues = item.get("quality_issues")
@@ -440,6 +506,8 @@ def normalize_record(
         for k, v in {
             "likes": likes_count,
             "comments": comments_count,
+            "reposts": reposts_count,
+            "quotes": quotes_count,
             "shares": shares_count,
             "views": views_count,
             "price": price,
@@ -450,9 +518,22 @@ def normalize_record(
     }
 
     extra_meta: Dict[str, Any] = {}
+    envelope_fallback_keys = {
+        "request_id",
+        "run_id",
+        "run_status",
+        "file_version",
+        "corrects_file",
+        "technical_status",
+        "data_quality_status",
+        "source_type",
+        "upcoming_vouchers",
+        "trending_context",
+    }
     for meta_key in (
         "request_id",
         "run_id",
+        "run_status",
         "search_groups",
         "entities_mentioned",
         "mentioned_products_brands_topics",
@@ -464,6 +545,7 @@ def normalize_record(
         "source_query",
         "type",
         "numeric_post_id",
+        "post_pk",
         "posted_at_utc",
         "posted_at_local",
         "currency",
@@ -471,8 +553,14 @@ def normalize_record(
         "crawl_bucket",
         "author_type",
         "hook_analysis",
+        "viral_analysis",
         "enrichment_status",
         "source_type",
+        "metrics_source",
+        "verification_status",
+        "trend_tier",
+        "trend_group",
+        "theme_tags",
         "url_status",
         "caption",
         "hashtags",
@@ -489,6 +577,8 @@ def normalize_record(
         "stock_signal",
         "selection_signal",
         "affiliate_eligible",
+        "reposts",
+        "quotes",
         "file_version",
         "corrects_file",
         "technical_status",
@@ -496,9 +586,18 @@ def normalize_record(
         "upcoming_vouchers",
         "trending_context",
     ):
-        val = item.get(meta_key) if meta_key in item else envelope.get(meta_key)
+        if meta_key in item:
+            val = item.get(meta_key)
+        elif meta_key in envelope_fallback_keys:
+            val = envelope.get(meta_key)
+        else:
+            val = None
         if val is not None and val != "":
             extra_meta[meta_key] = val
+    if viral_analysis and viral_analysis.get("affiliate_angle") is not None:
+        extra_meta["affiliate_angle"] = viral_analysis.get("affiliate_angle")
+    if evidence_url and "evidence_url" not in extra_meta:
+        extra_meta["evidence_url"] = evidence_url
     if "affiliate_eligible" in item:
         extra_meta["affiliate_eligible"] = bool(item["affiliate_eligible"])
     if data_quality is not None:
@@ -529,6 +628,7 @@ def normalize_record(
         "platform": platform,
         "external_id": external_id,
         "post_id": post_id,
+        "post_pk": post_pk,
         "item_id": item_id,
         "shop_id": shop_id,
         "author_handle": author_handle,
@@ -537,6 +637,7 @@ def normalize_record(
         "text_content": text_content,
         "summary_vi": summary_vi or text_content,
         "url": url,
+        "evidence_url": evidence_url,
         "content_group": content_group,
         "purchase_intent": purchase_intent,
         "language": language,
@@ -545,10 +646,16 @@ def normalize_record(
         "likes_count": likes_count,
         "comments_count": comments_count,
         "shares_count": shares_count,
+        "reposts_count": reposts_count,
+        "quotes_count": quotes_count,
         "views_count": views_count,
         "price": price,
         "sold_count": sold_count,
         "rating": rating,
+        "trend_tier": trend_tier,
+        "trend_group": trend_group,
+        "verification_status": verification_status,
+        "metrics_source": metrics_source,
         "data_quality": data_quality,
         "quality_issues": quality_issues,
         "is_corrected": is_corrected,
@@ -571,7 +678,7 @@ def normalize_payload(
     """Normalize an entire JSON file payload and return file_role, schema_version, envelope, and items."""
     file_role = classify_json_file(raw_obj, file_name=file_name, folder_path=folder_path)
     is_corrected = is_corrected_payload(raw_obj, file_name=file_name)
-    schema_version = detect_schema_version(raw_obj, file_role=file_role)
+    schema_version = detect_schema_version(raw_obj, file_role=file_role, file_name=file_name)
     envelope, raw_items = extract_records(raw_obj, file_role=file_role)
     normalized_items = [
         normalize_record(
