@@ -1,0 +1,912 @@
+{
+ "run_id": "threads-crawl-pilot001-run1-20261126-1225",
+ "started_at": "2026-11-26T12:25:38+07:00",
+ "ended_at": "2026-11-26T12:31:33+07:00",
+ "status": "completed",
+ "record_count": 50,
+ "duplicates_skipped": 3,
+ "source": "social.search platform=threads",
+ "notes": "Chong trung voi 46 bai da co (36 baseline threads_poc_001_sanitized.json + 10 threads_crawl_test_20261126.json): 3 bai trung bi loai (DgKoO8QjrzA @shopee_vn, DgL2-SpE5Ts, DgHJ6pnE7VU); khong co trung lap noi bo trong 119 bai thu duoc tu 5 truy van. 119 bai thu duoc, 58 bai thi truong Viet Nam bi loai vi khong phai tieng Viet/thi truong VN (chu yeu Indonesia/Malaysia, tieng Anh/Han/Trung) va 8 bai bi loai do la quang cao ban hang thuan tuy, hang replica, noi dung khong phu hop hoac trung lap chon loc. Chon 50 bai moi nhat, uu tien bai nguoi tieu dung (31 bai), deal/voucher (7 bai) va quang cao ban hang chi chiem 11/50 bai. Nhom hoi_mua_xin_link = 0 bai: cac truy van nhom (a) tra ve chu yeu la bai quang cao cua nguoi ban, khong co bai hoi mua/xin link that su cua nguoi tieu dung trong so bai tieng Viet moi. Tat ca content_summary la ban tom tat do cong cu social.search tra ve, khong phai nguyen van. Da loai 1 so dien thoai (DgJdiDtAdY5) va 1 email lien he (DgHLgK0gWOH), thay bang [da loai thong tin ca nhan]. Khong ghi author_followers hay du lieu ca nhan khong can thiet. content_group va purchase_intent chi phan loai dua tren noi dung bai viet.",
+ "posts": [
+  {
+   "post_id": "DgMTfpXH-8w",
+   "post_url": "https://www.threads.com/@phuongnhibeauti/post/DgMTfpXH-8w",
+   "author_handle": "@phuongnhibeauti",
+   "posted_at": "2026-11-26T05:00:39Z",
+   "posted_at_local": "2026-11-26T12:00:39+07:00",
+   "content_summary": "The creator announces that Shopee is running a voucher campaign offering 30% cashback with a maximum discount of 1 million VND. The post lists specific time slots throughout the day — 0H, 9H, 12H, 15H, 18H, and 21H — when the 'Extra' product vouchers refresh and can be applied to orders. It directs viewers to find the official sale links in the comments section and uses hashtags related to Shopee deals, vouchers, and sale-hunting tips. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "Shopee",
+    "voucher 30% cashback"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "deal_voucher",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgMQTynAcRa",
+   "post_url": "https://www.threads.com/@huyen.kim.85/post/DgMQTynAcRa",
+   "author_handle": "@huyen.kim.85",
+   "posted_at": "2026-11-26T04:32:42Z",
+   "posted_at_local": "2026-11-26T11:32:42+07:00",
+   "content_summary": "This two-slide carousel is a casual product review posted by user @huyen.kim.85. The accompanying caption in Vietnamese translates roughly to 'Had to go shower but had to come back to review, oh my. Luxury camellia flower shower gel smells amazing for full body. One toothpaste that's super clean, super white, super fragrant.' Slide 0 shows a close-up of a person's hand holding a light pink WEILAIYA Niacinamide Shower Gel bottle over a bathroom sink; red text overlay reads '330k/c' indicating price. Slide 1 shows a hand holding a silver MARVIS Smokers Whitening Mint toothpaste tube next to a white toothbrush, with Vietnamese on-screen text 'Đánh Marvis đúng cách để răng sạch hơn' (Brush Marvis correctly for cleaner teeth) and a pink price overlay '199k/tuýp' (199k per tube). The overall tone is informal, promotional, and focused on personal hygiene product recommendations. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "WEILAIYA Niacinamide Shower Gel",
+    "MARVIS Smokers Whitening Mint"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgMPIlhgeTN",
+   "post_url": "https://www.threads.com/@thanhngna_/post/DgMPIlhgeTN",
+   "author_handle": "@thanhngna_",
+   "posted_at": "2026-11-26T04:22:26Z",
+   "posted_at_local": "2026-11-26T11:22:26+07:00",
+   "content_summary": "The author posts a critical review of the brand Halio, accusing it of relying on paid, inauthentic promotion ('seeding bẩn') while the actual product quality is very poor. They compare the product unfavorably to cheap plastic goods sold at markets, citing a high price, intermittent pulsing during use, and excessive heat. The post also calls on fake/clone accounts to stop leaving positive comments intended to mislead potential buyers. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Halio"
+   ],
+   "language": "vi",
+   "content_group": "van_de_phan_nan",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgMJekDCVMa",
+   "post_url": "https://www.threads.com/@diepsamngoclinh/post/DgMJekDCVMa",
+   "author_handle": "@diepsamngoclinh",
+   "posted_at": "2026-11-26T03:33:04Z",
+   "posted_at_local": "2026-11-26T10:33:04+07:00",
+   "content_summary": "The video is a close-up, handheld shot of a large pile of dried, shredded bamboo shoots, identified in the audio and caption as 'măng le mụt' from the Central Highlands (Tây Nguyên). A person's hand repeatedly sifts through, lifts, and displays the thin, brownish-yellow strips to show their texture and dryness. The accompanying Vietnamese narration states that 50 kilograms have been sun-dried and are ready, describing them as 'super delicious' and noting they are already eaten by others. The on-screen caption reads 'Măng le mụt siêu ngon 3xx 1kg,' indicating it is for sale at approximately 300-something thousand VND per kilogram. The entire clip focuses solely on the food product with no other people, settings, or actions. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "măng le mụt",
+    "Tây Nguyên"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgMIOhLkib5",
+   "post_url": "https://www.threads.com/@jasminehalinh/post/DgMIOhLkib5",
+   "author_handle": "@jasminehalinh",
+   "posted_at": "2026-11-26T03:22:05Z",
+   "posted_at_local": "2026-11-26T10:22:05+07:00",
+   "content_summary": "The carousel is a two-slide product review for 'the cocoon ORIGINAL VIETNAM' Dak Lak Coffee Body Polish. Slide 0 shows a hand holding the black jar while brown scrub paste is applied to the wrist, with Vietnamese annotations stating it is a 100% vegan brand recognized internationally, made with 100% pure coffee beans and cocoa butter, leaves skin clean and smooth after rinsing, has a pleasant coffee scent lasting 1-2 hours, and has a dense but very fine scrub particle density, rated 5/5. Slide 1 is a styled product shot of the open jar next to scattered coffee beans and a bowl of beans. The accompanying caption promotes the scrub as a weekly exfoliation step for smoother, brighter skin, claiming gentle dead-skin removal without irritation, improved softness and even tone, added moisture, and confidence for summer outfits. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "the cocoon Dak Lak Coffee Body Polish"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgMF1ebARBq",
+   "post_url": "https://www.threads.com/@trang_ngoc_linh/post/DgMF1ebARBq",
+   "author_handle": "@trang_ngoc_linh",
+   "posted_at": "2026-11-26T03:01:11Z",
+   "posted_at_local": "2026-11-26T10:01:11+07:00",
+   "content_summary": "This is a five-slide Instagram/Threads carousel functioning as a fruit vendor's inventory showcase posted in 2026. Slide 0 shows a pile of red grapes with two small \"KK GRAPE\" tags resting on top. Slide 1 displays a box of red apples in foam netting, with a hand holding three halved apples to show the interior. Slide 2 features a hand holding several small mandarins over a green crate filled with more mandarins and leaves. Slide 3 shows a hand holding a plastic tray of large pink strawberries arranged individually. Slide 4 presents two open boxes of packaged green Kogane Shine Muscat grapes labeled \"KK PREMIUM GRAPES.\" The caption lists the afternoon's available fruit in Vietnamese with prices per kilogram or per tray: red rose grapes, Phu Sy honey apples, sweet little fragrant mandarins, ruby strawberries, Thai guava, and Japanese milk grapes. The overall tone is commercial and informational, with no narrative conflict or editorial content. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "KK GRAPE",
+    "Kogane Shine Muscat"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgMD01biGpG",
+   "post_url": "https://www.threads.com/@kofi.sunny/post/DgMD01biGpG",
+   "author_handle": "@kofi.sunny",
+   "posted_at": "2026-11-26T02:43:37Z",
+   "posted_at_local": "2026-11-26T09:43:37+07:00",
+   "content_summary": "The author reacts to seeing very cheap cajuput essential oil online, expressing skepticism. They argue that 'handmade' or 'homemade' is not inherently safe or good, because producers may lack awareness of right and wrong. Using farmers as an example, they describe how growers are told to use certain chemical sprays to make vegetables and fruit look better and sell at higher prices, and they comply. After seeing high rates of cancer, those same farmers recognize the chemicals are harmful, stop feeding the treated produce to their own families, but continue producing and selling it to others for income. The quoted post provides additional context, warning readers not to trust extremely low-priced oils claiming to be pure cold-pressed, urging verification of brand credentials and certifications, noting raw material costs exceed finished product prices, and stating that handmade labeling is not a quality guarantee. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "cajuput essential oil",
+    "macadamia cold-pressed oil"
+   ],
+   "language": "vi",
+   "content_group": "van_de_phan_nan",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgL3CSBgQOV",
+   "post_url": "https://www.threads.com/@jerrythuy96/post/DgL3CSBgQOV",
+   "author_handle": "@jerrythuy96",
+   "posted_at": "2026-11-26T00:51:52Z",
+   "posted_at_local": "2026-11-26T07:51:52+07:00",
+   "content_summary": "The carousel is a two-slide product showcase posted by a user selling food. Slide 0 shows a close-up pile of small orange tangerines with attached green leaves, with one fruit peeled open in the center to display the segments. Slide 1 shows a larger crate filled with similar tangerines and leaves, lined with clear plastic. The caption in Vietnamese states the seller has Thai tangerines available for 80 [currency] per unit/kg, aimed at everyone to eat, and asks interested buyers to message quickly because supply is limited. The overall tone is commercial and neutral, presenting fresh produce for sale with no additional narrative, people, or contextual risk elements. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Thai tangerines"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgLLO98k_Xr",
+   "post_url": "https://www.threads.com/@thaiha.bng/post/DgLLO98k_Xr",
+   "author_handle": "@thaiha.bng",
+   "posted_at": "2026-11-25T18:29:07Z",
+   "posted_at_local": "2026-11-26T01:29:07+07:00",
+   "content_summary": "The creator posts a short update about what is currently trending for them, labeling something referred to as 'suộc dì 6' as the number one hot topic. They mention trying to find something called 'bái tre' and express emotional distress, saying they are losing sleep over a person who has gone missing or stopped appearing. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "suộc dì 6",
+    "bái tre"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "khong_ro",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgLHWV2Dz1n",
+   "post_url": "https://www.threads.com/@cutehotmee01/post/DgLHWV2Dz1n",
+   "author_handle": "@cutehotmee01",
+   "posted_at": "2026-11-25T17:55:10Z",
+   "posted_at_local": "2026-11-26T00:55:10+07:00",
+   "content_summary": "The image is a screenshot of a mobile shopping app interface displaying a product page for 'BỘT KHỬ MÙI TRAPHA' (Trapha Odor Removal Powder) by Traphaco. The main visual shows a white bottle and its green-and-white box labeled 30g, with Vietnamese text describing odor elimination and drying effects. An orange banner indicates a flash sale price of 25,000đ (down from 26,000đ). Below, the listing shows a 4.8-star rating from 1.4K reviews, 25.2K units sold, free shipping, and a 'Mua ngay' (Buy now) button. A small video overlay appears in the lower right corner. The accompanying Threads caption (not part of the image itself but provided as context) is a user review complaining that the product did not work despite positive reviews claiming it stops sweat and eliminates odor. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 2,
+   "comment_count": 3,
+   "entities_mentioned": [
+    "BỘT KHỬ MÙI TRAPHA",
+    "Traphaco"
+   ],
+   "language": "vi",
+   "content_group": "van_de_phan_nan",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgK7r5nkwHy",
+   "post_url": "https://www.threads.com/@_knowurlimit/post/DgK7r5nkwHy",
+   "author_handle": "@_knowurlimit",
+   "posted_at": "2026-11-25T16:13:15Z",
+   "posted_at_local": "2026-11-25T23:13:15+07:00",
+   "content_summary": "The author posts a brief positive review of an eyelash adhesive, giving it a perfect 10 out of 10 score and stating that it lasts for a week or even longer. The post includes a Shopee shopping link to a product listing for HOHOISYOU 3D Volume Curl Natural false eyelashes, presented as an honest review. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "HOHOISYOU 3D Volume Curl Natural false eyelashes",
+    "Shopee"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKzbfvAac0",
+   "post_url": "https://www.threads.com/@phelim0311/post/DgKzbfvAac0",
+   "author_handle": "@phelim0311",
+   "posted_at": "2026-11-25T15:01:14Z",
+   "posted_at_local": "2026-11-25T22:01:14+07:00",
+   "content_summary": "The author responds to a recurring direct message asking whether a tech product priced at half the listed price is a counterfeit. They explain that lower cost comes from reducing intermediary fees along the distribution path, not from using inferior internal components, and emphasize that the internals remain unchanged. The author expresses concern specifically about products made cheap by swapping out internal parts, and outlines a personal verification process upon receiving any item: unboxing, inspecting the label, examining the charging port, and pressing each button before engaging further. The post ends by inviting the audience to share what they check first when unboxing technology, under the topic tag setupbancua. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "setupbancua"
+   ],
+   "language": "vi",
+   "content_group": "van_de_phan_nan",
+   "purchase_intent": "khong_ro",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKwnjdmIJe",
+   "post_url": "https://www.threads.com/@toan_truong_manh/post/DgKwnjdmIJe",
+   "author_handle": "@toan_truong_manh",
+   "posted_at": "2026-11-25T14:36:41Z",
+   "posted_at_local": "2026-11-25T21:36:41+07:00",
+   "content_summary": "The post announces a new product arrival at retailer TIC. It promotes the Ugreen 60515 Revodok 7-in-1 USB-C hub, detailing its ports: HDMI supporting 4K at 60Hz, Gigabit Ethernet RJ45, two USB-A 3.0 ports, SD and microSD card slots, and USB-C Power Delivery up to 100W. The caption lists transfer speeds and compatibility notes, states the selling price as 931,000 VND, and provides a direct link to the product page on tic.vn. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Ugreen 60515 Revodok 7-in-1 USB-C hub",
+    "TIC"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKwfMWoBsw",
+   "post_url": "https://www.threads.com/@chipiu_18th1/post/DgKwfMWoBsw",
+   "author_handle": "@chipiu_18th1",
+   "posted_at": "2026-11-25T14:35:24Z",
+   "posted_at_local": "2026-11-25T21:35:24+07:00",
+   "content_summary": "The image is a promotional graphic for the beauty brand TIME PHORIA, advertising its \"SPECTRA LIP VINYL\" lip product. The left side features a large render of a metallic silver lip vinyl tube with a pink cap and red applicator, set against a space background with a planet and starry sky. The top displays the brand name and \"OFFICIAL STORE\" badge. On the right, a panel announces a \"24/11 Payday Mega\" sale running 24-27 November, showing an eyeshadow stick and Vietnamese text offering it as a free gift for orders over 319K, marked \"limited quantity,\" with a \"MUA NGAY!\" (Buy Now!) button. Bottom banners promote platform perks: \"XTRA Freeship,\" \"EXTRA lên đến 14%,\" and \"Bonus Hoàn tiền.\" The overall tone is commercial and futuristic, aimed at driving sales during a payday promotion.\nTemporal Data of event in content: 24-27 November, Details: The post references the ongoing 24/11 Payday Mega sale dated 24-27 November and was posted on 25 November 2026. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 1,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "TIME PHORIA",
+    "SPECTRA LIP VINYL"
+   ],
+   "language": "vi",
+   "content_group": "deal_voucher",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKvVlhicPf",
+   "post_url": "https://www.threads.com/@bnhn.02/post/DgKvVlhicPf",
+   "author_handle": "@bnhn.02",
+   "posted_at": "2026-11-25T14:25:51Z",
+   "posted_at_local": "2026-11-25T21:25:51+07:00",
+   "content_summary": "The video is a short-form product review filmed in a bathroom. A hand reaches to a black corner shelf holding various toiletries and picks up a bright green tube labeled 'beplain MUNG BEAN pH-BALANCED CLEANSING FOAM.' On-screen text identifies it as 'Beplain Srm đậu xanh dịu nhẹ' (gentle mung bean cleanser). The creator holds the tube up to the camera, showing the front branding and then rotating it to display the back with Korean and English usage instructions. The cap is flipped open and the product — a white cream — is squeezed out onto the nozzle. Throughout, a female voice in Vietnamese describes the cleanser as very gentle, suitable for sensitive skin, non-irritating, effective for acne-prone and oily skin, and affordable at around 160,000 VND. The Threads caption repeats the product name and includes a Shopee purchase link. The overall tone is casual, helpful, and promotional. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "beplain MUNG BEAN pH-BALANCED CLEANSING FOAM",
+    "Shopee"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKrURAAYvf",
+   "post_url": "https://www.threads.com/@gam3590/post/DgKrURAAYvf",
+   "author_handle": "@gam3590",
+   "posted_at": "2026-11-25T13:50:13Z",
+   "posted_at_local": "2026-11-25T20:50:13+07:00",
+   "content_summary": "The carousel is a four-image promotional post for 'MĂNG MUỐI CHUA NGỌT QUỲ CHÂU,' a sweet-and-sour pickled bamboo shoot specialty from western Nghệ An, Vietnam. Slide 0 shows a hand holding a white floral plate piled with yellow sliced bamboo shoots mixed with red chili strips and garlic cloves. Slide 1 displays seven large plastic jars filled with the same pickled mixture, stacked two high over five, with colorful red, blue, and green lids. Slide 2 is a close-up top-down view inside an open jar, revealing the bamboo shoots submerged in brine with garlic slices, chili, and a metal spoon. Slide 3 shows a large-scale production setting: numerous filled jars lined up on the floor, alongside big metal basins containing chopped bamboo shoots mixed with chilies, and separate colanders holding piles of sliced red chilies and sliced garlic. The accompanying caption describes the product as crunchy, sour from the bamboo, spicy from the chili, and aromatic from garlic, recommended with noodles, instant noodles, or rice, and lists a price of 100k VND per 2kg box. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "MĂNG MUỐI CHUA NGỌT QUỲ CHÂU"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKp5NXGJdD",
+   "post_url": "https://www.threads.com/@thaomeowcuti/post/DgKp5NXGJdD",
+   "author_handle": "@thaomeowcuti",
+   "posted_at": "2026-11-25T13:37:47Z",
+   "posted_at_local": "2026-11-25T20:37:47+07:00",
+   "content_summary": "The carousel promotes a CLIO Professional 'Hot Deal' flash sale on November 25, advertising multiple beauty products for a uniform price of 99,000 VND during time slots at 12:00 and 21:00. Slide 1 displays the promotional graphic listing four items: CLIO Kill Cover Founwear Cushion 21N Linen, CLIO Crystal Glam Tint 01 Vintage Apple, Clio Eye Palette 02 Rose Connect, and Goodal Green Tangerine Vita C Dark Spot Care Serum Alpha, each marked 'FLASH SALE 99K'. Slide 0 shows screenshots from a shopping app confirming orders for the cushion and a Joocyee eye palette, with discounted prices and 'waiting for payment/confirmation' status, overlaid with hand-drawn marks. The accompanying caption in Vietnamese expresses excitement about the 21:00 sale going live, urging followers to shop quickly. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "CLIO Kill Cover Founwear Cushion",
+    "CLIO Crystal Glam Tint",
+    "Clio Eye Palette",
+    "Goodal Green Tangerine Vita C Dark Spot Care Serum",
+    "Joocyee"
+   ],
+   "language": "vi",
+   "content_group": "deal_voucher",
+   "purchase_intent": "cao",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKivfigBCD",
+   "post_url": "https://www.threads.com/@ngochuyen_211/post/DgKivfigBCD",
+   "author_handle": "@ngochuyen_211",
+   "posted_at": "2026-11-25T12:42:21Z",
+   "posted_at_local": "2026-11-25T19:42:21+07:00",
+   "content_summary": "This is a product review video by a full-time mom creator showcasing the 'Yootree Premium Multi-Functional Nursing Cover.' The video opens with text identifying it as a multi-functional shawl. A woman in pink striped pajamas handles a brown, waffle-knit fabric cover, demonstrating its texture, stretch, and size. She displays the pink branded box, which reads 'yootree' and 'PREMIUM MULTI FUNCTIONAL NURSING COVER,' along with an insert card showing a mother nursing a baby. On-screen Vietnamese text highlights key features: 'Chất khăn mỏng - nhẹ - thoáng mát' (thin, light, breathable fabric), 'Che phủ 360 độ' (360-degree coverage), 'Gấp gọn, tiện lợi' (foldable, convenient), and 'Khăn che nắng, gió' (sun and wind cover). The voiceover explains that while many mothers use regular blankets for privacy while breastfeeding, this dedicated nursing cover is more comfortable, provides better airflow, and allows mothers to feel confident nursing in public. The tone is gentle, informative, and aimed at new mothers. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 1,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "Yootree Premium Multi-Functional Nursing Cover"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKh-LbCqOu",
+   "post_url": "https://www.threads.com/@thaonhi.1124/post/DgKh-LbCqOu",
+   "author_handle": "@thaonhi.1124",
+   "posted_at": "2026-11-25T12:28:55Z",
+   "posted_at_local": "2026-11-25T19:28:55+07:00",
+   "content_summary": "This is a Vietnamese-language social media product review aimed at students looking for affordable personal care tips. The video begins with a humorous overlay about failing to copy a 'school flower' look, then showcases three items. First, a translucent purple 'grape jelly' bar soap filled with small cubes, demonstrated lathering into rich foam under running water, with claims it replaces shower gel and brightens skin like a filter. Second, an OKANEN apple-scented mousse shampoo from a blue can with red cap, shown dispensing a soft, souffle-like pink foam used to wash long dark hair, claimed to clean thoroughly and keep roots lifted for three days. Third, a green tea tree toner and lotion set, sprayed onto the arm and face, described as controlling oil naturally and providing stable results even after eating grilled food. The video ends with a promotional segment for '3C PHARMA,' a cosmetics manufacturer offering free samples via 3cshop.vn. The overall tone is upbeat, instructional, and commercial. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "OKANEN",
+    "3C PHARMA"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKhTjcDWBv",
+   "post_url": "https://www.threads.com/@duycuong1152026/post/DgKhTjcDWBv",
+   "author_handle": "@duycuong1152026",
+   "posted_at": "2026-11-25T12:24:02Z",
+   "posted_at_local": "2026-11-25T19:24:02+07:00",
+   "content_summary": "This is a Vietnamese beauty product review video where the creator showcases several affordable cosmetics and skincare items she considers 'holy grail' products that rival big brands. The video opens with close-ups of makeup palettes and then moves through a routine: first a yellow cleansing balm (demonstrated melting on the hand and rinsing clean without residue), followed by a white tube facial cleanser that foams well and doesn't dry the skin. She reviews a Pleuvoir Body Lotion Floral Musk, noting its thick yet non-sticky texture and lasting scent, comparing it favorably to Chanel perfume. Next is a rice-fermented shower gel with a sandalwood scent, praised for rich lather and moisturizing feel. For makeup, she demonstrates a cream blush (#201), a powder blush, and a CEZANNE four-color eyeshadow palette, swatching each on her arm to show pigmentation and finish. The tone is informative and enthusiastic throughout. The video concludes with a promotional segment for '3C PHARMA,' a cosmetics manufacturing factory offering free samples, displaying lab footage and product bottles. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Pleuvoir Body Lotion Floral Musk",
+    "CEZANNE",
+    "3C PHARMA"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKaZ1akVx9",
+   "post_url": "https://www.threads.com/@tralethaomoc/post/DgKaZ1akVx9",
+   "author_handle": "@tralethaomoc",
+   "posted_at": "2026-11-25T11:22:26Z",
+   "posted_at_local": "2026-11-25T18:22:26+07:00",
+   "content_summary": "The post advertises a group order (#gom) for a 5x10 cm \"key gương\" (mirror keychain) of esports player Peanut, produced by shop inan.muamua. Slide 0 is a preview graphic labeled \"PREVIEW Key gương Peanut 5 x 10\" showing the item before and after flash: before flash the surface is blank/reflective, after flash it reveals a photo of Peanut from behind wearing a jersey with \"PEANUT\" and \"FOX tigers,\" alongside Vietnamese text \"Chỉ cần làm tốt thêm một lần nữa thôi\" and \"WANGBAO.\" Slide 1 is a screenshot of a chat with the manufacturer confirming a request to add an extra round hole for the ball chain and listing prices (16k per unit for 50 units, 18k for 30 units, shipping excluded). The caption provides ordering details, deadline (30/11), form link, and rules: ONLY PEANUT, no reselling/trading, no blaming the player. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 9,
+   "comment_count": 9,
+   "entities_mentioned": [
+    "Peanut",
+    "inan.muamua"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKU7yyAWjE",
+   "post_url": "https://www.threads.com/@dungroimoinoi/post/DgKU7yyAWjE",
+   "author_handle": "@dungroimoinoi",
+   "posted_at": "2026-11-25T10:35:24Z",
+   "posted_at_local": "2026-11-25T17:35:24+07:00",
+   "content_summary": "A male presenter in a white long-sleeve shirt conducts a practical test of five popular lumbar support belts (labeled Mẫu 1 through Mẫu 5) to determine which offers the best support without digging into the waist and is most comfortable to wear. Standing behind a table with the belts laid out, he explains that many people buy them online and find they are uncomfortable after wearing. He then systematically reviews each model: Mẫu 4 is shown first, noted for its thin elastic straps and lack of strong support; Mẫu 1 is criticized for being too rigid, having only two support bars, and causing discomfort when bending; Mẫu 3 is praised for its breathable mesh fabric and good flexibility; Mẫu 5 is highlighted as very comfortable and well-designed but significantly more expensive (139 vs 49.9-63); and Mẫu 2 is presented as a balanced option with similar support to Mẫu 3 at a lower price. A female colleague also models one of the belts. The presenter uses calipers to measure thickness and bends the internal support bars to demonstrate rigidity. The video concludes with him recommending Mẫu 2 and Mẫu 3 as the best value choices, while noting Mẫu 5 is premium. On-screen text in Vietnamese provides commentary and prices, and a logo 'DÙNG RỒI MỚI NÓI' appears throughout. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "lumbar support belts"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKUnUcgShp",
+   "post_url": "https://www.threads.com/@nguyenhuongnb02081992/post/DgKUnUcgShp",
+   "author_handle": "@nguyenhuongnb02081992",
+   "posted_at": "2026-11-25T10:31:51Z",
+   "posted_at_local": "2026-11-25T17:31:51+07:00",
+   "content_summary": "The author shares a humorous anecdote about testing laundry detergent. According to the post, a customer tried washing with one product and then specifically requested to use the author's brand, Mely, while complaining that competitor Omo was not fragrant enough. The author playfully apologizes to other brands, attributing the preference to the customer's praise for Mely. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Mely",
+    "Omo"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKR_87EqXh",
+   "post_url": "https://www.threads.com/@tranthithamm83/post/DgKR_87EqXh",
+   "author_handle": "@tranthithamm83",
+   "posted_at": "2026-11-25T10:09:00Z",
+   "posted_at_local": "2026-11-25T17:09:00+07:00",
+   "content_summary": "The carousel is a three-slide screenshot of a text-message exchange between a buyer and a seller regarding dried red dates (táo tàu). Slide 0 shows a photo comparing two split dates labeled 'Táo khách mua' (customer-bought) on the left—dark, hollow, and fibrous—and 'Táo tui bán' (my sold) on the right—lighter and fuller. Accompanying messages state the customer's version has darker skin, is twice as large but cheap and poor quality, and that the shipper will send yogurt and another kilogram of dusty dates. Slide 1 continues with a hand holding the dark, dry customer date, text saying 'Quả thì to Nhưng nó kiểu j ấy Khô đắng' (big fruit but it's somehow dry and bitter), and a photo comparing a small wrinkled date to two larger ones. Slide 2 shows further messages confirming receipt, noting the taste differs from previously purchased dates, mentioning having bought many before, and that the remaining stock has lost its quality. The caption outside the carousel states customers should try and return if unsatisfied at the seller's shipping cost. The overall tone is a straightforward product-quality complaint and customer service exchange. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "táo tàu"
+   ],
+   "language": "vi",
+   "content_group": "van_de_phan_nan",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgKH8L0k6fa",
+   "post_url": "https://www.threads.com/@barxin2904/post/DgKH8L0k6fa",
+   "author_handle": "@barxin2904",
+   "posted_at": "2026-11-25T08:41:06Z",
+   "posted_at_local": "2026-11-25T15:41:06+07:00",
+   "content_summary": "The carousel is a seven-image food sales post. Each image shows a person's hand wearing a black disposable glove holding one or two cooked crabs that have been cracked open to display the bright orange roe and yellow-green tomalley inside. The background shows additional whole cooked crabs in baskets or styrofoam containers, indicating a market or kitchen setting. The accompanying Vietnamese caption explains the seller has a box of live VIP crabs (about 2 per kilogram) left over after a customer canceled an order in Tan Phu, Dinh Quan, Dong Nai, and is offering them at a discounted price (790 instead of 990) to anyone nearby who wants to buy. The tone is informal and urgent, using crying emojis to emphasize the need to sell quickly. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": 2,
+   "entities_mentioned": [
+    "VIP crabs",
+    "Tan Phu, Dinh Quan, Dong Nai"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJ9tPCkfMb",
+   "post_url": "https://www.threads.com/@findsreviews/post/DgJ9tPCkfMb",
+   "author_handle": "@findsreviews",
+   "posted_at": "2026-11-25T07:11:40Z",
+   "posted_at_local": "2026-11-25T14:11:40+07:00",
+   "content_summary": "This is a product review video for the 'Nano Gel Vacuum Suction Magnetic Phone Holder' model K007S. A presenter demonstrates the device, which comes in white and black, showing its components: a circular suction base with a twist-lock mechanism, an articulated arm, and a magnetic ring designed for MagSafe-compatible phones. He explains the features while handling the product, attaching the suction base to the underside of a desk to show it can hold securely out of the way, and demonstrating how the magnetic ring snaps onto the mount for hands-free use. The video includes on-screen text noting the product was sent for review, and the accompanying caption promotes it as a car essential with a strong vacuum grip. The tone is informative and promotional, aimed at showcasing the holder's versatility for cars, desks, or walls. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 1,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "Nano Gel Vacuum Suction Magnetic Phone Holder K007S"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJ5zNcGNAH",
+   "post_url": "https://www.threads.com/@hgia.14__/post/DgJ5zNcGNAH",
+   "author_handle": "@hgia.14__",
+   "posted_at": "2026-11-25T06:37:32Z",
+   "posted_at_local": "2026-11-25T13:37:32+07:00",
+   "content_summary": "The post consists solely of text sharing a Shopee shortened link (shp.ee/6yoy1ctzayx) with a Vietnamese call-to-action urging viewers to click to receive a 100,000 VND voucher. The accompanying link preview frames the offer as a gift sent by a friend. There is no additional commentary, personal story, or media beyond the link and promotional message. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Shopee"
+   ],
+   "language": "vi",
+   "content_group": "deal_voucher",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJ5iuAAZq1",
+   "post_url": "https://www.threads.com/@thoa_tran_128/post/DgJ5iuAAZq1",
+   "author_handle": "@thoa_tran_128",
+   "posted_at": "2026-11-25T06:35:18Z",
+   "posted_at_local": "2026-11-25T13:35:18+07:00",
+   "content_summary": "The image shows a person's hand holding a bottle of Summer's Eve Amber Nights pH-balanced cleansing wash against an outdoor blurred background. Overlaid Vietnamese text identifies the product as 'Dung dịch vệ sinh Summer’s Eve Mỹ' and provides a positive review: it is addictive, has a delicate long-lasting fragrance, is gentle and non-drying, keeps the intimate area clean, fresh, and dry all day, and feels very comfortable without stuffiness. The accompanying caption reinforces this, stating the product is excellent at odor removal, gentle, not drying or clogging for the private area, highly addictive once used, comes in a large nearly half-liter bottle, costs about 230,000 VND, and is super economical. The overall tone is promotional and testimonial, aimed at female consumers for intimate hygiene. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Summer's Eve Amber Nights"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJ4DfIn-hx",
+   "post_url": "https://www.threads.com/@alovesinhnet/post/DgJ4DfIn-hx",
+   "author_handle": "@alovesinhnet",
+   "posted_at": "2026-11-25T06:22:17Z",
+   "posted_at_local": "2026-11-25T13:22:17+07:00",
+   "content_summary": "The post presents a side-by-side comparison of Kymdan and Lien A mattresses, asking which offers better value for money. It provides a concise buying recommendation: choose Kymdan for a larger budget and lifelong orthopedic support, and choose Lien A for lower cost while still getting comfort and odor control. The content is published by Alo Ve Sinh, a cleaning service based in Da Nang, which includes its address, phone number, website, and a link to a full article on a Blogger site. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Kymdan",
+    "Lien A",
+    "Alo Ve Sinh"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJs2O3n9NM",
+   "post_url": "https://www.threads.com/@dtpt.97/post/DgJs2O3n9NM",
+   "author_handle": "@dtpt.97",
+   "posted_at": "2026-11-25T04:44:21Z",
+   "posted_at_local": "2026-11-25T11:44:21+07:00",
+   "content_summary": "The carousel consists of two still images advertising a XINMENG M75 mechanical keyboard with a \"Dâu sữa\" (strawberry milk) aesthetic. Slide 0 shows the white keyboard with pink and cream keycaps featuring cute icons (strawberries, ice cream, cherries, \"MILK TEA\" spacebar) resting on a wooden desk in front of a monitor displaying a Facebook Threads page. Slide 1 shows the same keyboard being held up in a person's hand, revealing a room background with stacked boxes. The accompanying Vietnamese caption lists features: hotswap full keys, 3 modes, RGB LED, Coconut White switches, rotary knob, priced at 599k VND new fullbox with free shipping, noting only 2 units remain. The overall tone is commercial and product-focused. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "XINMENG M75"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJdiDtAdY5",
+   "post_url": "https://www.threads.com/@tam.mguyenthi.5/post/DgJdiDtAdY5",
+   "author_handle": "@tam.mguyenthi.5",
+   "posted_at": "2026-11-25T02:30:32Z",
+   "posted_at_local": "2026-11-25T09:30:32+07:00",
+   "content_summary": "The three-slide carousel displays dried raw bird's nest (yến thô) for sale. Slides 0 and 1 show a hand holding a clear plastic container filled with pale, fibrous nests with some dark feather remnants, while slide 2 shows three containers arranged on a polished wooden table. In the background of all images is a dark wooden carving of a smiling Buddha figure. The accompanying Vietnamese caption announces the arrival of 1kg of raw bird's nest, notes high demand, and states a price reduction from 1,280,000 to 1,150,000 VND until stock runs out. It describes the product as mature, slightly broken, with few feathers and good expansion, and invites buyers to message 'Quý' or call [da loai thong tin ca nhan] to place orders. The overall tone is informal, promotional, and transactional. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "yến thô"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJaTAyGZ25",
+   "post_url": "https://www.threads.com/@_tlam76/post/DgJaTAyGZ25",
+   "author_handle": "@_tlam76",
+   "posted_at": "2026-11-25T02:02:16Z",
+   "posted_at_local": "2026-11-25T09:02:16+07:00",
+   "content_summary": "The author shares a time-limited promotional offer, announcing a 35 percent discount code valid at 12 o'clock for three products and includes a shortened Shopee URL for viewers to access the deal. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Shopee"
+   ],
+   "language": "vi",
+   "content_group": "deal_voucher",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgJQpSrk1Gf",
+   "post_url": "https://www.threads.com/@gemini3.8/post/DgJQpSrk1Gf",
+   "author_handle": "@gemini3.8",
+   "posted_at": "2026-11-25T00:37:55Z",
+   "posted_at_local": "2026-11-25T07:37:55+07:00",
+   "content_summary": "The author reflects on a shift in purchasing habits for a type of everyday product, admitting they previously assumed all options were similar and prioritized low price, leading to frequent replacement due to inconvenience. After discovering a different item at a sale, they note a distinct improvement in feel, build quality, and attention to small details, particularly that it resolves common issues that had been frustrating with earlier versions. They highlight that the sale price was surprisingly low relative to the perceived quality and encourage others to test the product themselves, including a Shopee shopping link. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Shopee"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgIuOVnE9CQ",
+   "post_url": "https://www.threads.com/@_juli.pt20/post/DgIuOVnE9CQ",
+   "author_handle": "@_juli.pt20",
+   "posted_at": "2026-11-24T19:37:09Z",
+   "posted_at_local": "2026-11-25T02:37:09+07:00",
+   "content_summary": "The author states they impulsively bought a large amount of Japanese domestic cosmetics due to fear of missing out. They propose that if the post receives 50 likes, they will upload the complete list of products, emphasizing that the sharing is not paid promotion or seeding. The stated intent is to help other women, referred to colloquially as 'ce', stay clear-headed and avoid unnecessary spending. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 2000,
+   "comment_count": 71,
+   "entities_mentioned": [
+    "Japanese domestic cosmetics"
+   ],
+   "language": "vi",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgIWkBWIy1d",
+   "post_url": "https://www.threads.com/@anhanh2310/post/DgIWkBWIy1d",
+   "author_handle": "@anhanh2310",
+   "posted_at": "2026-11-24T16:10:29Z",
+   "posted_at_local": "2026-11-24T23:10:29+07:00",
+   "content_summary": "The carousel is a Vietnamese-language shopping promotion for Shopee's 25.11 sale. Slide 0 displays a grid of ten low-cost products (dish sponge, laptop sleeve, skincare, acne patches, stationery, kitchen tools, snacks) with prices in VND and shop ratings. Slide 1 advertises a 'SIÊU DEAL ĐIỆN TỬ 25.11' mystery electronics item discounted from 2,300,000₫ to 999,000₫ available at 00:00. Slide 2 is a bright AI-style illustration urging viewers to 'Vào Telegram Săn mã hot mỗi ngày' and scan the QR code to follow @SPVOUCHER for updated discount codes and sale frames. The accompanying caption reinforces the theme, mentioning a 'túi mù' (mystery bag) tonight, a Bluestone microwave for 999k at 0h, a Tefal pressure cooker for 1999k at 12h, and links to specific Shopee product pages. The overall tone is upbeat, commercial, and instructional, aimed at bargain hunters.\nCulture moment=Shopee 25.11 sale; significance=Major Vietnam e-commerce shopping event with timed flash deals.; origin=Vietnam online retail promotion calendar [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Shopee",
+    "Bluestone",
+    "Tefal",
+    "SPVOUCHER"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "deal_voucher",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgIRU5QFERS",
+   "post_url": "https://www.threads.com/@haominhon/post/DgIRU5QFERS",
+   "author_handle": "@haominhon",
+   "posted_at": "2026-11-24T15:24:38Z",
+   "posted_at_local": "2026-11-24T22:24:38+07:00",
+   "content_summary": "The image is a screenshot from a social media post dated 05-11-2026 09:20, showing a close-up of a person's hand holding a small amber bottle labeled 'DIVAREN SCALP DENSITY ROOT SERUM' (30ml). The post is by user @kenichimustu, who gave the product a five-star rating. Vietnamese text on the screen reads 'Phân loại: 30ml' and 'Thấy founder bình luận trên Threads nên tò mò mua thử, không ngờ dùng k...Xem thêm,' indicating the user bought it after seeing the founder's comment on Threads. A product card at the bottom shows the item as 'Serum dưỡng da đầu DIVAREN Sca...' priced at 250,000đ with a 'Mua ngay' (Buy now) button. The background is an indoor setting with a white wall and wooden door. The overall tone is promotional and positive, presenting a personal product review. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "DIVAREN SCALP DENSITY ROOT SERUM"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgIAkwXAZsD",
+   "post_url": "https://www.threads.com/@buithinhu.my/post/DgIAkwXAZsD",
+   "author_handle": "@buithinhu.my",
+   "posted_at": "2026-11-24T12:58:15Z",
+   "posted_at_local": "2026-11-24T19:58:15+07:00",
+   "content_summary": "The creator posts a Vietnamese-language product review in response to follower questions. She states she has used the item for about a year and finds it durable, convenient, and good value for money. The post includes a Shopee affiliate link for viewers who want to reference or purchase the product, along with hashtags indicating a review, Shopee affiliate disclosure, and general lifestyle content. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Shopee"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHxDmlCo-o",
+   "post_url": "https://www.threads.com/@nguyenthihuong97222/post/DgHxDmlCo-o",
+   "author_handle": "@nguyenthihuong97222",
+   "posted_at": "2026-11-24T10:43:05Z",
+   "posted_at_local": "2026-11-24T17:43:05+07:00",
+   "content_summary": "A Vietnamese-language social media video presents a fast-paced product review compilation by a young woman. Opening with text about bloggers reviewing furniture, she quickly shifts to showcasing three main items. First, a light-green mousse shampoo in a bottle labeled with Chinese characters; she dispenses the airy foam, washes her hair, rinses, and claims each strand is clean, roots stay lifted for days, and the scent is fresh guava. Second, a white digital alarm clock decorated with cartoon stickers; she demonstrates inserting a smartphone into its slot and closing the lid to hide it, suggesting it can bypass dormitory metal-detector checks so users can message a crush. Third, a two-piece green skincare set (toner and lotion); she sprays and rubs it on her face and wrist, claiming it's suitable for all skin types and can restore whiteness to skin darkened by 14 days of military sun exposure. The video ends with a bright promotional graphic displaying the INL brand products, prices in VND, a 50% discount, voucher code MYPH50OFF, and a Shopee store link. The overall tone is energetic, persuasive, and typical of e-commerce influencer content. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "INL"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHu_MpkuFS",
+   "post_url": "https://www.threads.com/@hoshi_japanchinhhang/post/DgHu_MpkuFS",
+   "author_handle": "@hoshi_japanchinhhang",
+   "posted_at": "2026-11-24T10:24:34Z",
+   "posted_at_local": "2026-11-24T17:24:34+07:00",
+   "content_summary": "This is a multi-slide Instagram-style carousel titled 'Đánh Giá Sản Phẩm Chăm Sóc Da Nhật Bản – part 1' by the account curatedby2moms. The opening slide displays a flat-lay of various Japanese beauty products on a wood surface, including brands like Elixir, LuLuLun, IHADA, Kose, ReFa, and others. Subsequent slides each focus on a single product with close-up photos, packaging details, and Vietnamese bullet-point reviews. Featured items include the Keana Rice Pack wash-off mask, Kose Make Keep Mist setting spray, IHADA Face Protect Powder SPF40, ReFa Outbath Treatment Milk for hair, Suisai enzyme cleansing powder capsules, Kumagic Eye concentrated eye cream, and Quality 1st Derma Laser Super VC+Retinol eye sheets. Each review lists benefits (e.g., hydration, oil control, portability) and drawbacks (e.g., price, fragrance, limited shade range). The tone is informative and recommendation-oriented, aimed at viewers interested in accessible Japanese skincare and haircare routines. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 5,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "Elixir",
+    "LuLuLun",
+    "IHADA",
+    "Kose",
+    "ReFa",
+    "Keana Rice Pack",
+    "Suisai",
+    "Quality 1st"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHsdDHAV5o",
+   "post_url": "https://www.threads.com/@kailee.one_/post/DgHsdDHAV5o",
+   "author_handle": "@kailee.one_",
+   "posted_at": "2026-11-24T10:02:26Z",
+   "posted_at_local": "2026-11-24T17:02:26+07:00",
+   "content_summary": "The post is a Vietnamese-language consumer guide shared on Threads. The caption offers a pros-and-cons analysis between a floor-cleaning robot and an integrated vacuum-mop for indecisive buyers, noting the analysis is for reference only, and promotes an upcoming Black Friday sale with vouchers dropping at midnight, asking followers to comment to avoid missing the deals. Slide 0 displays a comparison table titled 'Tiêu chí' evaluating 'Robot lau nhà' versus 'Cây hút lau tích hợp' on seven criteria including convenience, time savings, tough-stain cleaning, daily hygiene, customizable cleaning, suitability for cluttered homes, and user effort. Slides 1 and 2 show Shopee VIP interface screenshots advertising mystery products: one priced down from 5,290,000₫ to 1,999,000₫ with a 'MUA VÀO 00:00' timer, and another showing a vacuum-cleaner silhouette priced down from 14,000,000₫ to 4,999,000₫ with a 'MUA VÀO 15:00' timer, both branded with Shopee VIP and 'MUA NGAY' calls to action. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 1,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "Shopee VIP",
+    "Black Friday"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHlzFrkp58",
+   "post_url": "https://www.threads.com/@ngasubi/post/DgHlzFrkp58",
+   "author_handle": "@ngasubi",
+   "posted_at": "2026-11-24T09:04:17Z",
+   "posted_at_local": "2026-11-24T16:04:17+07:00",
+   "content_summary": "The image is a mobile screenshot of a TikTok profile named \"Nga review\" (@ngariviu86) displayed in Vietnamese. The header shows the username with sparkle emojis, follower counts (1,122 following, 1,082 followers, 19K likes), and a bio stating \"Review những thứ mình dùng\" (Review things I use), a work contact number, and thanks to visitors. Below are navigation buttons for TikTok Studio, orders, and showcase. The main area displays a 3x3 grid of short video thumbnails featuring everyday consumer products: stacked Aumira creams, a Lifebuoy Naturals acne-control body wash, Japanese body patches, a glass of iced cacao being poured, Joki baby laundry detergent pouches, a Mooekiss pressed powder compact, Looran soothing masks, P/S toothpaste with a before/after teeth graphic, and an Archcafé box. The interface shows standard TikTok UI elements at top (time 15:59, 5G, battery) and bottom (Home, Shop, Create, Inbox, Profile). The overall tone is commercial and promotional, typical of a micro-influencer product-review account. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": 2,
+   "entities_mentioned": [
+    "Nga review",
+    "TikTok",
+    "Aumira",
+    "Lifebuoy Naturals",
+    "Joki",
+    "Mooekiss",
+    "Looran",
+    "P/S",
+    "Archcafé"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHciO7iJFp",
+   "post_url": "https://www.threads.com/@hygee_ne/post/DgHciO7iJFp",
+   "author_handle": "@hygee_ne",
+   "posted_at": "2026-11-24T07:43:40Z",
+   "posted_at_local": "2026-11-24T14:43:40+07:00",
+   "content_summary": "A close-up video shows a person's hand demonstrating a cosmetic product against a background of a laptop and a pink-star-patterned fabric. The product is a small jar labeled 'moon blush SACE LADY' with a rounded applicator cap. On-screen Vietnamese text identifies it as 'Má hồng kem màu nâu mocha' (mocha brown cream blush). The person opens the container, reveals the creamy texture on the applicator, and applies swatches to the back of their hand and inner wrist to display the color and finish. The video is silent except for background music, with no spoken narration. The overall tone is casual and informative, typical of a social media beauty review. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "moon blush SACE LADY"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHTtE9kuSd",
+   "post_url": "https://www.threads.com/@hoa19ne/post/DgHTtE9kuSd",
+   "author_handle": "@hoa19ne",
+   "posted_at": "2026-11-24T06:26:10Z",
+   "posted_at_local": "2026-11-24T13:26:10+07:00",
+   "content_summary": "This 7-slide carousel is a personal product review posted in Vietnamese, titled as a review of 'hot products I FOMO'd.' Each image focuses on bath and body care items arranged in a modern bathroom setting. Slide 0 shows a hand holding SABON Hydrating Shower Oil Golden Citrus. Slide 1 displays a bathtub ledge with SABON Body Scrub and Green Rose shower oil alongside other toiletries and a digital bath control panel. Slide 2 features a hand holding SABON Delicate Jasmine shower oil. Slide 3 highlights L'OCCITANE Rose Perfumed Shower Gel next to a SABON scrub jar. Slide 4 shows a shelf with Jill Stuart Treatment White Floral, ReFa Shampoo Milk, and ReFa Honey Queen shampoo. Slide 5 presents two pink Melt Moist Shampoo and Treatment bottles. Slide 6 closes with a Jill Stuart Deep Head Cleanse White Floral jar. The accompanying caption details impressions of the SABON limited Christmas edition, Tokyo limited scrub, jasmine set, and L'Occitane rose gel, describing scents and textures. The overall tone is casual, aesthetic-focused consumer sharing with no controversial or risky content. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 28,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "SABON",
+    "L'OCCITANE",
+    "Jill Stuart",
+    "ReFa",
+    "Melt"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHLgK0gWOH",
+   "post_url": "https://www.threads.com/@vongoan_/post/DgHLgK0gWOH",
+   "author_handle": "@vongoan_",
+   "posted_at": "2026-11-24T05:14:30Z",
+   "posted_at_local": "2026-11-24T12:14:30+07:00",
+   "content_summary": "The image is a mobile screenshot of a TikTok profile page for the account \"trái mận màu hồng\" (@tmmh21nov). The profile shows 19 accounts followed, 55.2K followers, and 3.1 million likes. The profile picture features a young woman with long dark hair and makeup. The bio identifies her as \"@thái nhi aka trái mận,\" lists a Facebook Page/YouTube channel with the same name, provides a contact email ([da loai thong tin ca nhan]), and includes a Beacons.ai link for product recommendations. Below the bio are story highlight circles labeled GIVEAWAY, ghim, link đồ, cọ makeup, and lông mi. The main feed displays six pinned video thumbnails, each showing the same creator in front of shelves of cosmetics, holding various makeup items such as primer, foundation, and spray bottles. On-screen text on the videos is in Vietnamese and references topics like refilling primer and optimizing makeup costs for people with limited budgets. The overall tone is that of a typical beauty influencer profile focused on affordable makeup reviews and recommendations. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 4800,
+   "comment_count": 110,
+   "entities_mentioned": [
+    "trái mận màu hồng",
+    "TikTok",
+    "Beacons.ai"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHFa1Moctw",
+   "post_url": "https://www.threads.com/@hima.warii90/post/DgHFa1Moctw",
+   "author_handle": "@hima.warii90",
+   "posted_at": "2026-11-24T04:21:21Z",
+   "posted_at_local": "2026-11-24T11:21:21+07:00",
+   "content_summary": "The author reflects on their usual habit of shopping for Tet clothing early in the season to avoid running out of desirable styles and delivery delays closer to the holiday. They note that Tet is still more than 72 days away and invite their audience to share currently trending outfit examples so everyone can browse options together.\nCulture moment=Tết 2027; significance=Tet is Vietnam's Lunar New Year, a major cultural moment when buying new clothes is traditional, making timely shopping socially important.; origin=Referenced explicitly in the topic tag and caption. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 2,
+   "comment_count": 20,
+   "entities_mentioned": [
+    "Tết"
+   ],
+   "language": "vi (suy ra tu noi dung)",
+   "content_group": "san_pham_quan_tam",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgHDfF_mkTB",
+   "post_url": "https://www.threads.com/@mayone_elsa/post/DgHDfF_mkTB",
+   "author_handle": "@mayone_elsa",
+   "posted_at": "2026-11-24T04:04:27Z",
+   "posted_at_local": "2026-11-24T11:04:27+07:00",
+   "content_summary": "The image is a mobile screenshot of a Vietnamese shopping app's review section titled \"Đánh giá (92)\" for a rain poncho. At the top, filter tabs show star ratings and a comment complains the shop is unhelpful and the product is terrible. Below, a one-star review with a photo shows a person wearing an oversized blue poncho indoors next to a motorbike, stating they ordered for two people but received one. The seller replies explaining the buyer selected the wrong variant. A second one-star review includes three photos of a maroon poncho with pink circles highlighting a small transparent pocket area; the reviewer accuses the shop of using AI-generated promotional videos that show a larger transparent visor for phone viewing, which the delivered product lacks, calling it a scam. The seller responds dismissively, saying returns are accepted and that affiliate-made videos are inaccurate. The interface shows standard e-commerce buttons at the bottom. The overall tone is frustrated consumer feedback about product misrepresentation. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 2,
+   "comment_count": null,
+   "entities_mentioned": [
+    "rain poncho"
+   ],
+   "language": "vi",
+   "content_group": "van_de_phan_nan",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgG8LIGicmA",
+   "post_url": "https://www.threads.com/@kocminhchau/post/DgG8LIGicmA",
+   "author_handle": "@kocminhchau",
+   "posted_at": "2026-11-24T03:00:33Z",
+   "posted_at_local": "2026-11-24T10:00:33+07:00",
+   "content_summary": "The carousel is a personal product review posted in Vietnamese about the 'After blow PERFUME HAND CREAM.' Slide 0 shows a close-up of a heavily used beige tube labeled 'PERFUME HAND CREAM' and 'After blow,' held in front of a small blue-framed mirror. Slide 1 features a woman in a striped shirt holding two identical tubes up to the camera while speaking; on-screen Vietnamese text reads 'truyền tai nhau đang viral bên thành phố sợi chỉ vì thơm' (word-of-mouth going viral in the city just because it smells good). Slide 2 shows the cream being squeezed from the tube onto the back of a hand, demonstrating its texture. The accompanying caption explains this is the user's first time joining the hype ('FOMO') because so many people praised it, expressing surprise that a hand cream is smooth, non-sticky, and fragrantly pleasant—even better than her perfume—and relief that the FOMO was successful. The overall tone is enthusiastic and promotional, focused on fragrance and moisturizing quality. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 3,
+   "comment_count": 1,
+   "entities_mentioned": [
+    "After blow PERFUME HAND CREAM"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "thap",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgG55xhoQtx",
+   "post_url": "https://www.threads.com/@vutrunghauvideoai/post/DgG55xhoQtx",
+   "author_handle": "@vutrunghauvideoai",
+   "posted_at": "2026-11-24T02:41:07Z",
+   "posted_at_local": "2026-11-24T09:41:07+07:00",
+   "content_summary": "This is a Vietnamese-language AI-generated product review comparing two insulated tumblers: the white Elmich EL8305WH (450 ml) and the black LocknLock LHC4357 (500 ml). Presented as a split-screen 'REVIEW SO SÁNH BÌNH GIỮ NHIỆT,' the video walks through five comparison points. Section 02 covers inner material: Elmich uses high-grade 316 stainless steel, while LocknLock has a ceramic-coated interior. Section 03 covers heat retention: Elmich is stated to keep drinks hot up to 8 hours and cold up to 18 hours; LocknLock is noted for vacuum insulation but without specific hour claims. Section 04 covers design and convenience: capacities are reiterated, Elmich has a fixed carry loop, LocknLock has a detachable strap. Section 05 covers price: Elmich is shown at a sale price of 379,000 VND (down from 679,000 VND), LocknLock at 444,000 VND (down from 704,000 VND), a difference of 65,000 VND. The conclusion (Section 06) recommends choosing LocknLock if you prefer ceramic lining and larger capacity, and choosing Elmich if you prefer 316 stainless steel, a carry loop, and a lower price. The tone is informative and commercial, aimed at e-commerce shoppers. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Elmich EL8305WH",
+    "LocknLock LHC4357"
+   ],
+   "language": "vi",
+   "content_group": "review_so_sanh",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgG0qH4m6A7",
+   "post_url": "https://www.threads.com/@chanhh_52/post/DgG0qH4m6A7",
+   "author_handle": "@chanhh_52",
+   "posted_at": "2026-11-24T01:54:53Z",
+   "posted_at_local": "2026-11-24T08:54:53+07:00",
+   "content_summary": "The image is a smartphone screenshot taken at 01:36 showing a shopping interface in Vietnamese. The top navigation shows tabs for 'Shop,' 'Sản phẩm' (Products) marked 'New,' and 'Danh mục hàng.' The main banner advertises a 'HOT DEAL NGÀY LƯƠNG VỀ 25.11 Flash Sale 99K' for CLIO Professional, with two time slots (12h00 and 21h00) offering 40 deals each. Below are four product tiles, each labeled 'FLASH SALE 99K': CLIO Kill Cover Founwear Cushion 21N Linen, CLIO Crystal Glam Tint 01 Vintage Apple, Clio Eye Palette 02 Rose Connect, and Goodal Green Tangerine Vita C Dark Spot Care Serum Alpha. The accompanying Threads caption states, 'Thích deal 99k của clio mà mỗi tội là hog săn đc' (Likes the 99k CLIO deals but just can't manage to snag them). The overall tone is commercial and promotional, with no people, nudity, or controversial content visible. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": null,
+   "comment_count": null,
+   "entities_mentioned": [
+    "CLIO Professional",
+    "Goodal Green Tangerine Vita C Dark Spot Care Serum"
+   ],
+   "language": "vi",
+   "content_group": "deal_voucher",
+   "purchase_intent": "cao",
+   "source_query": "social.search platform=threads"
+  },
+  {
+   "post_id": "DgGrsuMktNJ",
+   "post_url": "https://www.threads.com/@ifyou_iu/post/DgGrsuMktNJ",
+   "author_handle": "@ifyou_iu",
+   "posted_at": "2026-11-24T00:36:36Z",
+   "posted_at_local": "2026-11-24T07:36:36+07:00",
+   "content_summary": "The image displays a Shopee voucher banner in Vietnamese. On the left is the orange Shopee logo with an 'S' bag icon. The main text reads 'Số lượng có hạn' (limited quantity), 'Giảm 100kđ' (reduce 100,000 VND), 'Đơn tối thiểu 0đ' (minimum order 0 VND), and 'SIÊU HỘI SHOPEE'. Below, it states 'Đang hết nhanh • hết hạn 30.1...' (selling fast, expires Jan 30...) with a 'Điều kiện' (terms) link and a red checkmark. A tag in the top right says 'Lựa chọn tốt nhất' (best choice). The accompanying Threads caption lists several Shopee discount codes for the audience, promoting them as good deals available now. The overall tone is commercial and promotional, with no problematic visual content. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+   "likes": 2,
+   "comment_count": null,
+   "entities_mentioned": [
+    "Shopee"
+   ],
+   "language": "vi",
+   "content_group": "deal_voucher",
+   "purchase_intent": "trung_binh",
+   "source_query": "social.search platform=threads"
+  }
+ ]
+}

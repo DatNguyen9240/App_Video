@@ -1,0 +1,1035 @@
+{
+  "poc": "THREADS POC 001 – Vietnam Social Listening & Purchase Intent",
+  "role": "Data Collector only — không tạo content, không đăng bài, không tương tác, không gửi tin nhắn, không vượt giới hạn truy cập; không thu thập thông tin cá nhân không cần thiết (chỉ tài khoản công khai và nội dung công khai).",
+  "market": "Vietnam",
+  "collected_at": "2026-11-25T21:53-21:57+07:00",
+  "collection_window": "Lọc since=2026-11-22 trên social.search; 36 bài được chọn từ 166 bài duy nhất trả về sau 5 lượt tìm kiếm. Phần lớn bài nằm trong 24-72 giờ gần nhất; một số bài ngày 22/11 ở rìa ngoài cửa sổ 72 giờ một chút (đến ~3,4 ngày).",
+  "selection_method": "Ưu tiên bài tiếng Việt/thị trường VN, có dữ liệu tương tác, có tín hiệu mua hàng/deal/review, và phân bổ đủ 5 nhóm chủ đề yêu cầu.",
+  "connector_checks": [
+    {
+      "path": "social.search với platform=threads",
+      "result": "HOẠT ĐỘNG — 5/5 lượt tìm kiếm thành công, tổng 166 bài duy nhất; hỗ trợ lọc platform, từ khóa ngữ nghĩa, since/until, ranking_intent (informational/engagement/recency) và top tối đa 25/lượt.",
+      "limits": "Nội dung trả về là bản TÓM TẮT do hệ thống tạo, không phải nguyên văn; likes chỉ có ở 59/166 bài, số bình luận ở 61/166; views/reposts/quotes không được cung cấp; bình luận chi tiết (nguyên văn replies) không được trả về."
+    },
+    {
+      "path": "social.search tra cứu trực tiếp bằng post_url",
+      "result": "YẾU — với bài @shopee_vn/DgKoO8QjrzA, kết quả trả về chỉ có vỏ metadata: numeric post_id 18131554087862657, caption rỗng, like_count=0, comment_count=0 (không khớp số thật 8 likes/1 comment từ tìm kiếm từ khóa)."
+    },
+    {
+      "path": "threads-cli (connector Threads chính thức)",
+      "result": "KHÔNG DÙNG ĐƯỢC — accounts=[] , chưa kết nối tài khoản Threads nào; các thao tác cấp tài khoản (đọc feed/replies theo tài khoản) chưa kiểm chứng được."
+    },
+    {
+      "path": "Threads Web (threads.com)",
+      "result": "TRANG BÀI VIẾT đọc được không cần đăng nhập qua truy cập web: hiện tác giả + followers (83,243 với @shopee_vn), lượt thích hiện tại và bản tóm tắt bình luận. TRANG TÌM KIẾM của Threads Web trả lỗi 403 khi truy vấn trực tiếp — tìm kiếm theo từ khóa phải đi qua social.search."
+    }
+  ],
+  "posts": [
+    {
+      "post_id": "DgKoO8QjrzA",
+      "numeric_post_id": "18131554087862657",
+      "url": "https://www.threads.com/@shopee_vn/post/DgKoO8QjrzA",
+      "author_handle": "@shopee_vn",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-25 13:23:17 UTC",
+      "posted_at_local": "2026-11-25T20:23:17+07:00",
+      "content_full_text": null,
+      "content_summary": "This 5-slide Instagram carousel is a promotional advertisement for Shopee Vietnam's 'ShopeeVIP' Black Friday livestream sale. Slide 0 introduces the campaign with the headline '4 BUOC DE NHAP HOI SHOPEEVIP SAN DEAL BLACK FRIDAY SIEU KHUNG' (4 steps to join ShopeeVIP to hunt super huge Black Friday deals), featuring a stylized gold mascot character. Slides 1 through 4 break down the four steps, each hosted by a different invited guest: Ngoc Phuoc (Step 1: follow and watch the livestream), Gioi Lee (Step 2: register for the ShopeeVIP package during or before the livestream), Be 7 (Step 3: save voucher for 35% off exclusive to the livestream), and Duong Quoc My (Step 4: hunt deals for up to 50% off exclusive to the livestream). All slides repeat the event details at the bottom: watch from 19H-21H on November 27 on Shopee LIVE. The visual design uses a consistent red theater-curtain background, Black Friday ribbons, and floating VIP ticket graphics to convey a premium shopping event.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 8,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": [],
+      "mentioned_products_brands_topics": "people=Ngọc Phước (Post Caption), Giỏi Lee (Post Caption), Bé 7 (Post Caption), Dương Quốc Mỹ (Post Caption)",
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00",
+      "likes_recheck": {
+        "value": 13,
+        "checked_at": "2026-11-25T21:56+07:00",
+        "note": "Lượt thích tăng 8 → 13 sau ~3 phút: truy cập lại để cập nhật tương tác hoạt động. Trang web hiển thị giờ đăng '2026-11-25 05:23:17' không rõ múi giờ, lệch 8 giờ so với mốc UTC của connector (13:23:17 UTC) — chênh lệch chưa giải thích được, giữ mốc UTC của connector làm chuẩn."
+      },
+      "comments_note": "Bài có 1 bình luận hiển thị và đó là bình luận của chính tài khoản Shopee (lặp lại 4 bước săn deal ShopeeVIP) — không có câu hỏi/ý định mua từ người dùng trong bình luận nhìn thấy được (theo bản tóm tắt bình luận của Threads Web)."
+    },
+    {
+      "post_id": "DgKgkxDFAIE",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@trangochuyen.official/post/DgKgkxDFAIE",
+      "author_handle": "@trangochuyen.official",
+      "type": "text",
+      "posted_at_utc": "2026-11-25 12:16:21 UTC",
+      "posted_at_local": "2026-11-25T19:16:21+07:00",
+      "content_full_text": null,
+      "content_summary": "The author speaks directly to people struggling with persistent acne and melasma, recommending an unnamed product and citing their own decades-long experience with acne as authority. The second part of the post shifts to a promotional announcement about Hoa Ngân participating in the 2026 International Specialized Medical and Pharmaceutical Exhibition, highlighting the presentation of Vietnamese herbal microbiome technology on an international stage, supported by the Ministry of Health and featuring over 400 exhibitors from more than 15 countries. CommentSummary: The comment section consists solely of two detailed responses from the author account @trangochuyen.official, providing extensive promotional information rather than organic viewer discussion. The author emphasizes Hoa Ngân's pioneering status as the first biological cosmetics factory using microbiome technology in Vietnamese herbal and bird's nest extraction, highlighting scientific credibility. Reception is presented as highly positive, noting hundreds of visits from experts, doctors, and business partners on day one. The discourse focuses on practical benefits for retailers: direct factory connection eliminating middlemen, immediate product experience, simplified two-product regimen for all skin types, and zero-cost marketing expansion. No independent viewer comments are present to indicate broader community sentiment beyond the author's promotional narrative. 1. **Product efficacy after 30 minutes:** \"Trải nghiệm sản phẩm thực tế: cảm nhận hiệu quả sản phẩm chỉ sau 30 phút đắp mặt nạ Xịt Dưỡng.\" 2. **Direct factory sourcing for partners:** \"Kết nối trực tiếp nhà máy sản xuất, nhập hàng ngay tại nguồn không qua trung gian\" Overwhelmingly Positive Sentiment Focus Community reacts to product efficacy claims and booth activities at the exhibition.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Trần Ngọc Huyền Official (Author Name); products=skincare treatment for acne and melasma Events Triển lãm Quốc tế chuyên ngành Y Dược 2026: International specialized medical and pharmaceutical exhibition with over 400 representative booths from more than 15 countries, supported by Ministry of Health; Date: 2026",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKbw4bE_xH",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@hidayah.mohtar/post/DgKbw4bE_xH",
+      "author_handle": "@hidayah.mohtar",
+      "type": "image",
+      "posted_at_utc": "2026-11-25 11:34:19 UTC",
+      "posted_at_local": "2026-11-25T18:34:19+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a split-design promotional graphic for Shopee's 'Nov 25' Payday Sale. The left yellow panel advertises a 'SURPRISE VOUCHER DROP' offering up to RM645 in savings, listing three surprise vouchers: 30% off capped at RM65, 25% off capped at RM300, and 22% off capped at RM280, marked as 'LIMITED TIME'. The right red-orange panel promotes 'RM25 KNOCKOUT DEALS' on 25 NOV at 10AM, 12PM, 2PM, 8PM, and 10PM, illustrated with images of a large television displaying a colorful landscape, a Wah Chan 'As-Salam' gold bar product, and a black motor scooter displayed on a podium. The top includes the Shopee logo and the tagline 'SHOPEE LAGI MURAH'. The overall tone is commercial and celebratory, aimed at driving shopping during the sale event.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": 2,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=flat-screen television, motor scooter, book Events Payday Sale: Shopee promotional sale event on 25 November featuring surprise vouchers and knockout deals.; Date: 2026-11-25",
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "en",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKY4f0GPtf",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@thaomeowcuti/post/DgKY4f0GPtf",
+      "author_handle": "@thaomeowcuti",
+      "type": "text",
+      "posted_at_utc": "2026-11-25 11:09:08 UTC",
+      "posted_at_local": "2026-11-25T18:09:08+07:00",
+      "content_full_text": null,
+      "content_summary": "The author shares a promotional offer for new Shopee users, providing a voucher code intended to give a 100,000 VND discount and directing readers to redeem it via a provided Shopee link. The post functions as a coupon-sharing advertisement aimed at encouraging sign-ups or purchases on the platform.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKRJaqk5Ro",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@goc_cong_nghe_chill/post/DgKRJaqk5Ro",
+      "author_handle": "@goc_cong_nghe_chill",
+      "type": "image",
+      "posted_at_utc": "2026-11-25 10:01:33 UTC",
+      "posted_at_local": "2026-11-25T17:01:33+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a Vietnamese-language product advertisement for 'TAI NGHE PRO 2 - CHỐNG ỒN ANC' (Pro 2 Earphones - ANC Noise Cancellation). Centered on an orange background is a large photo of a white wireless earbud charging case. On the left, four red feature boxes list: 12-month warranty, touch control, 7 hours of music playback, and microphone for calls. On the right, text reads 'Tặng Ốp' (Free Case) plus an image of a Nintendo Switch Joy-Con style case, with 'Nhiều Mẫu Tự Chọn' (Many Models to Choose From). The overall tone is promotional and commercial, aimed at selling affordable earbuds.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=wireless earbud charging case, Nintendo Switch themed earbud case cover",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKRIdQndz2",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@sakitran2k3/post/DgKRIdQndz2",
+      "author_handle": "@sakitran2k3",
+      "type": "text",
+      "posted_at_utc": "2026-11-25 10:01:25 UTC",
+      "posted_at_local": "2026-11-25T17:01:25+07:00",
+      "content_full_text": null,
+      "content_summary": "The author announces a Black Friday promotion, emphasizing that it occurs only once per year and urging readers to act quickly before items sell out. The tone is urgent and sales-driven, using exclamation marks to create a sense of limited-time opportunity.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKMNHGHaEO",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@pnt21_11/post/DgKMNHGHaEO",
+      "author_handle": "@pnt21_11",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-25 09:18:22 UTC",
+      "posted_at_local": "2026-11-25T16:18:22+07:00",
+      "content_full_text": null,
+      "content_summary": "The two-slide carousel documents a defective cosmetics purchase. Slide 0 shows a hand holding an open fwee 'Chip Cheek' cream blush compact (shade Sweet Rose Chip) with the product visibly melted and leaking inside the pan. The background suggests a desk with medical textbooks. Slide 1 is a screenshot of the Shopee app's 'Return/Refund Details' page confirming a return request filed on 25-11-26 for the same item, with the stated reason 'Rò rỉ chất lỏng' (liquid leakage) and a refund amount of 213,706 VND. The accompanying Vietnamese caption expresses strong frustration, using profanity to criticize the product quality, delayed warehouse shipping, and the requirement to arrange and pay for the return oneself, concluding with an exasperated reaction to receiving the damaged item. CommentSummary: Commenters largely thank the author for posting the damage photo, saying they were about to buy the fwee Chip Cheek and will now avoid it. Many confirm similar melting or poor packaging, while others debate whether heat or Shopee's warehouse delays are to blame. A thread discusses Shopee's return options, with the author explaining the three methods and confirming she was assigned the paid self-drop-off. Sentiment is mostly negative toward the product's stability and Shopee's handling, but appreciative of the heads-up, with occasional defensive notes from buyers who received intact units. 1. **Gratitude for warning and canceling purchase plans:** \"Cảm ơn bà nha đang định mua\" 2. **Shared experiences of melting or packaging issues:** \"vl chảy tè le luôn\" 3. **Questions about Shopee return fees and logistics:** \"Ủa sao hoàn hàng bị phí vậy?\" Mixed Sentiment Focus Reactions to the melted blush and frustration with Shopee's delayed shipping and paid return process.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 640,
+      "replies_or_comments_count": 30,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=cream blush compact",
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKLP3sGVpt",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@2301ha_/post/DgKLP3sGVpt",
+      "author_handle": "@2301ha_",
+      "type": "text",
+      "posted_at_utc": "2026-11-25 09:10:00 UTC",
+      "posted_at_local": "2026-11-25T16:10:00+07:00",
+      "content_full_text": null,
+      "content_summary": "The post is a promotional advertisement for VIP Group Logistics, offering official China-to-Vietnam freight forwarding services. It targets individuals and businesses needing to import goods from Chinese platforms such as Taobao, 1688, and Tmall, emphasizing professional handling, transparent pricing, and assistance with import procedures. The caption provides a call to action for consultation and quotes, along with contact details including a website and a Hotline/Zalo phone number. CommentSummary: The community response is limited to a single comment from the author account itself, which reinforces the brand message by restating the company name and its positioning as a connector for Vietnam-China goods. There is no debate, criticism, or additional user-generated content, indicating a controlled promotional thread rather than organic discussion. The tone remains business-focused and supportive, with hashtags emphasizing legitimate cross-border transport. Because only the author participates, the discourse reflects brand messaging rather than independent customer feedback, suggesting the post functions primarily as advertising with minimal community interaction at this stage. 1. **Promotion of China-Vietnam freight forwarding:** \"VIP Group Logistics – Kết nối hàng hóa Việt – Trung!\" Positive Sentiment Focus Community reaction focuses on the logistics service promotion for China-Vietnam shipping.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "places=China, Vietnam",
+      "search_groups": [
+        "Order Taobao/1688 / phí vận chuyển / cách đặt hàng"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKJTvgmNOs",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@cindyle.659/post/DgKJTvgmNOs",
+      "author_handle": "@cindyle.659",
+      "type": "text",
+      "posted_at_utc": "2026-11-25 08:53:03 UTC",
+      "posted_at_local": "2026-11-25T15:53:03+07:00",
+      "content_full_text": null,
+      "content_summary": "The author advertises an order fulfillment service for Chinese e-commerce platforms Taobao and 1688, offering both official customs clearance and e-commerce channel shipping to Vietnam. Pricing is stated as 5,000 VND per kilogram for official import and from 12,000 VND per kilogram for e-commerce. The post notes delivery within 2-3 days to a warehouse in Bac Ninh, mentions a dedicated website for customers to place orders and track progress themselves, highlights a clear and transparent compensation policy, and provides a phone number for contact.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "places=Bac Ninh, Vietnam",
+      "search_groups": [
+        "Order Taobao/1688 / phí vận chuyển / cách đặt hàng"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKHn5IE4Vf",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@linhchipovlt31/post/DgKHn5IE4Vf",
+      "author_handle": "@linhchipovlt31",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-25 08:38:20 UTC",
+      "posted_at_local": "2026-11-25T15:38:20+07:00",
+      "content_full_text": null,
+      "content_summary": "The post is a consumer complaint shared on Threads. The caption states the author is temporarily bypassing restrictions to post again after four months, saying they cannot tell if the situation is a transaction warning or a scam. They bought subsidized merchandise intended to support voting starting in July and have still not received the goods. They report sending emails, Zalo messages, regular SMS, and Threads messages, receiving apologies but no delivery, and emphasize they are not asking for charity—just fulfillment or honesty so time is not wasted. Carousel slide 0 is a screenshot of a Threads direct message conversation with the account \"Minh Hải\" (profile picture is a cat). The sender has sent the same message five times: \"CÁC BẠN ĐỪNG LÀM KHÓ MÌNH VÀ ĐỪNG LÀM MẤT THỜI GIAN CỦA MÌNH\" (Please don't make it difficult for me and don't waste my time). At 15:27, the recipient replies \"Không thể nhận tin nhắn từ bạn\" (Cannot receive messages from you), indicating the sender is blocked. Carousel slide 1 is a screenshot of an iPhone SMS draft to 09363139406, timestamped 15:21. The green bubble contains a lengthy Vietnamese message identifying the sender as Sonic, referencing the July subsidized merch purchase for JSOL voting, stating no delivery, multiple unanswered emails and Threads messages, a promise of direct delivery that did not happen after a week, and requesting urgent checking and shipment. Below the bubble, red text reads \"Chưa gửi được\" (Not sent) with a failure icon, confirming the message did not go through. CommentSummary: The comment section functions as a support thread where viewers validate the author's frustration by reporting their own late or missing orders from the same seller. Many comments echo the timeline starting in July and September, express surprise at the half-year wait, and urge the author to continue posting to gain visibility. The author actively replies, confirming she is not begging, providing additional proof links, and encouraging bumps. Tone is sympathetic and mobilizing rather than hostile, with no defense of the seller visible. The discourse reinforces the narrative of unresponsive customer service and collective consumer dissatisfaction. 1. **Shared delivery delays:** \"Tui mua hồi tháng 9 cũng chưa có\" 2. **Calls to amplify the post:** \"viral lên cho toi\" Positive Sentiment Focus Viewers share similar experiences of delayed merch and encourage the author to keep posting.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 41,
+      "replies_or_comments_count": 20,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Minh Hải (Post Caption)",
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKGHyNk6cN",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@thanh_siin96/post/DgKGHyNk6cN",
+      "author_handle": "@thanh_siin96",
+      "type": "text",
+      "posted_at_utc": "2026-11-25 08:25:12 UTC",
+      "posted_at_local": "2026-11-25T15:25:12+07:00",
+      "content_full_text": null,
+      "content_summary": "The creator is promoting a Black Friday sale, stating that many items are discounted and urging viewers to go to Shopee to buy immediately. The message is accompanied by downward-pointing emojis indicating a call to action.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgKF1W-mM9B",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@lopbop10/post/DgKF1W-mM9B",
+      "author_handle": "@lopbop10",
+      "type": "image",
+      "posted_at_utc": "2026-11-25 08:22:41 UTC",
+      "posted_at_local": "2026-11-25T15:22:41+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a digital promotional graphic for Shopee's Black Friday sale in Vietnam. At the top is the white Shopee logo. Below it, an orange banner reads '29.11 SIÊU SALE' (Super Sale). Large white text announces 'BLACK FRIDAY'. Promotional details include 'VOUCHER XTRA GIẢM ĐẾN 1 TRIỆU ĐỒNG', 'PHÍ SHIP 0Đ' (free shipping), and 'Shopee Video SĂN VOUCHER ĐẾN 50%'. The sale period is listed as '25.11 - 30.11' with a 'MUA NGAY' (Buy Now) button at the bottom. On the right side, product cutouts are displayed: a maroon sweatshirt, a white air fryer with food inside, two stainless steel pots/pans, a light blue Laneige Water Bank cream jar, and a red lipstick or cosmetic bottle with a bear cap. A gold coin graphic appears near the top right. The overall tone is commercial and promotional.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=oversized crewneck sweatshirt, digital air fryer, stainless steel saucepan, stainless steel frying pan, skincare moisturizer jar, lip tint Events Black Friday 2026: Shopee Black Friday sale event running 25 November to 30 November with super sale on 29 November; Date: 2026-11-25",
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgJvQXTE03b",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@n.uyenn108/post/DgJvQXTE03b",
+      "author_handle": "@n.uyenn108",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-25 05:05:24 UTC",
+      "posted_at_local": "2026-11-25T12:05:24+07:00",
+      "content_full_text": null,
+      "content_summary": "The four-slide carousel is a beauty product advertisement for JUMISO Niacinamide 20 Serum. Slide 0 shows a person applying the pink serum to their cheek with on-screen text stating '1 month results with 20% niacinamide.' Slide 1 displays the purple bottle labeled 'NIACINAMIDE 20 SERUM Reduces dark spots and hyperpigmentation Dark Spot Correcting JUMISO' with overlay text 'Korean dark spot remover.' Slide 2 presents a split-screen before/after comparison of facial skin, showing reduced discoloration after use. Slide 3 shows the person smiling while holding the bottle near their face. The accompanying Vietnamese caption recommends the serum for acne scars, dullness, and uneven skin tone, noting its 20% niacinamide formula with glutathione and TXA for brightening and oil control, and describing its lightweight, fast-absorbing texture. CommentSummary: The comment section is dominated by the creator herself providing a direct Shopee purchase link for the featured serum. There is no debate or negative feedback visible; the tone is helpful and promotional. The single comment functions as a call-to-action, directing interested viewers to the product page, reinforcing the commercial intent of the post. No broader community conversation, questions, or testimonials are present in the supplied comments. 1. **Purchase information:** \"Ai đang quan tâm em serum này thì tham khảo link bên dưới nhen\" Positive Sentiment Focus Viewers respond to the product link and claimed results.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=niacinamide serum",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgJtDjeATp9",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@tramcongnghe.review/post/DgJtDjeATp9",
+      "author_handle": "@tramcongnghe.review",
+      "type": "video",
+      "posted_at_utc": "2026-11-25 04:47:53 UTC",
+      "posted_at_local": "2026-11-25T11:47:53+07:00",
+      "content_full_text": null,
+      "content_summary": "This is a Vietnamese tech review video from the channel 'TRAM CONG NGHE' evaluating the hottest smartwatches currently available, focusing on health features and battery life. The presenter begins by showing an Apple Watch alerting him at night for low heart rate and blood oxygen, which he describes as potentially life-saving. He then demonstrates the Huawei GT6's detailed sleep tracking, including HRV analysis and minor movement detection during sleep via its companion app. The review moves to battery performance: the Xiaomi S4 is claimed to last 15 days (he reports about 10 days in real use), the OPPO Watch S1 is praised for being lightweight and comfortable, and the Huawei GT6 is noted for its official two-week battery life. In contrast, the Apple Watch requires daily charging, which he finds inconvenient despite its smooth ecosystem integration with iPhone. A comparison chart is shown summarizing specs. Throughout, the presenter speaks directly to camera in outdoor settings (park, beach) while holding the watches, explaining pros and cons for different user needs. He concludes by inviting viewers to comment for personalized recommendations and encourages them to save and share the video.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=Apple Watch, Huawei Watch GT6, Xiaomi Watch S4, OPPO Watch S1",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgIkLKPkkEP",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@sjwosh_ekd/post/DgIkLKPkkEP",
+      "author_handle": "@sjwosh_ekd",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-24 18:09:20 UTC",
+      "posted_at_local": "2026-11-25T01:09:20+07:00",
+      "content_full_text": null,
+      "content_summary": "The post is a customer complaint about Shopee's return process, posted in 2026. The caption in Vietnamese questions whether Shopee truly listens to complaints or is dismissive of customers, describing an experience where a return was not picked up by a shipper despite over 10 calls to customer service, and the system was not updated. The two-carousel images support the claim: Slide 0 shows a Shopee 'Return/Refund Details' screen for a 'Saigon Swagger TIDY BAG' where the request was cancelled because the item was not returned within the required timeframe. Slide 1 shows a second order from 'Beemart_HCM' for a '[KO KÈM BƠ+ Tặng Hộp] Set làm Cheesecake Oreo' with status 'Waiting for return' and a refund amount of 167,580₫, prompting to retry before November 23. The overall tone is frustrated and critical of the platform's logistics and support.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 2,
+      "replies_or_comments_count": 7,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=crossbody bag, cheesecake making set",
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgH9RUhH87c",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@mecuajony/post/DgH9RUhH87c",
+      "author_handle": "@mecuajony",
+      "type": "image",
+      "posted_at_utc": "2026-11-24 12:29:23 UTC",
+      "posted_at_local": "2026-11-24T19:29:23+07:00",
+      "content_full_text": null,
+      "content_summary": "The image displays a digital voucher graphic from the e-commerce platform Shopee, presented in Vietnamese. At the top, a gold banner reads 'VOUCHER ĐỘC QUYỀN DÀNH RIÊNG SHOPEEVIP' (Exclusive Voucher Exclusively for ShopeeVIP). Below, a red ticket-style card shows the Shopee VIP logo, and adjacent text details the offer: 'Giảm 25% Giảm tối đa 200kđ Đơn Tối Thiểu 0đ' (25% off, maximum discount 200,000 VND, minimum order 0 VND), with validity starting from the 16th and a 'Điều Kiện' (Terms) link. A red 'Lưu' (Save) button is visible on the right. The accompanying Threads post context indicates this is shared as a good deal for end-of-month sales plus Black Friday shopping.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": 9,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgH13E9GmsL",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@lign.p/post/DgH13E9GmsL",
+      "author_handle": "@lign.p",
+      "type": "image",
+      "posted_at_utc": "2026-11-24 11:24:38 UTC",
+      "posted_at_local": "2026-11-24T18:24:38+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a pastel-pink infographic from 'lignp.studio' advertising a Taobao ordering service for customers in Vietnam. At the top, it states 'NHẬN ORDER TAOBAO' (Accepting Taobao orders) with the tagline that the shop helps place orders and ship to Vietnam. It breaks down the cost calculation as product price + warehouse fee + actual weight fee + domestic China shipping (if any). Deposit rules are listed: 50% for orders under 1 million VND, and 80% or 100% payment for orders of 1 million VND or more, with the balance due on arrival. A four-step process is illustrated with icons: customer sends product link, shop places order on Taobao, Chinese seller ships to Chinese warehouse, then goods are shipped from China to Vietnam and delivered to the customer. Delivery time is noted as starting from when the Chinese seller ships, and may vary due to seller speed, transport, customs, holidays, or sales. A cartoon girl holding a Taobao box appears in the corner. The bottom calls viewers to inbox lignp.studio for links, consultation, and quotes.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Order Taobao/1688 / phí vận chuyển / cách đặt hàng"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgHtvnAG85l",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@ng.anh96_/post/DgHtvnAG85l",
+      "author_handle": "@ng.anh96_",
+      "type": "image",
+      "posted_at_utc": "2026-11-24 10:13:42 UTC",
+      "posted_at_local": "2026-11-24T17:13:42+07:00",
+      "content_full_text": null,
+      "content_summary": "The image shows a Threads post by user 'fuownpui.alpe' with a cartoon avatar, displaying a block of Vietnamese text inside a dashed speech bubble. The post is a consumer complaint directed at 'brand B mà ai cũng biết là ai' (the brand everyone knows). The author states they bought a Uniqlo shirt with a similar print for 390k VND and washed it repeatedly without any peeling, and recently bought a fanmade shirt for 130k VND that also did not peel after washing. They conclude by telling the brand not to assume fans will easily pay 500k because they like an idol, and question why the brand expects customer respect while not respecting customers. This appears to be a reply to a prior post (context provided) where another user complained that a new white Uniqlo Sanrio 'Sweet Friends' T-shirt developed yellow stains after one machine wash. The tone is frustrated and critical of perceived poor quality relative to price. CommentSummary: Commenters engage directly with the author's complaint about brand B, debating whether the 500k price is justified and comparing it to Uniqlo's 390k shirts and cheaper fanmade options. Many agree Uniqlo quality has declined after washing, sharing personal experiences from Japan and Vietnam, while others defend or contextualize brand decisions involving co-founders and staff shirts. The author actively replies, reinforcing frustration, using sarcasm, and dismissing critics as biased fans. Sentiment is largely critical of brands and sympathetic to consumer disappointment, with some defensive fan commentary, creating a mixed but focused discussion rather than off-topic noise. 1. **Brand B pricing criticism:** \"Nuốt dc 500k thì B giàu to\" 2. **Uniqlo fabric quality complaints:** \"Em ở Nhật bao nhiêu năm nay nhưng e cũng ko ưng áo Uniqlo đâu\" Mixed Sentiment Focus Community discusses brand B quality, pricing, and comparisons to Uniqlo durability.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 73,
+      "replies_or_comments_count": 14,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgHLxzMGmTV",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@miubeauty_japan/post/DgHLxzMGmTV",
+      "author_handle": "@miubeauty_japan",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-24 05:16:55 UTC",
+      "posted_at_local": "2026-11-24T12:16:55+07:00",
+      "content_full_text": null,
+      "content_summary": "The carousel is a three-slide product listing for a Judydoll #04 Blush Shadow Palette. Slide 0 shows a clean product render labeled 'Upgraded Version' and '#04 Blush Shadow Palette' with descriptive text noting 'Swelling Pink Tone | Nude Pink Micro Shimmer' and the phrase 'Friendly for both yellow and white skin.' Slide 1 shows a hand holding the open palette over a fluffy surface; the palette has four pans (glow highlighter, cream highlighter, neutral highlighter, contour), with the cream highlighter pan visibly hit and worn down. Slide 2 shows the back of the closed palette, displaying the brand 'JUDYDOLL,' pan labels in English and Chinese (01 Glow Highlighter, 02 Neutral Highlighter, 03 Cream Highlighter, 04 Contour), net weight 9g, and expiration date 20270911. The accompanying caption in Vietnamese states the item is Judydoll 04, condition as pictured with one pan used, remaining full, date 2027, and lists a price of 65 (with a fish emoji). The overall tone is casual resale, focused on cosmetics condition and details.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 4,
+      "replies_or_comments_count": 4,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=four-pan highlight and contour makeup palette",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgHJ6pnE7VU",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@il.ice_cream/post/DgHJ6pnE7VU",
+      "author_handle": "@il.ice_cream",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-24 05:00:38 UTC",
+      "posted_at_local": "2026-11-24T12:00:38+07:00",
+      "content_full_text": null,
+      "content_summary": "The carousel consists of six screenshots of a messaging app conversation dated November 22, 2026, between a buyer and a seller identified as \"Phương Thúy\" (labeled \"NGƯỜI LẠ\"). The buyer complains that a puffer jacket purchased for 150,000 VND plus 30,000 VND shipping arrived very dirty, and sends multiple short videos (00:07, 00:04, 00:06, 00:11, 00:22) showing stained fabric. Messages read: \"eo ơi áo bẩn dữ vậy shop,\" \"đang còn nhiều vết bẩn lắm luôn á,\" and \"siêu nhiều vết bẩn, quay không hết.\" The shop replies asking for an unboxing video to process the issue. After providing the order number \"1952,\" the buyer follows up over several days asking if the shop has checked and how it will be resolved. A forwarded message from another user mentions waiting four days for a different shirt. The buyer then accuses the shop of calling the item \"hàng xả\" (clearance) despite paying for a \"VIP\" item, and states they were blocked after commenting on the shop's livestream. Later screenshots show the buyer saying they were told \"em nhắn rồi chị không đọc tn à\" and expressing disbelief at being blocked while seeking a legitimate resolution. The overall tone is a documented customer-service dispute with no graphic or inappropriate content.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 9,
+      "replies_or_comments_count": 7,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Phuong Thuy (No Substantiation), Mai Anh Tho (Post Caption); products=pink puffer jacket",
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgFzeosEyRD",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@ng.d5yu/post/DgFzeosEyRD",
+      "author_handle": "@ng.d5yu",
+      "type": "text",
+      "posted_at_utc": "2026-11-23 16:25:20 UTC",
+      "posted_at_local": "2026-11-23T23:25:20+07:00",
+      "content_full_text": null,
+      "content_summary": "The author is sharing a Shopee promotional offer, advertising a voucher code valued at 120,000 VND that can be redeemed for free. They urge followers to claim it quickly because only four redemption slots remain. The post includes a link to a Shopee games page framed as a gift from a friend and is tagged under a community topic focused on hunting Shopee sales.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgFvFNpGHIA",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@anthao2hand_2/post/DgFvFNpGHIA",
+      "author_handle": "@anthao2hand_2",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-23 15:46:55 UTC",
+      "posted_at_local": "2026-11-23T22:46:55+07:00",
+      "content_full_text": null,
+      "content_summary": "The carousel is a straightforward product showcase posted with the Vietnamese caption 'kem mắt este sale 350k còn đầy' (Estée eye cream on sale for 350k, still full). Slide 0 shows the front of the Estée Lauder Advanced Night Repair Eye Supercharged Gel-Creme jar held in a person's palm, clearly displaying the brand name and product description. Slide 1 shows the reverse side of the same jar, displaying the French translation of the product name. The setting appears to be indoors on a wooden floor. The overall tone is neutral and commercial, intended to display the condition and authenticity of the skincare product for potential buyers.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=Advanced Night Repair Eye Supercharged Gel-Creme",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgFtQ5dI8It",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@th.tamiee/post/DgFtQ5dI8It",
+      "author_handle": "@th.tamiee",
+      "type": "image",
+      "posted_at_utc": "2026-11-23 15:31:02 UTC",
+      "posted_at_local": "2026-11-23T22:31:02+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a close-up photograph of two perfume bottles placed side-by-side on a wooden tabletop. On the left is a clear glass bottle labeled 'ESSENTIAL PARFUMS PARIS BOIS IMPÉRIAL by Quentin Bisch.' On the right is a black glittery bottle labeled 'BLACK OPIUM YVES SAINT LAURENT.' The background is softly blurred and shows additional perfume bottles and storage containers, suggesting a personal collection or vanity area. The accompanying Threads post text in Vietnamese translates to a comment about a younger sister trying a decanted sample and, seven days later, messaging to buy the full-size bottle, noting that while it may be seeded promotion, the scent is genuinely good. The overall tone is casual and promotional, focused on fragrance appreciation.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=perfume",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgFqt6biFWY",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@pechanee_/post/DgFqt6biFWY",
+      "author_handle": "@pechanee_",
+      "type": "video",
+      "posted_at_utc": "2026-11-23 15:13:20 UTC",
+      "posted_at_local": "2026-11-23T22:13:20+07:00",
+      "content_full_text": null,
+      "content_summary": "The video is a 5-second screen recording of a smartphone at 22:06 showing a Vietnamese cross-border logistics page titled 'Hậu cần xuyên biên giới.' The interface displays tabs for payment, warehouse export, and delivery, with the current status highlighted as 'Chờ xuất kho' (Waiting for warehouse export). An order number is visible but partially obscured by a blue crying-emoji sticker. Below, a product listing shows a photo of a person in a brown jacket labeled 'Phong cách của những người n...' with '1 loại Hàng hóa, Tổng 1 kiện' and a total package count of 1. The total amount due is shown as ¥16.00, with buttons for 'Chat với DVVC' and 'Chi tiết vận...'. The accompanying Threads caption explains this is the user's first time ordering from 1688 since early November, they thought payment was complete and were just waiting for delivery, but discovered they still needed to pay an additional 16 yuan shipping fee to get the item out of the warehouse, expressing confusion and asking if they made a mistake or if more fees will appear. CommentSummary: Commenters respond helpfully to the author's confusion, clarifying that the initial payment covers the product plus domestic Chinese shipping, while the 16 yuan is the separate international freight to Vietnam. Many share their own experiences, noting that direct 1688 shipping often incurs higher final costs than using a consolidation warehouse, and some suggest switching to Taobao for simpler one-time payment. The author replies multiple times thanking users and confirming understanding, indicating relief after the explanation. A few comments joke about quality differences between 1688 and Taobao, and one offers private assistance, creating a supportive but slightly teasing tone around a common beginner mistake. 1. **Domestic vs international shipping fees:** \"thường tiền ship đầu bác trả là ship nội địa á. Còn vận chuyển quốc tế phải trả thêm\" 2. **Advice to use Taobao or intermediary warehouse:** \"B đặt đồ lên taobao nhiều mẫu mã hơn mà còn có lựa chọn ship thẳng về VN\" Mixed Sentiment Focus Explaining the two-step payment process for 1688 orders shipped to Vietnam.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 25,
+      "replies_or_comments_count": 10,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Thuỳ Trang (Author Name); products=brown jacket or coat",
+      "search_groups": [
+        "Order Taobao/1688 / phí vận chuyển / cách đặt hàng"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgFg-gDmZ_A",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@thhny__/post/DgFg-gDmZ_A",
+      "author_handle": "@thhny__",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-23 13:43:40 UTC",
+      "posted_at_local": "2026-11-23T20:43:40+07:00",
+      "content_full_text": null,
+      "content_summary": "A two-image carousel posted to sell a used cosmetic product. Both slides show the same person's left hand (wearing a gold chain bracelet) holding a bottle of Catrice Cosmetics HD Liquid Coverage Foundation against a light wood flooring background. Slide 0 displays the front label identifying the brand, product name, \"LASTS UP TO 24H,\" mattifying, water + sweatproof, with niacinamide, 30mL. Slide 1 shows the back label with barcode, ingredients, and Vietnamese text indicating shade 002 Porcelain Beige, made in Italy. The accompanying caption reads \"nền catrice 002 cond 98% 140k,\" indicating the foundation in shade 002 is in 98% condition and priced at 140,000 VND. The overall tone is neutral and commercial, presenting the item for resale without additional narrative.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 2,
+      "replies_or_comments_count": 2,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=HD Liquid Coverage Foundation",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgFdh9Xn2L_",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@ice.ems/post/DgFdh9Xn2L_",
+      "author_handle": "@ice.ems",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-23 13:13:33 UTC",
+      "posted_at_local": "2026-11-23T20:13:33+07:00",
+      "content_full_text": null,
+      "content_summary": "The carousel consists of five screenshots of a Vietnamese-language chat between a TikTok Shop customer and a seller. The customer ordered a shirt in size S but received size M. They request a return, but the seller apologizes and asks them to initiate the return using the reason \"no longer need,\" promising a 30,000 VND code to reorder. The customer points out that reordering would cost about 20,000 VND more even with the code, and that size S in the desired beige color is now out of stock. The seller continues to apologize, suggests tailoring the oversized item at the shop's expense, and reiterates the request to use the \"no demand\" return option. The exchange conveys mounting customer frustration over the error, the proposed workaround, and the inability to repurchase at the original price and size. The overall tone is a relatable online-shopping complaint shared as a warning about seller practices. CommentSummary: The author uses the comments to expand the complaint, noting the second shop sent the wrong color due to stock issues and that while resolved off-platform, the process was time-consuming. They express exasperation that shops confirm orders despite lacking inventory, causing disappointment when deliveries arrive incorrect. The tone is annoyed and venting, seeking validation rather than advice, with no other viewers engaging. 1. **Seller accountability for wrong shipments:** \"HỠI CÁC SHOP ƠI!!! Ý LÀ MÌNH KHÔNG CÓ HÀNG THÌ BẤM XÁC NHẬN ĐƠN HÀNG CHI\" Negative Sentiment Focus Frustration with sellers shipping wrong items and requesting improper return reasons.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgE9BpXmJ8P",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@lydong9x/post/DgE9BpXmJ8P",
+      "author_handle": "@lydong9x",
+      "type": "image",
+      "posted_at_utc": "2026-11-23 08:29:31 UTC",
+      "posted_at_local": "2026-11-23T15:29:31+07:00",
+      "content_full_text": null,
+      "content_summary": "The image shows a smartphone screen at 15:13 displaying a Vietnamese-language message titled 'Trung tâm trợ giúp' (Help Center). It is an email from Grab addressed to 'chị Lyly,' thanking her for feedback on GrabFood order 001443695231-C8LUR8JAGJNCN6. Grab apologizes for the failure to deliver the order and the inconvenience caused, explains that its system incorrectly pinned the delivery location (address partially redacted, Duy Tan, Hoa Cuong Bac, Da Nang), causing the driver to go to the wrong place. The company states it does not blame the customer, is updating the address data within up to 10 business days, notes the payment was cash so no online charge occurred, and invites further contact via email. The tone is formal, apologetic, and service-oriented.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 5,
+      "replies_or_comments_count": 3,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Lyly (No Substantiation); places=Đà Nẵng",
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgE6oW3GO-c",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@verygoodnail.more/post/DgE6oW3GO-c",
+      "author_handle": "@verygoodnail.more",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-23 08:08:35 UTC",
+      "posted_at_local": "2026-11-23T15:08:35+07:00",
+      "content_full_text": null,
+      "content_summary": "The carousel is a three-slide commercial product showcase posted by a Vietnamese account. Each slide displays a flat-lay arrangement of professional eyelash and brow supplies on a dark wood surface. Visible items include multiple boxes of \"banhada\" Brow & Lash lift cream, \"LASH CLINIC\" 15ml bottles, pink \"DREAM ROD FIT FOR ALL EYES\" boxes, \"BIG LASH FACTORY\" patch cases, clear containers labeled \"Slim mandu EARLY\" and \"mandu EARLY\" with a dumpling mascot, \"OLRAGA\" perm step packets, \"THE LASH MONSTER MOISTURE & SOOTHING HYDROGEL EYE PATCHES,\" \"Returning COLLAGEN BUFFER\" bottles, \"ROLLY KING! EYELASH FLYING ESSENCE\" tubes, and small \"gurooming\" cases. The accompanying caption reads \"❣️Đồ mi về sẵn❣️ [Liên hệ mua hàng] 📞 076-4613-744 🪽 Link shopee: https://shope.ee/6fF02NaPT7 🪽 Link nhóm săn sale: https://zalo.me/g/loklde245,\" indicating the products are in stock and providing phone, Shopee, and Zalo contacts for purchase. The tone is straightforward retail inventory presentation with no people, actions, or narrative beyond product display.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=banhada brow and lash lift cream, LASH CLINIC lash lifting solution, DREAM ROD eyelash perm rod, Slim mondu eyelash tape, gurooming storage case, BIG LASH FACTORY under eye patch, bread under eyelash...",
+      "search_groups": [
+        "Xin link / hỏi giá / tìm nơi mua"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgEd3YnCVk0",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@nhi.gumi/post/DgEd3YnCVk0",
+      "author_handle": "@nhi.gumi",
+      "type": "image",
+      "posted_at_utc": "2026-11-23 03:57:14 UTC",
+      "posted_at_local": "2026-11-23T10:57:14+07:00",
+      "content_full_text": null,
+      "content_summary": "The image shows a top-down view of beauty products arranged on a white knitted fabric, with a fluffy gray plush visible in the upper left corner. In the foreground is an open \"Soufflayer Eye Palette\" by Alternative Stereo, displaying six neutral-toned eyeshadow pans in pinks and browns, next to its dusty-rose packaging box. To the left are two makeup brushes in clear plastic packaging, and above them is an ice-cream-cone-shaped makeup sponge (blue and white swirled \"ice cream\" on a tan cone base) still in its clear box. The accompanying Threads caption in Vietnamese reads \"Đáng tiền thiệt sự 🫶🏻✨ em iu chị @gausorder1696,\" which translates to expressing that the product is truly worth the money and tagging another user affectionately. The overall tone is positive and promotional, presenting the items as a cute, appealing makeup haul.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 29,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=eye shadow palette, makeup sponge, makeup brushes",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgEb79aEx6a",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@binhpham3008/post/DgEb79aEx6a",
+      "author_handle": "@binhpham3008",
+      "type": "image",
+      "posted_at_utc": "2026-11-23 03:40:23 UTC",
+      "posted_at_local": "2026-11-23T10:40:23+07:00",
+      "content_full_text": null,
+      "content_summary": "The image captures a stage event branded with the Shopee logo, featuring a large LED screen displaying 'THE BEST CROSS-BORDER LIVESTREAM STAR' and the name 'DIỆP LÊ'. On stage, two women stand in front of the screen; one holds a bouquet of flowers. The setting is a formal awards ceremony with stage lighting and Shopee branding prominently displayed above and below the screen. The accompanying Threads post promotes upcoming Black Friday international livestreams by Diệp Lê on November 25-27, highlighting deals such as a water heater and exclusive cosmetics.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 1,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Diệp Lê (Vision Model Only), Diệp Lê (No Substantiation)",
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgDYinyE5wP",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@order_taobaolani/post/DgDYinyE5wP",
+      "author_handle": "@order_taobaolani",
+      "type": "image",
+      "posted_at_utc": "2026-11-22 17:51:28 UTC",
+      "posted_at_local": "2026-11-23T00:51:28+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a pink, kawaii-style infographic titled 'Lani Taobao' with the tagline 'Order Taobao dễ dàng – Mua sắm thả ga' (Easy Taobao ordering – Shop freely). It outlines 'CÁCH THỨC MUA HÀNG ORDER TAOBAO' (How to order Taobao) in five steps: 1) send link or product image, 2) consultation and price quote, 3) pay 70% deposit or full payment, 4) shop places order and tracks it, 5) receive goods and pay balance. Below, under 'LƯU Ý KHI ĐẶT HÀNG' (Notes when ordering), it lists five reminders about checking details, price fluctuations, shipping fees, estimated delivery times, and possible color differences. Contact information is provided at the bottom: Zalo 'Linh' and phone number 0964256002, with cute brown bear mascots throughout. The overall tone is cheerful, commercial, and informational, aimed at Vietnamese customers wanting to purchase from China's Taobao platform.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 14,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": null,
+      "search_groups": [
+        "Order Taobao/1688 / phí vận chuyển / cách đặt hàng"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgC-8Jun454",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@thich_du_kpop/post/DgC-8Jun454",
+      "author_handle": "@thich_du_kpop",
+      "type": "image",
+      "posted_at_utc": "2026-11-22 14:07:46 UTC",
+      "posted_at_local": "2026-11-22T21:07:46+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a screenshot of a mobile messaging interface at 21:04 showing a conversation with the account 'shop.bebear'. A customer has sent two photos of a brown-and-white plush toy resembling a fox/tiger, alongside a screenshot of the shop's product listing showing the same plush. In a blue message bubble, the customer writes in Vietnamese: 'shop xem thử xem có giống ko mà bảo đây là cáo hổ hay là đem hàng lỗi giao cho khánh nên ko giống' — asking the shop to check if it looks alike, stating they were told this is a fox-tiger, or if a defective item was shipped. The shop replies at 21:02 with 'Khác sao b' ('How is it different?'). Below are buttons for 'Yêu cầu hoàn tiền' (Request refund) and 'Gửi đơn hàng' (Send order). The context from the related Threads post indicates the customer is warning others to avoid the shop after receiving a mismatched, allegedly defective plush instead of the advertised 'gấu cáo hổ'. CommentSummary: Commenters largely express frustration and solidarity with the poster, describing similar experiences where the delivered plush did not resemble the listing photo. Many sympathize with the birthday-gift context and criticize the shop's response 'Khác sao b'. Several users pivot to self-promotion, offering their own plush shops with claims of accurate photos, COD availability, and better quality, including price points like 33k, 35k, 95k, and 119k. Advice is shared to request real photos before buying, and one commenter offers to donate a spare plush. Overall tone is supportive of the complainant and distrustful of the named shop. 1. **Shared complaints about same shop:** \"+1 nạn nhân giống bạn. sốp MRS Studio hỏi khác chỗ nào\" 2. **Alternative seller promotions:** \"Mốt mua gấu qua tui nha\" 3. **Sympathy for birthday gift failure:** \"Buồn quá bà ơi mai sinh nhật em tui , tui mua gấu tặng nó mà hàng về như vậy\" Negative Sentiment Focus Community reacts to the mismatch between advertised and received plush toy.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 140,
+      "replies_or_comments_count": 33,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=plush stuffed animal",
+      "search_groups": [
+        "Phàn nàn / vấn đề sản phẩm-dịch vụ"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgC3LciETPf",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@shopee_vn/post/DgC3LciETPf",
+      "author_handle": "@shopee_vn",
+      "type": "image",
+      "posted_at_utc": "2026-11-22 12:59:57 UTC",
+      "posted_at_local": "2026-11-22T19:59:57+07:00",
+      "content_full_text": null,
+      "content_summary": "The image is a promotional graphic for Shopee Vietnam's 'ShopeeVIP' Black Friday event. Set against a red theater-curtain background with 'BLACK FRIDAY' ribbons, it announces 'NHẬP HỘI SHOPEEVIP - SĂN DEAL BLACK FRIDAY'. Four individuals are featured and labeled: Giỏi Lee, Bé 7, Ngọc Phước, and Dương Quốc Mỹ. A central invitation card advertises a 'SĂN DEAL LIVESTREAM' offering 'VOUCHER GIẢM 35%' and 'DEAL GIẢM 50%' from brands including PUMA, Enchanteur, Bio-essence, and Carrie Junior, and many others. A cartoon mascot in a red suit with a gold box head appears on the right. At the bottom, viewing details state 'XEM LÚC 19H-21H | NGÀY 27.11 | TRÊN Shopee LIVE'. The overall tone is commercial, festive, and aimed at driving viewership to a live shopping event.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 11,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Giỏi Lee (Post Caption), Bé 7 (Post Caption), Ngọc Phước (Post Caption), Dương Quốc Mỹ (Post Caption); products=Puma brand logo, Enchanteur brand logo, Bio essence brand logo, Carrie Junior brand logo Events Black Friday: ShopeeVIP Black Friday livestream shopping event promoting vouchers and deals.; Location: Shopee LIVE; Date: 2026-11-27",
+      "search_groups": [
+        "Shopee / săn deal / voucher / Black Friday / sale"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgC0ztekl6C",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@vho_qinh/post/DgC0ztekl6C",
+      "author_handle": "@vho_qinh",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-22 12:39:14 UTC",
+      "posted_at_local": "2026-11-22T19:39:14+07:00",
+      "content_full_text": null,
+      "content_summary": "This three-slide carousel documents a user's first self-placed order from the Chinese wholesale platform 1688. Slide 0 shows an order completion screen for a beige men's jacket ('Áo khoác GDDQSDC'), purchased for ¥135 (about 555,307 VND) from Guangzhou Bai Xi Trading Co., with a loading indicator over the payment details. Slide 1 displays the international logistics fee breakdown (¥15.90) for shipping to Vietnam, including package weight (1.526kg) and delivery address in Quảng Nam, Vietnam. Slide 2 is a close-up photo of the received jacket on a hanger, revealing a red plaid lining and an interior label reading 'VINTAGE GDDQSDC AMEIKAJI JACKET M.' The accompanying caption expresses satisfaction with the 7-day delivery, notes the total cost (~600k VND split between product and shipping), and encourages others to try self-ordering. CommentSummary: Viewers respond with practical curiosity rather than criticism, asking step-by-step how the creator paid, whether Visa is required, and if ZaloPay works. The author replies promptly, confirming Visa or ZaloPay options and explaining that 1688 and Taobao share an account system but 1688 leans wholesale and can be cheaper. Several commenters compare fees, noting that bank transfer via ZaloPay avoids the ~3% Visa surcharge, while others remark on shipping being comparable to intermediary services and fast to Ho Chi Minh City. The tone stays helpful and appreciative, with thanks exchanged, indicating the post functions as a peer tutorial for Vietnamese buyers navigating Chinese e-commerce platforms. 1. **Payment methods for 1688 orders:** \"Thẻ visa, hoặc zalopay cũng đc ấy b\" 2. **Difference between 1688 and Taobao:** \"Chung 1 tập đoàn. Dùng chung tài khoản. Nhưng 1688 thiên về bán sỉ hơn.\" 3. **Shipping speed and cost to Vietnam:** \"Ship về TpHCM siêu nhanh 6 ngày là tới r\" Positive Sentiment Focus How to order and pay on 1688, shipping costs, and differences from Taobao.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 17,
+      "replies_or_comments_count": 8,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=khaki vintage jacket",
+      "search_groups": [
+        "Order Taobao/1688 / phí vận chuyển / cách đặt hàng"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgCmEAmHwHx",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@nhungnguyenorder/post/DgCmEAmHwHx",
+      "author_handle": "@nhungnguyenorder",
+      "type": "text",
+      "posted_at_utc": "2026-11-22 10:30:23 UTC",
+      "posted_at_local": "2026-11-22T17:30:23+07:00",
+      "content_full_text": null,
+      "content_summary": "The author announces that US perfumes and cosmetics are heavily discounted and says they are overwhelmed with items to share for customers. They invite anyone interested to message them directly to receive sale links, and humorously note feeling exhausted from shopping, using laughing emojis to convey a lighthearted, enthusiastic tone.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": null,
+      "replies_or_comments_count": null,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "people=Nhung Nguyen Order (Author Name); products=US perfume, US cosmetics",
+      "search_groups": [
+        "Xin link / hỏi giá / tìm nơi mua"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    },
+    {
+      "post_id": "DgCAP4TnW3-",
+      "numeric_post_id": null,
+      "url": "https://www.threads.com/@dthao_185/post/DgCAP4TnW3-",
+      "author_handle": "@dthao_185",
+      "type": "carousel",
+      "posted_at_utc": "2026-11-22 04:59:57 UTC",
+      "posted_at_local": "2026-11-22T11:59:57+07:00",
+      "content_full_text": null,
+      "content_summary": "The four-slide carousel is a user-generated product demonstration posted in Vietnamese. Slides 0-2 show a hand holding the purple PINKTWO \"Pore Deep-Clean BLACKHEAD REMOVER Peel-Off Nose Strip\" packaging and several individual foil packets, with a plush toy and other toiletries visible in the background. Slide 3 shifts to a different setting and shows the same hand holding the used white nose strip up to the camera, revealing small dark particles stuck to it that represent removed blackheads. The accompanying caption praises the product's effectiveness, stating it was left on for about 15 minutes, pulled out \"a basket of acne,\" and left the nose feeling smooth and \"reborn\" compared to before. The overall tone is enthusiastic and promotional, focused on the satisfying visual result of the skincare product.",
+      "content_note": "social.search trả về bản tóm tắt nội dung do hệ thống tạo, không phải nguyên văn bài viết — trường nguyên văn để null.",
+      "likes": 2,
+      "replies_or_comments_count": 1,
+      "reposts": null,
+      "quotes": null,
+      "views": null,
+      "purchase_intent_comments": null,
+      "mentioned_products_brands_topics": "products=blackhead remover nose strip",
+      "search_groups": [
+        "Review sản phẩm"
+      ],
+      "language": "vi",
+      "source": "social.search (connector, platform=threads)",
+      "collected_at": "2026-11-25T21:53-21:54+07:00"
+    }
+  ],
+  "verification": {
+    "keyword_search": {
+      "verdict": "PASS",
+      "detail": "5 nhóm từ khóa tiếng Việt đều trả kết quả đúng chủ đề; kết quả có lẫn một số bài khu vực (Indonesia/Malaysia) trong tổng 166 bài — bản chọn lọc đã ưu tiên tiếng Việt (35/36 bài)."
+    },
+    "time_filter": {
+      "verdict": "PASS",
+      "detail": "Tham số since=2026-11-22 hoạt động: mọi bài trả về đều đăng từ 22/11 trở đi; mọi bài đều có timestamp đầy đủ đến giây (UTC)."
+    },
+    "read_replies": {
+      "verdict": "PARTIAL",
+      "detail": "Connector cho số lượng bình luận ở ~37% số bài nhưng không cho nguyên văn replies. Threads Web cho bản tóm tắt bình luận (ví dụ bài @shopee_vn: bình luận duy nhất là của chính thương hiệu). Đọc replies nguyên văn hàng loạt: chưa có đường nào xác minh được."
+    },
+    "reaccess_update": {
+      "verdict": "PASS",
+      "detail": "Bài @shopee_vn DgKoO8QjrzA: likes 8 (tìm kiếm 21:53) → 13 (truy cập lại qua web 21:56). URL bài viết ổn định, truy cập lại không cần đăng nhập."
+    },
+    "fresh_vs_old_popular": {
+      "verdict": "PARTIAL",
+      "detail": "Mọi bài đều có thời gian đăng chính xác nên phân biệt được bài mới với bài cũ bằng timestamp + tương tác tích lũy; tuy nhiên ranking 'engagement' của connector trộn cả hai, và không có chỉ số tốc độ tăng trưởng — phải tự đối chiếu timestamp khi dùng."
+    },
+    "limits_login_captcha_stability": {
+      "verdict": "PASS (connector) / PARTIAL (web)",
+      "detail": "social.search: không cần đăng nhập, không captcha, 5/5 lượt ổn định. Threads Web: trang bài viết mở công khai; trang tìm kiếm 403 qua truy vấn trực tiếp. threads-cli chưa kết nối nên chưa kiểm chứng được độ ổn định cấp tài khoản."
+    }
+  },
+  "capability_verdicts": [
+    {
+      "capability": "Tìm kiếm Threads theo từ khóa (thị trường VN)",
+      "verdict": "PASS"
+    },
+    {
+      "capability": "Lọc theo thời gian (24-72h)",
+      "verdict": "PASS"
+    },
+    {
+      "capability": "Đủ tối thiểu 30 bài",
+      "verdict": "PASS",
+      "detail": "36 bài đã chọn (từ 166 bài thô)."
+    },
+    {
+      "capability": "Post ID + URL",
+      "verdict": "PASS",
+      "detail": "Mọi bài có mã bài trong URL; numeric ID chỉ lấy được qua tra cứu trực tiếp (1 bài đã ghi)."
+    },
+    {
+      "capability": "Nội dung đầy đủ (nguyên văn)",
+      "verdict": "PARTIAL",
+      "detail": "Chỉ có bản tóm tắt nội dung; nguyên văn để null."
+    },
+    {
+      "capability": "Tài khoản + thời gian đăng",
+      "verdict": "PASS"
+    },
+    {
+      "capability": "Likes",
+      "verdict": "PARTIAL",
+      "detail": "Có ở 25/36 bài đã chọn (59/166 bài thô); còn lại null."
+    },
+    {
+      "capability": "Số replies/bình luận",
+      "verdict": "PARTIAL",
+      "detail": "Có ở 27/36 bài đã chọn."
+    },
+    {
+      "capability": "Reposts / quotes / views",
+      "verdict": "FAIL",
+      "detail": "social.search không cung cấp các trường này — null toàn bộ."
+    },
+    {
+      "capability": "Đọc nội dung replies (ý định mua hàng trong bình luận)",
+      "verdict": "PARTIAL",
+      "detail": "Chỉ qua bản tóm tắt bình luận của Threads Web từng bài; không có nguyên văn hàng loạt. Trong 36 bài, tín hiệu ý định mua chủ yếu nằm trong chính nội dung bài (xin link, hỏi giá, chia sẻ link Shopee/Zalo) hơn là bình luận đã đọc được."
+    },
+    {
+      "capability": "Truy cập lại cập nhật tương tác",
+      "verdict": "PASS"
+    },
+    {
+      "capability": "Connector Threads cấp tài khoản (threads-cli)",
+      "verdict": "FAIL",
+      "detail": "Chưa kết nối tài khoản (accounts=[])."
+    }
+  ],
+  "notable_signals_in_data": [
+    "Bài phàn nàn về mỹ phẩm lỗi của @pnt21_11 (25/11) đạt 640 likes, 30 bình luận — tương tác cao nhất trong bản chọn lọc; nhóm phàn nàn có nhiều bài tương tác cao (@thich_du_kpop 140 likes/33 bình luận; @ng.anh96_ 73/14; @linhchipovlt31 41/20).",
+    "Tài khoản chính thức @shopee_vn đăng bài Black Friday/ShopeeVIP ngay trong ngày 25/11; nhiều tài khoản nhỏ chia sẻ voucher và link nhóm săn sale (Zalo) kèm link Shopee.",
+    "Nhóm order Taobao/1688 chủ yếu là bài quảng bá dịch vụ order hộ/logistics và chia sẻ kinh nghiệm tự order lần đầu (@vho_qinh).",
+    "Bài của @verygoodnail.more để sẵn link Shopee + link nhóm săn sale Zalo trong caption — mẫu affiliate/bán hàng điển hình trên Threads VN."
+  ],
+  "files": [
+    "threads_poc_001.json"
+  ],
+  "sanitization": {
+    "note": "Ban sao dung de upload len thu muc lam viec chia se: da loai bo truong author_followers (so followers cua tac gia - thong tin khong can thiet cho muc dich phan tich noi dung) khoi moi bai viet.",
+    "kept": "Handle tai khoan cong khai, URL bai viet, noi dung tom tat, so lieu tuong tac va thoi gian dang - day la du lieu bai viet cong khai, can cho viec doi chieu nguon.",
+    "removed_fields": [
+      "author_followers"
+    ]
+  }
+}

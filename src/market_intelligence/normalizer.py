@@ -1,0 +1,594 @@
+"""
+Multi-version Market Intelligence JSON Normalizer (Data Contract V2).
+
+Supports Threads, TikTok, and Shopee payloads across schema variants (including
+Muse AI POC 001, POC 002, Pilot 001, E2E V1, and Data Contract V2 corrected_v2).
+Strictly preserves missing fields as None (never fabricates absent data, never turns null into 0).
+Distinguishes crawl payloads from strategy / audit / data_contract files.
+"""
+
+import hashlib
+import json
+import re
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+
+SUPPORTED_PLATFORMS = {"threads", "tiktok", "shopee"}
+NON_CRAWL_ROLES = {"data_contract", "crawl_strategy", "quality_audit", "market_report"}
+
+
+def _clean_str(val: Any) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        return s if s else None
+    return str(val).strip() or None
+
+
+def _clean_int(val: Any) -> Optional[int]:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    if isinstance(val, str):
+        digits = re.sub(r"[^\d-]", "", val.strip())
+        if digits and digits != "-":
+            try:
+                return int(digits)
+            except ValueError:
+                return None
+    return None
+
+
+def _clean_float(val: Any) -> Optional[float]:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _platform_from_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        host = (urlparse(url).netloc or "").lower()
+    except Exception:
+        return None
+    if "threads.net" in host or "threads.com" in host:
+        return "threads"
+    if "tiktok.com" in host or "vm.tiktok" in host:
+        return "tiktok"
+    if "shopee." in host or "shp.ee" in host:
+        return "shopee"
+    return None
+
+
+def _normalize_platform_token(val: Optional[str]) -> Optional[str]:
+    if not val:
+        return None
+    lower = val.lower()
+    for p in ("threads", "tiktok", "shopee"):
+        if re.search(rf"(?:^|[^a-z]){p}(?:$|[^a-z])", lower):
+            return p
+    return None
+
+
+def classify_json_file(
+    raw_obj: Any,
+    file_name: Optional[str] = None,
+    folder_path: Optional[str] = None,
+) -> str:
+    """
+    Classify JSON file role strictly so data_contract, strategy, audit, and report
+    files are never mixed into crawl_data records.
+    """
+    fname = (file_name or "").lower()
+    if isinstance(raw_obj, dict):
+        if "data_contract" in fname or (
+            "contract" in raw_obj and ("global_rules" in raw_obj or "update_rules_for_app_video" in raw_obj)
+        ):
+            return "data_contract"
+        if "strategy" in fname or (
+            "strategy" in raw_obj
+            and ("schema_changes_additive_only" in raw_obj or "buckets" in raw_obj or "target_metrics" in raw_obj)
+        ):
+            return "crawl_strategy"
+        if "audit" in fname or ("audit" in raw_obj and "verdict" in raw_obj):
+            return "quality_audit"
+
+        has_item_list = any(
+            isinstance(raw_obj.get(k), list)
+            for k in ("posts", "items", "records", "products", "videos", "threads")
+        )
+        if not has_item_list and (
+            fname.startswith("market_report")
+            or any(
+                k in raw_obj
+                for k in (
+                    "report",
+                    "analysis",
+                    "market_report",
+                    "platform_results",
+                    "opportunity_ranking",
+                    "telegram_summary",
+                )
+            )
+        ):
+            return "market_report"
+    return "crawl_data"
+
+
+def is_corrected_payload(raw_obj: Any, file_name: Optional[str] = None) -> bool:
+    """Return True if payload or filename represents a corrected_v2 version."""
+    fname = (file_name or "").lower()
+    if "_corrected" in fname:
+        return True
+    if isinstance(raw_obj, dict):
+        fv = str(raw_obj.get("file_version") or "").lower()
+        if "corrected" in fv or raw_obj.get("corrects_file") or raw_obj.get("corrects_report"):
+            return True
+    return False
+
+
+def detect_platform(
+    item: Dict[str, Any],
+    envelope: Optional[Dict[str, Any]] = None,
+    file_name: Optional[str] = None,
+    platform_hint: Optional[str] = None,
+) -> str:
+    """Detect source platform accurately without misclassifying handles like @shopee_vn on Threads."""
+    envelope = envelope or {}
+
+    for candidate in (
+        item.get("platform"),
+        envelope.get("platform"),
+        item.get("source_platform"),
+        envelope.get("source_platform"),
+    ):
+        found = _normalize_platform_token(_clean_str(candidate))
+        if found:
+            return found
+
+    for url_key in ("post_url", "url", "item_url", "product_url", "video_url", "link"):
+        p_url = _platform_from_url(_clean_str(item.get(url_key)))
+        if p_url:
+            return p_url
+
+    for candidate in (
+        item.get("source_query"),
+        item.get("source"),
+        envelope.get("source"),
+        envelope.get("poc"),
+    ):
+        found = _normalize_platform_token(_clean_str(candidate))
+        if found:
+            return found
+
+    for candidate in (platform_hint, file_name):
+        found = _normalize_platform_token(_clean_str(candidate))
+        if found:
+            return found
+
+    return "unknown"
+
+
+def detect_schema_version(raw_obj: Any, file_role: str = "crawl_data") -> str:
+    """Identify the JSON schema variant for auditability."""
+    if file_role != "crawl_data":
+        if isinstance(raw_obj, dict) and (raw_obj.get("version") or raw_obj.get("schema_version")):
+            return f"{file_role}:{raw_obj.get('schema_version') or raw_obj.get('version')}"
+        return file_role
+    if isinstance(raw_obj, dict):
+        explicit = _clean_str(raw_obj.get("schema_version") or raw_obj.get("version"))
+        if explicit:
+            return explicit
+        if str(raw_obj.get("file_version") or "").lower() == "corrected_v2":
+            return "data_contract_v2_corrected"
+        if "poc" in raw_obj and isinstance(raw_obj.get("posts"), list):
+            return "muse_threads_poc_001"
+        if "run_id" in raw_obj and isinstance(raw_obj.get("posts"), list):
+            posts = raw_obj["posts"]
+            if posts and isinstance(posts[0], dict):
+                if "data_quality" in posts[0] or "deal_status" in posts[0] or "url_status" in posts[0]:
+                    return "data_contract_v2"
+                if "content_group" in posts[0] or "purchase_intent" in posts[0]:
+                    return "muse_crawl_v2"
+            return "muse_crawl_v1"
+        for key in ("posts", "items", "records", "data", "results", "products"):
+            if isinstance(raw_obj.get(key), list):
+                return f"envelope_{key}_v1"
+        return "single_object_v1"
+    if isinstance(raw_obj, list):
+        return "array_v1"
+    return "unknown"
+
+
+def extract_records(raw_obj: Any, file_role: str = "crawl_data") -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Extract envelope metadata and list of item dicts from crawl JSON payloads."""
+    if isinstance(raw_obj, list):
+        return {}, [x for x in raw_obj if isinstance(x, dict)]
+
+    if not isinstance(raw_obj, dict):
+        return {}, []
+
+    envelope_meta = {
+        k: v
+        for k, v in raw_obj.items()
+        if not isinstance(v, list) or k in ("files", "notable_signals_in_data", "upcoming_vouchers")
+    }
+    if file_role in NON_CRAWL_ROLES:
+        return envelope_meta, []
+
+    for list_key in ("posts", "items", "records", "data", "results", "products", "threads", "videos"):
+        val = raw_obj.get(list_key)
+        if isinstance(val, list):
+            return envelope_meta, [x for x in val if isinstance(x, dict)]
+
+    nested_data = raw_obj.get("data")
+    if isinstance(nested_data, dict):
+        for list_key in ("posts", "items", "records", "results", "products", "videos"):
+            val = nested_data.get(list_key)
+            if isinstance(val, list):
+                return envelope_meta, [x for x in val if isinstance(x, dict)]
+
+    if any(k in raw_obj for k in ("post_id", "item_id", "video_id", "url", "post_url", "content_summary", "content_summary_vi", "product_name")):
+        return {}, [raw_obj]
+
+    return envelope_meta, []
+
+
+def _canonical_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+        clean_path = parsed.path.rstrip("/")
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{clean_path}"
+    except Exception:
+        return url.strip()
+
+
+def build_dedup_key(
+    platform: str,
+    post_id: Optional[str],
+    item_id: Optional[str],
+    shop_id: Optional[str],
+    external_id: Optional[str],
+    url: Optional[str],
+    author_handle: Optional[str],
+    published_at: Optional[str],
+    title: Optional[str],
+    text_content: Optional[str],
+    run_id: Optional[str] = None,
+    rank: Optional[int] = None,
+    frame_start_at: Optional[str] = None,
+) -> str:
+    """
+    Build deterministic deduplication / upsert key per Data Contract V2:
+      - Threads: post_id
+      - TikTok: video_id (or author_handle + rank + run_id)
+      - Shopee: shop_id+item_id or item_id or normalized product_name (+ run_id/frame)
+    """
+    plat = platform or "unknown"
+
+    if plat == "shopee":
+        if shop_id and item_id:
+            return f"shopee:item:{shop_id}:{item_id}"
+        if item_id:
+            return f"shopee:item:{item_id}"
+        if title:
+            clean_name = re.sub(r"\s+", " ", title.strip().lower())
+            name_hash = hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:16]
+            scope = run_id or frame_start_at or "global"
+            return f"shopee:name:{scope}:{name_hash}"
+        if post_id:
+            return f"shopee:post:{post_id}"
+    elif plat == "tiktok":
+        if item_id:
+            return f"tiktok:item:{item_id}"
+        if post_id:
+            return f"tiktok:post:{post_id}"
+        if author_handle and run_id:
+            rank_part = str(rank) if rank is not None else "na"
+            return f"tiktok:handle_run:{run_id}:{author_handle.strip().lower()}:{rank_part}"
+    elif plat == "threads":
+        if post_id:
+            return f"threads:post:{post_id}"
+        if item_id:
+            return f"threads:item:{item_id}"
+    else:
+        if post_id:
+            return f"{plat}:post:{post_id}"
+        if item_id:
+            return f"{plat}:item:{item_id}"
+
+    if external_id:
+        return f"{plat}:ext:{external_id}"
+
+    c_url = _canonical_url(url)
+    if c_url:
+        return f"{plat}:url:{c_url}"
+
+    fingerprint_src = json.dumps(
+        [plat, author_handle or "", published_at or "", title or "", text_content or ""],
+        ensure_ascii=False,
+        sort_keys=False,
+    )
+    digest = hashlib.sha256(fingerprint_src.encode("utf-8")).hexdigest()[:24]
+    return f"{plat}:hash:{digest}"
+
+
+def normalize_record(
+    item: Dict[str, Any],
+    envelope: Optional[Dict[str, Any]] = None,
+    file_name: Optional[str] = None,
+    platform_hint: Optional[str] = None,
+    schema_version: str = "unknown",
+    item_index: int = 0,
+    is_corrected: bool = False,
+) -> Dict[str, Any]:
+    """
+    Normalize one raw Market Intelligence item into canonical Data Contract V2 form.
+    Missing fields remain None; nothing is fabricated; null never becomes 0.
+    """
+    envelope = envelope or {}
+    platform = detect_platform(item, envelope=envelope, file_name=file_name, platform_hint=platform_hint)
+
+    post_id = _clean_str(item.get("post_id"))
+    item_id = _clean_str(
+        item.get("item_id")
+        or item.get("video_id")
+        or item.get("aweme_id")
+        or item.get("product_id")
+    )
+    shop_id = _clean_str(item.get("shop_id") or item.get("shopid"))
+    numeric_post_id = _clean_str(item.get("numeric_post_id"))
+    rank_val = _clean_int(item.get("rank"))
+    run_id = _clean_str(item.get("run_id") or envelope.get("run_id"))
+    external_id = post_id or item_id or numeric_post_id or _clean_str(item.get("id"))
+
+    author_handle = _clean_str(
+        item.get("author_handle")
+        or item.get("author_username")
+        or item.get("username")
+        or item.get("author")
+        or item.get("shop_name")
+        or item.get("seller_name")
+    )
+    author_name = _clean_str(item.get("author_name") or item.get("shop_title"))
+
+    title = _clean_str(item.get("title") or item.get("product_name") or item.get("name"))
+    summary_vi = _clean_str(item.get("content_summary_vi"))
+    text_content = _clean_str(
+        item.get("content_full_text")
+        or summary_vi
+        or item.get("content_summary")
+        or item.get("text")
+        or item.get("caption")
+        or item.get("description")
+    )
+    # Keep item URL strict (never swap Shopee's missing product_url with evidence_url)
+    url = _clean_str(
+        item.get("post_url")
+        or item.get("video_url")
+        or item.get("product_url")
+        or item.get("item_url")
+        or item.get("url")
+    )
+
+    content_group = _clean_str(
+        item.get("content_group")
+        or item.get("contentGroup")
+        or item.get("topic_group")
+    )
+    purchase_intent = _clean_str(
+        item.get("purchase_intent")
+        or item.get("purchaseIntent")
+        or item.get("buyer_intent")
+    )
+
+    published_at = _clean_str(
+        item.get("posted_at_local")
+        or item.get("posted_at")
+        or item.get("posted_at_utc")
+        or item.get("published_at")
+        or item.get("created_at")
+        or item.get("frame_start_at")
+    )
+    crawled_at = _clean_str(
+        item.get("collected_at")
+        or envelope.get("ended_at")
+        or envelope.get("collected_at")
+        or envelope.get("started_at")
+    )
+    language = _clean_str(item.get("language"))
+
+    likes_count = _clean_int(item.get("likes") if "likes" in item else item.get("likes_count"))
+    comments_count = _clean_int(
+        item.get("comment_count")
+        if "comment_count" in item
+        else (item.get("replies_or_comments_count") if "replies_or_comments_count" in item else item.get("comments_count"))
+    )
+    shares_count = _clean_int(
+        item.get("shares") if "shares" in item else (item.get("reposts") if "reposts" in item else item.get("shares_count"))
+    )
+    views_count = _clean_int(item.get("views") if "views" in item else (item.get("play_count") if "play_count" in item else item.get("views_count")))
+    price = _clean_float(item.get("price_vnd") if "price_vnd" in item else item.get("price"))
+    sold_count = _clean_int(
+        item.get("sold_count")
+        if "sold_count" in item
+        else (item.get("sold") if "sold" in item else item.get("historical_sold"))
+    )
+    rating = _clean_float(item.get("rating") if "rating" in item else item.get("rating_star"))
+
+    data_quality = _clean_str(item.get("data_quality"))
+    raw_issues = item.get("quality_issues")
+    quality_issues = [str(q) for q in raw_issues if q] if isinstance(raw_issues, list) else []
+
+    metrics = {
+        k: v
+        for k, v in {
+            "likes": likes_count,
+            "comments": comments_count,
+            "shares": shares_count,
+            "views": views_count,
+            "price": price,
+            "sold": sold_count,
+            "rating": rating,
+        }.items()
+        if v is not None
+    }
+
+    extra_meta: Dict[str, Any] = {}
+    for meta_key in (
+        "request_id",
+        "run_id",
+        "search_groups",
+        "entities_mentioned",
+        "mentioned_products_brands_topics",
+        "purchase_intent_comments",
+        "content_summary",
+        "content_summary_vi",
+        "content_note",
+        "comments_note",
+        "source_query",
+        "type",
+        "numeric_post_id",
+        "posted_at_utc",
+        "posted_at_local",
+        "currency",
+        "category",
+        "crawl_bucket",
+        "author_type",
+        "hook_analysis",
+        "enrichment_status",
+        "source_type",
+        "url_status",
+        "caption",
+        "hashtags",
+        "affiliate_relevance",
+        "affiliate_reason",
+        "evidence_url",
+        "rank",
+        "deal_status",
+        "frame_start_at",
+        "frame_end_at",
+        "price_status",
+        "original_price",
+        "price_original",
+        "stock_signal",
+        "selection_signal",
+        "affiliate_eligible",
+        "file_version",
+        "corrects_file",
+        "technical_status",
+        "data_quality_status",
+        "upcoming_vouchers",
+        "trending_context",
+    ):
+        val = item.get(meta_key) if meta_key in item else envelope.get(meta_key)
+        if val is not None and val != "":
+            extra_meta[meta_key] = val
+    if "affiliate_eligible" in item:
+        extra_meta["affiliate_eligible"] = bool(item["affiliate_eligible"])
+    if data_quality is not None:
+        extra_meta["data_quality"] = data_quality
+    if quality_issues:
+        extra_meta["quality_issues"] = quality_issues
+    if is_corrected:
+        extra_meta["is_corrected"] = True
+
+    dedup_key = build_dedup_key(
+        platform=platform,
+        post_id=post_id,
+        item_id=item_id,
+        shop_id=shop_id,
+        external_id=external_id,
+        url=url,
+        author_handle=author_handle,
+        published_at=published_at,
+        title=title,
+        text_content=text_content,
+        run_id=run_id,
+        rank=rank_val,
+        frame_start_at=_clean_str(item.get("frame_start_at")),
+    )
+
+    return {
+        "dedup_key": dedup_key,
+        "platform": platform,
+        "external_id": external_id,
+        "post_id": post_id,
+        "item_id": item_id,
+        "shop_id": shop_id,
+        "author_handle": author_handle,
+        "author_name": author_name,
+        "title": title,
+        "text_content": text_content,
+        "summary_vi": summary_vi or text_content,
+        "url": url,
+        "content_group": content_group,
+        "purchase_intent": purchase_intent,
+        "language": language,
+        "published_at": published_at,
+        "crawled_at": crawled_at,
+        "likes_count": likes_count,
+        "comments_count": comments_count,
+        "shares_count": shares_count,
+        "views_count": views_count,
+        "price": price,
+        "sold_count": sold_count,
+        "rating": rating,
+        "data_quality": data_quality,
+        "quality_issues": quality_issues,
+        "is_corrected": is_corrected,
+        "source_priority": 2 if is_corrected else 1,
+        "run_id": run_id,
+        "metrics": metrics,
+        "extra_meta": extra_meta,
+        "schema_version": schema_version,
+        "raw_item_index": item_index,
+        "raw_payload_json": json.dumps(item, ensure_ascii=False),
+    }
+
+
+def normalize_payload(
+    raw_obj: Any,
+    file_name: Optional[str] = None,
+    platform_hint: Optional[str] = None,
+    folder_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Normalize an entire JSON file payload and return file_role, schema_version, envelope, and items."""
+    file_role = classify_json_file(raw_obj, file_name=file_name, folder_path=folder_path)
+    is_corrected = is_corrected_payload(raw_obj, file_name=file_name)
+    schema_version = detect_schema_version(raw_obj, file_role=file_role)
+    envelope, raw_items = extract_records(raw_obj, file_role=file_role)
+    normalized_items = [
+        normalize_record(
+            item,
+            envelope=envelope,
+            file_name=file_name,
+            platform_hint=platform_hint,
+            schema_version=schema_version,
+            item_index=idx,
+            is_corrected=is_corrected,
+        )
+        for idx, item in enumerate(raw_items)
+    ]
+    return {
+        "file_role": file_role,
+        "is_corrected": is_corrected,
+        "schema_version": schema_version,
+        "envelope": envelope,
+        "items": normalized_items,
+    }

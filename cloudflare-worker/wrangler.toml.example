@@ -1,0 +1,31 @@
+name = "app-video-scheduler"
+main = "worker.v2.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+# Root Google Drive Workspace folder (AI_WORKSPACE)
+GOOGLE_DRIVE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g"
+# Muse AI D1 polling cadence:
+# - "production_6h" (default: 6 hours combining scheduled crawl + crawl_requests queue check)
+# - "test_5m" (limited testing only: 5 minutes)
+MUSE_POLL_PROFILE = "production_6h"
+# Optional direct override for 01_Market_Data folder ID
+# MARKET_DATA_FOLDER_ID = ""
+# Optional legacy fallback folder ID
+# THREADS_FOLDER_ID = "1jJ0ihxv_LtpZFlkAeBO_BLysLZ9XwcE8"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "app-video-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[triggers]
+# Preserves existing Cron schedule used by notifyNewCrawl & lease expiration
+crons = ["*/5 * * * *"]
+
+# Required Secrets (configure via `wrangler secret put <NAME>`, NEVER commit values):
+# - GOOGLE_SERVICE_ACCOUNT_JSON
+# - TELEGRAM_BOT_TOKEN_VIDEO
+# - TELEGRAM_OWNER_ID
+# - TELEGRAM_WEBHOOK_SECRET
+# - APP_VIDEO_API_TOKEN   (must match CLOUDFLARE_APP_TOKEN in local App_Video/.env)

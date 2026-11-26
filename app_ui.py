@@ -55,6 +55,67 @@ bg_mod       = load_mod("bg_audio", "04_bg_audio.py")
 pipeline_mod = load_mod("pipeline", "05_pipeline.py")
 visual_builder_mod = load_mod("visual_story_builder", "visual_story_builder.py")
 
+from market_intelligence import (
+    MarketIntelligenceStore,
+    CloudflareBridgeClient,
+    MarketSyncService,
+    RemoteCommandPoller,
+)
+
+_market_runtime_lock = threading.Lock()
+_market_runtime = None
+
+
+def get_market_runtime(data_dir=None, client=None):
+    """Initialize or return the singleton Market Intelligence runtime."""
+    global _market_runtime
+    with _market_runtime_lock:
+        if _market_runtime is None:
+            store = MarketIntelligenceStore(data_dir=data_dir)
+            cf_client = client or CloudflareBridgeClient(env_path=ENV_PATH)
+            try:
+                default_interval = int(os.environ.get("MARKET_SYNC_INTERVAL_SEC", "300"))
+            except ValueError:
+                default_interval = 300
+            try:
+                poll_interval = int(os.environ.get("REMOTE_POLL_INTERVAL_SEC", "10"))
+            except ValueError:
+                poll_interval = 10
+
+            sync_service = MarketSyncService(
+                store=store,
+                client=cf_client,
+                default_interval_sec=default_interval,
+            )
+            remote_poller = RemoteCommandPoller(
+                store=store,
+                client=cf_client,
+                sync_service=sync_service,
+                poll_interval_sec=poll_interval,
+            )
+            _market_runtime = {
+                "store": store,
+                "client": cf_client,
+                "sync_service": sync_service,
+                "remote_poller": remote_poller,
+            }
+        return _market_runtime
+
+
+def reset_market_runtime_for_tests(data_dir=None, client=None):
+    """Test helper to swap runtime cleanly with isolated temp directory and mock client."""
+    global _market_runtime
+    with _market_runtime_lock:
+        if _market_runtime is not None:
+            try:
+                _market_runtime["remote_poller"].stop(timeout=1.0)
+                _market_runtime["sync_service"].stop(timeout=1.0)
+                _market_runtime["store"].close()
+            except Exception:
+                pass
+            _market_runtime = None
+    return get_market_runtime(data_dir=data_dir, client=client)
+
 
 def _render_all_cards_helper(post, theme="light", enable_attached_image=None, platform=None):
     """
@@ -329,6 +390,13 @@ HTML_TEMPLATE = """
           class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2 cursor-pointer">
           <i class="fa-solid fa-sliders"></i>
           <span>3. Cấu Hình Đạo Diễn</span>
+        </button>
+
+        <button @click="currentTab = 'market'; loadMarketDashboard();" :class="currentTab === 'market' ? 'bg-brand-600 text-white font-bold shadow-md shadow-indigo-600/35' : 'text-slate-400 hover:text-slate-200'"
+          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2 relative cursor-pointer">
+          <i class="fa-solid fa-magnifying-glass-chart"></i>
+          <span>4. Market Intelligence</span>
+          <span v-if="marketStatus.is_syncing" class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping absolute -top-0.5 -right-0.5"></span>
         </button>
       </nav>
 
@@ -2207,6 +2275,728 @@ HTML_TEMPLATE = """
       </div>
     </main>
 
+    <!-- TAB 4: MARKET INTELLIGENCE & REMOTE SYNC -->
+    <main v-show="currentTab === 'market'" class="flex-1 max-w-[1760px] w-full mx-auto px-4 sm:px-8 py-6 space-y-5">
+
+      <!-- Top Header, Sync Controls & Sub-tabs -->
+      <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+          <div>
+            <h2 class="text-base font-bold text-white flex items-center gap-2.5 flex-wrap">
+              <i class="fa-solid fa-magnifying-glass-chart text-emerald-400"></i>
+              <span>Market Intelligence — Data Contract V2</span>
+              <span class="text-[11px] px-2.5 py-0.5 rounded-full font-semibold border"
+                :class="marketStatus.cloudflare?.token_configured ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-amber-500/15 text-amber-300 border-amber-500/30'">
+                {{ marketStatus.cloudflare?.token_configured ? 'Cloudflare Auth OK' : 'Chưa cấu hình CLOUDFLARE_APP_TOKEN' }}
+              </span>
+              <span class="text-[11px] px-2.5 py-0.5 rounded-full font-semibold border"
+                :class="marketStatus.stats?.last_sync_status === 'ok' ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' : (marketStatus.is_syncing ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' : 'bg-rose-500/15 text-rose-300 border-rose-500/30')">
+                Sync: {{ marketStatus.is_syncing ? 'đang đồng bộ' : (marketStatus.stats?.last_sync_status || 'idle') }}
+              </span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-1">
+              Đồng bộ từ <span class="font-mono text-slate-300">AI_WORKSPACE/01_Market_Data/</span> • Cập nhật gần nhất:
+              <strong class="text-slate-200">{{ formatIsoTime(marketStatus.stats?.last_sync_at) || 'Chưa đồng bộ' }}</strong>
+            </p>
+            <p v-if="marketStatus.stats?.last_error" class="text-[11px] text-rose-300 mt-1">
+              ⚠️ Lỗi gần nhất: {{ marketStatus.stats.last_error }}
+            </p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="flex items-center gap-2 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-800 text-xs">
+              <span class="text-slate-400">Chu kỳ nền:</span>
+              <select v-model.number="marketConfigInterval" @change="updateMarketConfig"
+                class="bg-transparent text-indigo-300 font-semibold focus:outline-none cursor-pointer">
+                <option :value="60" class="bg-slate-900">1 phút</option>
+                <option :value="300" class="bg-slate-900">5 phút (Mặc định)</option>
+                <option :value="600" class="bg-slate-900">10 phút</option>
+                <option :value="900" class="bg-slate-900">15 phút</option>
+                <option :value="1800" class="bg-slate-900">30 phút</option>
+              </select>
+            </div>
+
+            <button @click="testMarketConnection" :disabled="isTestingConnection"
+              class="px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50">
+              <i class="fa-solid fa-plug-circle-check text-cyan-400" :class="{'fa-spin': isTestingConnection}"></i>
+              <span>Kiểm tra Cloudflare</span>
+            </button>
+
+            <button @click="triggerMarketSyncNow" :disabled="marketStatus.is_syncing"
+              class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-emerald-600 to-teal-600 hover:opacity-95 text-white shadow-lg shadow-emerald-600/25 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50">
+              <i class="fa-solid fa-arrows-rotate" :class="{'fa-spin': marketStatus.is_syncing}"></i>
+              <span>{{ marketStatus.is_syncing ? 'Đang đồng bộ...' : 'Sync Now' }}</span>
+            </button>
+
+            <label title="Nhập file JSON cục bộ để kiểm tra"
+              class="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold cursor-pointer">
+              <i class="fa-solid fa-file-import text-amber-400 mr-1"></i> Nhập JSON
+              <input type="file" accept=".json,application/json" class="hidden" @change="uploadLocalMarketJson">
+            </label>
+          </div>
+        </div>
+
+        <div v-if="marketConnectionNotice" class="p-3 rounded-xl border text-xs flex items-center justify-between gap-3"
+          :class="marketConnectionNotice.ok ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-200' : 'bg-amber-950/50 border-amber-500/40 text-amber-200'">
+          <span>{{ marketConnectionNotice.text }}</span>
+          <button @click="marketConnectionNotice = null" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+
+        <!-- 5 Market Intelligence Sub-tabs -->
+        <div class="flex flex-wrap items-center gap-2 pt-1">
+          <button @click="switchMarketSubTab('overview')"
+            :class="marketSubTab === 'overview' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">📊 Tổng quan</button>
+          <button @click="switchMarketSubTab('threads')"
+            :class="marketSubTab === 'threads' ? 'bg-indigo-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
+            🧵 Threads ({{ marketStatus.stats?.by_platform?.threads ?? 0 }})
+          </button>
+          <button @click="switchMarketSubTab('tiktok')"
+            :class="marketSubTab === 'tiktok' ? 'bg-cyan-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
+            🎵 TikTok ({{ marketStatus.stats?.by_platform?.tiktok ?? 0 }})
+          </button>
+          <button @click="switchMarketSubTab('shopee')"
+            :class="marketSubTab === 'shopee' ? 'bg-orange-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
+            🛒 Shopee ({{ marketStatus.stats?.by_platform?.shopee ?? 0 }})
+          </button>
+          <button @click="switchMarketSubTab('reports')"
+            :class="marketSubTab === 'reports' ? 'bg-amber-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">📋 Báo cáo</button>
+        </div>
+      </div>
+
+      <!-- SUB-TAB 1: TỔNG QUAN -->
+      <div v-show="marketSubTab === 'overview'" class="space-y-5">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="glass-panel rounded-2xl p-4 space-y-1.5">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Số bản ghi theo nền tảng</div>
+            <div class="text-2xl font-extrabold text-white font-mono">{{ marketStatus.stats?.total_items ?? 0 }}</div>
+            <div class="flex flex-wrap gap-1.5 text-[11px] font-bold">
+              <span class="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">Threads: {{ marketStatus.stats?.by_platform?.threads ?? 0 }}</span>
+              <span class="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">TikTok: {{ marketStatus.stats?.by_platform?.tiktok ?? 0 }}</span>
+              <span class="px-2 py-0.5 rounded bg-orange-500/15 text-orange-300 border border-orange-500/30">Shopee: {{ marketStatus.stats?.by_platform?.shopee ?? 0 }}</span>
+            </div>
+            <div class="text-[10px] text-slate-400">Từ {{ marketStatus.stats?.total_raw_files ?? 0 }} file Drive (tách riêng file strategy/audit/contract)</div>
+          </div>
+
+          <div class="glass-panel rounded-2xl p-4 space-y-1.5">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Chất lượng dữ liệu (Usable vs Cần xác minh)</div>
+            <div class="flex items-baseline gap-3">
+              <span class="text-xl font-extrabold text-emerald-300 font-mono">{{ marketStatus.stats?.by_quality?.usable ?? 0 }} <span class="text-xs font-normal">usable</span></span>
+              <span class="text-lg font-bold text-amber-300 font-mono">{{ marketStatus.stats?.by_quality?.needs_verification ?? 0 }} <span class="text-xs font-normal">needs_verif</span></span>
+            </div>
+            <div class="text-[11px] text-slate-400 font-mono">
+              T: {{ marketStatus.stats?.by_platform_quality?.threads?.usable ?? 0 }}/{{ marketStatus.stats?.by_platform_quality?.threads?.total ?? 0 }} |
+              TT: {{ marketStatus.stats?.by_platform_quality?.tiktok?.usable ?? 0 }}/{{ marketStatus.stats?.by_platform_quality?.tiktok?.total ?? 0 }} |
+              SP: {{ marketStatus.stats?.by_platform_quality?.shopee?.usable ?? 0 }}/{{ marketStatus.stats?.by_platform_quality?.shopee?.total ?? 0 }}
+            </div>
+            <div class="text-[10px] text-slate-500">Chưa gắn nhãn (cũ): {{ marketStatus.stats?.by_quality?.unlabeled ?? 0 }}</div>
+          </div>
+
+          <div class="glass-panel rounded-2xl p-4 space-y-1.5">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Tỷ lệ đầy đủ dữ liệu tương tác</div>
+            <div class="text-xs font-mono text-slate-200 space-y-0.5 pt-0.5">
+              <div>Likes: <strong class="text-pink-300">{{ marketStatus.stats?.engagement_completeness?.likes_pct ?? '—' }}%</strong> ({{ marketStatus.stats?.engagement_completeness?.with_likes ?? 0 }} bài)</div>
+              <div>Comments: <strong class="text-sky-300">{{ marketStatus.stats?.engagement_completeness?.comments_pct ?? '—' }}%</strong> ({{ marketStatus.stats?.engagement_completeness?.with_comments ?? 0 }} bài)</div>
+              <div>Views: <strong class="text-cyan-300">{{ marketStatus.stats?.engagement_completeness?.views_pct ?? '—' }}%</strong> ({{ marketStatus.stats?.engagement_completeness?.with_views ?? 0 }} bản ghi)</div>
+            </div>
+            <div class="text-[10px] text-slate-500">Thiếu = null (không quy đổi về 0)</div>
+          </div>
+
+          <div class="glass-panel rounded-2xl p-4 space-y-1.5">
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Cập nhật & Telegram Poller</div>
+            <div class="text-xs font-bold" :class="marketStatus.remote_poller?.running && marketStatus.remote_poller?.configured ? 'text-emerald-300' : 'text-amber-300'">
+              <i class="fa-brands fa-telegram text-sky-400 mr-1"></i>
+              {{ marketStatus.remote_poller?.running ? (marketStatus.remote_poller?.configured ? 'Online Polling (D1)' : 'Chờ Token') : 'Offline' }}
+            </div>
+            <div class="text-[11px] text-slate-300 font-mono truncate">{{ formatIsoTime(marketStatus.stats?.last_sync_at) || 'Chưa đồng bộ' }}</div>
+            <div class="text-[10px] text-slate-400">Token: {{ marketStatus.cloudflare?.token_masked || 'Chưa cấu hình' }}</div>
+          </div>
+        </div>
+
+        <!-- Top Cơ hội có bằng chứng (chỉ bản ghi đủ điều kiện) -->
+        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-3">
+          <div class="flex items-center justify-between gap-2 flex-wrap">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
+              <i class="fa-solid fa-bullseye"></i> Top Cơ Hội Có Bằng Chứng (Đã loại needs_verification & tên nền tảng)
+            </h3>
+            <button @click="switchMarketSubTab('reports')" class="text-xs text-indigo-300 hover:underline cursor-pointer">Xem báo cáo đầy đủ →</button>
+          </div>
+          <div v-if="(marketReport?.affiliate_opportunities || []).length" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+            <div v-for="(a, i) in (marketReport.affiliate_opportunities || []).slice(0, 6)" :key="'ov-aff-'+i"
+              class="p-3 rounded-xl bg-slate-900/75 border border-slate-800 space-y-1">
+              <div class="font-bold text-white line-clamp-1">{{ a.product || a.brand_or_topic }}</div>
+              <div class="flex items-center gap-1.5 text-[10px]">
+                <span v-if="a.purchase_intent" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">intent: {{ a.purchase_intent }}</span>
+                <span v-if="a.brand_or_topic" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">{{ a.brand_or_topic }}</span>
+              </div>
+              <p v-if="a.evidence_summary" class="text-[11px] text-slate-300 line-clamp-2">{{ a.evidence_summary }}</p>
+              <a v-if="(a.evidence_urls || []).length" :href="a.evidence_urls[0]" target="_blank" rel="noreferrer"
+                class="text-[10px] text-sky-400 hover:underline inline-block truncate max-w-full">🔗 {{ a.evidence_urls[0] }}</a>
+            </div>
+          </div>
+          <div v-else class="text-xs text-slate-400 italic py-2">Chưa có cơ hội đủ điều kiện từ dữ liệu hiện tại.</div>
+        </div>
+
+        <!-- Sync History & Crawl Center -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-3">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-2">
+              <i class="fa-solid fa-clock-rotate-left"></i> Lịch sử đồng bộ & Lệnh Telegram (D1)
+            </h3>
+            <div class="space-y-2 max-h-56 overflow-y-auto text-xs">
+              <div v-for="run in (marketStatus.recent_runs || [])" :key="run.run_id"
+                class="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="font-semibold text-slate-200">
+                    {{ run.trigger_source }} •
+                    <span :class="run.status === 'completed' ? 'text-emerald-400' : (run.status === 'failed' ? 'text-rose-400' : 'text-cyan-400')">{{ run.status }}</span>
+                  </div>
+                  <div class="text-[10px] text-slate-400 font-mono">{{ formatIsoTime(run.started_at) }}</div>
+                  <div v-if="run.error_message" class="text-[10px] text-rose-300 truncate">{{ run.error_message }}</div>
+                </div>
+                <div class="text-right font-mono text-[11px] text-slate-300 whitespace-nowrap">
+                  <div>+{{ run.records_inserted }} mới / ~{{ run.records_updated }} upd</div>
+                  <div class="text-[10px] text-slate-500">{{ run.files_downloaded }}/{{ run.files_checked }} files • {{ run.records_deduped }} bỏ qua</div>
+                </div>
+              </div>
+              <div v-if="!(marketStatus.recent_runs || []).length" class="text-slate-500 italic py-3 text-center">Chưa có lượt đồng bộ.</div>
+            </div>
+
+            <div v-if="(marketStatus.stats?.non_crawl_files || []).length" class="pt-2 border-t border-slate-800 space-y-1">
+              <div class="text-[10px] font-bold uppercase text-slate-400">File tài liệu hệ thống tách riêng (không nhập vào bản ghi crawl)</div>
+              <div class="flex flex-wrap gap-1.5 text-[10px]">
+                <span v-for="nf in marketStatus.stats.non_crawl_files" :key="nf.file_name"
+                  class="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 font-mono">
+                  {{ nf.file_name }} [{{ nf.file_role }}]
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-3">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                <i class="fa-solid fa-spider"></i> Crawl Center — Hàng Đợi D1
+              </h3>
+              <select v-model="crawlScheduleProfile" @change="updateCrawlScheduleProfile"
+                class="glass-input rounded-lg px-2.5 py-1 text-[11px] bg-slate-800 text-amber-300 font-semibold">
+                <option value="production_6h">Chu kỳ đề xuất Worker: Production (6h)</option>
+                <option value="test_5m">Chu kỳ đề xuất Worker: Test giới hạn (5p)</option>
+              </select>
+            </div>
+            <div class="text-[11px] text-slate-300 bg-slate-900/60 px-3 py-2 rounded-xl border border-slate-800 space-y-0.5">
+              <div>
+                Poll thực tế gần nhất từ Muse:
+                <strong class="font-mono text-emerald-300">{{ crawlScheduleInfo?.muse_last_poll_at ? formatIsoTime(crawlScheduleInfo.muse_last_poll_at) : 'Chưa ghi nhận lượt poll từ Muse' }}</strong>
+              </div>
+              <div class="text-[10px] text-slate-400">
+                <span v-if="crawlScheduleInfo?.expected_pickup_at">Dự kiến nhận kế tiếp (theo poll thật): {{ formatIsoTime(crawlScheduleInfo.expected_pickup_at) }}</span>
+                <span v-else>⚠️ Chưa có lịch Muse bật tự động — chỉ đổi cấu hình Worker không tự kích hoạt Muse.</span>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-12 gap-2">
+              <select v-model="crawlRequestForm.platform" class="sm:col-span-3 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                <option value="all">Tất cả (All)</option>
+                <option value="threads">Threads</option>
+                <option value="tiktok">TikTok</option>
+                <option value="shopee">Shopee</option>
+              </select>
+              <select v-model.number="crawlRequestForm.requested_count" class="sm:col-span-2 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                <option :value="20">20 bài</option>
+                <option :value="50">50 bài</option>
+                <option :value="100">100 bài</option>
+                <option :value="200">200 bài</option>
+              </select>
+              <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa / ngách sản phẩm..."
+                class="sm:col-span-5 glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
+              <button @click="submitCrawlRequest"
+                class="sm:col-span-2 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer">
+                Gửi Queue
+              </button>
+            </div>
+
+            <div class="space-y-2 max-h-48 overflow-y-auto text-xs pt-1">
+              <div v-for="crw in crawlRequests" :key="crw.id"
+                class="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 flex items-center justify-between gap-2">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
+                    <span class="font-mono text-[11px] text-slate-300">{{ crw.requested_count || 50 }} bài</span>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
+                      :class="crw.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' : (crw.status === 'running' ? 'bg-cyan-500/20 text-cyan-300' : (crw.status === 'queued' ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-800 text-slate-400'))">
+                      {{ crw.status === 'queued' ? 'Đang chờ Muse claim' : (crw.status === 'running' ? 'Muse đang crawl' : crw.status) }}
+                    </span>
+                    <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
+                  </div>
+                  <div class="text-[10px] text-slate-400 truncate mt-0.5">
+                    {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
+                  </div>
+                </div>
+                <button v-if="crw.status === 'queued'" @click="cancelCrawlRequest(crw.id)"
+                  class="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/30 text-[10px] font-semibold shrink-0 cursor-pointer">
+                  Hủy chờ
+                </button>
+              </div>
+              <div v-if="!crawlRequests.length" class="text-slate-500 italic py-4 text-center">
+                Chưa có yêu cầu Crawl nào trong hàng đợi D1.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUB-TAB 2: THREADS -->
+      <div v-show="marketSubTab === 'threads'" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
+          <div class="md:col-span-4 relative">
+            <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
+            <input v-model="marketFilters.search" @keyup.enter="loadMarketItems(0)" type="text"
+              placeholder="Tìm nội dung Threads, @tác giả, entities..."
+              class="w-full glass-input rounded-xl pl-8 pr-3 py-2 text-xs text-slate-100">
+          </div>
+          <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
+            class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="all">Mọi chất lượng</option>
+            <option value="usable">Chỉ usable</option>
+            <option value="needs_verification">Cần xác minh</option>
+          </select>
+          <select v-model="marketFilters.purchase_intent" @change="loadMarketItems(0)"
+            class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="all">Mọi Buyer Intent</option>
+            <option value="cao">cao</option>
+            <option value="trung_binh">trung_binh</option>
+            <option value="thap">thap</option>
+            <option value="khong_ro">khong_ro</option>
+          </select>
+          <select v-model="marketFilters.sort_by" @change="loadMarketItems(0)"
+            class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="engagement">Sắp xếp: Tương tác cao nhất</option>
+            <option value="intent">Sắp xếp: Ý định mua cao nhất</option>
+            <option value="recent">Sắp xếp: Mới nhất / Corrected</option>
+          </select>
+          <button @click="loadMarketItems(0)" class="md:col-span-1 py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">Lọc</button>
+        </div>
+
+        <div class="overflow-x-auto rounded-xl border border-slate-800">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-900/90 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800">
+              <tr>
+                <th class="px-3 py-3">Tác giả & Bucket</th>
+                <th class="px-3 py-3">Tóm tắt tiếng Việt & URL gốc</th>
+                <th class="px-3 py-3">Buyer Intent & Quality</th>
+                <th class="px-3 py-3">Hook / Insight / Content Angle</th>
+                <th class="px-3 py-3">Tương tác</th>
+                <th class="px-3 py-3 text-right">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/70 text-slate-200">
+              <tr v-if="!marketItems.length">
+                <td colspan="6" class="px-4 py-10 text-center text-slate-500">Không có bản ghi Threads khớp bộ lọc.</td>
+              </tr>
+              <tr v-for="item in marketItems" :key="item.id" class="hover:bg-slate-900/60">
+                <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
+                  <div class="font-bold text-indigo-200">{{ item.author_handle || '—' }}</div>
+                  <div class="text-[10px] text-slate-400">Loại: {{ item.extra_meta?.author_type || '—' }}</div>
+                  <div v-if="item.extra_meta?.crawl_bucket" class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    {{ item.extra_meta.crawl_bucket }}
+                  </div>
+                  <div v-if="item.is_corrected" class="text-[10px] text-emerald-300 font-semibold">✓ corrected_v2</div>
+                </td>
+                <td class="px-3 py-3 align-top max-w-md space-y-1">
+                  <p class="text-slate-100 leading-relaxed">{{ item.summary_vi || item.text_content || '—' }}</p>
+                  <div v-if="item.url" class="text-[10px]">
+                    <a :href="item.url" target="_blank" rel="noreferrer" class="text-sky-400 hover:underline break-all">🔗 {{ item.url }}</a>
+                  </div>
+                  <div v-if="(item.extra_meta?.entities_mentioned || []).length" class="flex flex-wrap gap-1">
+                    <span v-for="ent in item.extra_meta.entities_mentioned.slice(0, 4)" :key="ent"
+                      class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">{{ ent }}</span>
+                  </div>
+                </td>
+                <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
+                  <div>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] border"
+                      :class="item.purchase_intent === 'cao' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : (item.purchase_intent === 'trung_binh' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800 text-slate-300 border-slate-700')">
+                      intent: {{ item.purchase_intent || 'null' }}
+                    </span>
+                  </div>
+                  <div>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] border"
+                      :class="item.data_quality === 'usable' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : (item.data_quality === 'needs_verification' ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-slate-800 text-slate-400 border-slate-700')">
+                      {{ item.data_quality || 'legacy' }}
+                    </span>
+                  </div>
+                  <div class="text-[10px] text-slate-400">{{ item.content_group || '—' }}</div>
+                </td>
+                <td class="px-3 py-3 align-top max-w-sm text-[11px] space-y-1">
+                  <div v-if="item.extra_meta?.hook_analysis?.hook"><strong class="text-amber-300">Hook:</strong> {{ item.extra_meta.hook_analysis.hook }}</div>
+                  <div v-if="item.extra_meta?.hook_analysis?.insight"><strong class="text-cyan-300">Insight:</strong> {{ item.extra_meta.hook_analysis.insight }}</div>
+                  <div v-if="item.extra_meta?.hook_analysis?.content_angle"><strong class="text-emerald-300">Angle:</strong> {{ item.extra_meta.hook_analysis.content_angle }}</div>
+                  <div v-if="!item.extra_meta?.hook_analysis" class="text-slate-500 italic">—</div>
+                </td>
+                <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap">
+                  <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count : '—' }}</div>
+                  <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count : '—' }}</div>
+                </td>
+                <td class="px-3 py-3 align-top text-right whitespace-nowrap space-x-1">
+                  <button @click="openMarketRawModal(item.id)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] cursor-pointer">Raw</button>
+                  <button @click="useMarketItemInStudio(item)" class="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer">Nạp Studio</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>Hiển thị {{ marketItems.length }} / {{ marketTotal }} bản ghi Threads</span>
+          <div class="flex gap-2">
+            <button @click="loadMarketItems(Math.max(0, marketOffset - marketLimit))" :disabled="marketOffset === 0" class="px-3 py-1 rounded-lg bg-slate-800 disabled:opacity-40 cursor-pointer">Trước</button>
+            <button @click="loadMarketItems(marketOffset + marketLimit)" :disabled="marketOffset + marketLimit >= marketTotal" class="px-3 py-1 rounded-lg bg-slate-800 disabled:opacity-40 cursor-pointer">Sau</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUB-TAB 3: TIKTOK -->
+      <div v-show="marketSubTab === 'tiktok'" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
+          <div class="md:col-span-5 relative">
+            <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
+            <input v-model="marketFilters.search" @keyup.enter="loadMarketItems(0)" type="text"
+              placeholder="Tìm tài khoản TikTok, caption, hashtag..."
+              class="w-full glass-input rounded-xl pl-8 pr-3 py-2 text-xs text-slate-100">
+          </div>
+          <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
+            class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="all">Mọi chất lượng</option>
+            <option value="usable">Chỉ usable</option>
+            <option value="needs_verification">Cần xác minh (needs_verification)</option>
+          </select>
+          <select v-model="marketFilters.sort_by" @change="loadMarketItems(0)"
+            class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="views">Sắp xếp: Views cao nhất</option>
+            <option value="engagement">Sắp xếp: Tổng tương tác</option>
+            <option value="recent">Sắp xếp: Mới nhất</option>
+          </select>
+          <button @click="loadMarketItems(0)" class="md:col-span-1 py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer">Lọc</button>
+        </div>
+
+        <div class="overflow-x-auto rounded-xl border border-slate-800">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-900/90 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800">
+              <tr>
+                <th class="px-3 py-3">Tài khoản & Nguồn</th>
+                <th class="px-3 py-3">URL Video, Caption & Hashtag</th>
+                <th class="px-3 py-3">Views / Likes / Comments / Shares</th>
+                <th class="px-3 py-3">Affiliate Relevance & Hook</th>
+                <th class="px-3 py-3">Chất lượng</th>
+                <th class="px-3 py-3 text-right">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/70 text-slate-200">
+              <tr v-if="!marketItems.length">
+                <td colspan="6" class="px-4 py-10 text-center text-slate-500">Không có bản ghi TikTok khớp bộ lọc.</td>
+              </tr>
+              <tr v-for="item in marketItems" :key="item.id" class="hover:bg-slate-900/60">
+                <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
+                  <div class="font-bold text-cyan-200">{{ item.author_handle || '—' }}</div>
+                  <div>
+                    <span class="px-2 py-0.5 rounded text-[10px] font-semibold border"
+                      :class="item.extra_meta?.source_type === 'official_creative_center' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-amber-500/15 text-amber-300 border-amber-500/30'">
+                      {{ item.extra_meta?.source_type === 'official_creative_center' ? 'Chính thức' : 'Bên thứ ba (' + (item.extra_meta?.source_type || 'N/A') + ')' }}
+                    </span>
+                  </div>
+                  <div class="text-[10px] font-mono text-slate-400">ID: {{ item.item_id || 'null' }}</div>
+                </td>
+                <td class="px-3 py-3 align-top max-w-md space-y-1">
+                  <p class="text-slate-100">{{ item.summary_vi || item.text_content || '—' }}</p>
+                  <div class="text-[11px] text-slate-400">Caption: {{ item.extra_meta?.caption || '— (nguồn chưa cung cấp)' }}</div>
+                  <div v-if="(item.extra_meta?.hashtags || []).length" class="flex flex-wrap gap-1">
+                    <span v-for="ht in item.extra_meta.hashtags" :key="ht" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-cyan-300">{{ ht }}</span>
+                  </div>
+                  <div v-if="item.url" class="text-[10px] space-y-0.5">
+                    <a :href="item.url" target="_blank" rel="noreferrer" class="text-sky-400 hover:underline break-all">🔗 {{ item.url }}</a>
+                    <div v-if="item.extra_meta?.url_status && item.extra_meta.url_status !== 'da_kiem_chung'"
+                      class="inline-block px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      ⚠️ URL chưa xác minh ({{ item.extra_meta.url_status }})
+                    </div>
+                  </div>
+                  <div v-else class="text-[10px] text-amber-300">⚠️ URL chưa xác minh (không có video_url)</div>
+                </td>
+                <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
+                  <div>👁️ Views: <strong class="text-cyan-300">{{ formatCompactMetric(item.views_count) }}</strong></div>
+                  <div>❤️ Likes: {{ formatCompactMetric(item.likes_count) }}</div>
+                  <div>💬 Comments: {{ formatCompactMetric(item.comments_count) }}</div>
+                  <div>🔁 Shares: {{ formatCompactMetric(item.shares_count) }}</div>
+                </td>
+                <td class="px-3 py-3 align-top max-w-xs text-[11px] space-y-1">
+                  <div>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] border"
+                      :class="(item.extra_meta?.affiliate_relevance === 'cao' || item.extra_meta?.affiliate_relevance === 'trung_binh') ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-slate-800 text-slate-400 border-slate-700'">
+                      Affiliate: {{ item.extra_meta?.affiliate_relevance || '—' }}
+                    </span>
+                  </div>
+                  <div v-if="item.extra_meta?.affiliate_reason" class="text-slate-300 text-[10px]">{{ item.extra_meta.affiliate_reason }}</div>
+                  <div v-if="item.extra_meta?.hook_analysis?.hook" class="text-amber-300 text-[10px]">Hook: {{ item.extra_meta.hook_analysis.hook }}</div>
+                  <div v-if="item.extra_meta?.hook_analysis?.structure" class="text-indigo-300 text-[10px]">Angle/Cấu trúc: {{ item.extra_meta.hook_analysis.structure }}</div>
+                </td>
+                <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
+                  <span class="px-2 py-0.5 rounded-full text-[10px] border"
+                    :class="item.data_quality === 'usable' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-rose-500/20 text-rose-300 border-rose-500/40'">
+                    {{ item.data_quality || 'legacy' }}
+                  </span>
+                </td>
+                <td class="px-3 py-3 align-top text-right whitespace-nowrap space-x-1">
+                  <button @click="openMarketRawModal(item.id)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] cursor-pointer">Raw</button>
+                  <button @click="useMarketItemInStudio(item)" class="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer">Nạp Studio</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SUB-TAB 4: SHOPEE -->
+      <div v-show="marketSubTab === 'shopee'" class="space-y-4">
+        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+          <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
+            <div class="md:col-span-5 relative">
+              <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
+              <input v-model="marketFilters.search" @keyup.enter="loadMarketItems(0)" type="text"
+                placeholder="Tìm tên sản phẩm Shopee, shop_id, item_id..."
+                class="w-full glass-input rounded-xl pl-8 pr-3 py-2 text-xs text-slate-100">
+            </div>
+            <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
+              class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+              <option value="all">Mọi chất lượng</option>
+              <option value="usable">Chỉ usable</option>
+              <option value="needs_verification">Cần xác minh (needs_verification)</option>
+            </select>
+            <label class="md:col-span-3 flex items-center gap-2 text-xs text-slate-300 px-2 cursor-pointer">
+              <input type="checkbox" v-model="shopeeAffiliateOnly" @change="loadMarketItems(0)" class="rounded">
+              <span>Chỉ sản phẩm đủ điều kiện Affiliate</span>
+            </label>
+            <button @click="loadMarketItems(0)" class="md:col-span-1 py-2 px-3 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-semibold cursor-pointer">Lọc</button>
+          </div>
+
+          <div class="overflow-x-auto rounded-xl border border-slate-800">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-900/90 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800">
+                <tr>
+                  <th class="px-3 py-3">Sản phẩm & ID</th>
+                  <th class="px-3 py-3">Giá gốc / Giá ưu đãi / Trạng thái</th>
+                  <th class="px-3 py-3">Lượt bán & Đánh giá</th>
+                  <th class="px-3 py-3">Trạng thái Deal & Khung giờ</th>
+                  <th class="px-3 py-3">Affiliate & Quality</th>
+                  <th class="px-3 py-3 text-right">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-800/70 text-slate-200">
+                <tr v-if="!marketItems.length">
+                  <td colspan="6" class="px-4 py-10 text-center text-slate-500">Không có sản phẩm Shopee khớp điều kiện (chưa có sản phẩm nào đủ điều kiện Affiliate).</td>
+                </tr>
+                <tr v-for="item in marketItems" :key="item.id" class="hover:bg-slate-900/60">
+                  <td class="px-3 py-3 align-top max-w-md space-y-1">
+                    <div class="font-bold text-white">{{ item.title || '—' }}</div>
+                    <p class="text-[11px] text-slate-300">{{ item.summary_vi || item.text_content || '—' }}</p>
+                    <div class="text-[10px] font-mono text-slate-400">shop_id: {{ item.shop_id || 'null' }} • item_id: {{ item.item_id || 'null' }}</div>
+                    <div v-if="item.url" class="text-[10px]"><a :href="item.url" target="_blank" rel="noreferrer" class="text-sky-400 hover:underline">🔗 Link sản phẩm</a></div>
+                    <div v-else class="text-[10px] text-amber-300">Chưa có link sản phẩm trực tiếp <span v-if="item.extra_meta?.evidence_url">(<a :href="item.extra_meta.evidence_url" target="_blank" rel="noreferrer" class="text-sky-400 hover:underline">trang nguồn</a>)</span></div>
+                  </td>
+                  <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
+                    <div>Giá gốc: {{ (item.extra_meta?.original_price ?? item.extra_meta?.price_original) ?? '—' }}</div>
+                    <div>Giá ưu đãi: <strong class="text-orange-300">{{ item.price !== null && item.price !== undefined ? item.price : '—' }}</strong></div>
+                    <div class="text-[10px] text-slate-400">Trạng thái giá: {{ item.extra_meta?.price_status || '—' }}</div>
+                  </td>
+                  <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
+                    <div>Đã bán: {{ item.sold_count !== null && item.sold_count !== undefined ? item.sold_count : '—' }}</div>
+                    <div>Đánh giá: {{ item.rating !== null && item.rating !== undefined ? item.rating : '—' }}</div>
+                    <div v-if="item.extra_meta?.selection_signal" class="text-[10px] text-emerald-300">Tín hiệu: {{ item.extra_meta.selection_signal }}</div>
+                  </td>
+                  <td class="px-3 py-3 align-top text-[11px] whitespace-nowrap space-y-1">
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold border"
+                      :class="item.extra_meta?.deal_status === 'sap_dien_ra' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-amber-500/20 text-amber-300 border-amber-500/40'">
+                      {{ item.extra_meta?.deal_status === 'sap_dien_ra' ? 'Sắp diễn ra' : (item.extra_meta?.deal_status === 'dang_dien_ra' ? 'Đang diễn ra' : '—') }}
+                    </span>
+                    <div class="text-[10px] font-mono text-slate-400">Bắt đầu: {{ formatIsoTime(item.extra_meta?.frame_start_at) || '—' }}</div>
+                    <div class="text-[10px] font-mono text-slate-400">Kết thúc: {{ formatIsoTime(item.extra_meta?.frame_end_at) || '—' }}</div>
+                  </td>
+                  <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
+                    <div v-if="item.extra_meta?.affiliate_eligible === true && item.data_quality !== 'needs_verification'"
+                      class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold">✅ Đủ điều kiện Affiliate</div>
+                    <div v-else class="px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px]">
+                      ⛔ Chưa đủ điều kiện Affiliate
+                    </div>
+                    <div class="text-[10px] text-slate-400">{{ item.data_quality || 'legacy' }}</div>
+                  </td>
+                  <td class="px-3 py-3 align-top text-right whitespace-nowrap space-x-1">
+                    <button @click="openMarketRawModal(item.id)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] cursor-pointer">Raw</button>
+                    <button @click="useMarketItemInStudio(item)" class="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer">Nạp Studio</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Upcoming Vouchers Panel -->
+        <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-2">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-orange-400 flex items-center gap-2">
+            <i class="fa-solid fa-ticket"></i> Upcoming Vouchers (Shopee)
+          </h3>
+          <div v-if="(marketStatus.stats?.upcoming_vouchers || []).length" class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+            <div v-for="(v, i) in marketStatus.stats.upcoming_vouchers" :key="'uv-'+i"
+              class="p-3 rounded-xl bg-slate-900/75 border border-slate-800 space-y-0.5">
+              <div class="font-bold text-orange-300">{{ v.code_or_name }}</div>
+              <div class="text-slate-300">{{ v.conditions }}</div>
+              <div class="text-[10px] text-slate-400 font-mono">{{ v.valid_from }} → {{ v.valid_to }}</div>
+            </div>
+          </div>
+          <div v-else class="text-xs text-slate-400 italic">
+            Chưa có voucher sắp tung trong dữ liệu Shopee hiện tại (trang công khai chưa cung cấp — chờ phiên đăng nhập Shopee).
+          </div>
+        </div>
+      </div>
+
+      <!-- SUB-TAB 5: BÁO CÁO -->
+      <div v-show="marketSubTab === 'reports'" class="glass-panel rounded-2xl p-6 shadow-xl space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3.5">
+          <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2 flex-wrap">
+              <i class="fa-solid fa-file-chart-column"></i>
+              <span>{{ marketReport?.latest_muse_report?.title || marketReport?.title || 'Báo Cáo Phân Tích Thị Trường' }}</span>
+              <span v-if="marketReport?.is_corrected || marketReport?.latest_muse_report?.is_corrected"
+                class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">CORRECTED V2</span>
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">
+              {{ marketReport?.source_label || 'Ưu tiên báo cáo Muse corrected mới nhất' }}
+              <span v-if="marketReport?.technical_status || marketReport?.data_quality_status">
+                • Kỹ thuật: <strong class="text-cyan-300">{{ marketReport.technical_status || '—' }}</strong>
+                • Chất lượng dữ liệu: <strong class="text-amber-300">{{ marketReport.data_quality_status || '—' }}</strong>
+              </span>
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <select v-model="marketReportPlatform" @change="loadMarketReport"
+              class="glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200">
+              <option value="all">Tất cả nguồn</option>
+              <option value="threads">Threads</option>
+              <option value="tiktok">TikTok</option>
+              <option value="shopee">Shopee</option>
+            </select>
+            <button @click="loadMarketReport" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold cursor-pointer">Làm mới</button>
+            <button @click="downloadMarketReportJson" v-if="marketReport" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer">
+              <i class="fa-solid fa-download mr-1"></i> Tải JSON
+            </button>
+          </div>
+        </div>
+
+        <div v-if="marketReport?.telegram_summary" class="p-4 rounded-xl bg-indigo-950/35 border border-indigo-500/30 text-xs text-slate-100 whitespace-pre-line leading-relaxed">
+          {{ marketReport.telegram_summary }}
+        </div>
+
+        <div v-if="marketReport && Object.keys(marketReport.platform_results || {}).length" class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+          <div v-for="(pr, pKey) in marketReport.platform_results" :key="'pr-'+pKey"
+            class="p-3.5 rounded-xl bg-slate-900/75 border border-slate-800 space-y-1.5">
+            <div class="flex items-center justify-between font-bold uppercase text-white">
+              <span>{{ pKey }}</span>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-emerald-300">{{ pr.business_usable_records ?? 0 }}/{{ pr.records ?? 0 }} usable</span>
+            </div>
+            <div class="text-[11px] text-slate-400">Kỹ thuật: {{ pr.technical_status || pr.status }} • Chất lượng: {{ pr.data_quality_status || '—' }}</div>
+            <ul v-if="(pr.remaining_issues || []).length" class="text-[10px] text-amber-300 list-disc pl-4 space-y-0.5">
+              <li v-for="(iss, idx) in pr.remaining_issues.slice(0, 3)" :key="'ri-'+idx">{{ iss }}</li>
+            </ul>
+          </div>
+        </div>
+
+        <div v-if="marketReport" class="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
+          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
+            <div class="font-bold text-amber-300 uppercase text-[11px]">1. Xu hướng nổi bật</div>
+            <ul class="space-y-1.5 text-slate-200" v-if="(marketReport.trending_highlights || []).length">
+              <li v-for="(t, i) in marketReport.trending_highlights.slice(0, 5)" :key="'tr-'+i">• {{ t.title || t }}</li>
+            </ul>
+            <div v-else class="text-slate-500 italic">Chưa có xu hướng nổi bật từ dữ liệu hiện tại.</div>
+          </div>
+
+          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
+            <div class="font-bold text-rose-300 uppercase text-[11px]">2. Nhu cầu & Vấn đề người tiêu dùng</div>
+            <ul class="space-y-1.5 text-slate-200" v-if="(marketReport.consumer_needs_problems || []).length">
+              <li v-for="(n, i) in marketReport.consumer_needs_problems.slice(0, 5)" :key="'nd-'+i">
+                • {{ n.title || n }}
+                <a v-if="(n.evidence_urls || []).length" :href="n.evidence_urls[0]" target="_blank" rel="noreferrer" class="ml-1 text-[10px] text-sky-400 hover:underline">[link]</a>
+              </li>
+            </ul>
+            <div v-else class="text-slate-500 italic">Chưa phát hiện nhóm vấn đề/phàn nàn nổi bật.</div>
+          </div>
+
+          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
+            <div class="font-bold text-emerald-300 uppercase text-[11px]">3. Sản phẩm Affiliate đủ điều kiện & Bằng chứng</div>
+            <div class="space-y-2" v-if="(marketReport.affiliate_opportunities || []).length">
+              <div v-for="(a, i) in marketReport.affiliate_opportunities.slice(0, 4)" :key="'af-'+i"
+                class="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80 space-y-1">
+                <div class="font-semibold text-white">{{ a.product || a.brand_or_topic }}</div>
+                <div v-if="a.evidence_summary" class="text-[11px] text-slate-400 line-clamp-2">{{ a.evidence_summary }}</div>
+                <a v-if="(a.evidence_urls || []).length" :href="a.evidence_urls[0]" target="_blank" rel="noreferrer" class="text-[10px] text-sky-400 hover:underline">{{ a.evidence_urls[0] }}</a>
+              </div>
+            </div>
+            <div v-else class="text-slate-500 italic">Chưa có sản phẩm Affiliate đủ điều kiện.</div>
+          </div>
+
+          <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
+            <div class="space-y-1.5">
+              <div class="font-bold text-indigo-300 uppercase text-[11px]">4. Gợi ý Text Content & Short Video</div>
+              <div v-for="(txt, i) in (marketReport.content_suggestions?.text_posts || []).slice(0, 2)" :key="'tp-'+i"
+                class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-950/50 border border-slate-800">
+                <span class="text-slate-200 line-clamp-2">✍️ {{ txt }}</span>
+                <button @click="topicInput = txt; currentTab = 'studio';" class="px-2 py-1 rounded bg-indigo-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo bài</button>
+              </div>
+              <div v-for="(vid, i) in (marketReport.content_suggestions?.short_videos || []).slice(0, 2)" :key="'sv-'+i"
+                class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-950/50 border border-slate-800">
+                <span class="text-slate-200 line-clamp-2">🎬 {{ vid }}</span>
+                <button @click="topicInput = vid; currentTab = 'studio';" class="px-2 py-1 rounded bg-pink-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo Video</button>
+              </div>
+            </div>
+            <div class="pt-2 border-t border-slate-800 space-y-1">
+              <div class="font-bold text-cyan-300 uppercase text-[11px]">5. Link nguồn tiêu biểu</div>
+              <div class="flex flex-wrap gap-2">
+                <a v-for="(lnk, i) in (marketReport.source_links || []).slice(0, 6)" :key="'sl-'+i"
+                  :href="lnk.url" target="_blank" rel="noreferrer"
+                  class="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700">
+                  {{ lnk.platform || 'src' }}:{{ lnk.post_id || (i+1) }} ↗
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Modal Raw JSON Market Item -->
+    <div v-if="selectedMarketDetail" :style="{ display: selectedMarketDetail ? 'flex' : 'none' }" style="display: none;"
+      class="fixed inset-0 bg-black/85 backdrop-blur-md items-center justify-center z-50 p-4">
+      <div class="glass-panel max-w-4xl w-full rounded-2xl p-6 shadow-2xl border border-indigo-500/40 space-y-4 max-h-[90vh] flex flex-col">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div>
+            <h3 class="text-sm font-bold text-white">Chi tiết bản ghi: {{ selectedMarketDetail.dedup_key }}</h3>
+            <p class="text-xs text-slate-400">File gốc: {{ selectedMarketDetail.source_file_name }} • Schema: {{ selectedMarketDetail.schema_version }}</p>
+          </div>
+          <button @click="selectedMarketDetail = null" class="text-slate-400 hover:text-white p-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 overflow-y-auto flex-1">
+          <div>
+            <div class="text-xs font-bold text-emerald-400 mb-1.5">Dữ liệu đã chuẩn hóa</div>
+            <pre class="bg-black/70 p-3 rounded-xl text-[11px] font-mono text-slate-200 overflow-auto max-h-[55vh] border border-slate-800">{{ JSON.stringify(selectedMarketDetail, null, 2) }}</pre>
+          </div>
+          <div>
+            <div class="text-xs font-bold text-amber-400 mb-1.5">Dữ liệu gốc (Raw JSON)</div>
+            <pre class="bg-black/70 p-3 rounded-xl text-[11px] font-mono text-slate-300 overflow-auto max-h-[55vh] border border-slate-800">{{ JSON.stringify(selectedMarketDetail.raw_payload, null, 2) }}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Modal Chọn Avatar Người Thật Trực Quan -->
     <div v-if="showAvatarModal" :style="{ display: showAvatarModal ? 'flex' : 'none' }" style="display: none;"
       class="fixed inset-0 bg-black/85 backdrop-blur-md items-center justify-center z-50 p-4">
@@ -2371,7 +3161,25 @@ HTML_TEMPLATE = """
           directorConfig: null,
           latestVideoUrl: '',
           latestCaption: '',
-          pollTimer: null
+          pollTimer: null,
+          marketStatus: { is_syncing: false, stats: {}, cloudflare: {}, remote_poller: {}, filter_options: {}, recent_runs: [] },
+          marketItems: [],
+          marketTotal: 0,
+          marketOffset: 0,
+          marketLimit: 25,
+          marketConfigInterval: 300,
+          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', sort_by: 'recent', search: '' },
+          marketSubTab: 'overview',
+          shopeeAffiliateOnly: false,
+          selectedMarketDetail: null,
+          isTestingConnection: false,
+          marketConnectionNotice: null,
+          crawlRequestForm: { platform: 'all', requested_count: 50, keywords: '' },
+          crawlRequests: [],
+          crawlScheduleProfile: 'production_6h',
+          crawlScheduleInfo: null,
+          marketReport: null,
+          marketReportPlatform: 'all'
         }
       },
       computed: {
@@ -2393,6 +3201,7 @@ HTML_TEMPLATE = """
         this.loadDailyTrendingTopics(false);
         this.loadDirectorConfig();
         this.loadAvatarGallery();
+        this.loadMarketDashboard();
         this.startStatusPolling();
       },
       beforeUnmount() {
@@ -2432,6 +3241,7 @@ HTML_TEMPLATE = """
           }
         },
         startStatusPolling() {
+          let marketTick = 0;
           this.pollTimer = setInterval(async () => {
             try {
               const res = await fetch('/api/pipeline_status');
@@ -2445,6 +3255,17 @@ HTML_TEMPLATE = """
                 this.previewMode = 'video';
               }
             } catch(e) {}
+
+            marketTick += 1;
+            if ((this.currentTab === 'market' || this.marketStatus.is_syncing) && marketTick % 5 === 0) {
+              const prevTotal = this.marketStatus.stats?.total_items || 0;
+              const wasSyncing = Boolean(this.marketStatus.is_syncing);
+              await this.loadMarketStatus();
+              const newTotal = this.marketStatus.stats?.total_items || 0;
+              if (newTotal !== prevTotal || (wasSyncing && !this.marketStatus.is_syncing)) {
+                this.loadMarketItems(this.marketOffset);
+              }
+            }
           }, 800);
         },
         setPlatform(plat) {
@@ -2995,6 +3816,240 @@ HTML_TEMPLATE = """
           if (!this.latestCaption) return;
           navigator.clipboard.writeText(this.latestCaption);
           this.notify('📋 Đã sao chép caption vào bộ nhớ tạm!', 'success');
+        },
+        formatIsoTime(val) {
+          if (!val) return '';
+          try {
+            const d = new Date(val);
+            if (Number.isNaN(d.getTime())) return String(val);
+            return d.toLocaleString('vi-VN');
+          } catch (e) {
+            return String(val);
+          }
+        },
+        async loadMarketDashboard() {
+          await Promise.all([
+            this.loadMarketStatus(),
+            this.loadMarketItems(this.marketOffset),
+            this.loadMarketReport(),
+            this.loadCrawlRequests()
+          ]);
+        },
+        async loadMarketReport() {
+          try {
+            const res = await fetch('/api/market/report?platform=' + encodeURIComponent(this.marketReportPlatform || 'all'));
+            const data = await res.json();
+            if (data.report) this.marketReport = data.report;
+          } catch (e) {}
+        },
+        downloadMarketReportJson() {
+          if (!this.marketReport) return;
+          const blob = new Blob([JSON.stringify(this.marketReport, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `market_report_${this.marketReportPlatform || 'all'}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+        },
+        async loadCrawlRequests() {
+          try {
+            const res = await fetch('/api/remote/crawl_requests');
+            const data = await res.json();
+            if (data.ok) {
+              this.crawlRequests = data.items || [];
+              if (data.schedule) {
+                this.crawlScheduleInfo = data.schedule;
+                this.crawlScheduleProfile = data.schedule.poll_profile || 'production_6h';
+              }
+            }
+          } catch (e) {}
+        },
+        async loadMarketStatus() {
+          try {
+            const res = await fetch('/api/market/status');
+            const data = await res.json();
+            this.marketStatus = data;
+            if (data.stats?.sync_interval_seconds) {
+              this.marketConfigInterval = data.stats.sync_interval_seconds;
+            }
+          } catch (e) {}
+        },
+        formatCompactMetric(val) {
+          if (val === null || val === undefined) return '—';
+          const num = Number(val);
+          if (!Number.isFinite(num)) return String(val);
+          if (num >= 1000000) return (num / 1000000).toFixed(1).replace(/\\.0$/, '') + 'M (' + num.toLocaleString('vi-VN') + ')';
+          return num.toLocaleString('vi-VN');
+        },
+        switchMarketSubTab(subTab) {
+          this.marketSubTab = subTab;
+          if (subTab === 'threads' || subTab === 'tiktok' || subTab === 'shopee') {
+            this.marketFilters.platform = subTab;
+            this.marketFilters.sort_by = subTab === 'tiktok' ? 'views' : (subTab === 'threads' ? 'engagement' : 'recent');
+            this.loadMarketItems(0);
+          } else if (subTab === 'reports') {
+            this.loadMarketReport();
+          } else {
+            this.marketFilters.platform = 'all';
+            this.loadMarketDashboard();
+          }
+        },
+        async loadMarketItems(offset = 0) {
+          this.marketOffset = Math.max(0, offset);
+          try {
+            const qs = new URLSearchParams({
+              platform: this.marketFilters.platform || 'all',
+              content_group: this.marketFilters.content_group || 'all',
+              purchase_intent: this.marketFilters.purchase_intent || 'all',
+              data_quality: this.marketFilters.data_quality || 'all',
+              sort_by: this.marketFilters.sort_by || 'recent',
+              affiliate_only: (this.marketSubTab === 'shopee' && this.shopeeAffiliateOnly) ? '1' : '0',
+              search: this.marketFilters.search || '',
+              limit: String(this.marketLimit),
+              offset: String(this.marketOffset),
+            });
+            const res = await fetch('/api/market/items?' + qs.toString());
+            const data = await res.json();
+            this.marketItems = data.items || [];
+            this.marketTotal = data.total || 0;
+          } catch (e) {}
+        },
+        async triggerMarketSyncNow() {
+          try {
+            const res = await fetch('/api/market/sync', { method: 'POST' });
+            const data = await res.json();
+            this.notify(data.started ? '🔄 Đã bắt đầu đồng bộ nền...' : (data.message || 'Đang đồng bộ'), 'success');
+            this.loadMarketStatus();
+            setTimeout(() => this.loadMarketDashboard(), 1200);
+          } catch (e) {
+            this.notify('Lỗi kích hoạt sync: ' + e, 'error');
+          }
+        },
+        async testMarketConnection() {
+          this.isTestingConnection = true;
+          try {
+            const res = await fetch('/api/market/test_connection', { method: 'POST' });
+            const data = await res.json();
+            this.marketConnectionNotice = {
+              ok: Boolean(data.connected),
+              text: data.connected
+                ? `✅ Kết nối Cloudflare Worker OK (DB: ${data.health?.db_ok}, Drive: ${data.health?.drive_ok})`
+                : `⚠️ ${data.error || 'Không thể kết nối Cloudflare Worker'}`
+            };
+          } catch (e) {
+            this.marketConnectionNotice = { ok: false, text: 'Lỗi kiểm tra kết nối: ' + e };
+          } finally {
+            this.isTestingConnection = false;
+          }
+        },
+        async updateMarketConfig() {
+          try {
+            const res = await fetch('/api/market/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sync_interval_seconds: this.marketConfigInterval })
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.notify(`⏱️ Đã cập nhật chu kỳ đồng bộ nền: ${data.sync_interval_seconds}s`, 'success');
+            }
+          } catch (e) {}
+        },
+        async openMarketRawModal(itemId) {
+          try {
+            const res = await fetch('/api/market/items/' + encodeURIComponent(itemId));
+            const data = await res.json();
+            if (data.item) this.selectedMarketDetail = data.item;
+          } catch (e) {}
+        },
+        useMarketItemInStudio(item) {
+          const isUnverified = item.data_quality === 'needs_verification' ||
+            (item.extra_meta && item.extra_meta.affiliate_eligible === false) ||
+            (item.extra_meta && item.extra_meta.url_status && item.extra_meta.url_status !== 'da_kiem_chung');
+          if (isUnverified) {
+            const ok = confirm('⚠️ Dữ liệu này đang ở trạng thái needs_verification / chưa đủ bằng chứng xác minh.\nBạn vẫn muốn nạp vào Studio để biên tập thủ công?');
+            if (!ok) return;
+          }
+          const text = item.summary_vi || item.title || item.text_content || '';
+          if (text) {
+            this.topicInput = text.slice(0, 220);
+            this.currentTab = 'studio';
+            this.notify(isUnverified ? '⚠️ Đã nạp dữ liệu chưa xác minh vào Studio (cần kiểm chứng lại).' : '🎬 Đã nạp dữ liệu Market Intelligence vào Studio!', isUnverified ? 'warning' : 'success');
+          }
+        },
+        async uploadLocalMarketJson(e) {
+          const file = e.target.files[0];
+          if (!file) return;
+          const form = new FormData();
+          form.append('file', file);
+          try {
+            const res = await fetch('/api/market/import_local', { method: 'POST', body: form });
+            const data = await res.json();
+            if (data.success) {
+              this.notify(`✅ Đã nạp ${data.result.inserted} mới / ${data.result.deduped} trùng từ ${file.name}`, 'success');
+              this.loadMarketDashboard();
+            } else {
+              this.notify('Lỗi nhập JSON: ' + data.error, 'error');
+            }
+          } catch (err) {
+            this.notify('Lỗi tải file JSON: ' + err, 'error');
+          }
+        },
+        async submitCrawlRequest() {
+          try {
+            const res = await fetch('/api/remote/crawl_requests', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ...this.crawlRequestForm,
+                poll_profile: this.crawlScheduleProfile
+              })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              this.notify(
+                data.deduplicated
+                  ? 'ℹ️ Đã có yêu cầu crawl tương tự đang chờ trong hàng đợi D1.'
+                  : '📝 Đã gửi yêu cầu vào Crawl Queue D1 (đang chờ Muse claim).',
+                'success'
+              );
+              this.crawlRequestForm.keywords = '';
+              this.loadCrawlRequests();
+            } else {
+              this.notify(data.error || 'Không thể tạo Crawl Queue (kiểm tra kết nối Cloudflare).', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi gửi Crawl Queue: ' + e, 'error');
+          }
+        },
+        async cancelCrawlRequest(crawlId) {
+          try {
+            const res = await fetch('/api/remote/crawl_requests/' + encodeURIComponent(crawlId) + '/cancel', { method: 'POST' });
+            const data = await res.json();
+            if (data.ok) {
+              this.notify('🚫 Đã hủy yêu cầu đang chờ: ' + crawlId, 'success');
+              this.loadCrawlRequests();
+            } else {
+              this.notify(data.error || 'Không thể hủy yêu cầu.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi hủy yêu cầu: ' + e, 'error');
+          }
+        },
+        async updateCrawlScheduleProfile() {
+          try {
+            const res = await fetch('/api/remote/crawl_schedule', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ poll_profile: this.crawlScheduleProfile })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              this.crawlScheduleInfo = data;
+              this.notify('ℹ️ Đã lưu cấu hình chu kỳ đề xuất trên Worker (chờ xác nhận khi Muse poll thật).', 'info');
+            }
+          } catch (e) {}
         }
       }
     }).mount('#app');
@@ -3931,11 +4986,201 @@ def api_open_folder():
         return jsonify({"success": False, "error": str(e)})
 
 
+# ─── MARKET INTELLIGENCE & TELEGRAM REMOTE CONTROL API ───────────────────────
+
+
+@app.route("/api/market/status", methods=["GET"])
+def api_market_status():
+    rt = get_market_runtime()
+    store = rt["store"]
+    return jsonify({
+        "is_syncing": rt["sync_service"].is_syncing,
+        "stats": store.get_stats(),
+        "filter_options": store.get_filter_options(),
+        "recent_runs": store.list_sync_runs(limit=15),
+        "cloudflare": rt["client"].get_public_config_summary(),
+        "remote_poller": rt["remote_poller"].get_status(),
+    })
+
+
+@app.route("/api/market/test_connection", methods=["POST"])
+def api_market_test_connection():
+    rt = get_market_runtime()
+    return jsonify(rt["client"].check_connection())
+
+
+@app.route("/api/market/sync", methods=["POST"])
+def api_market_sync():
+    rt = get_market_runtime()
+    wait = request.args.get("wait", "0") == "1"
+    if wait:
+        res = rt["sync_service"].sync_now(trigger_source="manual_ui")
+        return jsonify({"success": res.get("status") == "completed", "result": res})
+    res = rt["sync_service"].trigger_async_sync(trigger_source="manual_ui")
+    return jsonify({"success": True, **res})
+
+
+@app.route("/api/market/config", methods=["GET", "POST"])
+def api_market_config():
+    rt = get_market_runtime()
+    if request.method == "POST":
+        data = request.json or {}
+        sec = data.get("sync_interval_seconds")
+        updated = rt["sync_service"].get_interval_seconds()
+        if sec is not None:
+            updated = rt["sync_service"].set_interval_seconds(int(sec))
+        return jsonify({"success": True, "sync_interval_seconds": updated})
+    return jsonify({
+        "sync_interval_seconds": rt["sync_service"].get_interval_seconds(),
+        "cloudflare": rt["client"].get_public_config_summary(),
+    })
+
+
+@app.route("/api/market/items", methods=["GET"])
+def api_market_items():
+    rt = get_market_runtime()
+    platform = request.args.get("platform", "all")
+    content_group = request.args.get("content_group", "all")
+    purchase_intent = request.args.get("purchase_intent", "all")
+    data_quality = request.args.get("data_quality", "all")
+    sort_by = request.args.get("sort_by", "recent")
+    affiliate_only = request.args.get("affiliate_only", "0") in ("1", "true", "True")
+    search = request.args.get("search", "")
+    try:
+        limit = int(request.args.get("limit", "25"))
+    except ValueError:
+        limit = 25
+    try:
+        offset = int(request.args.get("offset", "0"))
+    except ValueError:
+        offset = 0
+    return jsonify(
+        rt["store"].query_items(
+            platform=platform,
+            content_group=content_group,
+            purchase_intent=purchase_intent,
+            data_quality=data_quality,
+            search=search,
+            sort_by=sort_by,
+            affiliate_only=affiliate_only,
+            limit=limit,
+            offset=offset,
+        )
+    )
+
+
+@app.route("/api/market/items/<item_id>", methods=["GET"])
+def api_market_item_detail(item_id):
+    rt = get_market_runtime()
+    detail = rt["store"].get_item_detail(item_id)
+    if not detail:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"item": detail})
+
+
+@app.route("/api/market/files", methods=["GET"])
+def api_market_files():
+    rt = get_market_runtime()
+    return jsonify({"files": rt["store"].list_raw_files(limit=50)})
+
+
+@app.route("/api/market/runs", methods=["GET"])
+def api_market_runs():
+    rt = get_market_runtime()
+    return jsonify({"runs": rt["store"].list_sync_runs(limit=30)})
+
+
+@app.route("/api/market/import_local", methods=["POST"])
+def api_market_import_local():
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "Missing file"}), 400
+    f = request.files["file"]
+    if not f or not f.filename:
+        return jsonify({"success": False, "error": "Empty filename"}), 400
+    raw_bytes = f.read()
+    rt = get_market_runtime()
+    try:
+        res = rt["store"].ingest_raw_file(
+            file_id=f"local_{f.filename}",
+            file_name=f.filename,
+            raw_bytes=raw_bytes,
+            folder_path="local_upload",
+        )
+        return jsonify({"success": True, "result": res})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route("/api/remote/status", methods=["GET"])
+def api_remote_status():
+    rt = get_market_runtime()
+    return jsonify(rt["remote_poller"].get_status())
+
+
+@app.route("/api/market/report", methods=["GET"])
+def api_market_report():
+    rt = get_market_runtime()
+    platform = request.args.get("platform", "all")
+    report = rt["store"].build_evidence_report(platform=platform)
+    saved = rt["store"].list_reports(limit=10)
+    return jsonify({"report": report, "saved_reports": saved})
+
+
+@app.route("/api/remote/crawl_requests", methods=["GET", "POST"])
+def api_remote_crawl_requests():
+    rt = get_market_runtime()
+    if not rt["client"].is_configured():
+        return jsonify({"ok": False, "error": "Thiếu CLOUDFLARE_APP_TOKEN"}), 503
+    try:
+        if request.method == "POST":
+            body = request.json or {}
+            return jsonify(
+                rt["client"].create_crawl_request(
+                    platform=str(body.get("platform", "")).lower().strip(),
+                    keywords=str(body.get("keywords", "")).strip(),
+                    requested_count=int(body.get("requested_count") or 50),
+                    poll_profile=body.get("poll_profile"),
+                    dedup_token=body.get("dedup_token"),
+                    options=body.get("options") if isinstance(body.get("options"), dict) else {},
+                )
+            )
+        return jsonify(rt["client"].list_crawl_requests())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/api/remote/crawl_requests/<crawl_id>/cancel", methods=["POST"])
+def api_remote_crawl_cancel(crawl_id):
+    rt = get_market_runtime()
+    if not rt["client"].is_configured():
+        return jsonify({"ok": False, "error": "Thiếu CLOUDFLARE_APP_TOKEN"}), 503
+    try:
+        return jsonify(rt["client"].cancel_crawl_request(crawl_id))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/api/remote/crawl_schedule", methods=["POST"])
+def api_remote_crawl_schedule():
+    rt = get_market_runtime()
+    if not rt["client"].is_configured():
+        return jsonify({"ok": False, "error": "Thiếu CLOUDFLARE_APP_TOKEN"}), 503
+    try:
+        body = request.json or {}
+        return jsonify(rt["client"].set_crawl_schedule(str(body.get("poll_profile", "production_6h"))))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
 def start_studio(port=5000, auto_open=True):
     print("\n" + "╔" + "═" * 58 + "╗")
     print("║     🎬 THREADS VIDEO AUTOMATION STUDIO 2.0 (AI DIRECTOR)  ║")
     print("╚" + "═" * 58 + "╝")
     print(f"👉 Studio đang mở tại: http://localhost:{port}")
+    if os.environ.get("APP_VIDEO_DISABLE_BG_WORKERS", "0") != "1":
+        rt = get_market_runtime()
+        rt["sync_service"].start(sync_on_startup=True)
+        rt["remote_poller"].start()
     if auto_open:
         threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{port}")).start()
     app.run(host="0.0.0.0", port=port, debug=False)

@@ -1,0 +1,163 @@
+{
+  "run_id": "threads-crawl-test-20261126-1012",
+  "started_at": "2026-11-26T10:12:45+07:00",
+  "ended_at": "2026-11-26T10:15:20+07:00",
+  "status": "completed",
+  "record_count": 10,
+  "duplicates_skipped": 2,
+  "source": "social.search platform=threads",
+  "notes": "Thu muc Drive Threads (1jJ0ihxv_LtpZFlkAeBO_BLysLZ9XwcE8) trong truoc luot chay; chi baseline threads_poc_001_sanitized.json (36 bai) duoc dung de chong trung. 2 bai trung baseline bi loai: DgKoO8QjrzA (@shopee_vn), DgKJTvgmNOs (@cindyle.659). Trong luot chay khong co trung lap noi bo (98 bai duy nhat tu 2 luot tim kiem). Chon 10 bai moi nhat co Language=vi trong so 21 bai tieng Viet moi. Tat ca content_summary la ban tom tat do cong cu tra ve, khong phai nguyen van. Khong ghi so luong nguoi theo doi cua tac gia hay du lieu ca nhan khong can thiet.",
+  "posts": [
+    {
+      "post_id": "DgL-xQVE7PS",
+      "post_url": "https://www.threads.com/@senlenaaa/post/DgL-xQVE7PS",
+      "author_handle": "@senlenaaa",
+      "posted_at": "2026-11-26T01:59:27Z",
+      "posted_at_local": "2026-11-26T08:59:27+07:00",
+      "content_summary": "This Instagram carousel is a commercial post advertising fresh-cut 'Tuyết Mai lá đỏ' (red-leaf snow plum) branches for sale. Slides 0-4 show still photos of large bundles of the plant with mixed green and deep-red foliage and tiny white blossoms, displayed outdoors in front of a turquoise metal gate with cardboard boxes and other wrapped flowers nearby. A person's hand with dark nail polish repeatedly appears to hold up individual stems to highlight the leaf color and buds. Slide 5 is a short handheld video panning over the bundles while the seller speaks in Vietnamese, noting the batch is very thick with many buds, that the red color will become more intense over time, and promoting the item as beautiful and ready to sell. The caption states the price is 69k per set of 5-7 large branches, provides a phone number (0867198716), and lists the location as Chợ đêm Phú Hà. The overall tone is promotional and informational, aimed at flower buyers. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [
+        "bundle of red-leaf snow plum branches",
+        "Chợ đêm Phú Hà"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgL2-SpE5Ts",
+      "post_url": "https://www.threads.com/@rabbit.921050/post/DgL2-SpE5Ts",
+      "author_handle": "@rabbit.921050",
+      "posted_at": "2026-11-26T00:51:19Z",
+      "posted_at_local": "2026-11-26T07:51:19+07:00",
+      "content_summary": "The author posted a text-only message consisting of a shortened Shopee shopping link followed by Vietnamese text inviting readers to claim a voucher code valued at 100. The post functions as a simple promotional share with no additional commentary, storytelling, or personal context provided. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgK6_OmD4xe",
+      "post_url": "https://www.threads.com/@to919to/post/DgK6_OmD4xe",
+      "author_handle": "@to919to",
+      "posted_at": "2026-11-25T16:07:10Z",
+      "posted_at_local": "2026-11-25T23:07:10+07:00",
+      "content_summary": "The image is a clean product photograph of a 1-liter (33.8 oz) bottle of Vaseline Total Moisture bodywash with a white pump dispenser against a plain white background. The label displays the blue Vaseline logo, the words 'total moisture bodywash,' the claim 'For clean and nourished skin' in English and French, and an illustration of yellow oil droplets over a honeycomb pattern. The accompanying Threads post text is in Vietnamese, advertising the American Vaseline shower gel for 185,000 VND per bottle plus shipping, and provides a Zalo contact number (0337353545). The overall tone is straightforward commercial promotion with no people, actions, or narrative beyond product display. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [
+        "Vaseline total moisture bodywash"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgKgl5WkyEC",
+      "post_url": "https://www.threads.com/@khnh.lnh18_/post/DgKgl5WkyEC",
+      "author_handle": "@khnh.lnh18_",
+      "posted_at": "2026-11-25T12:16:30Z",
+      "posted_at_local": "2026-11-25T19:16:30+07:00",
+      "content_summary": "This is a two-slide Instagram/Threads carousel used for product listing. Slide 0 shows the front of a red and white Lotus Biscoff 250g package featuring the brand name, logo, and an image of a single biscuit. Slide 1 shows the back of the same package with details in English: ingredients (wheat flour, sugar, vegetable oils, soya flour, cinnamon, etc.), allergen warning (contains wheat, gluten and soy), and nutrition information per serving (151 Cal, 5.9g fat, 22.5g carbohydrate, 11.8g sugars). The accompanying caption in Vietnamese states 'Biscoff bản 250g (32 cái) 130/gói ạ', indicating the product variant and price. The overall tone is purely commercial and informational, with no people, actions, or narrative beyond presenting the packaged food item. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [
+        "Lotus Biscoff biscuits"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgKeQVyEk9Q",
+      "post_url": "https://www.threads.com/@lyngoanly/post/DgKeQVyEk9Q",
+      "author_handle": "@lyngoanly",
+      "posted_at": "2026-11-25T11:56:05Z",
+      "posted_at_local": "2026-11-25T18:56:05+07:00",
+      "content_summary": "The carousel is a simple commercial post showing inventory of sweet potatoes at night. Slide 0 displays multiple large clear plastic bags stacked on the ground, some containing lighter brown tubers in the foreground and darker ones behind, with a motorized cart and orange tarp visible in the background and two water bottles on the dirt floor. Slide 1 provides a closer view of two open bags revealing purple-skinned sweet potatoes inside. The caption states pricing: 'Honey sweet potato. 430k per bag. 20 kg. Japanese sweet potato. 470k per bag 24-25 kg.' The overall tone is neutral and transactional, documenting produce available for purchase with no additional narrative, people prominently featured, or editorial commentary. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [
+        "sweet potato bags"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgKdnyQD3EB",
+      "post_url": "https://www.threads.com/@sapbebong123/post/DgKdnyQD3EB",
+      "author_handle": "@sapbebong123",
+      "posted_at": "2026-11-25T11:50:33Z",
+      "posted_at_local": "2026-11-25T18:50:33+07:00",
+      "content_summary": "The carousel is a straightforward product showcase for pink waxflowers posted by a Vietnamese seller. Slide 0 shows a person partially obscured behind a large bouquet, wearing a white top and dark glove. Slide 1 displays multiple wrapped bouquets packed together, with blue packaging tape visible. Slides 2, 3, and 4 show hands holding single bouquets against different backgrounds—a dark slatted door, a sunlit wall with leaf shadows, and an outdoor paved surface. The accompanying caption advertises the flowers as beautiful, long-lasting, and priced at 115k VND per bunch, 110k VND from two bunches, and 65k VND for half a bunch, using enthusiastic informal language. The overall tone is commercial and aesthetic, focused on highlighting the color and freshness of the blooms. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [
+        "pink waxflower bouquet"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgKa2Usn32R",
+      "post_url": "https://www.threads.com/@ngocj.trinh/post/DgKa2Usn32R",
+      "author_handle": "@ngocj.trinh",
+      "posted_at": "2026-11-25T11:26:19Z",
+      "posted_at_local": "2026-11-25T18:26:19+07:00",
+      "content_summary": "The image shows nine retail boxes of Moyuum brand 'Silicone Coating Glass Bottle' baby bottles laid out on a dark marbled surface in two rows. The top row contains four 150ml / 5oz boxes, and the bottom row contains five 240ml / 8oz boxes. Each box displays the product image — a glass bottle with a silicone sleeve and cap, available in solid colors (mint green and white/gray) and with a smiley-face pattern. Text on the packaging includes English ('Silicone Coating Glass Bottle') and Korean. An accompanying caption lists prices in Vietnamese dong for plain versus patterned versions at both sizes. The post appears in the 'Mom Threads' community, indicating it is a product listing or sale post for infant feeding supplies. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [
+        "silicone coating glass baby bottle"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgKYcJkkljm",
+      "post_url": "https://www.threads.com/@ynhu28091/post/DgKYcJkkljm",
+      "author_handle": "@ynhu28091",
+      "posted_at": "2026-11-25T11:05:16Z",
+      "posted_at_local": "2026-11-25T18:05:16+07:00",
+      "content_summary": "The image is a screenshot of a mobile shopping app checkout interface in Vietnamese. At the top it states delivery will arrive tomorrow from 8:00 AM with 'Freeship'. The cart item is 'Bánh xếp nhân hải sản Bibigo gói 175g' (Bibigo seafood-filled dumplings, 175g package) priced at 106,500₫ (marked down from 213,000₫), with quantity set to 6 and unit price shown as 17,750₫ per package. Below, the breakdown lists 'Tiền hàng' (merchandise cost) 106,500₫, 'Phí giao' (delivery fee) Freeship, and an option for coupons/VIP points (14 available). The 'Tổng thanh toán' (total payment) is 106,500₫, with green text noting 'Đã tiết kiệm: 106,500₫' (saved 106,500₫). The overall tone is neutral and transactional, showing a routine online grocery purchase. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": 1,
+      "entities_mentioned": [
+        "Bibigo seafood mandu dumplings 175g"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgKL0KOk5qQ",
+      "post_url": "https://www.threads.com/@thanhthuy1978vnn/post/DgKL0KOk5qQ",
+      "author_handle": "@thanhthuy1978vnn",
+      "posted_at": "2026-11-25T09:14:57Z",
+      "posted_at_local": "2026-11-25T16:14:57+07:00",
+      "content_summary": "The image shows a close-up of a person's left hand holding a red and white carton of Meiji CP-meiji 4.3 Deluxe Milk. The carton features branding including 'meiji', 'CP-meiji', Japanese text, 'Rich & Creamy', 'Made from 100% Fresh Milk', 'No.1 Best Selling Pasteurized Milk in Japan', and 'Pasteurized'. The background shows an open cardboard shipping box containing multiple identical milk cartons with red caps. The accompanying Threads caption states 'meiji đỏ date 12/12. Giá 60k/hộp' (red Meiji, expiry 12/12, price 60k per box), indicating this is a product listing or sales post within the Food Threads community. The overall tone is commercial and informational, with no narrative conflict or sensitive content. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": null,
+      "comment_count": null,
+      "entities_mentioned": [
+        "pasteurized milk carton"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    },
+    {
+      "post_id": "DgKHUKmGI1l",
+      "post_url": "https://www.threads.com/@mahchip_filmm/post/DgKHUKmGI1l",
+      "author_handle": "@mahchip_filmm",
+      "posted_at": "2026-11-25T08:35:38Z",
+      "posted_at_local": "2026-11-25T15:35:38+07:00",
+      "content_summary": "The image is a top-down photograph of photographic film products arranged on a light-colored marble countertop. Visible items include a three-pack box of Kodak Gold 200 film, a single box of Kodak ColorPlus 200 film, a small box of Yes!Star 400 film, and a translucent plastic film canister containing a roll. White text overlays reading \"mahchip_filmm\" appear at the top and center of the image as a watermark. The accompanying Threads post caption, in Vietnamese, advertises a \"HOT DEAL TODAY\" for Kodak Gold 200 priced at 250-245k, stating it is only available that day. The overall tone is commercial and informational, presenting film stock for sale without any depicted people, actions, or controversial content. [Bản tóm tắt do công cụ social.search trả về, không phải nguyên văn bài viết.]",
+      "likes": 2,
+      "comment_count": 1,
+      "entities_mentioned": [
+        "35mm color print film",
+        "35mm color negative film",
+        "35mm film canister"
+      ],
+      "language": "vi",
+      "source_query": "social.search platform=threads"
+    }
+  ]
+}

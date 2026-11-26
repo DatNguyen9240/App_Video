@@ -1,0 +1,15 @@
+name = "app-video-scheduler"
+main = "worker.v2.js"
+compatibility_date = "2026-11-26"
+
+[vars]
+GOOGLE_DRIVE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g"
+MUSE_POLL_PROFILE = "test_5m"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "app-video-db"
+database_id = "068b71d1-5afd-4863-b709-af6de973fde0"
+
+[triggers]
+crons = ["*/5 * * * *"]

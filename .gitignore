@@ -3,6 +3,20 @@
 *.env
 server/.env
 !.env.example
+*.pem
+*.key
+*credentials*.json
+*service_account*.json
+
+# Cloudflare Wrangler local cache & backups (NEVER commit)
+.wrangler/
+cloudflare-worker/backups/
+cloudflare-worker/cloudflare-worker/
+*.backup.*
+*.db
+*.sqlite
+*.sqlite3
+*.log
 
 # Video nền nặng (GitHub chặn file > 100MB, file gameplay thường hàng GB)
 assets/backgrounds/**/*.mp4
@@ -33,6 +47,10 @@ assets/documentary/**/*.mp4
 output/*
 !output/.gitkeep
 !output/**/.gitkeep
+
+# Local Market Intelligence runtime data (SQLite + downloaded Drive raw JSONs)
+data/
+
 
 # Scratch & Temporary test files
 scratch/
