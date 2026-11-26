@@ -204,6 +204,10 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("market_reports", "business_usable_records", "INTEGER")
         self._add_column_if_missing("market_reports", "source_priority", "INTEGER NOT NULL DEFAULT 1")
 
+        self._add_column_if_missing("remote_command_log", "attempt", "INTEGER")
+        self._add_column_if_missing("remote_command_log", "claimed_by", "TEXT")
+        self._add_column_if_missing("remote_command_log", "lease_expires_at", "TEXT")
+
         self._conn.commit()
 
     def _cleanup_orphaned_running_syncs(self):
@@ -611,7 +615,7 @@ class MarketIntelligenceStore:
 
         if file_role not in ("data_contract", "crawl_strategy", "quality_audit") and has_muse_report_sections(raw_obj):
             try:
-                norm_report = normalize_muse_report(raw_obj, file_name=file_name)
+                norm_report = normalize_muse_report(raw_obj, file_name=file_name, modified_time=modified_time)
                 self.save_report(norm_report, raw_file_id=file_id, raw_payload=raw_obj)
             except Exception:
                 pass
@@ -1037,16 +1041,28 @@ class MarketIntelligenceStore:
             ).fetchone()
             return dict(row) if row else None
 
-    def mark_command_running(self, command_id: str, command_type: str):
+    def mark_command_running(
+        self,
+        command_id: str,
+        command_type: str,
+        *,
+        attempt: Optional[int] = None,
+        claimed_by: Optional[str] = None,
+        lease_expires_at: Optional[str] = None,
+    ):
         now_iso = _utc_now_iso()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO remote_command_log (command_id, command_type, status, claimed_at, pending_ack)
-                VALUES (?, ?, 'running', ?, 0)
-                ON CONFLICT(command_id) DO UPDATE SET status = 'running'
+                INSERT INTO remote_command_log (command_id, command_type, status, claimed_at, pending_ack, attempt, claimed_by, lease_expires_at)
+                VALUES (?, ?, 'running', ?, 0, ?, ?, ?)
+                ON CONFLICT(command_id) DO UPDATE SET
+                    status = 'running',
+                    attempt = COALESCE(excluded.attempt, remote_command_log.attempt),
+                    claimed_by = COALESCE(excluded.claimed_by, remote_command_log.claimed_by),
+                    lease_expires_at = COALESCE(excluded.lease_expires_at, remote_command_log.lease_expires_at)
                 """,
-                (command_id, command_type, now_iso),
+                (command_id, command_type, now_iso, attempt, claimed_by, lease_expires_at),
             )
             self._conn.commit()
 
@@ -1058,6 +1074,10 @@ class MarketIntelligenceStore:
         result: Optional[Dict[str, Any]] = None,
         error_message: Optional[str] = None,
         acked: bool = False,
+        *,
+        attempt: Optional[int] = None,
+        claimed_by: Optional[str] = None,
+        lease_expires_at: Optional[str] = None,
     ):
         now_iso = _utc_now_iso()
         res_json = json.dumps(result or {}, ensure_ascii=False)
@@ -1065,15 +1085,18 @@ class MarketIntelligenceStore:
             self._conn.execute(
                 """
                 INSERT INTO remote_command_log
-                (command_id, command_type, status, result_json, error_message, pending_ack, claimed_at, completed_at, acked_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (command_id, command_type, status, result_json, error_message, pending_ack, claimed_at, completed_at, acked_at, attempt, claimed_by, lease_expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(command_id) DO UPDATE SET
                     status = excluded.status,
                     result_json = excluded.result_json,
                     error_message = excluded.error_message,
                     pending_ack = excluded.pending_ack,
                     completed_at = excluded.completed_at,
-                    acked_at = excluded.acked_at
+                    acked_at = excluded.acked_at,
+                    attempt = COALESCE(excluded.attempt, remote_command_log.attempt),
+                    claimed_by = COALESCE(excluded.claimed_by, remote_command_log.claimed_by),
+                    lease_expires_at = COALESCE(excluded.lease_expires_at, remote_command_log.lease_expires_at)
                 """,
                 (
                     command_id,
@@ -1085,6 +1108,9 @@ class MarketIntelligenceStore:
                     now_iso,
                     now_iso,
                     now_iso if acked else None,
+                    attempt,
+                    claimed_by,
+                    lease_expires_at,
                 ),
             )
             self._conn.commit()
@@ -1095,6 +1121,20 @@ class MarketIntelligenceStore:
             self._conn.execute(
                 "UPDATE remote_command_log SET pending_ack = 0, acked_at = ? WHERE command_id = ?",
                 (now_iso, command_id),
+            )
+            self._conn.commit()
+
+    def mark_command_superseded(self, command_id: str, reason: Optional[str] = None):
+        now_iso = _utc_now_iso()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE remote_command_log
+                SET pending_ack = 0, status = 'superseded', acked_at = ?,
+                    error_message = COALESCE(?, error_message)
+                WHERE command_id = ?
+                """,
+                (now_iso, reason, command_id),
             )
             self._conn.commit()
 
@@ -1192,29 +1232,80 @@ class MarketIntelligenceStore:
             self._conn.commit()
         return report_key
 
+    @staticmethod
+    def _parse_iso_ts(val: Optional[str]) -> float:
+        if not val:
+            return 0.0
+        try:
+            s = str(val).strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            return datetime.fromisoformat(s).timestamp()
+        except Exception:
+            return 0.0
+
     def list_reports(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return reports ordered by newest run first, preferring corrected only within the same run/request."""
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id, report_key, source_type, title, platform, raw_file_id, report_json,
-                       generated_at, updated_at, is_corrected, corrects_report, request_id, run_id,
-                       technical_status, data_quality_status, business_usable_records, source_priority
-                FROM market_reports
-                ORDER BY source_priority DESC, is_corrected DESC, updated_at DESC
-                LIMIT ?
-                """,
-                (max(1, min(int(limit), 100)),),
+                SELECT mr.id, mr.report_key, mr.source_type, mr.title, mr.platform, mr.raw_file_id, mr.report_json,
+                       mr.generated_at, mr.updated_at, mr.is_corrected, mr.corrects_report, mr.request_id, mr.run_id,
+                       mr.technical_status, mr.data_quality_status, mr.business_usable_records, mr.source_priority,
+                       r.modified_time AS raw_modified_time
+                FROM market_reports mr
+                LEFT JOIN raw_drive_files r ON mr.raw_file_id = r.file_id
+                ORDER BY COALESCE(mr.generated_at, r.modified_time, mr.updated_at) DESC, mr.updated_at DESC
+                LIMIT 100
+                """
             ).fetchall()
-            out = []
-            for r in rows:
-                d = dict(r)
-                d["is_corrected"] = bool(d.get("is_corrected"))
-                try:
-                    d["report"] = json.loads(d.pop("report_json") or "{}")
-                except Exception:
-                    d["report"] = {}
-                out.append(d)
-            return out
+
+        out: List[Dict[str, Any]] = []
+        file_name_to_group: Dict[str, str] = {}
+        for r in rows:
+            d = dict(r)
+            d["is_corrected"] = bool(d.get("is_corrected"))
+            try:
+                d["report"] = json.loads(d.pop("report_json") or "{}")
+            except Exception:
+                d["report"] = {}
+            fname = str((d["report"] or {}).get("file_name") or "").strip().lower()
+            grp = str(d.get("request_id") or d.get("run_id") or d.get("report_key"))
+            if fname:
+                file_name_to_group[fname] = grp
+            d["_group_key"] = grp
+            d["_item_ts"] = max(
+                self._parse_iso_ts(d.get("generated_at")),
+                self._parse_iso_ts(d.get("raw_modified_time")),
+                self._parse_iso_ts(d.get("updated_at")),
+            )
+            out.append(d)
+
+        # Resolve corrects_report linkage into the same run group
+        for d in out:
+            corr_target = str(d.get("corrects_report") or "").strip().lower()
+            if corr_target and corr_target in file_name_to_group:
+                d["_group_key"] = file_name_to_group[corr_target]
+
+        group_latest_ts: Dict[str, float] = {}
+        for d in out:
+            gk = d["_group_key"]
+            group_latest_ts[gk] = max(group_latest_ts.get(gk, 0.0), d["_item_ts"])
+
+        out.sort(
+            key=lambda d: (
+                group_latest_ts.get(d["_group_key"], 0.0),
+                int(d.get("source_priority") or 1),
+                1 if d.get("is_corrected") else 0,
+                d["_item_ts"],
+            ),
+            reverse=True,
+        )
+        for d in out:
+            d.pop("_group_key", None)
+            d.pop("_item_ts", None)
+            d.pop("raw_modified_time", None)
+        return out[: max(1, min(int(limit), 100))]
 
     def build_evidence_report(self, platform: str = "all") -> Dict[str, Any]:
         """

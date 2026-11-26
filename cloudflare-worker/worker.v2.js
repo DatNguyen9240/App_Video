@@ -330,22 +330,33 @@ async function listFolderChildren(token, folderId, pageToken = null, pageSize = 
     return driveGetJson(token, `files?${params}`);
 }
 
-async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso = null, limit = 50) {
+async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso = null, limit = 50, pageToken = null) {
     const results = [];
     let frontier = [{ id: rootMarketFolderId, relPath: "", depth: 0 }];
     const maxDepth = 3;
+    const cursorMs = cursorIso ? Date.parse(cursorIso) : null;
 
-    while (frontier.length > 0 && results.length < 250) {
+    let tokMs = null;
+    let tokFileId = "";
+    if (pageToken && String(pageToken).includes("|")) {
+        const sepIdx = String(pageToken).lastIndexOf("|");
+        const rawTs = String(pageToken).slice(0, sepIdx);
+        tokFileId = String(pageToken).slice(sepIdx + 1);
+        const parsedTs = Date.parse(rawTs);
+        if (Number.isFinite(parsedTs)) tokMs = parsedTs;
+    }
+
+    while (frontier.length > 0) {
         const nextFrontier = [];
         const levelData = await Promise.all(
             frontier.map(async current => {
                 const items = [];
-                let pageToken = null;
+                let drivePageToken = null;
                 do {
-                    const data = await listFolderChildren(token, current.id, pageToken, 100);
+                    const data = await listFolderChildren(token, current.id, drivePageToken, 100);
                     items.push(...(data.files || []));
-                    pageToken = data.nextPageToken || null;
-                } while (pageToken);
+                    drivePageToken = data.nextPageToken || null;
+                } while (drivePageToken);
                 return { current, items };
             })
         );
@@ -363,7 +374,10 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
                     (f.name && f.name.toLowerCase().endsWith(".json")) ||
                     f.mimeType === "application/json";
                 if (!isJson) continue;
-                if (cursorIso && f.modifiedTime && Date.parse(f.modifiedTime) < Date.parse(cursorIso)) continue;
+                const itemMs = f.modifiedTime ? (Date.parse(f.modifiedTime) || 0) : 0;
+                // Inclusive >= on cursorMs ensures multiple files sharing cursor timestamp are never dropped
+                if (cursorMs !== null && Number.isFinite(cursorMs) && itemMs > 0 && itemMs < cursorMs) continue;
+                if (tokMs !== null && (itemMs < tokMs || (itemMs === tokMs && String(f.id) <= tokFileId))) continue;
                 results.push({
                     file_id: f.id,
                     name: f.name,
@@ -380,15 +394,31 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
         frontier = nextFrontier;
     }
 
-    results.sort((a, b) => (Date.parse(a.modified_time || 0) || 0) - (Date.parse(b.modified_time || 0) || 0));
-    const sliced = results.slice(0, Math.min(Math.max(Number(limit) || 50, 1), 100));
-    const nextCursor = sliced.length > 0 ? sliced[sliced.length - 1].modified_time : cursorIso;
-    return { files: sliced, total_matched: results.length, next_cursor: nextCursor };
+    // Deterministic composite keyset order: (modified_time ASC, file_id ASC)
+    results.sort((a, b) => {
+        const diff = (Date.parse(a.modified_time || 0) || 0) - (Date.parse(b.modified_time || 0) || 0);
+        if (diff !== 0) return diff;
+        return a.file_id < b.file_id ? -1 : (a.file_id > b.file_id ? 1 : 0);
+    });
+    const effLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+    const sliced = results.slice(0, effLimit);
+    const hasMore = results.length > effLimit;
+    const last = sliced.length > 0 ? sliced[sliced.length - 1] : null;
+    const nextCursor = last ? last.modified_time : cursorIso;
+    const nextPageToken = (hasMore && last) ? `${last.modified_time || "1970-01-01T00:00:00Z"}|${last.file_id}` : null;
+    return { files: sliced, total_matched: results.length, has_more: hasMore, next_page_token: nextPageToken, next_cursor: nextCursor };
 }
 
 function isNonReportDocName(fileName) {
     const low = String(fileName || "").toLowerCase();
     return low.includes("data_contract") || low.includes("strategy") || low.includes("audit");
+}
+
+function getReportStem(fileName) {
+    return String(fileName || "")
+        .toLowerCase()
+        .replace(/\.json$/i, "")
+        .replace(/_corrected(_v\d+)?$/i, "");
 }
 
 async function resolveReportsFolderId(token, env) {
@@ -407,27 +437,30 @@ async function resolveReportsFolderId(token, env) {
     return marketFolderId;
 }
 
-async function getLatestMuseReportFromDrive(env, targetRunOrRequestId = null) {
+async function listValidMuseReportsOnDrive(env) {
     const token = await getDriveToken(env);
     const reportsFolderId = await resolveReportsFolderId(token, env);
-    const listing = await listFolderChildren(token, reportsFolderId, null, 50);
-    const jsonReports = (listing.files || []).filter(f => {
-        const low = String(f.name || "").toLowerCase();
-        if (!low.endsWith(".json")) return false;
-        if (isNonReportDocName(low)) return false;
-        return low.startsWith("market_report") || low.includes("report");
-    });
-    if (!jsonReports.length) return { reportsFolderId, file: null, data: null };
+    const allReportFiles = [];
+    let pageToken = null;
+    do {
+        const listing = await listFolderChildren(token, reportsFolderId, pageToken, 100);
+        for (const f of (listing.files || [])) {
+            const low = String(f.name || "").toLowerCase();
+            if (!low.endsWith(".json")) continue;
+            if (isNonReportDocName(low)) continue;
+            if (low.startsWith("market_report") || low.includes("report")) {
+                allReportFiles.push(f);
+            }
+        }
+        pageToken = listing.nextPageToken || null;
+    } while (pageToken && allReportFiles.length < 200);
 
-    // Sort corrected_v2 / _corrected first, then newest modifiedTime
-    jsonReports.sort((a, b) => {
-        const aCorr = String(a.name || "").toLowerCase().includes("_corrected") ? 1 : 0;
-        const bCorr = String(b.name || "").toLowerCase().includes("_corrected") ? 1 : 0;
-        if (bCorr !== aCorr) return bCorr - aCorr;
-        return (Date.parse(b.modifiedTime || 0) || 0) - (Date.parse(a.modifiedTime || 0) || 0);
-    });
+    if (!allReportFiles.length) return { reportsFolderId, ranked: [] };
 
-    for (const candidate of jsonReports.slice(0, 5)) {
+    allReportFiles.sort((a, b) => (Date.parse(b.modifiedTime || 0) || 0) - (Date.parse(a.modifiedTime || 0) || 0));
+
+    const parsedCandidates = [];
+    for (const candidate of allReportFiles.slice(0, 20)) {
         try {
             const rawRes = await fetch(
                 `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(candidate.id)}?alt=media&supportsAllDrives=true`,
@@ -436,26 +469,62 @@ async function getLatestMuseReportFromDrive(env, targetRunOrRequestId = null) {
             if (!rawRes.ok) continue;
             const parsed = await rawRes.json();
             if (isNonReportDocName(candidate.name) || parsed.contract || parsed.audit || parsed.strategy) continue;
-            if (targetRunOrRequestId && parsed.request_id && parsed.request_id !== targetRunOrRequestId && parsed.run_id !== targetRunOrRequestId) {
-                continue;
-            }
-            return { reportsFolderId, file: candidate, data: parsed };
+            const isCorr = String(candidate.name || "").toLowerCase().includes("_corrected") || Boolean(parsed.corrects_report);
+            const effTs = Math.max(
+                Date.parse(parsed.ended_at || "") || 0,
+                Date.parse(parsed.collected_at || "") || 0,
+                Date.parse(candidate.modifiedTime || "") || 0
+            );
+            parsedCandidates.push({
+                reportsFolderId,
+                file: candidate,
+                data: parsed,
+                isCorr,
+                effTs,
+                groupKey: String(parsed.request_id || parsed.run_id || getReportStem(candidate.name))
+            });
         } catch {}
     }
 
-    // Fallback without strict target filter if none matched request_id
-    for (const candidate of jsonReports.slice(0, 3)) {
-        try {
-            const rawRes = await fetch(
-                `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(candidate.id)}?alt=media&supportsAllDrives=true`,
-                { headers: { Authorization: `Bearer ${token}` } }
-            );
-            if (!rawRes.ok) continue;
-            const parsed = await rawRes.json();
-            if (!parsed.contract && !parsed.audit && !parsed.strategy) {
-                return { reportsFolderId, file: candidate, data: parsed };
-            }
-        } catch {}
+    // Link corrects_report target filenames into the same run group
+    const fileToGroup = new Map();
+    for (const c of parsedCandidates) {
+        if (c.file?.name) fileToGroup.set(String(c.file.name).toLowerCase(), c.groupKey);
+    }
+    for (const c of parsedCandidates) {
+        const corrTarget = String(c.data?.corrects_report || "").toLowerCase();
+        if (corrTarget && fileToGroup.has(corrTarget)) {
+            c.groupKey = fileToGroup.get(corrTarget);
+        }
+    }
+
+    // Newest run ALWAYS beats older runs; _corrected wins only WITHIN the same run
+    const groupLatestTs = new Map();
+    for (const c of parsedCandidates) {
+        groupLatestTs.set(c.groupKey, Math.max(groupLatestTs.get(c.groupKey) || 0, c.effTs));
+    }
+    parsedCandidates.sort((a, b) => {
+        const gDiff = (groupLatestTs.get(b.groupKey) || 0) - (groupLatestTs.get(a.groupKey) || 0);
+        if (gDiff !== 0) return gDiff;
+        if (b.isCorr !== a.isCorr) return (b.isCorr ? 1 : 0) - (a.isCorr ? 1 : 0);
+        return b.effTs - a.effTs;
+    });
+
+    return { reportsFolderId, ranked: parsedCandidates };
+}
+
+async function getLatestMuseReportFromDrive(env, targetRunOrRequestId = null) {
+    const { reportsFolderId, ranked } = await listValidMuseReportsOnDrive(env);
+    for (const item of ranked) {
+        if (
+            targetRunOrRequestId &&
+            item.data?.request_id &&
+            item.data.request_id !== targetRunOrRequestId &&
+            item.data.run_id !== targetRunOrRequestId
+        ) {
+            continue;
+        }
+        return { reportsFolderId, file: item.file, data: item.data };
     }
     return { reportsFolderId, file: null, data: null };
 }
@@ -495,90 +564,188 @@ async function getLatestCrawl(env) {
     return { ...data, _drive_file: file };
 }
 
-async function notifyNewCrawl(env) {
-    // 1. Check latest Muse report on 01_Market_Data/Reports/ first (strictly deduplicated via crawl_notifications)
+async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, text) {
+    // Check existing record first — never blindly resend `sent`, `sending`, or `delivery_uncertain`
     try {
-        const rep = await getLatestMuseReportFromDrive(env);
-        if (rep.file && rep.data) {
-            const d = rep.data;
-            const techStatus = String(d.technical_status || "completed").toLowerCase();
-            if (techStatus === "completed" || techStatus === "partial") {
-                const rawRunId = String(d.run_id || rep.file.name || "report").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 96);
-                const isCorr = String(rep.file.name || "").toLowerCase().includes("_corrected") || Boolean(d.corrects_report);
-                const notifKey = isCorr ? `${rawRunId}_corrected` : rawRunId;
-                const totals = d.totals || {};
-                const recCount = Number(totals.records ?? 0);
-                const usableCount = Number(totals.business_usable_records ?? recCount);
-
-                const claim = await env.DB.prepare(`
-                    INSERT OR IGNORE INTO crawl_notifications
-                    (run_id, record_count, status, created_at)
-                    VALUES (?, ?, 'sending', ?)
-                `).bind(notifKey, recCount, new Date().toISOString()).run();
-
-                if (claim.meta.changes === 1) {
-                    const summaryText = d.telegram_summary
-                        ? `🔔 BÁO CÁO MUSE MỚI (${isCorr ? "BẢN CORRECTED V2" : "MỚI NHẤT"})\n\n${d.telegram_summary}`
-                        : `🔔 BÁO CÁO MUSE MỚI\nRun: ${rawRunId}\nKỹ thuật: ${d.technical_status || "completed"} | Chất lượng: ${d.data_quality_status || "N/A"}\nUsable: ${usableCount}/${recCount}`;
-                    try {
-                        const res = await sendTelegramMessage(env, env.TELEGRAM_OWNER_ID, summaryText, mainInlineKeyboard());
-                        if (!res.ok) throw new Error("Delivery failed");
-                        await env.DB.prepare("UPDATE crawl_notifications SET status = 'sent', sent_at = ? WHERE run_id = ?")
-                            .bind(new Date().toISOString(), notifKey).run();
-                    } catch {
-                        await env.DB.prepare("UPDATE crawl_notifications SET status = 'delivery_uncertain' WHERE run_id = ?")
-                            .bind(notifKey).run();
-                    }
-                    return;
-                }
-            }
+        const existing = await env.DB.prepare("SELECT status FROM crawl_notifications WHERE run_id = ?")
+            .bind(notifKey)
+            .first();
+        if (existing) {
+            return { claimed: false, delivered: existing.status === "sent", status: existing.status };
         }
     } catch {}
-
-    // 2. Preserved V1 fallback check on THREADS_FOLDER_ID
-    const data = await getLatestCrawl(env);
-    if (!data || data.status !== "completed") return;
-
-    if (Date.parse(data.started_at) < Date.parse("2026-11-26T12:25:00+07:00")) return;
-    if (
-        typeof data.run_id !== "string" ||
-        !/^[a-zA-Z0-9_-]{1,128}$/.test(data.run_id) ||
-        !Array.isArray(data.posts)
-    ) {
-        return;
-    }
-    if (!Number.isFinite(Date.parse(data.ended_at))) return;
 
     const claim = await env.DB.prepare(`
         INSERT OR IGNORE INTO crawl_notifications
         (run_id, record_count, status, created_at)
         VALUES (?, ?, 'sending', ?)
-    `).bind(data.run_id, data.posts.length, new Date().toISOString()).run();
+    `).bind(notifKey, recordCount, new Date().toISOString()).run();
 
-    if (claim.meta.changes !== 1) return;
-
-    const time = formatVnTime(data.ended_at);
-    const text =
-        "🔔 MUSE CRAWL HOÀN THÀNH\n\n" +
-        "Nền tảng: Threads\n" +
-        `Số bài: ${data.posts.length}\n` +
-        `Trùng đã loại: ${Number.isSafeInteger(data.duplicates_skipped) ? data.duplicates_skipped : "N/A"}\n` +
-        `Hoàn thành: ${time}\n\n` +
-        "Auto Sync đang chạy ngầm và sẽ tự đồng bộ về App_Video (hoặc vào ⚙️ Cài đặt → 🔄 Đồng bộ thủ công).";
-
-    try {
-        const res = await sendTelegramMessage(env, env.TELEGRAM_OWNER_ID, text, mainInlineKeyboard());
-        if (!res.ok) throw new Error("Delivery failed");
-    } catch {
-        await env.DB.prepare(`
-            UPDATE crawl_notifications SET status = 'delivery_uncertain' WHERE run_id = ?
-        `).bind(data.run_id).run();
-        return;
+    if (claim.meta.changes !== 1) {
+        return { claimed: false, delivered: false, status: "duplicate" };
     }
 
-    await env.DB.prepare(`
-        UPDATE crawl_notifications SET status = 'sent', sent_at = ? WHERE run_id = ?
-    `).bind(new Date().toISOString(), data.run_id).run();
+    try {
+        const res = await sendTelegramMessage(env, chatId, text, mainInlineKeyboard());
+        if (!res.ok) {
+            const apiStatus = Number(res.httpStatus || 0);
+            const nextState = apiStatus >= 400 && apiStatus < 500 ? "delivery_failed" : "delivery_uncertain";
+            await env.DB.prepare("UPDATE crawl_notifications SET status = ? WHERE run_id = ?")
+                .bind(nextState, notifKey).run();
+            return { claimed: true, delivered: false, status: nextState };
+        }
+        await env.DB.prepare("UPDATE crawl_notifications SET status = 'sent', sent_at = ? WHERE run_id = ?")
+            .bind(new Date().toISOString(), notifKey).run();
+        return { claimed: true, delivered: true, status: "sent" };
+    } catch {
+        // Transport threw (timeout/reset after possible server receipt) -> record delivery_uncertain safely
+        await env.DB.prepare("UPDATE crawl_notifications SET status = 'delivery_uncertain' WHERE run_id = ?")
+            .bind(notifKey).run();
+        return { claimed: true, delivered: false, status: "delivery_uncertain" };
+    }
+}
+
+async function notifyNewCrawl(env) {
+    if (!env.TELEGRAM_OWNER_ID || !env.TELEGRAM_BOT_TOKEN_VIDEO) return;
+    const cutoffMs = Date.parse("2026-11-26T12:25:00+07:00");
+    const notifiedRequestIds = new Set();
+
+    // 1. Check ALL unnotified Drive reports (grouped per run so corrected beats original in the same run, processing oldest->newest)
+    try {
+        const { ranked } = await listValidMuseReportsOnDrive(env);
+        const byGroup = new Map();
+        for (const item of ranked) {
+            if (!byGroup.has(item.groupKey)) {
+                byGroup.set(item.groupKey, item); // ranked puts winning variant first per group
+            }
+        }
+        const winningReports = Array.from(byGroup.values()).sort((a, b) => a.effTs - b.effTs);
+
+        for (const item of winningReports) {
+            const d = item.data || {};
+            if (item.effTs && item.effTs < cutoffMs) continue;
+            const techStatus = String(d.technical_status || "completed").toLowerCase();
+            if (!["completed", "partial", "failed"].includes(techStatus)) continue;
+
+            const rawRunId = String(d.run_id || item.file?.name || "report").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 96);
+            const notifKey = item.isCorr ? `${rawRunId}_corrected` : rawRunId;
+            const totals = d.totals || {};
+            const recCount = Number(totals.records ?? 0);
+            const usableCount = Number(totals.business_usable_records ?? recCount);
+
+            const statusBadge = techStatus === "failed"
+                ? "❌ CRAWL THẤT BẠI"
+                : (item.isCorr ? "🔔 BÁO CÁO MUSE (BẢN CORRECTED V2)" : "🔔 BÁO CÁO MUSE MỚI");
+            const summaryText = d.telegram_summary
+                ? `${statusBadge}\n━━━━━━━━━━━━━━━━━━━━\n${d.telegram_summary}`
+                : `${statusBadge}\n━━━━━━━━━━━━━━━━━━━━\n` +
+                  `🆔 Run: ${rawRunId}\n` +
+                  `⚙️ Kỹ thuật: ${d.technical_status || techStatus}\n` +
+                  `🎯 Chất lượng: ${d.data_quality_status || "N/A"}\n` +
+                  `📊 Bản ghi usable: ${usableCount}/${recCount}` +
+                  (d.error_message ? `\n❗ Lỗi: ${String(d.error_message).slice(0, 300)}` : "");
+
+            const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText);
+            if (d.request_id) {
+                if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+                    notifiedRequestIds.add(String(d.request_id));
+                    try {
+                        await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
+                            .bind(new Date().toISOString(), String(d.request_id)).run();
+                    } catch {}
+                }
+            }
+        }
+    } catch {}
+
+    // 2. Check ALL direct-D1 completed or failed crawl_requests not yet notified
+    try {
+        const rowsRes = await env.DB.prepare(`
+            SELECT * FROM crawl_requests
+            WHERE status IN ('completed', 'failed') AND notified_at IS NULL
+            ORDER BY updated_at ASC LIMIT 20
+        `).all();
+        const rows = rowsRes.results || [];
+        for (const req of rows) {
+            if (notifiedRequestIds.has(req.id)) continue;
+            let summary = {};
+            try { summary = JSON.parse(req.result_summary_json || "{}"); } catch {}
+            const notifKey = `crw_${req.id}_${req.status}`.slice(0, 120);
+            const recCount = Number(summary.record_count ?? 0);
+            const chatId = req.requested_by_chat_id || env.TELEGRAM_OWNER_ID;
+            const platLabel = String(req.platform || "all").toUpperCase();
+            const text = req.status === "completed"
+                ? `✅ MUSE CRAWL HOÀN THÀNH (${platLabel})\n━━━━━━━━━━━━━━━━━━━━\n` +
+                  `🆔 Mã: ${req.id}\n` +
+                  `👤 Nguồn xử lý: ${req.claimed_by || "Muse"}\n` +
+                  `📊 Số bản ghi: ${summary.record_count ?? "N/A"}\n` +
+                  `🕒 Cập nhật: ${formatVnTime(req.updated_at)}\n\n` +
+                  "🔄 Auto Sync sẽ tự đồng bộ về App_Video."
+                : `❌ MUSE CRAWL THẤT BẠI (${platLabel})\n━━━━━━━━━━━━━━━━━━━━\n` +
+                  `🆔 Mã: ${req.id}\n` +
+                  `👤 Nguồn xử lý: ${req.claimed_by || "Muse"}\n` +
+                  `❗ Lỗi: ${String(req.error_message || "Không rõ nguyên nhân").slice(0, 400)}\n` +
+                  `🕒 Cập nhật: ${formatVnTime(req.updated_at)}`;
+
+            const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, chatId, text);
+            if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+                try {
+                    await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ?")
+                        .bind(new Date().toISOString(), req.id).run();
+                } catch {}
+            }
+        }
+    } catch {}
+
+    // 3. Preserved V1 fallback check on THREADS_FOLDER_ID (up to 10 recent files)
+    try {
+        const token = await getDriveToken(env);
+        const headers = { Authorization: `Bearer ${token}` };
+        const folderId = env.THREADS_FOLDER_ID || LEGACY_THREADS_FOLDER_ID;
+        const params = new URLSearchParams({
+            q: `'${folderId}' in parents and trashed = false and name contains 'threads_crawl'`,
+            fields: "files(id,name,size,createdTime,modifiedTime)",
+            orderBy: "createdTime desc",
+            pageSize: "10",
+            supportsAllDrives: "true",
+            includeItemsFromAllDrives: "true"
+        });
+        const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, { headers });
+        if (!res.ok) return;
+        const list = await res.json();
+        const candidates = (list.files || []).slice().reverse();
+        for (const file of candidates) {
+            if (!file.size || Number(file.size) > MAX_MARKET_JSON_BYTES) continue;
+            const dataRes = await fetch(
+                `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`,
+                { headers }
+            );
+            if (!dataRes.ok) continue;
+            const data = await dataRes.json();
+            if (!data || !["completed", "failed"].includes(data.status)) continue;
+            const startedMs = Date.parse(data.started_at);
+            if (!Number.isFinite(startedMs) || startedMs < cutoffMs) continue;
+            if (typeof data.run_id !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.run_id)) continue;
+            const postsLen = Array.isArray(data.posts) ? data.posts.length : 0;
+            const endAt = data.ended_at;
+            if (!Number.isFinite(Date.parse(endAt))) continue;
+
+            const time = formatVnTime(endAt);
+            const text = data.status === "failed"
+                ? `❌ MUSE CRAWL THẤT BẠI (Threads)\n━━━━━━━━━━━━━━━━━━━━\n` +
+                  `🆔 Run: ${data.run_id}\n` +
+                  `❗ Lỗi: ${String(data.error_message || "Unknown").slice(0, 300)}\n` +
+                  `🕒 Thời gian: ${time}`
+                : `🔔 MUSE CRAWL HOÀN THÀNH (Threads)\n━━━━━━━━━━━━━━━━━━━━\n` +
+                  `🆔 Run: ${data.run_id}\n` +
+                  `📊 Số bài: ${postsLen}\n` +
+                  `🧹 Trùng đã loại: ${Number.isSafeInteger(data.duplicates_skipped) ? data.duplicates_skipped : "N/A"}\n` +
+                  `🕒 Hoàn thành: ${time}\n\n` +
+                  "🔄 Auto Sync đang chạy ngầm (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).";
+
+            await deliverWithUncertaintyGuard(env, data.run_id, postsLen, env.TELEGRAM_OWNER_ID, text);
+        }
+    } catch {}
 }
 
 async function expireStaleLeases(env) {
@@ -632,7 +799,7 @@ async function sendTelegramMessage(env, chatId, text, replyMarkup = null) {
         body: JSON.stringify(body)
     });
     const data = await resp.json();
-    return { ok: Boolean(resp.ok && data.ok), data };
+    return { ok: Boolean(resp.ok && data.ok), httpStatus: resp.status, data };
 }
 
 async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = null) {
@@ -814,36 +981,36 @@ function formatCommandNotificationText(cmdRow, status, resultObj, errorMessage) 
     const cmdType = cmdRow.command_type;
     if (status === "failed") {
         return (
-            `❌ LỆNH ${cmdType.toUpperCase()} THẤT BẠI\n\n` +
-            `Mã lệnh: ${cmdRow.id}\n` +
-            `Lỗi: ${String(errorMessage || "Unknown error").slice(0, 400)}`
+            `❌ LỆNH ${cmdType.toUpperCase()} THẤT BẠI\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `🆔 Mã lệnh: ${cmdRow.id}\n` +
+            `❗ Lỗi: ${String(errorMessage || "Unknown error").slice(0, 400)}`
         );
     }
 
     if (cmdType === "sync_now") {
         const r = resultObj || {};
         return (
-            "✅ APP_VIDEO ĐÃ ĐỒNG BỘ XONG\n\n" +
-            `Mã lệnh: ${cmdRow.id}\n` +
-            `File kiểm tra: ${r.files_checked ?? 0}\n` +
-            `File tải mới: ${r.files_downloaded ?? 0}\n` +
-            `Bản ghi thêm mới: ${r.records_inserted ?? 0}\n` +
-            `Cập nhật: ${r.records_updated ?? 0}\n` +
-            `Trùng đã bỏ qua: ${r.records_deduped ?? 0}\n` +
-            `Tổng kho local: ${r.total_items ?? "N/A"}\n` +
-            `Hoàn thành: ${formatVnTime(r.finished_at || new Date().toISOString())}`
+            "✅ APP_VIDEO ĐÃ ĐỒNG BỘ XONG\n━━━━━━━━━━━━━━━━━━━━\n" +
+            `🆔 Mã lệnh: ${cmdRow.id}\n` +
+            `📂 File kiểm tra: ${r.files_checked ?? 0}\n` +
+            `📥 File tải mới: ${r.files_downloaded ?? 0}\n` +
+            `➕ Bản ghi thêm mới: ${r.records_inserted ?? 0}\n` +
+            `♻️ Cập nhật: ${r.records_updated ?? 0}\n` +
+            `🧹 Trùng đã bỏ qua: ${r.records_deduped ?? 0}\n` +
+            `📦 Tổng kho local: ${r.total_items ?? "N/A"}\n` +
+            `🕒 Hoàn thành: ${formatVnTime(r.finished_at || new Date().toISOString())}`
         );
     }
 
     if (cmdType === "app_status") {
         const r = resultObj || {};
         return (
-            "📡 APP_VIDEO STATUS (LIVE)\n\n" +
-            `Trạng thái: 🟢 ONLINE\n` +
-            `Client: ${r.client_id || "app-video"}\n` +
-            `Đồng bộ nền: ${r.sync_status || "idle"} (mỗi ${r.sync_interval_seconds ?? 300}s)\n` +
-            `Sync gần nhất: ${formatVnTime(r.last_sync_at)}\n` +
-            `Tổng bản ghi local: ${r.total_items ?? 0}`
+            "📡 APP_VIDEO STATUS (LIVE)\n━━━━━━━━━━━━━━━━━━━━\n" +
+            `🟢 Trạng thái: ONLINE\n` +
+            `🖥️ Client: ${r.client_id || "app-video"}\n` +
+            `🔄 Đồng bộ nền: ${r.sync_status || "idle"} (mỗi ${r.sync_interval_seconds ?? 300}s)\n` +
+            `🕒 Sync gần nhất: ${formatVnTime(r.last_sync_at)}\n` +
+            `📦 Tổng bản ghi local: ${r.total_items ?? 0}`
         );
     }
 
@@ -851,13 +1018,13 @@ function formatCommandNotificationText(cmdRow, status, resultObj, errorMessage) 
         const r = resultObj || {};
         const byPlat = r.by_platform || {};
         return (
-            "📊 THỐNG KÊ THỊ TRƯỜNG APP_VIDEO\n\n" +
-            `Mã lệnh: ${cmdRow.id}\n` +
-            `Tổng bản ghi: ${r.total_items ?? 0}\n` +
-            `• Threads: ${byPlat.threads ?? 0}\n` +
-            `• TikTok: ${byPlat.tiktok ?? 0}\n` +
-            `• Shopee: ${byPlat.shopee ?? 0}\n` +
-            `Sync gần nhất: ${formatVnTime(r.last_sync_at)}`
+            "📊 THỐNG KÊ THỊ TRƯỜNG APP_VIDEO\n━━━━━━━━━━━━━━━━━━━━\n" +
+            `🆔 Mã lệnh: ${cmdRow.id}\n` +
+            `📦 Tổng bản ghi: ${r.total_items ?? 0}\n` +
+            `🧵 Threads: ${byPlat.threads ?? 0}\n` +
+            `🎵 TikTok: ${byPlat.tiktok ?? 0}\n` +
+            `🛒 Shopee: ${byPlat.shopee ?? 0}\n` +
+            `🕒 Sync gần nhất: ${formatVnTime(r.last_sync_at)}`
         );
     }
 
@@ -913,10 +1080,11 @@ async function handleAppApi(request, env, url) {
     if (request.method === "GET" && path === "/api/app/market/files") {
         try {
             const cursor = url.searchParams.get("cursor") || null;
+            const pageToken = url.searchParams.get("page_token") || null;
             const limit = Number(url.searchParams.get("limit") || "50");
             const driveToken = await getDriveToken(env);
             const marketFolderId = await resolveMarketDataFolderId(driveToken, env);
-            const listing = await listMarketJsonFilesRecursive(driveToken, marketFolderId, cursor, limit);
+            const listing = await listMarketJsonFilesRecursive(driveToken, marketFolderId, cursor, limit, pageToken);
             return jsonResponse({ ok: true, scope_folder_id: marketFolderId, ...listing });
         } catch {
             return jsonResponse({ ok: false, error: "Failed to list Market Data files" }, 502);
@@ -1059,6 +1227,7 @@ async function handleAppApi(request, env, url) {
                         id: candidate.id,
                         command_type: candidate.command_type,
                         payload: parsedPayload,
+                        claimed_by: clientId,
                         lease_expires_at: leaseExpires,
                         attempts: Number(candidate.attempts || 0) + 1,
                         created_at: candidate.created_at
@@ -1086,16 +1255,44 @@ async function handleAppApi(request, env, url) {
         if (!existing) return jsonResponse({ ok: false, error: "Command not found" }, 404);
 
         if (["completed", "failed", "cancelled"].includes(existing.status)) {
+            const reqAttempt = body.attempt ?? body.attempts;
+            const reqOwner = body.claimed_by || clientId;
+            if ((existing.claimed_by && reqOwner !== existing.claimed_by) || (reqAttempt !== undefined && Number(reqAttempt) !== Number(existing.attempts))) {
+                return jsonResponse({ ok: false, error: "Command already finalized by a newer attempt", conflict: true }, 409);
+            }
             return jsonResponse({ ok: true, already_finalized: true, status: existing.status });
+        }
+
+        if (existing.status !== "running") {
+            return jsonResponse({ ok: false, error: "Claim expired or command is not running", conflict: true }, 409);
+        }
+
+        const callerId = String(body.claimed_by || clientId);
+        if (existing.claimed_by && callerId !== existing.claimed_by) {
+            return jsonResponse({ ok: false, error: "Claim ownership mismatch", conflict: true }, 409);
+        }
+
+        const reqAttempt = body.attempt ?? body.attempts;
+        if (reqAttempt === undefined || Number(reqAttempt) !== Number(existing.attempts || 0)) {
+            return jsonResponse({ ok: false, error: "Stale or missing claim attempt", conflict: true }, 409);
+        }
+
+        if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
+            await expireStaleLeases(env);
+            return jsonResponse({ ok: false, error: "Claim lease expired", conflict: true }, 409);
         }
 
         const upd = await env.DB.prepare(`
             UPDATE app_commands
             SET status = ?, result_json = ?, error_message = ?, updated_at = ?
-            WHERE id = ? AND status IN ('running', 'queued')
-        `).bind(nextStatus, resultJson, errMsg, nowIso, commandId).run();
+            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+        `).bind(nextStatus, resultJson, errMsg, nowIso, commandId, existing.claimed_by, existing.attempts).run();
 
-        if (upd.meta.changes === 1 && existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+        if (upd.meta.changes !== 1) {
+            return jsonResponse({ ok: false, error: "Completion conflict: claim changed concurrently", conflict: true }, 409);
+        }
+
+        if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
             const text = formatCommandNotificationText(existing, nextStatus, body.result, errMsg);
             const sent = await updatePrimaryProgressMessage(env, existing.requested_by_chat_id, text, mainInlineKeyboard());
             if (sent.ok) {
@@ -1196,27 +1393,57 @@ async function handleAppApi(request, env, url) {
         const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
         if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
         if (["completed", "failed", "cancelled"].includes(existing.status)) {
+            const reqAttempt = body.attempt ?? body.attempts;
+            const reqOwner = String(body.claimed_by || body.worker_id || clientId);
+            if ((existing.claimed_by && reqOwner !== existing.claimed_by) || (reqAttempt !== undefined && Number(reqAttempt) !== Number(existing.attempts))) {
+                return jsonResponse({ ok: false, error: "Crawl request already finalized by another worker/attempt", conflict: true }, 409);
+            }
             return jsonResponse({ ok: true, already_finalized: true, status: existing.status });
+        }
+
+        if (existing.status !== "running") {
+            return jsonResponse({ ok: false, error: "Crawl lease expired or request is not running", conflict: true }, 409);
+        }
+
+        const callerOwner = String(body.claimed_by || body.worker_id || clientId);
+        if (existing.claimed_by && callerOwner !== existing.claimed_by) {
+            return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+        }
+
+        const reqAttempt = body.attempt ?? body.attempts;
+        if (reqAttempt !== undefined && Number(reqAttempt) !== Number(existing.attempts || 0)) {
+            return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+        }
+
+        if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
+            await expireStaleLeases(env);
+            return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
         }
 
         const upd = await env.DB.prepare(`
             UPDATE crawl_requests
             SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
-            WHERE id = ? AND status IN ('running', 'queued')
+            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
         `).bind(
             nextStatus,
             JSON.stringify(body.result_summary || {}),
             body.report_file_id || null,
             body.error_message || null,
             nowIso,
-            crawlId
+            crawlId,
+            existing.claimed_by,
+            existing.attempts
         ).run();
 
-        if (upd.meta.changes === 1 && existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+        if (upd.meta.changes !== 1) {
+            return jsonResponse({ ok: false, error: "Crawl completion conflict: claim changed concurrently", conflict: true }, 409);
+        }
+
+        if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
             const summary = body.result_summary || {};
             const text = nextStatus === "completed"
-                ? `✅ MUSE CRAWL XONG (${existing.platform.toUpperCase()})\nMã: ${crawlId}\nSố bài: ${summary.record_count ?? "N/A"}`
-                : `❌ MUSE CRAWL THẤT BẠI (${existing.platform.toUpperCase()})\nMã: ${crawlId}\nLỗi: ${body.error_message || "Unknown"}`;
+                ? `✅ MUSE CRAWL XONG (${existing.platform.toUpperCase()})\n━━━━━━━━━━━━━━━━━━━━\n🆔 Mã: ${crawlId}\n📊 Số bài: ${summary.record_count ?? "N/A"}`
+                : `❌ MUSE CRAWL THẤT BẠI (${existing.platform.toUpperCase()})\n━━━━━━━━━━━━━━━━━━━━\n🆔 Mã: ${crawlId}\n❗ Lỗi: ${body.error_message || "Unknown"}`;
             const sent = await updatePrimaryProgressMessage(env, existing.requested_by_chat_id, text, mainInlineKeyboard());
             if (sent.ok) {
                 await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ?").bind(nowIso, crawlId).run();
@@ -1473,19 +1700,25 @@ async function buildSystemStatusView(env) {
     if (hb?.market_counts_json) {
         try { hbCounts = JSON.parse(hb.market_counts_json); } catch {}
     }
+    let uncertainNotifs = 0;
+    try {
+        const uRow = await env.DB.prepare("SELECT COUNT(*) AS cnt FROM crawl_notifications WHERE status = 'delivery_uncertain'").first();
+        uncertainNotifs = Number(uRow?.cnt || 0);
+    } catch {}
 
     const text =
-        "📡 TRẠNG THÁI HỆ THỐNG\n\n" +
-        "• Cloudflare Worker: ✅ Online\n" +
-        "• Telegram Bot: ✅ Connected\n" +
-        `• D1 Database: ${dbStatus}\n` +
-        `• Drive Connector Backend: ${driveBackendStatus}\n` +
-        `• App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
-        `• Đồng bộ ngầm gần nhất: ${hb?.last_sync_at ? formatVnTime(hb.last_sync_at) : "Chưa ghi nhận"} (${hb?.sync_status || "unknown"})\n` +
-        `• Kho local App_Video: ${hbCounts.total_items ?? "N/A"} bản ghi\n` +
-        `• Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
-        `• Muse Poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n` +
-        "• Auto Publisher: Chưa triển khai";
+        "📡 TRẠNG THÁI HỆ THỐNG\n━━━━━━━━━━━━━━━━━━━━\n" +
+        "☁️ Cloudflare Worker: ✅ Online\n" +
+        "🤖 Telegram Bot: ✅ Connected\n" +
+        `🗄️ D1 Database: ${dbStatus}\n` +
+        `🔗 Drive Connector Backend: ${driveBackendStatus}\n` +
+        `🖥️ App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
+        `🔄 Đồng bộ ngầm gần nhất: ${hb?.last_sync_at ? formatVnTime(hb.last_sync_at) : "Chưa ghi nhận"} (${hb?.sync_status || "unknown"})\n` +
+        `📦 Kho local App_Video: ${hbCounts.total_items ?? "N/A"} bản ghi\n` +
+        `⏱️ Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
+        `🕒 Muse Poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n` +
+        (uncertainNotifs > 0 ? `⚠️ Cảnh báo gửi tin không chắc chắn: ${uncertainNotifs} (không tự gửi lại tránh trùng)\n` : "") +
+        "🚫 Auto Publisher: Chưa triển khai";
 
     const kb = {
         inline_keyboard: [

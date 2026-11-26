@@ -7,6 +7,7 @@ Account keys locally and never logs raw secrets.
 """
 
 import os
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 import requests
@@ -14,6 +15,10 @@ import requests
 
 DEFAULT_WORKER_URL = "https://app-video-scheduler.doctortphat.workers.dev"
 DEFAULT_CLIENT_ID = "app-video-desktop"
+
+
+class StaleClaimConflictError(RuntimeError):
+    """Raised when the Worker rejects completion due to stale claim ownership, attempt, or expired lease (HTTP 409)."""
 
 
 def mask_secret(value: Optional[str]) -> str:
@@ -61,6 +66,7 @@ class CloudflareBridgeClient:
         self.env_path = env_path
         self.timeout_sec = timeout_sec
         self._session = session or requests.Session()
+        self._http_lock = threading.RLock()
         self._explicit_url = worker_url
         self._explicit_token = api_token
         self._explicit_client_id = client_id
@@ -128,14 +134,15 @@ class CloudflareBridgeClient:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                resp = self._session.request(
-                    method=method,
-                    url=url,
-                    headers=self._headers(),
-                    params=params,
-                    json=json_body,
-                    timeout=self.timeout_sec,
-                )
+                with self._http_lock:
+                    resp = self._session.request(
+                        method=method,
+                        url=url,
+                        headers=self._headers(),
+                        params=params,
+                        json=json_body,
+                        timeout=self.timeout_sec,
+                    )
                 if resp.status_code in (502, 503, 504) and attempt < max_attempts:
                     time.sleep(0.4 * attempt)
                     continue
@@ -193,10 +200,17 @@ class CloudflareBridgeClient:
                 "error": str(exc),
             }
 
-    def list_market_files(self, cursor: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+    def list_market_files(
+        self,
+        cursor: Optional[str] = None,
+        limit: int = 50,
+        page_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         params: Dict[str, Any] = {"limit": max(1, min(int(limit), 100))}
         if cursor:
             params["cursor"] = cursor
+        if page_token:
+            params["page_token"] = page_token
         resp = self._request_with_retry("GET", "/api/app/market/files", params=params)
         if not resp.ok:
             raise RuntimeError(f"list_market_files failed: HTTP {resp.status_code}")
@@ -241,17 +255,27 @@ class CloudflareBridgeClient:
         status: str,
         result: Optional[Dict[str, Any]] = None,
         error_message: Optional[str] = None,
+        *,
+        claimed_by: Optional[str] = None,
+        attempt: Optional[int] = None,
     ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "status": status,
+            "result": result or {},
+            "error_message": error_message,
+        }
+        if claimed_by is not None:
+            body["claimed_by"] = claimed_by
+        if attempt is not None:
+            body["attempt"] = int(attempt)
         resp = self._request_with_retry(
             "POST",
             f"/api/app/commands/{command_id}/complete",
-            json_body={
-                "status": status,
-                "result": result or {},
-                "error_message": error_message,
-            },
+            json_body=body,
             max_attempts=3,
         )
+        if resp.status_code == 409:
+            raise StaleClaimConflictError(f"complete_command rejected as stale claim (HTTP 409): {resp.text[:200]}")
         if not resp.ok:
             raise RuntimeError(f"complete_command failed: HTTP {resp.status_code}")
         return resp.json()

@@ -501,6 +501,61 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertEqual(ev["data_quality"]["usable_items"], 1)  # only threads item is usable in this test DB
         self.assertEqual(len(ev["affiliate_opportunities"]), 0)  # all unverified Shop/TikTok items excluded
 
+    def test_newer_run_report_beats_older_corrected_report(self):
+        """Regression (Issue #1): Older corrected report MUST NOT shadow a newer run's report; corrected wins only within the same run."""
+        older_corrected = {
+            "report": "Old Run 1 Report (Corrected)",
+            "run_id": "run-20261126-old",
+            "ended_at": "2026-11-26T09:00:00Z",
+            "corrects_report": "market_report_run1.json",
+            "technical_status": "completed",
+            "data_quality_status": "dat",
+            "telegram_summary": "OLD RUN 1",
+        }
+        newer_original = {
+            "report": "New Run 2 Report (Original)",
+            "run_id": "run-20261127-new",
+            "ended_at": "2026-11-27T09:00:00Z",
+            "technical_status": "completed",
+            "data_quality_status": "dat mot phan",
+            "telegram_summary": "NEW RUN 2",
+        }
+        # Ingest newer original FIRST, then older corrected SECOND
+        self.store.ingest_raw_file(
+            "f_new_orig",
+            "market_report_run2_20261127.json",
+            json.dumps(newer_original).encode("utf-8"),
+            modified_time="2026-11-27T09:05:00Z",
+        )
+        self.store.ingest_raw_file(
+            "f_old_corr",
+            "market_report_run1_20261126_corrected_v2.json",
+            json.dumps(older_corrected).encode("utf-8"),
+            modified_time="2026-11-26T09:05:00Z",
+        )
+
+        reports = self.store.list_reports(limit=5)
+        self.assertEqual(reports[0]["run_id"], "run-20261127-new")
+        ev = self.store.build_evidence_report(platform="all")
+        self.assertEqual(ev["latest_muse_report"]["run_id"], "run-20261127-new")
+
+        # Within run-20261127-new, adding its own corrected version overrides run 2 original and stays #1
+        newer_corrected = {
+            **newer_original,
+            "report": "New Run 2 Report (Corrected)",
+            "corrects_report": "market_report_run2_20261127.json",
+            "telegram_summary": "NEW RUN 2 CORRECTED",
+        }
+        self.store.ingest_raw_file(
+            "f_new_corr",
+            "market_report_run2_20261127_corrected_v2.json",
+            json.dumps(newer_corrected).encode("utf-8"),
+            modified_time="2026-11-27T09:10:00Z",
+        )
+        reports_after = self.store.list_reports(limit=5)
+        self.assertEqual(reports_after[0]["run_id"], "run-20261127-new")
+        self.assertTrue(reports_after[0]["is_corrected"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

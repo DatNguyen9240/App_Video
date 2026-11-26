@@ -160,12 +160,30 @@ class MarketSyncService:
                     }
 
                 cursor = self.store.get_state("drive_cursor")
-                listing = self.client.list_market_files(cursor=cursor, limit=100)
+                all_files = []
+                seen_fids = set()
+                seen_page_tokens = set()
+                page_token = None
+                for _page in range(50):
+                    listing = self.client.list_market_files(cursor=cursor, limit=100, page_token=page_token)
+                    page_files = listing.get("files", []) or []
+                    for fmeta in page_files:
+                        fid = fmeta.get("file_id") or fmeta.get("id")
+                        if fid and fid not in seen_fids:
+                            seen_fids.add(fid)
+                            all_files.append(fmeta)
+                    next_pt = listing.get("next_page_token")
+                    if not listing.get("has_more") or not next_pt or next_pt in seen_page_tokens:
+                        break
+                    seen_page_tokens.add(next_pt)
+                    page_token = next_pt
+
                 files = sorted(
-                    listing.get("files", []) or [],
+                    all_files,
                     key=lambda x: (
                         1 if "_corrected" in str(x.get("name") or "").lower() else 0,
                         str(x.get("modified_time") or x.get("modifiedTime") or ""),
+                        str(x.get("file_id") or x.get("id") or ""),
                     ),
                 )
                 latest_mtime = cursor

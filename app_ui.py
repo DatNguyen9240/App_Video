@@ -5183,7 +5183,8 @@ def start_studio(port=5000, auto_open=True):
         rt["remote_poller"].start()
     if auto_open:
         threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{port}")).start()
-    app.run(host="0.0.0.0", port=port, debug=False)
+    bind_host = os.environ.get("APP_VIDEO_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    app.run(host=bind_host, port=port, debug=False)
 
 
 if __name__ == "__main__":

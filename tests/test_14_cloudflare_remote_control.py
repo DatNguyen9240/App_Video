@@ -48,6 +48,7 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
         self.mock_crawl_requests = []
         self.auth_headers_seen = []
         self.fail_next_complete = False
+        self.conflict_next_complete = False
         self.list_call_count = 0
         self.download_call_count = 0
         self.slow_download_delay = 0.0
@@ -91,15 +92,37 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
         self.auth_headers_seen.append(self._headers()["Authorization"])
         return {"configured": True, "connected": True, "status": "connected", "health": {"ok": True, "db_ok": True, "drive_ok": True}}
 
-    def list_market_files(self, cursor=None, limit=50):
+    def list_market_files(self, cursor=None, limit=50, page_token=None):
         self.list_call_count += 1
         self.auth_headers_seen.append(self._headers()["Authorization"])
-        files = []
-        for f in sorted(self.mock_files.values(), key=lambda x: x["modified_time"]):
-            if cursor and f["modified_time"] < cursor:
+        ordered = sorted(
+            self.mock_files.values(),
+            key=lambda x: (str(x["modified_time"] or ""), str(x["file_id"])),
+        )
+        filtered = []
+        tok_mtime, tok_fid = ("", "")
+        if page_token and "|" in page_token:
+            tok_mtime, tok_fid = page_token.split("|", 1)
+        for f in ordered:
+            fm = str(f["modified_time"] or "")
+            fid = str(f["file_id"])
+            if cursor and fm < cursor:
                 continue
-            files.append({k: v for k, v in f.items() if k != "bytes"})
-        return {"ok": True, "files": files[:limit]}
+            if page_token and (fm, fid) <= (tok_mtime, tok_fid):
+                continue
+            filtered.append({k: v for k, v in f.items() if k != "bytes"})
+        eff_lim = max(1, min(int(limit or 50), 100))
+        page = filtered[:eff_lim]
+        has_more = len(filtered) > eff_lim
+        next_tok = f"{page[-1]['modified_time']}|{page[-1]['file_id']}" if (has_more and page) else None
+        next_cur = page[-1]["modified_time"] if page else cursor
+        return {
+            "ok": True,
+            "files": page,
+            "has_more": has_more,
+            "next_page_token": next_tok,
+            "next_cursor": next_cur,
+        }
 
     def download_market_file(self, file_id: str):
         if self.slow_download_delay > 0:
@@ -125,10 +148,16 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
                 return dict(c)
         return None
 
-    def complete_command(self, command_id, status, result=None, error_message=None):
+    def complete_command(self, command_id, status, result=None, error_message=None, *, claimed_by=None, attempt=None):
         if self.fail_next_complete:
             self.fail_next_complete = False
             raise RuntimeError("Simulated network failure during ack")
+        if self.conflict_next_complete:
+            self.conflict_next_complete = False
+            from market_intelligence.cloudflare_client import StaleClaimConflictError
+            raise StaleClaimConflictError("Simulated HTTP 409 stale claim/attempt")
+        self.complete_payloads = getattr(self, "complete_payloads", [])
+        self.complete_payloads.append({"command_id": command_id, "claimed_by": claimed_by, "attempt": attempt})
         for c in self.mock_commands:
             if c["id"] == command_id:
                 if c["status"] in ("completed", "failed", "cancelled"):
@@ -516,6 +545,104 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
             rt["store"].close()
             app_ui._market_runtime = None
             flask_tmp.cleanup()
+
+    def test_start_studio_binds_localhost_by_default(self):
+        """Regression (Issue #3): start_studio MUST bind 127.0.0.1 by default instead of 0.0.0.0."""
+        seen_hosts = []
+        orig_run = app_ui.app.run
+        orig_disable = os.environ.get("APP_VIDEO_DISABLE_BG_WORKERS")
+        orig_env_host = os.environ.pop("APP_VIDEO_HOST", None)
+        try:
+            os.environ["APP_VIDEO_DISABLE_BG_WORKERS"] = "1"
+            app_ui.app.run = lambda *a, **kw: seen_hosts.append(kw.get("host"))
+            app_ui.start_studio(port=5099, auto_open=False)
+        finally:
+            app_ui.app.run = orig_run
+            if orig_disable is None:
+                os.environ.pop("APP_VIDEO_DISABLE_BG_WORKERS", None)
+            else:
+                os.environ["APP_VIDEO_DISABLE_BG_WORKERS"] = orig_disable
+            if orig_env_host is not None:
+                os.environ["APP_VIDEO_HOST"] = orig_env_host
+        self.assertEqual(seen_hosts, ["127.0.0.1"])
+
+    def test_independent_heartbeat_during_slow_sync_command(self):
+        """Regression (Issue #5): Heartbeat must keep firing independently while sync_now executes slowly."""
+        self.client.add_drive_file("f_slow1", "threads_crawl_poc_002.json", self.poc2_bytes, "2026-11-26T03:15:20Z", "md5_s1")
+        self.client.slow_download_delay = 0.28
+        self.poller.heartbeat_interval_sec = 0.06
+        self.poller.poll_interval_sec = 0.05
+
+        self.client.enqueue_d1_command("cmd_slow_sync", "sync_now")
+        self.poller.start()
+        try:
+            deadline = time.monotonic() + 3.0
+            # Wait briefly while slow sync is in flight and ensure >= 2 heartbeats occurred concurrently
+            while time.monotonic() < deadline:
+                if len(self.client.mock_heartbeats) >= 2 and self.client.mock_commands[0]["status"] == "completed":
+                    break
+                time.sleep(0.03)
+            # Crucially, check heartbeat didn't just wait until command finished: reset and trigger during active execution
+            self.client.mock_heartbeats.clear()
+            self.client.add_drive_file("f_slow2", "threads_crawl_pilot_001.json", self.pilot1_bytes, "2026-11-26T05:31:33Z", "md5_s2")
+            self.client.enqueue_d1_command("cmd_slow_sync_2", "sync_now")
+            t_wait = time.monotonic() + 0.24
+            while time.monotonic() < t_wait:
+                if self.client.mock_commands[1]["status"] == "completed" and len(self.client.mock_heartbeats) >= 2:
+                    break
+                time.sleep(0.02)
+            self.assertGreaterEqual(len(self.client.mock_heartbeats), 2)
+        finally:
+            self.poller.stop(timeout=2.0)
+
+    def test_stale_pending_ack_409_resolves_without_looping_and_sends_attempt(self):
+        """Regression (Issue #4): Stale 409 conflict on pending_ack marks local ack resolved instead of infinite retries."""
+        self.client.add_drive_file("f_ack1", "threads_crawl_poc_002.json", self.poc2_bytes, "2026-11-26T03:15:20Z", "md5_a1")
+        self.client.enqueue_d1_command("cmd_stale_409", "sync_now")
+        self.client.fail_next_complete = True
+        self.poller.poll_once()
+        self.assertEqual(len(self.store.list_pending_ack_commands()), 1)
+
+        # Now Worker rejects stale claim with 409 Conflict -> pending_ack MUST clear cleanly
+        self.client.conflict_next_complete = True
+        self.poller.poll_once()
+        self.assertEqual(self.store.list_pending_ack_commands(), [])
+
+        # Normal complete sends claimed_by & attempt
+        self.client.enqueue_d1_command("cmd_with_attempt", "app_status")
+        self.poller.poll_once()
+        last_payload = self.client.complete_payloads[-1]
+        self.assertEqual(last_payload["command_id"], "cmd_with_attempt")
+        self.assertEqual(last_payload["claimed_by"], "test-client")
+        self.assertEqual(last_payload["attempt"], 1)
+
+    def test_sync_paginates_over_100_files_with_equal_modified_time(self):
+        """Regression (Issue #6): Sync must paginate >100 files sharing the exact same modified_time without dropping files."""
+        shared_mtime = "2026-11-26T12:00:00Z"
+        for idx in range(125):
+            payload = {
+                "run_id": "run-pagination-125",
+                "platform": "threads",
+                "posts": [{
+                    "post_id": f"PG_{idx:03d}",
+                    "post_url": f"https://www.threads.com/@user_{idx}/post/PG_{idx:03d}",
+                    "author_handle": f"@user_{idx}",
+                    "content_summary_vi": f"Bài test phân trang số {idx}",
+                    "likes": idx + 1,
+                }],
+            }
+            self.client.add_drive_file(
+                f"fid_{idx:03d}",
+                f"threads_page_{idx:03d}.json",
+                json.dumps(payload).encode("utf-8"),
+                shared_mtime,
+                f"md5_{idx:03d}",
+            )
+
+        res = self.sync_service.sync_now(trigger_source="test_pagination")
+        self.assertEqual(res["status"], "completed")
+        self.assertEqual(res["files_checked"], 125)
+        self.assertEqual(self.store.get_stats()["total_items"], 125)
 
 
 if __name__ == "__main__":

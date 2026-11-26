@@ -44,43 +44,66 @@ class MockD1Database {
       },
       async first() {
         if (norm.startsWith("SELECT 1 AS ok")) return { ok: 1 };
+        if (norm.startsWith("SELECT status FROM crawl_notifications WHERE run_id = ?")) {
+          return db.notifications.find((n) => n.run_id === this.args[0]) || null;
+        }
+        if (norm.startsWith("SELECT COUNT(*) AS cnt FROM crawl_notifications")) {
+          return { cnt: db.notifications.filter((n) => n.status === "delivery_uncertain").length };
+        }
         if (norm.startsWith("SELECT value FROM worker_runtime_state WHERE key = ?")) {
           const v = db.runtimeState.get(this.args[0]);
           return v !== undefined ? { value: v } : null;
         }
         if (norm.startsWith("SELECT * FROM app_heartbeats")) {
           const all = Array.from(db.heartbeats.values()).sort((a, b) => b.last_seen_at.localeCompare(a.last_seen_at));
-          return all[0] || null;
+          return all[0] ? { ...all[0] } : null;
         }
         if (norm.startsWith("SELECT id, status FROM app_commands WHERE dedup_token = ?")) {
-          return db.commands.find((c) => c.dedup_token === this.args[0]) || null;
+          const row = db.commands.find((c) => c.dedup_token === this.args[0]);
+          return row ? { ...row } : null;
         }
         if (norm.includes("FROM app_commands WHERE status = 'queued'")) {
-          return db.commands.filter((c) => c.status === "queued").sort((a, b) => a.created_at.localeCompare(b.created_at))[0] || null;
+          const row = db.commands.filter((c) => c.status === "queued").sort((a, b) => a.created_at.localeCompare(b.created_at))[0];
+          return row ? { ...row } : null;
         }
         if (norm === "SELECT * FROM app_commands WHERE id = ?") {
-          return db.commands.find((c) => c.id === this.args[0]) || null;
+          const row = db.commands.find((c) => c.id === this.args[0]);
+          return row ? { ...row } : null;
         }
         if (norm.startsWith("SELECT * FROM crawl_requests WHERE dedup_token = ?")) {
-          return db.crawlRequests.find((c) => c.dedup_token === this.args[0]) || null;
+          const row = db.crawlRequests.find((c) => c.dedup_token === this.args[0]);
+          return row ? { ...row } : null;
         }
         if (norm.includes("FROM crawl_requests WHERE platform = ? AND lower(trim(keywords)) = ?")) {
           const [plat, kw, cnt] = this.args;
-          return db.crawlRequests.find(
+          const row = db.crawlRequests.find(
             (c) => c.platform === plat && c.keywords.trim().toLowerCase() === kw && c.requested_count === cnt && ["queued", "running"].includes(c.status)
-          ) || null;
+          );
+          return row ? { ...row } : null;
         }
         if (norm.includes("FROM crawl_requests WHERE status = 'queued'")) {
-          return db.crawlRequests.filter((c) => c.status === "queued").sort((a, b) => a.created_at.localeCompare(b.created_at))[0] || null;
+          const row = db.crawlRequests.filter((c) => c.status === "queued").sort((a, b) => a.created_at.localeCompare(b.created_at))[0];
+          return row ? { ...row } : null;
         }
         if (norm === "SELECT * FROM crawl_requests WHERE id = ?") {
-          return db.crawlRequests.find((c) => c.id === this.args[0]) || null;
+          const row = db.crawlRequests.find((c) => c.id === this.args[0]);
+          return row ? { ...row } : null;
         }
         return null;
       },
       async all() {
         if (norm.includes("FROM app_commands")) {
           return { results: [...db.commands].reverse().slice(0, 8) };
+        }
+        if (norm.includes("FROM crawl_requests WHERE status IN ('completed', 'failed') AND notified_at IS NULL")) {
+          return {
+            results: db.crawlRequests.filter((c) => ["completed", "failed"].includes(c.status) && !c.notified_at),
+          };
+        }
+        if (norm.includes("FROM crawl_notifications WHERE status = 'delivery_uncertain'")) {
+          return {
+            results: db.notifications.filter((n) => n.status === "delivery_uncertain"),
+          };
         }
         if (norm.includes("FROM crawl_requests")) {
           return { results: [...db.crawlRequests].reverse().slice(0, 40) };
@@ -147,8 +170,14 @@ class MockD1Database {
           return { meta: { changes } };
         }
         if (norm.startsWith("UPDATE app_commands SET status = ?, result_json = ?")) {
-          const [status, result_json, error_message, updated_at, id] = this.args;
-          const row = db.commands.find((c) => c.id === id && (c.status === "running" || c.status === "queued"));
+          const [status, result_json, error_message, updated_at, id, claimed_by, attempts] = this.args;
+          const row = db.commands.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              (claimed_by === undefined || c.claimed_by === claimed_by) &&
+              (attempts === undefined || c.attempts === attempts)
+          );
           if (!row) return { meta: { changes: 0 } };
           row.status = status;
           row.result_json = result_json;
@@ -219,8 +248,14 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = ?, result_summary_json = ?")) {
-          const [status, result_summary_json, report_file_id, error_message, updated_at, id] = this.args;
-          const row = db.crawlRequests.find((c) => c.id === id && ["running", "queued"].includes(c.status));
+          const [status, result_summary_json, report_file_id, error_message, updated_at, id, claimed_by, attempts] = this.args;
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              (claimed_by === undefined || c.claimed_by === claimed_by) &&
+              (attempts === undefined || c.attempts === attempts)
+          );
           if (!row) return { meta: { changes: 0 } };
           row.status = status;
           row.result_summary_json = result_summary_json;
@@ -563,6 +598,7 @@ const completeRes = await worker.fetch(
     headers: { ...authHeaders, "Content-Type": "application/json" },
     body: JSON.stringify({
       status: "completed",
+      attempt: claimJson.command.attempts,
       result: { files_checked: 1, files_downloaded: 1, records_inserted: 50, records_deduped: 0, total_items: 50 },
     }),
   }),
@@ -895,5 +931,209 @@ assert.ok(callsAfterFirstCron > callsBeforeCron);
 
 await worker.scheduled({}, env, {});
 assert.equal(telegramCalls.length, callsAfterFirstCron);
+
+// 9. GPT Review Regressions (RED before fix):
+//    Issue #1: Newer run report beats older corrected report; corrected only wins within same run
+const EXTRA_REPORTS = [
+  {
+    id: "1Run1OldCorrected",
+    name: "market_report_run1_corrected_v2.json",
+    mimeType: "application/json",
+    size: "1200",
+    modifiedTime: "2026-11-26T09:05:00Z",
+    body: { run_id: "run-1-old", technical_status: "completed", data_quality_status: "dat", totals: { records: 5, business_usable_records: 5 }, telegram_summary: "OLD CORRECTED RUN 1" },
+  },
+  {
+    id: "1Run2NewOriginal",
+    name: "market_report_run2_20261127.json",
+    mimeType: "application/json",
+    size: "1200",
+    modifiedTime: "2026-11-27T09:05:00Z",
+    body: { run_id: "run-2-new", technical_status: "completed", data_quality_status: "dat", totals: { records: 12, business_usable_records: 10 }, telegram_summary: "NEWEST RUN 2 REPORT" },
+  },
+  {
+    id: "1Run3FailedReport",
+    name: "market_report_run3_failed.json",
+    mimeType: "application/json",
+    size: "900",
+    modifiedTime: "2026-11-27T10:00:00Z",
+    body: { run_id: "run-3-failed", technical_status: "failed", error_message: "Login expired", totals: { records: 0, business_usable_records: 0 }, telegram_summary: "RUN 3 FAILED REPORT" },
+  },
+];
+let extraReportsEnabled = false;
+let simulateTelegramThrowOnce = false;
+let paginationFiles = [];
+
+const origFetch = globalThis.fetch;
+globalThis.fetch = async (url, init = {}) => {
+  const sUrl = String(url);
+  if (extraReportsEnabled && sUrl.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+    const u = new URL(sUrl);
+    const q = u.searchParams.get("q") || "";
+    if (q.includes(`'${REPORTS_ID}' in parents`)) {
+      return new Response(JSON.stringify({ files: EXTRA_REPORTS }), { status: 200 });
+    }
+    if (paginationFiles.length > 0 && q.includes(`'${THREADS_ID}' in parents`)) {
+      const pt = u.searchParams.get("pageToken");
+      const startIdx = pt ? Number(pt) : 0;
+      const slice = paginationFiles.slice(startIdx, startIdx + 100);
+      const nextPageToken = startIdx + 100 < paginationFiles.length ? String(startIdx + 100) : undefined;
+      return new Response(JSON.stringify({ files: slice, ...(nextPageToken ? { nextPageToken } : {}) }), { status: 200 });
+    }
+  }
+  if (extraReportsEnabled) {
+    for (const rptFile of EXTRA_REPORTS) {
+      if (sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${rptFile.id}?alt=media`)) {
+        return new Response(JSON.stringify(rptFile.body), { status: 200 });
+      }
+    }
+  }
+  if (simulateTelegramThrowOnce && sUrl.startsWith("https://api.telegram.org/")) {
+    simulateTelegramThrowOnce = false;
+    throw new Error("Simulated Telegram transport timeout");
+  }
+  return origFetch(url, init);
+};
+
+extraReportsEnabled = true;
+// Exclude run3 failed temporarily or check newest failed/completed priority: first check Run2 vs old corrected Run1
+const run2OnlyCheck = EXTRA_REPORTS.pop(); // temporarily test run2 (2026-11-27) vs run1_corrected (2026-11-26)
+const rptNewWinsRes = await worker.fetch(
+  new Request("https://example.workers.dev/telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+    body: JSON.stringify({
+      update_id: 5020,
+      callback_query: { id: "cq_20", from: { id: 999001 }, message: { message_id: 30, chat: { id: 999001, type: "private" } }, data: "rpt:summary" },
+    }),
+  }),
+  env
+);
+assert.equal(rptNewWinsRes.status, 200);
+const latestRptMsg = telegramCalls[telegramCalls.length - 1];
+assert.ok(String(latestRptMsg.body).includes("NEWEST RUN 2 REPORT"));
+EXTRA_REPORTS.push(run2OnlyCheck);
+
+//    Issue #2: Cron notifies ALL unnotified runs + failed Drive report + direct D1 crawl_requests + delivery_uncertain safety
+env.DB.crawlRequests.push({
+  id: "crw_direct_d1_fail",
+  platform: "shopee",
+  keywords: "flash sale",
+  requested_count: 10,
+  status: "failed",
+  claimed_by: "muse-oauth",
+  attempts: 1,
+  max_attempts: 3,
+  requested_by_chat_id: "999001",
+  requested_by_source: "telegram",
+  error_message: "Shopee session expired",
+  notified_at: null,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+});
+simulateTelegramThrowOnce = true; // Next notification hits transport error -> delivery_uncertain
+await worker.scheduled({}, env, {});
+assert.ok(env.DB.notifications.some((n) => n.status === "delivery_uncertain"));
+assert.ok(env.DB.notifications.some((n) => n.run_id === "run-2-new" && n.status === "sent"));
+assert.ok(env.DB.notifications.some((n) => n.run_id === "run-3-failed" && n.status === "sent"));
+assert.ok(env.DB.notifications.some((n) => String(n.run_id).includes("crw_direct_d1_fail") && n.status === "sent"));
+const directD1Row = env.DB.crawlRequests.find((c) => c.id === "crw_direct_d1_fail");
+assert.ok(directD1Row.notified_at);
+
+// Next Cron MUST NOT double-send delivery_uncertain blindly
+const callsAfterMultiCron = telegramCalls.length;
+await worker.scheduled({}, env, {});
+assert.equal(telegramCalls.length, callsAfterMultiCron);
+
+//    Issue #4: Complete endpoints verify ownership, attempt & lease
+env.DB.commands.push({
+  id: "cmd_owner_guard",
+  command_type: "sync_now",
+  payload_json: "{}",
+  status: "running",
+  claimed_by: "desktop-2",
+  claimed_at: new Date().toISOString(),
+  lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+  attempts: 2,
+  max_attempts: 3,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+});
+// Stale attempt 1 from desktop-1 -> 409 Conflict
+const wrongOwnerCmd = await worker.fetch(
+  new Request("https://example.workers.dev/api/app/commands/cmd_owner_guard/complete", {
+    method: "POST",
+    headers: { Authorization: "Bearer app-video-bearer-secret", "X-App-Client-Id": "desktop-1", "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "completed", attempt: 1, result: { total_items: 999 } }),
+  }),
+  env
+);
+assert.equal(wrongOwnerCmd.status, 409);
+// Stale attempt 1 from same desktop-2 -> 409 Conflict
+const wrongAttemptCmd = await worker.fetch(
+  new Request("https://example.workers.dev/api/app/commands/cmd_owner_guard/complete", {
+    method: "POST",
+    headers: { Authorization: "Bearer app-video-bearer-secret", "X-App-Client-Id": "desktop-2", "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "completed", attempt: 1, result: { total_items: 999 } }),
+  }),
+  env
+);
+assert.equal(wrongAttemptCmd.status, 409);
+assert.equal(env.DB.commands.find((c) => c.id === "cmd_owner_guard").status, "running");
+
+// Crawl complete ownership & lease guard
+env.DB.crawlRequests.push({
+  id: "crw_owner_guard",
+  platform: "threads",
+  keywords: "",
+  requested_count: 20,
+  status: "running",
+  claimed_by: "muse-worker-2",
+  claimed_at: new Date().toISOString(),
+  lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+  attempts: 2,
+  max_attempts: 3,
+  notified_at: null,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+});
+const wrongOwnerCrawl = await worker.fetch(
+  new Request("https://example.workers.dev/api/app/crawl-requests/crw_owner_guard/complete", {
+    method: "POST",
+    headers: { ...authHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ worker_id: "muse-worker-1", attempt: 1, status: "completed", result_summary: { record_count: 20 } }),
+  }),
+  env
+);
+assert.equal(wrongOwnerCrawl.status, 409);
+
+//    Issue #6: Worker paginates >100 files sharing equal modifiedTime via keyset page_token
+paginationFiles = Array.from({ length: 105 }, (_, idx) => ({
+  id: `1PageFile_${String(idx).padStart(3, "0")}`,
+  name: `threads_batch_${String(idx).padStart(3, "0")}.json`,
+  mimeType: "application/json",
+  size: "300",
+  modifiedTime: "2026-11-26T12:00:00Z",
+  md5Checksum: `md5p_${idx}`,
+}));
+const collectedIds = new Set();
+let pageToken = "";
+for (let page = 0; page < 5; page++) {
+  const qs = new URLSearchParams({ limit: "50", ...(pageToken ? { page_token: pageToken } : {}) });
+  const pgRes = await worker.fetch(
+    new Request(`https://example.workers.dev/api/app/market/files?${qs}`, { headers: authHeaders }),
+    env
+  );
+  assert.equal(pgRes.status, 200);
+  const pgJson = await pgRes.json();
+  for (const f of pgJson.files) collectedIds.add(f.file_id);
+  if (!pgJson.has_more) break;
+  pageToken = pgJson.next_page_token || "";
+  assert.ok(pageToken);
+}
+for (const pf of paginationFiles) {
+  assert.ok(collectedIds.has(pf.id));
+}
+assert.equal(collectedIds.size, 108); // 105 Threads files + 3 Reports files
 
 console.log("WORKER_V2_CONTRACT_TESTS_OK");

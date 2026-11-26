@@ -131,7 +131,11 @@ def has_muse_report_sections(raw_obj: Any) -> bool:
     return any(k in raw_obj for k in report_keys)
 
 
-def normalize_muse_report(raw_obj: Dict[str, Any], file_name: Optional[str] = None) -> Dict[str, Any]:
+def normalize_muse_report(
+    raw_obj: Dict[str, Any],
+    file_name: Optional[str] = None,
+    modified_time: Optional[str] = None,
+) -> Dict[str, Any]:
     """Normalize explicit Muse reports (POC, Pilot, E2E V1, E2E corrected_v2) into canonical 5 sections."""
     src = raw_obj
     for container_key in ("report", "analysis", "market_report"):
@@ -408,7 +412,14 @@ def normalize_muse_report(raw_obj: Dict[str, Any], file_name: Optional[str] = No
         "totals": totals,
         "platform_results": platform_results,
         "telegram_summary": src.get("telegram_summary") or raw_obj.get("telegram_summary"),
-        "generated_at": raw_obj.get("ended_at") or raw_obj.get("collected_at") or _utc_now_iso(),
+        "generated_at": (
+            raw_obj.get("ended_at")
+            or raw_obj.get("collected_at")
+            or src.get("ended_at")
+            or src.get("collected_at")
+            or modified_time
+            or _utc_now_iso()
+        ),
         "trending_highlights": trending_highlights,
         "consumer_needs_problems": consumer_needs_problems,
         "affiliate_opportunities": affiliate_opportunities,
