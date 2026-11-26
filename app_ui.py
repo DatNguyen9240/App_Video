@@ -3184,16 +3184,33 @@ def api_generate_script():
                     post.documentary_scenes = deepcopy(visual_builder_mod.DEFAULT_TROJAN_SCENES)
                 elif getattr(post, "comments", None):
                     scs = []
-                    for idx, c in enumerate(post.comments, 1):
-                        is_even = (idx % 2 == 0)
+                    # Đưa nội dung mở đầu (post.content) làm Cảnh #1 để không bị mất phần hook
+                    main_hook = (getattr(post, "content", "") or "").strip()
+                    first_ill = getattr(post, "illustration_path", "") or ""
+                    if main_hook:
+                        is_vid_1 = first_ill.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm"))
+                        scs.append({
+                            "index": 1,
+                            "type": "video" if is_vid_1 else "image",
+                            "path": first_ill,
+                            "badge": "MỞ ĐẦU CÂU CHUYỆN",
+                            "text": main_hook,
+                            "sfx": "sub_drop",
+                            "voice": post.voice_id or "adam"
+                        })
+                    start_idx = len(scs) + 1
+                    for offset, c in enumerate(post.comments):
+                        idx = start_idx + offset
+                        ill_path = first_ill if (idx == 1 and not main_hook) else ""
+                        is_vid = ill_path.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm"))
                         scs.append({
                             "index": idx,
-                            "type": "image" if is_even else "video",
-                            "path": getattr(post, "illustration_path", ""),
+                            "type": "video" if is_vid else "image",
+                            "path": ill_path,
                             "badge": f"PHÂN CẢNH #{idx}",
                             "text": c.content,
                             "sfx": c.sfx if c.sfx != "none" else "tension_riser",
-                            "voice": post.voice_id or "adam"
+                            "voice": getattr(c, "voice_id", None) or post.voice_id or "adam"
                         })
                     post.documentary_scenes = scs
 

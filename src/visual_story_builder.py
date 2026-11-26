@@ -38,13 +38,13 @@ config_mod = _loader._load("config.py")
 
 def get_ffmpeg_exe() -> str:
     sys_ffmpeg = shutil.which("ffmpeg")
-    if sys_ffmpeg:
+    if sys_ffmpeg and not sys_ffmpeg.lower().endswith((".cmd", ".bat")):
         return sys_ffmpeg
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        return "ffmpeg"
+        return sys_ffmpeg or "ffmpeg"
 
 
 def get_audio_duration_seconds(audio_path: str) -> float:
@@ -83,18 +83,25 @@ def create_header_badge_image(title: str, subtitle: str, output_path: str, width
         font_sub = font_title
 
     # Glassmorphism container
-    box_w, box_h = 1000, 150
-    bx, by = (width - box_w) // 2, 40
-    draw.rounded_rectangle([(bx, by), (bx + box_w, by + box_h)], radius=24, fill=(15, 23, 42, 220), outline=(255, 255, 255, 60), width=2)
+    box_w, box_h = 1000, 156
+    bx, by = (width - box_w) // 2, 36
+    draw.rounded_rectangle([(bx, by), (bx + box_w, by + box_h)], radius=24, fill=(15, 23, 42, 230), outline=(255, 255, 255, 70), width=2)
 
-    # Pill badge đỏ nổi bật
-    pill_w, pill_h = 280, 36
-    px, py = bx + 24, by + 18
-    draw.rounded_rectangle([(px, py), (px + pill_w, py + pill_h)], radius=12, fill=(225, 29, 72, 240))
-    draw.text((px + 16, py + 6), subtitle, font=font_sub, fill=(255, 255, 255))
+    # Pill badge đỏ tự co giãn theo độ dài chữ
+    px, py = bx + 28, by + 18
+    sub_bbox = draw.textbbox((0, 0), subtitle, font=font_sub)
+    sub_tw = sub_bbox[2] - sub_bbox[0]
+    pill_w = min(box_w - 56, max(180, sub_tw + 36))
+    pill_h = 38
+    draw.rounded_rectangle([(px, py), (px + pill_w, py + pill_h)], radius=12, fill=(225, 29, 72, 245))
+    draw.text((px + 18, py + 6), subtitle, font=font_sub, fill=(255, 255, 255))
 
-    # Title text
-    draw.text((bx + 24, by + 68), title, font=font_title, fill=(255, 255, 255))
+    # Title text (tự thu nhỏ nếu quá dài để không tràn khung)
+    max_title_w = box_w - 56
+    title_bbox = draw.textbbox((0, 0), title, font=font_title)
+    if (title_bbox[2] - title_bbox[0]) > max_title_w:
+        title = title[:42].rstrip() + "..."
+    draw.text((bx + 28, by + 74), title, font=font_title, fill=(255, 255, 255))
 
     im.save(output_path, "PNG")
     return output_path
@@ -106,16 +113,17 @@ def create_cinematic_scene_slide(badge: str, title: str, text: str, output_path:
     im = Image.new("RGB", (width, height), (15, 23, 42))
     draw = ImageDraw.Draw(im)
 
-    # Gradient nền điện ảnh
+    # Gradient nền điện ảnh sâu có chiều sâu
     for y in range(height):
         ratio = y / height
-        r = int(15 + ratio * 20)
-        g = int(23 + ratio * 15)
-        b = int(42 + ratio * 25)
+        r = int(12 + ratio * 18)
+        g = int(18 + ratio * 16)
+        b = int(36 + ratio * 28)
         draw.line([(0, y), (width, y)], fill=(r, g, b))
 
-    # Viền kính mờ
-    draw.rounded_rectangle([(10, 10), (width - 10, height - 10)], radius=24, outline=(255, 255, 255, 50), width=2)
+    # Thanh accent dọc bên trái & viền kính mờ
+    draw.rounded_rectangle([(12, 12), (width - 12, height - 12)], radius=24, outline=(148, 163, 184), width=2)
+    draw.rounded_rectangle([(44, 48), (52, height - 48)], radius=4, fill=(225, 29, 72))
 
     font_badge = None
     font_text = None
@@ -123,7 +131,7 @@ def create_cinematic_scene_slide(badge: str, title: str, text: str, output_path:
         if os.path.exists(f_path):
             try:
                 font_badge = ImageFont.truetype(f_path, 24)
-                font_text = ImageFont.truetype(f_path, 28)
+                font_text = ImageFont.truetype(f_path, 38)
                 break
             except Exception:
                 pass
@@ -131,25 +139,29 @@ def create_cinematic_scene_slide(badge: str, title: str, text: str, output_path:
         font_badge = ImageFont.load_default()
         font_text = font_badge
 
-    # Badge pill
-    badge_text = badge.upper() if badge else "TƯ LIỆU CÓ THẬT"
-    draw.rounded_rectangle([(40, 40), (420, 95)], radius=14, fill=(225, 29, 72))
-    draw.text((56, 54), badge_text[:28], font=font_badge, fill=(255, 255, 255))
+    # Badge pill tự co giãn theo text
+    badge_text = (badge.upper() if badge else "TƯ LIỆU CÓ THẬT")[:36]
+    b_bbox = draw.textbbox((0, 0), badge_text, font=font_badge)
+    b_pw = min(width - 140, max(180, (b_bbox[2] - b_bbox[0]) + 40))
+    draw.rounded_rectangle([(80, 56), (80 + b_pw, 106)], radius=14, fill=(225, 29, 72))
+    draw.text((100, 68), badge_text, font=font_badge, fill=(255, 255, 255))
 
-    # Text tóm tắt cảnh
+    # Text tóm tắt cảnh căn giữa theo chiều dọc, font lớn dễ đọc
     import textwrap
-    lines = textwrap.wrap(text, width=42)[:4]
-    y_pos = 160
+    lines = textwrap.wrap(text, width=34)[:5]
+    line_h = 58
+    total_text_h = len(lines) * line_h
+    y_pos = max(145, 130 + (height - 170 - total_text_h) // 2)
     for line in lines:
-        draw.text((50, y_pos), line, font=font_text, fill=(241, 245, 249))
-        y_pos += 48
+        draw.text((84, y_pos), line, font=font_text, fill=(248, 250, 252))
+        y_pos += line_h
 
     im.save(output_path, "JPEG", quality=92)
     return output_path
 
 
 def build_ass_subtitle_file(scenes_data: List[Dict], output_ass: str) -> str:
-    """Tạo file phụ đề ASS với kiểu chữ vàng/trắng viền đen 3.5px chuẩn TikTok."""
+    """Tạo file phụ đề ASS kiểu CapCut (cụm 4 từ, hiệu ứng pop-in mượt, viền đen dày)."""
     os.makedirs(os.path.dirname(output_ass), exist_ok=True)
 
     header = """[Script Info]
@@ -160,8 +172,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Segoe UI,54,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4.0,2.0,2,60,60,420,1
-Style: Highlight,Segoe UI,56,&H0000F5FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4.5,2.5,2,60,60,420,1
+Style: Default,Segoe UI,60,&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,4.5,2.5,2,60,60,835,1
+Style: Highlight,Segoe UI,62,&H0000D7FF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,5.0,3.0,2,60,60,835,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -178,9 +190,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             s = t % 60
             return f"{h}:{m:02d}:{s:05.2f}"
 
-        # Chia câu thành các cụm 6-8 từ để hiển thị nhịp nhàng trên màn hình điện thoại
+        # Chia câu thành cụm ngắn 4 từ kiểu CapCut để nhịp đọc nhanh, bắt mắt
         words = sc["text"].split()
-        chunk_size = 7
+        chunk_size = 4
         num_chunks = max(1, (len(words) + chunk_size - 1) // chunk_size)
         chunk_dur = (end_s - start_s) / num_chunks
 
@@ -189,8 +201,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             c_end = min(end_s, c_start + chunk_dur)
             sub_words = words[c_idx * chunk_size : (c_idx + 1) * chunk_size]
             sub_text = " ".join(sub_words)
-            style_name = "Highlight" if (c_idx % 2 == 1 or "!" in sub_text) else "Default"
-            events.append(f"Dialogue: 0,{fmt(c_start)},{fmt(c_end)},{style_name},,0,0,0,,{sub_text}")
+            has_num = any(ch.isdigit() for ch in sub_text)
+            style_name = "Highlight" if (c_idx % 2 == 1 or "!" in sub_text or has_num) else "Default"
+            pop_tag = r"{\fscx110\fscy110\t(0,110,\fscx100\fscy100)}"
+            events.append(f"Dialogue: 0,{fmt(c_start)},{fmt(c_end)},{style_name},,0,0,0,,{pop_tag}{sub_text}")
 
     with open(output_ass, "w", encoding="utf-8") as f:
         f.write(header + "\n".join(events) + "\n")
@@ -297,7 +311,7 @@ def render_visual_documentary_video(
 
     for idx, sc in enumerate(scenes, 1):
         voice_id = sc.get("voice", "adam")
-        rate = sc.get("rate", "+16%")
+        rate = sc.get("rate", "+6%")
         pitch = sc.get("pitch", "+0Hz")
         audio_name = f"doc_scene_{idx}.mp3"
         audio_path = os.path.join(AUDIO_DIR, audio_name)
@@ -333,85 +347,183 @@ def render_visual_documentary_video(
     print(f"✅ Tổng thời lượng dẫn chuyện: {total_duration:.2f} giây ({len(scenes)} phân cảnh)")
     if tracker:
         tracker.finish_step("tts")
-        tracker.start_step("composite", f"Đang dựng {len(scenes)} phân cảnh (Hình ảnh Ken Burns & Video tư liệu 60 FPS)...", 55)
+        tracker.start_step("composite", f"Đang dựng {len(scenes)} phân cảnh (Split-Screen Ken Burns + Satisfying 60 FPS)...", 55)
 
-    # 2. RENDER TỪNG PHÂN CẢNH VIDEO DỌC 9:16 (BOKEH BACKGROUND + SHARP MEDIA)
-    print("\n🎥 [BƯỚC 2/4]: Đang dựng từng phân cảnh (Hình ảnh Ken Burns / Video tư liệu)...")
+    # 2. RENDER TỪNG PHÂN CẢNH VIDEO DỌC 9:16 (SPLIT-SCREEN: TƯ LIỆU TRÊN + SATISFYING DƯỚI)
+    print("\n🎥 [BƯỚC 2/4]: Đang dựng từng phân cảnh (Split-Screen Ken Burns + Satisfying 60 FPS)...")
     scene_videos = []
+    used_scene_imgs = set()
+
+    # Chọn 1 video satisfying thật (>500KB) để chạy xuyên suốt nửa dưới màn hình
+    import random
+    bottom_sat_video = None
+    try:
+        sat_root = os.path.join(ASSETS_DIR, "satisfying")
+        sat_candidates = []
+        if os.path.isdir(sat_root):
+            for r_dir, _, f_names in os.walk(sat_root):
+                for fn in f_names:
+                    if fn.lower().endswith(".mp4") and not fn.startswith("sample_"):
+                        fp = os.path.join(r_dir, fn)
+                        if os.path.getsize(fp) > 500_000:
+                            sat_candidates.append(fp)
+        if sat_candidates:
+            bottom_sat_video = random.choice(sat_candidates)
+            print(f"  🎮 [SPLIT-SCREEN BOTTOM]: {os.path.basename(bottom_sat_video)}")
+    except Exception:
+        bottom_sat_video = None
+
+    # Danh sách ảnh dự phòng cục bộ để xoay vòng nếu không tải được ảnh web
+    local_ill_dir = os.path.join(ASSETS_DIR, "illustrations")
+    local_ill_pool = []
+    if os.path.isdir(local_ill_dir):
+        local_ill_pool = [
+            os.path.join(local_ill_dir, fn)
+            for fn in sorted(os.listdir(local_ill_dir))
+            if fn.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
 
     for sc in scenes_data:
         idx = sc["index"]
         stype = sc["type"]
         spath = sc.get("path", "")
         abs_check = spath if (spath and os.path.isabs(spath)) else (os.path.join(BASE_DIR, spath) if spath else "")
+        if abs_check and os.path.exists(abs_check):
+            used_scene_imgs.add(os.path.abspath(abs_check))
         if not abs_check or not os.path.exists(abs_check):
-            # Tự động tạo ảnh slide điện ảnh chất lượng cao cho phân cảnh này
-            fallback_img = os.path.join(temp_dir, f"scene_slide_{idx}.jpg")
-            create_cinematic_scene_slide(sc.get("badge", ""), story_title, sc.get("text", ""), fallback_img)
-            spath = fallback_img
-            stype = "image"
+            # Thử tự động tìm ảnh thật theo từ khóa của phân cảnh (lưu riêng từng cảnh để không bị ghi đè)
+            fetched_img = ""
+            q_list = [q for q in [sc.get("search_query_en", ""), sc.get("text", "")[:50], story_title] if q]
+            if q_list:
+                try:
+                    from real_image_search import search_and_download_real_image
+                    scene_out_img = os.path.join(temp_dir, f"scene_web_{idx}.jpg")
+                    fetched_img = search_and_download_real_image(
+                        queries=q_list,
+                        category="general_life",
+                        output_path=scene_out_img,
+                        target_width=1040,
+                        target_height=820,
+                        fallback_to_category=False
+                    )
+                except Exception:
+                    fetched_img = ""
+            if fetched_img and os.path.exists(fetched_img) and os.path.abspath(fetched_img) not in used_scene_imgs:
+                spath = fetched_img
+                stype = "image"
+                used_scene_imgs.add(os.path.abspath(fetched_img))
+            else:
+                # Xoay vòng ảnh từ assets/illustrations hoặc tạo slide điện ảnh
+                unused_local = [p for p in local_ill_pool if os.path.abspath(p) not in used_scene_imgs]
+                if unused_local:
+                    spath = unused_local[0]
+                    stype = "image"
+                    used_scene_imgs.add(os.path.abspath(spath))
+                else:
+                    fallback_img = os.path.join(temp_dir, f"scene_slide_{idx}.jpg")
+                    create_cinematic_scene_slide(sc.get("badge", ""), story_title, sc.get("text", ""), fallback_img)
+                    spath = fallback_img
+                    stype = "image"
         else:
             spath = abs_check
+            # Bảo vệ: nếu file thực tế là ảnh (.jpg/.png/.webp...) thì ép stype='image' để tránh FFmpeg treo với -stream_loop -1
+            ext = os.path.splitext(spath)[1].lower()
+            if ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"):
+                stype = "image"
+            elif ext in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"):
+                stype = "video"
         sdur = sc["duration"]
+        xfade_pad = 0.35 if idx < len(scenes_data) else 0.0
+        render_dur = sdur + xfade_pad
         sc_out = os.path.join(temp_dir, f"rendered_scene_{idx}.mp4")
 
-        # Khung viền hình ảnh/video chính giữa: 1000 x 600px đặt tại y=480
+        # Khung trên: 1040x820 tại y=205 (ngay dưới header). Khung dưới (nếu có): 1040x840 tại y=1045.
+        top_y = 205 if bottom_sat_video else 235
         if stype == "video":
-            # Video clip: Lặp hoặc cắt đúng sdur giây, tạo nền mờ bokeh 1080x1920 và chèn video sắc nét ở giữa
-            vf = (
-                f"[0:v]fps=60,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5,colorchannelmixer=aa=0.45[bg];"
-                f"[0:v]fps=60,scale=1020:620:force_original_aspect_ratio=increase,crop=1020:620[fg];"
-                f"[bg][fg]overlay=x=(W-w)/2:y=500[outv]"
-            )
-            cmd = [
-                ffmpeg_exe, "-y",
-                "-stream_loop", "-1", "-i", spath,
-                "-filter_complex", vf,
-                "-map", "[outv]",
-                "-t", f"{sdur:.2f}",
-                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                sc_out
-            ]
+            vf_fg = f"[0:v]fps=60,scale=1040:820:force_original_aspect_ratio=increase,crop=1040:820[fg]"
+            in_args = ["-stream_loop", "-1", "-i", spath]
         else:
-            # Hình ảnh sắc nét: Tạo hiệu ứng Ken Burns zoom nhẹ (1.0 -> 1.08) trên ảnh, kèm nền mờ bokeh
-            vf = (
-                f"[0:v]fps=60,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5,colorchannelmixer=aa=0.45[bg];"
-                f"[0:v]fps=60,scale=1020:620:force_original_aspect_ratio=increase,crop=1020:620[fg];"
-                f"[bg][fg]overlay=x=(W-w)/2:y=500[outv]"
+            zp_expr = (
+                "z='min(zoom+0.0007,1.09)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                if (idx % 2 == 1)
+                else "z='if(eq(on,1),1.09,max(zoom-0.0007,1.01))':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             )
-            cmd = [
-                ffmpeg_exe, "-y",
-                "-loop", "1", "-framerate", "60", "-i", spath,
-                "-filter_complex", vf,
-                "-map", "[outv]",
-                "-t", f"{sdur:.2f}",
-                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                sc_out
-            ]
+            vf_fg = f"[0:v]scale=1240:-1:force_original_aspect_ratio=increase,zoompan={zp_expr}:s=1040x820:fps=60[fg]"
+            in_args = ["-loop", "1", "-framerate", "60", "-i", spath]
+
+        if bottom_sat_video:
+            sat_seek = (idx - 1) * 4.5
+            in_args.extend(["-stream_loop", "-1", "-ss", f"{sat_seek:.1f}", "-i", bottom_sat_video])
+            vf = (
+                f"[0:v]fps=60,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=35:5,eq=brightness=-0.22:saturation=0.7[bg];"
+                f"{vf_fg};"
+                f"[1:v]fps=60,scale=1040:840:force_original_aspect_ratio=increase,crop=1040:840[bot];"
+                f"[bg][fg]overlay=x=(W-w)/2:y={top_y}[v1];"
+                f"[v1][bot]overlay=x=(W-w)/2:y=1045[outv]"
+            )
+        else:
+            vf = (
+                f"[0:v]fps=60,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=35:5,eq=brightness=-0.22:saturation=0.7[bg];"
+                f"{vf_fg};"
+                f"[bg][fg]overlay=x=(W-w)/2:y={top_y}[outv]"
+            )
+
+        cmd = [
+            ffmpeg_exe, "-y",
+            *in_args,
+            "-filter_complex", vf,
+            "-map", "[outv]",
+            "-t", f"{render_dur:.2f}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            sc_out
+        ]
 
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if os.path.exists(sc_out):
             print(f"  ✓ Đã dựng Cảnh {idx} ({stype.upper()}): {sdur:.2f}s")
-            scene_videos.append(sc_out)
+            scene_videos.append((sc_out, sdur))
         else:
             print(f"  ❌ Lỗi khi dựng cảnh {idx}")
 
-    # Nối tất cả các video phân cảnh lại
-    concat_txt = os.path.join(temp_dir, "scenes_concat.txt")
-    with open(concat_txt, "w", encoding="utf-8") as f:
-        for v in scene_videos:
-            safe_v = os.path.abspath(v).replace("\\", "/")
-            f.write(f"file '{safe_v}'\n")
-
+    # Nối tất cả các video phân cảnh bằng xfade chuyển cảnh mượt (0.35s)
     assembled_video = os.path.join(temp_dir, "assembled_scenes.mp4")
-    cmd_cat = [
-        ffmpeg_exe, "-y",
-        "-f", "concat", "-safe", "0", "-i", concat_txt,
-        "-c", "copy",
-        assembled_video
-    ]
-    subprocess.run(cmd_cat, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    print("  ✓ Đã ghép nối toàn bộ các phân cảnh video thành luồng chuyển động liên tục!")
+    if len(scene_videos) == 1:
+        shutil.copyfile(scene_videos[0][0], assembled_video)
+    elif len(scene_videos) > 1:
+        xfade_dur = 0.35
+        transitions = ["fade", "wipeleft", "smoothleft", "dissolve", "slideright"]
+        xf_inputs = []
+        for sv_path, _ in scene_videos:
+            xf_inputs.extend(["-i", sv_path])
+        xf_filters = []
+        prev_label = "[0:v]"
+        acc_dur = 0.0
+        for i in range(len(scene_videos) - 1):
+            acc_dur += scene_videos[i][1]
+            # Offset khớp đúng điểm kết thúc giọng đọc của cảnh i (vì mỗi cảnh đã pad +0.35s)
+            offset_t = max(0.0, acc_dur)
+            out_label = "[v_xf]" if i == len(scene_videos) - 2 else f"[xf_{i}]"
+            tr_name = transitions[i % len(transitions)]
+            xf_filters.append(f"{prev_label}[{i+1}:v]xfade=transition={tr_name}:duration={xfade_dur}:offset={offset_t:.3f}{out_label}")
+            prev_label = out_label
+        cmd_xf = [
+            ffmpeg_exe, "-y",
+            *xf_inputs,
+            "-filter_complex", ";".join(xf_filters),
+            "-map", "[v_xf]",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            assembled_video
+        ]
+        res_xf = subprocess.run(cmd_xf, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res_xf.returncode != 0 or not os.path.exists(assembled_video):
+            # Fallback sang concat nếu xfade gặp lỗi
+            concat_txt = os.path.join(temp_dir, "scenes_concat.txt")
+            with open(concat_txt, "w", encoding="utf-8") as f:
+                for sv_path, _ in scene_videos:
+                    safe_v = os.path.abspath(sv_path).replace("\\", "/")
+                    f.write(f"file '{safe_v}'\n")
+            subprocess.run([ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", concat_txt, "-c", "copy", assembled_video], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print("  ✓ Đã ghép nối toàn bộ các phân cảnh với hiệu ứng chuyển cảnh mượt xfade!")
 
     # 3. TẠO THẺ TIÊU ĐỀ HEADER & PHỤ ĐỀ KINETIC
     print("\n📝 [BƯỚC 3/4]: Tạo thẻ tiêu đề và file phụ đề động Kinetic...")
@@ -461,36 +573,50 @@ def render_visual_documentary_video(
         audio_inputs_cmd.extend(["-stream_loop", "-1", "-i", bgm_file])
         bgm_idx = in_idx
         in_idx += 1
-        foley_filters.append(f"[{bgm_idx}:a]volume=0.20,atrim=0:{total_duration:.2f}[a_bgm]")
+        # Sidechain ducking: nhạc nền tự nhỏ xuống khi giọng đọc vang lên
+        foley_filters.append(f"[{vocal_idx}:a]asplit=2[v_main][v_sc]")
+        foley_filters.append(f"[{bgm_idx}:a]volume=0.26,atrim=0:{total_duration:.2f}[a_bgm_raw]")
+        foley_filters.append("[a_bgm_raw][v_sc]sidechaincompress=threshold=0.02:ratio=4:attack=50:release=300[a_bgm]")
+        vocal_mix_label = "[v_main]"
+    else:
+        vocal_mix_label = f"[{vocal_idx}:a]"
 
-    # Thêm SFX tại điểm bắt đầu từng cảnh
+    # Thêm SFX tại điểm bắt đầu từng cảnh (tự chèn whoosh nhẹ khi chuyển cảnh nếu chưa có SFX)
     sfx_streams = []
-    for sc in scenes_data:
+    for s_i, sc in enumerate(scenes_data):
         sfx_name = sc["sfx"]
+        if (not sfx_name or sfx_name == "none") and s_i > 0:
+            sfx_name = "whoosh"
         if sfx_name and sfx_name != "none":
             sfx_file = os.path.join(SFX_DIR, f"{sfx_name}.mp3")
             if os.path.exists(sfx_file):
                 audio_inputs_cmd.extend(["-i", sfx_file])
                 delay_ms = int(sc["start"] * 1000)
                 sfx_stream_name = f"sfx_{in_idx}"
-                foley_filters.append(f"[{in_idx}:a]adelay={delay_ms}|{delay_ms},volume=0.45[{sfx_stream_name}]")
+                vol = 0.25 if sfx_name == "whoosh" else 0.45
+                foley_filters.append(f"[{in_idx}:a]adelay={delay_ms}:all=1,volume={vol}[{sfx_stream_name}]")
                 sfx_streams.append(f"[{sfx_stream_name}]")
                 in_idx += 1
 
-    mix_inputs = [f"[{vocal_idx}:a]"]
+    mix_inputs = [vocal_mix_label]
     if has_bgm:
         mix_inputs.append("[a_bgm]")
     mix_inputs.extend(sfx_streams)
 
     foley_filters.append(f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=2[a_final]")
 
-    # MASTER COMPOSITE TOÀN DIỆN BẰNG FFMPEG
+    # Thanh tiến trình đỏ (Progress Bar) chạy ngang đáy màn hình
+    bar_idx = in_idx
+    audio_inputs_cmd.extend(["-f", "lavfi", "-i", "color=c=#e11d48:s=1080x6"])
+
+    # MASTER COMPOSITE TOÀN DIỆN BẰNG FFMPEG (Vignette + Header + CapCut ASS + Progress Bar)
     clean_ass = os.path.abspath(ass_path).replace("\\", "/").replace(":", "\\:")
-    clean_header = os.path.abspath(header_img).replace("\\", "/")
 
     filter_complex_all = (
-        f"[0:v][1:v]overlay=x=0:y=60[v_head];"
-        f"[v_head]ass='{clean_ass}'[v_final];" +
+        f"[0:v]vignette=angle=PI/4[v_vig];"
+        f"[v_vig][1:v]overlay=x=0:y=30[v_head];"
+        f"[v_head]ass='{clean_ass}'[v_sub];"
+        f"[v_sub][{bar_idx}:v]overlay=x='-1080+(1080*t/{total_duration:.2f})':y=1914:shortest=1[v_final];" +
         ";".join(foley_filters)
     )
 
@@ -518,8 +644,9 @@ def render_visual_documentary_video(
         tracker.start_step("export", f"FFmpeg đang xuất bản video thành phẩm 60 FPS ({total_duration:.1f}s)...", 90)
     res_final = subprocess.run(final_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res_final.returncode != 0:
-        print(f"❌ Lỗi khi xuất video cuối cùng: {res_final.stderr[-600:]}")
-        raise RuntimeError("FFmpeg xuất video thất bại!")
+        err_tail = (res_final.stderr or "").strip()[-400:]
+        print(f"❌ Lỗi khi xuất video cuối cùng: {err_tail}")
+        raise RuntimeError(f"FFmpeg xuất video thất bại! {err_tail}")
 
     # Dọn dẹp file tạm
     try:

@@ -385,10 +385,10 @@ def generate_story_with_gemini(
             f"- TIÊU ĐỀ VIDEO (video_title): Đặt tiêu đề in hoa giật gân, tò mò (dưới 10 từ, ví dụ: 'CÚ LỪA 250 CHIẾC ÁO PHÔNG TÂN PHÁT XÍT', 'VỤ ÁN BÁN THÁP EIFFEL 2 LẦN').\n"
             f"- NHÃN CHUYÊN MỤC (story_badge): Nhãn phân loại hồ sơ (ví dụ: 'HỒ SƠ KỲ THÚ • EXIT DEUTSCHLAND', 'SIÊU LỪA ĐẢO THẾ KỶ • NƯỚC PHÁP').\n"
             f"- THẺ MỞ ĐẦU (POST): Đặt hook cực sốc, nêu bật sự thật kỳ lạ hoặc kết quả không ai ngờ tới của sự kiện để người xem dừng tay nghe tiếp.\n"
-            f"- PHÂN CẢNH TƯ LIỆU (documentary_scenes): BẮT BUỘC tạo đúng từ 5 đến 6 phân cảnh tư liệu hoàn chỉnh:\n"
+            f"- PHÂN CẢNH TƯ LIỆU (documentary_scenes): BẮT BUỘC tạo đúng từ 7 đến 8 phân cảnh tư liệu hoàn chỉnh (để video đạt thời lượng chuẩn 60-75 giây):\n"
             f"  + Mỗi cảnh có 'badge': nhãn in hoa ngắn gọn (dưới 5 từ, vd: 'LỄ HỘI ROCK', 'CÚ LỪA THẾ KỶ', 'BẢN HỢP ĐỒNG GIẢ', 'MÁY GIẶT KÍCH HOẠT').\n"
             f"  + 'search_query_en': từ khóa tiếng Anh cực chuẩn xác của nhân vật, sự kiện hoặc đồ vật để tìm ảnh chụp thực tế trên Wikimedia/Web (vd: 'Victor Lustig mugshot', 'Eiffel tower scrap metal 1925').\n"
-            f"  + 'narration': lời dẫn chuyện lôi cuốn bằng tiếng Việt do giọng đọc AI đọc (từ 20-35 từ).\n"
+            f"  + 'narration': lời dẫn chuyện lôi cuốn, chi tiết bằng tiếng Việt do giọng đọc AI đọc (từ 35-50 từ mỗi cảnh, đủ ý và có nhịp kể chuyện).\n"
             f"  + 'sfx': âm thanh kịch tính phù hợp ('tension_riser', 'ting', 'sub_drop', 'boom', 'water_splash', 'applause', 'scratch').\n"
             f"- TƯ LIỆU QUỐC TẾ: Điền 'documentary_query' là từ khóa tiếng Anh chính xác để tra cứu tư liệu gốc.\n"
             f"- Đặt story_mode = 'true_story'."
@@ -601,17 +601,36 @@ def generate_story_with_gemini(
     raw_doc_scenes = data.get("documentary_scenes", [])
     doc_scenes = []
     if raw_doc_scenes:
+        used_scene_paths = set()
         for idx, sc in enumerate(raw_doc_scenes, 1):
             if isinstance(sc, dict):
                 sc_text = sc.get("narration") or sc.get("text") or ""
+                q_en = sc.get("search_query_en", "")
+                sc_path = sc.get("path", "")
+                if not sc_path or not os.path.exists(sc_path):
+                    try:
+                        from src.real_image_search import search_and_download_real_image
+                        sc_queries = [q for q in [q_en, sc_text[:50], topic] if q]
+                        found = search_and_download_real_image(
+                            queries=sc_queries,
+                            category=illus_cat,
+                            target_width=1040,
+                            target_height=860,
+                            fallback_to_category=(idx == 1)
+                        )
+                        if found and os.path.exists(found) and found not in used_scene_paths:
+                            sc_path = found
+                            used_scene_paths.add(found)
+                    except Exception:
+                        pass
                 doc_scenes.append({
                     "index": sc.get("index", idx),
-                    "type": sc.get("type", "image"),
+                    "type": "video" if (sc_path and sc_path.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm"))) else "image",
                     "badge": sc.get("badge", f"CẢNH #{idx}"),
-                    "search_query_en": sc.get("search_query_en", ""),
+                    "search_query_en": q_en,
                     "text": sc_text,
                     "sfx": sc.get("sfx", "none"),
-                    "path": ""
+                    "path": sc_path
                 })
 
     post = Post(

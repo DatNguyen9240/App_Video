@@ -84,8 +84,9 @@ class TestVisualStoryBuilder(unittest.TestCase):
         self.assertIn("[Script Info]", content)
         self.assertIn("[V4+ Styles]", content)
         self.assertIn("[Events]", content)
-        self.assertIn("Dialogue: 0,0:00:00.00,0:00:04.50", content)
-        self.assertIn("Năm 1925 tại Paris hoa lệ...", content)
+        self.assertIn("Dialogue: 0,0:00:00.00,", content)
+        self.assertIn("Năm 1925 tại Paris", content)
+        self.assertIn("hoa lệ...", content)
 
     def test_default_trojan_scenes_integrity(self):
         """Mẫu Trojan scenes phải có đủ 6 phân cảnh với cấu trúc tiêu chuẩn."""

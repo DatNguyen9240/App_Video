@@ -52,13 +52,13 @@ SATISFYING_CATEGORIES = {
 def get_ffmpeg_exe() -> str:
     import shutil
     sys_ffmpeg = shutil.which("ffmpeg")
-    if sys_ffmpeg:
+    if sys_ffmpeg and not sys_ffmpeg.lower().endswith((".cmd", ".bat")):
         return sys_ffmpeg
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        return "ffmpeg"
+        return sys_ffmpeg or "ffmpeg"
 
 
 def ensure_satisfying_directories():
