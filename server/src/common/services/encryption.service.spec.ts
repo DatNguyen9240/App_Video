@@ -67,4 +67,29 @@ describe('EncryptionService (AES-256-GCM)', () => {
     expect(service.encrypt('')).toEqual('');
     expect(service.decrypt('')).toEqual('');
   });
+
+  it('should throw an error for invalid ciphertext format (not 3 parts)', () => {
+    expect(() => service.decrypt('invalid-payload-without-colons')).toThrow();
+    expect(() => service.decrypt('part1:part2')).toThrow();
+  });
+
+  it('should support short non-64-hex ENCRYPTION_KEY via SHA-256 fallback', async () => {
+    const shortKeyModule: TestingModule = await Test.createTestingModule({
+      providers: [
+        EncryptionService,
+        {
+          provide: ConfigService,
+          useValue: {
+            get: (key: string, defaultVal?: string) =>
+              key === 'ENCRYPTION_KEY' ? 'short-dev-passphrase' : defaultVal,
+          },
+        },
+      ],
+    }).compile();
+
+    const shortKeyService = shortKeyModule.get<EncryptionService>(EncryptionService);
+    const secret = 'fallback-key-secret-token';
+    const encrypted = shortKeyService.encrypt(secret);
+    expect(shortKeyService.decrypt(encrypted)).toEqual(secret);
+  });
 });

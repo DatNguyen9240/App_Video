@@ -1,6 +1,7 @@
 # Environment variables & API keys (CHỨA KEY BẢO MẬT, TUYỆT ĐỐI KHÔNG PUSH)
 .env
 *.env
+server/.env
 !.env.example
 
 # Video nền nặng (GitHub chặn file > 100MB, file gameplay thường hàng GB)
