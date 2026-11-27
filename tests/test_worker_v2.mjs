@@ -44,7 +44,11 @@ class MockD1Database {
       },
       async first() {
         if (norm.startsWith("SELECT 1 AS ok")) return { ok: 1 };
-        if (norm.startsWith("SELECT status, created_at FROM crawl_notifications WHERE run_id = ?") || norm.startsWith("SELECT status FROM crawl_notifications WHERE run_id = ?")) {
+        if (
+          norm.startsWith("SELECT run_id, status, created_at") ||
+          norm.startsWith("SELECT status, created_at FROM crawl_notifications WHERE run_id = ?") ||
+          norm.startsWith("SELECT status FROM crawl_notifications WHERE run_id = ?")
+        ) {
           const row = db.notifications.find((n) => n.run_id === this.args[0]);
           return row ? { ...row } : null;
         }
@@ -111,6 +115,22 @@ class MockD1Database {
               .filter((n) => n.status === "delivery_uncertain" || n.status === "sending")
               .slice()
               .reverse(),
+          };
+        }
+        if (norm.includes("FROM crawl_notifications WHERE status = 'delivery_failed'")) {
+          const [nowIso, limit] = this.args;
+          return {
+            results: db.notifications
+              .filter(
+                (n) =>
+                  n.status === "delivery_failed" &&
+                  Number(n.retryable || 0) === 1 &&
+                  Number(n.retry_count || 0) < Number(n.max_retries || 5) &&
+                  (!n.next_retry_at || String(n.next_retry_at) <= String(nowIso))
+              )
+              .slice()
+              .sort((a, b) => String(a.next_retry_at || a.created_at || "").localeCompare(String(b.next_retry_at || b.created_at || "")))
+              .slice(0, Number(limit || 10)),
           };
         }
         if (norm.includes("FROM crawl_notifications WHERE status = 'delivery_uncertain'")) {
@@ -279,6 +299,13 @@ class MockD1Database {
           row.updated_at = updated_at;
           return { meta: { changes: 1 } };
         }
+        if (norm.startsWith("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")) {
+          const [notified_at, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && !c.notified_at);
+          if (!row) return { meta: { changes: 0 } };
+          row.notified_at = notified_at;
+          return { meta: { changes: 1 } };
+        }
         if (norm.startsWith("UPDATE crawl_requests SET notified_at = ? WHERE id = ?")) {
           const [notified_at, id] = this.args;
           const row = db.crawlRequests.find((c) => c.id === id);
@@ -286,11 +313,76 @@ class MockD1Database {
           return { meta: { changes: row ? 1 : 0 } };
         }
         if (norm.startsWith("INSERT OR IGNORE INTO crawl_notifications")) {
-          const [run_id, record_count, created_at] = this.args;
+          const run_id = this.args[0];
           if (db.notifications.some((n) => n.run_id === run_id)) {
             return { meta: { changes: 0 } };
           }
-          db.notifications.push({ run_id, record_count, status: "sending", created_at, sent_at: null });
+          if (this.args.length >= 5) {
+            const [, record_count, created_at, max_retries, retry_payload_json] = this.args;
+            db.notifications.push({
+              run_id,
+              record_count,
+              status: "sending",
+              created_at,
+              sent_at: null,
+              retry_count: 0,
+              max_retries,
+              next_retry_at: null,
+              retryable: 0,
+              last_error: null,
+              retry_payload_json,
+            });
+          } else {
+            const [, record_count, created_at] = this.args;
+            db.notifications.push({
+              run_id,
+              record_count,
+              status: "sending",
+              created_at,
+              sent_at: null,
+              retry_count: 0,
+              max_retries: 5,
+              next_retry_at: null,
+              retryable: 0,
+              last_error: null,
+              retry_payload_json: null,
+            });
+          }
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_notifications SET status = 'sending'")) {
+          const [reclaimNowIso, retryPayloadJson, notifKey, cmpIso] = this.args;
+          const row = db.notifications.find(
+            (n) =>
+              n.run_id === notifKey &&
+              n.status === "delivery_failed" &&
+              Number(n.retryable || 0) === 1 &&
+              Number(n.retry_count || 0) < Number(n.max_retries || 5) &&
+              (!n.next_retry_at || String(n.next_retry_at) <= String(cmpIso))
+          );
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "sending";
+          row.created_at = reclaimNowIso;
+          row.retry_count = Number(row.retry_count || 0) + 1;
+          row.next_retry_at = null;
+          if (retryPayloadJson !== null && retryPayloadJson !== undefined) {
+            row.retry_payload_json = retryPayloadJson;
+          }
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_notifications SET status = ?, sent_at = COALESCE(?, sent_at)")) {
+          const [status, sentAt, retryCount, nextRetryAt, retryable, lastError, retryPayloadJson, notifKey] = this.args;
+          const row = db.notifications.find((n) => n.run_id === notifKey);
+          if (!row) return { meta: { changes: 0 } };
+          row.status = status;
+          if (sentAt !== null && sentAt !== undefined) row.sent_at = sentAt;
+          if (retryCount !== null && retryCount !== undefined) row.retry_count = retryCount;
+          row.next_retry_at = nextRetryAt;
+          row.retryable = Number(retryable ? 1 : 0);
+          row.last_error = lastError;
+          if (retryPayloadJson !== null && retryPayloadJson !== undefined) {
+            row.retry_payload_json = retryPayloadJson;
+          }
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_notifications SET status = 'sent'")) {
@@ -1702,6 +1794,318 @@ assert.equal(v3StartBtns.length, 6);
     }
   } finally {
     globalThis.fetch = prevFetch11;
+  }
+}
+
+// 12. Third-Round GPT Review Regressions (#1, #2, #4):
+//     #1: Atomic delivery_failed reclaim (429 retry_after respected, max_retries enforced, 408/503 -> delivery_uncertain, 400 permanent)
+//     #2: Concurrent Promise.all dedupe across Drive report, D1 direct, API /complete, and V1 fallback
+//     #4: expireStaleLeases runs independently even if notifyNewCrawl throws
+{
+  const env12 = {
+    ...env,
+    DB: new MockD1Database(),
+    NOTIFY_BATCH_SIZE: "20",
+    TELEGRAM_MAX_ATTEMPTS: "1",
+    TELEGRAM_MAX_RETRIES: "2",
+    TELEGRAM_RETRY_BASE_MS: "10",
+    TELEGRAM_IMMEDIATE_RETRY_MAX_MS: "0", // force deferred next_retry_at reclaim path in tests
+  };
+
+  let driveReports12 = [];
+  let v1Files12 = [];
+  let telegramMode = "ok"; // "429_then_ok" | "429_always" | "408" | "503" | "400" | "ok"
+  let tgCalls12 = [];
+  let force429Remaining = 0;
+
+  const prevFetch12 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.startsWith("https://oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "mock-token-12" }), { status: 200 });
+    }
+    if (sUrl.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+      const q = new URL(sUrl).searchParams.get("q") || "";
+      if (q.includes(`'${REPORTS_ID}' in parents`) && !q.includes("vnd.google-apps.document")) {
+        return new Response(JSON.stringify({ files: driveReports12 }), { status: 200 });
+      }
+      if (q.includes(`'${THREADS_ID}' in parents`)) {
+        return new Response(JSON.stringify({ files: v1Files12 }), { status: 200 });
+      }
+      return prevFetch12(url, init);
+    }
+    for (const f of [...driveReports12, ...v1Files12]) {
+      if (sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)) {
+        return new Response(JSON.stringify(f.body), { status: 200 });
+      }
+    }
+    if (sUrl.startsWith("https://api.telegram.org/bot")) {
+      tgCalls12.push({ url: sUrl, body: init.body });
+      if (sUrl.includes("/sendMessage") || sUrl.includes("/editMessageText")) {
+        if (telegramMode === "429_then_ok" && force429Remaining > 0) {
+          force429Remaining -= 1;
+          return new Response(
+            JSON.stringify({ ok: false, error_code: 429, parameters: { retry_after: 0.08 }, description: "Too Many Requests" }),
+            { status: 429 }
+          );
+        }
+        if (telegramMode === "429_always") {
+          return new Response(
+            JSON.stringify({ ok: false, error_code: 429, parameters: { retry_after: 0.01 }, description: "Too Many Requests" }),
+            { status: 429 }
+          );
+        }
+        if (telegramMode === "408") {
+          return new Response(JSON.stringify({ ok: false, error_code: 408, description: "Request Timeout" }), { status: 408 });
+        }
+        if (telegramMode === "503") {
+          return new Response(JSON.stringify({ ok: false, error_code: 503, description: "Service Unavailable" }), { status: 503 });
+        }
+        if (telegramMode === "400") {
+          return new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request" }), { status: 400 });
+        }
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 9001 } }), { status: 200 });
+    }
+    return prevFetch12(url, init);
+  };
+
+  try {
+    // 12a-1: Definite-unsent HTTP 429 schedules next_retry_at respecting retry_after; blocked before next_retry_at, atomically reclaimed after
+    telegramMode = "429_then_ok";
+    force429Remaining = 1;
+    driveReports12 = [{
+      id: "1RptReclaim429",
+      name: "trend_report_reclaim429.json",
+      mimeType: "application/json",
+      size: "600",
+      modifiedTime: "2026-11-28T03:00:00Z",
+      body: { run_id: "run-reclaim-429", generated_at: "2026-11-28T03:00:00Z", run_status: "completed", telegram_summary: "Retryable 429 test" },
+    }];
+    await worker.scheduled({}, env12, {});
+    const row429 = env12.DB.notifications.find((n) => n.run_id === "run-reclaim-429");
+    assert.ok(row429);
+    assert.equal(row429.status, "delivery_failed");
+    assert.equal(row429.retryable, 1);
+    assert.equal(row429.retry_count, 0);
+    assert.ok(row429.next_retry_at && Date.parse(row429.next_retry_at) > Date.now());
+    const callsAfterFirst429 = tgCalls12.length;
+
+    // Must NOT reclaim before next_retry_at
+    await worker.scheduled({}, env12, {});
+    assert.equal(tgCalls12.length, callsAfterFirst429);
+    assert.equal(row429.status, "delivery_failed");
+
+    // Wait for retry_after (~80ms) to elapse, then cron reclaims & succeeds
+    await new Promise((r) => setTimeout(r, 110));
+    await worker.scheduled({}, env12, {});
+    assert.equal(tgCalls12.length, callsAfterFirst429 + 1);
+    assert.equal(row429.status, "sent");
+    assert.equal(row429.retryable, 0);
+    assert.equal(row429.retry_count, 1);
+
+    // 12a-2: Bounded max_retries=2 stops retrying once exhausted
+    telegramMode = "429_always";
+    driveReports12 = [{
+      id: "1RptExhaust",
+      name: "trend_report_exhaust.json",
+      mimeType: "application/json",
+      size: "600",
+      modifiedTime: "2026-11-28T03:10:00Z",
+      body: { run_id: "run-exhaust-429", generated_at: "2026-11-28T03:10:00Z", run_status: "completed", telegram_summary: "Exhaust max_retries" },
+    }];
+    await worker.scheduled({}, env12, {}); // initial fail (retry_count=0, retryable=1)
+    await new Promise((r) => setTimeout(r, 25));
+    await worker.scheduled({}, env12, {}); // reclaim #1 (retry_count=1, retryable=1)
+    await new Promise((r) => setTimeout(r, 25));
+    await worker.scheduled({}, env12, {}); // reclaim #2 (retry_count=2 >= max_retries=2 -> retryable=0)
+    const rowEx = env12.DB.notifications.find((n) => n.run_id === "run-exhaust-429");
+    assert.equal(rowEx.status, "delivery_failed");
+    assert.equal(rowEx.retry_count, 2);
+    assert.equal(rowEx.retryable, 0);
+    const callsAtExhaust = tgCalls12.length;
+    await new Promise((r) => setTimeout(r, 25));
+    await worker.scheduled({}, env12, {}); // must NOT reclaim again
+    assert.equal(tgCalls12.length, callsAtExhaust);
+
+    // 12a-3: HTTP 408 and HTTP 503 MUST become delivery_uncertain (NEVER retried)
+    for (const [errCode, runTag] of [["408", "run-err-408"], ["503", "run-err-503"]]) {
+      telegramMode = errCode;
+      driveReports12 = [{
+        id: `1Rpt_${errCode}`,
+        name: `trend_report_${errCode}.json`,
+        mimeType: "application/json",
+        size: "600",
+        modifiedTime: "2026-11-28T03:20:00Z",
+        body: { run_id: runTag, generated_at: "2026-11-28T03:20:00Z", run_status: "completed", telegram_summary: `Uncertain HTTP ${errCode}` },
+      }];
+      const beforeUnc = tgCalls12.length;
+      await worker.scheduled({}, env12, {});
+      assert.equal(tgCalls12.length, beforeUnc + 1);
+      const uncRow = env12.DB.notifications.find((n) => n.run_id === runTag);
+      assert.equal(uncRow.status, "delivery_uncertain");
+      assert.equal(uncRow.retryable, 0);
+      await new Promise((r) => setTimeout(r, 25));
+      await worker.scheduled({}, env12, {}); // must NEVER retry delivery_uncertain
+      assert.equal(tgCalls12.length, beforeUnc + 1);
+    }
+
+    // 12a-4: Permanent 400 -> non-retryable delivery_failed (NEVER retried)
+    telegramMode = "400";
+    driveReports12 = [{
+      id: "1Rpt_400",
+      name: "trend_report_400.json",
+      mimeType: "application/json",
+      size: "600",
+      modifiedTime: "2026-11-28T03:30:00Z",
+      body: { run_id: "run-perm-400", generated_at: "2026-11-28T03:30:00Z", run_status: "completed", telegram_summary: "Permanent 400" },
+    }];
+    const before400 = tgCalls12.length;
+    await worker.scheduled({}, env12, {});
+    assert.equal(tgCalls12.length, before400 + 1);
+    const permRow = env12.DB.notifications.find((n) => n.run_id === "run-perm-400");
+    assert.equal(permRow.status, "delivery_failed");
+    assert.equal(permRow.retryable, 0);
+    await worker.scheduled({}, env12, {});
+    assert.equal(tgCalls12.length, before400 + 1);
+
+    // 12b: Concurrent Promise.all dedupe across Drive report, D1 direct completion, API /complete, and V1 fallback
+    telegramMode = "ok";
+    const raceRunId = "run-concurrent-4way";
+    const raceReqId = "crw_race_api_d1";
+    const raceD1DirectId = "crw_race_d1_only";
+    env12.DB.crawlRequests.push(
+      {
+        id: raceReqId,
+        platform: "threads",
+        keywords: "",
+        requested_count: 20,
+        status: "running",
+        claimed_by: "muse-racer",
+        claimed_at: new Date().toISOString(),
+        lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+        attempts: 1,
+        max_attempts: 3,
+        requested_by_chat_id: "999001",
+        notified_at: null,
+        updated_at: "2026-11-28T04:00:00Z",
+      },
+      {
+        id: raceD1DirectId,
+        platform: "threads",
+        keywords: "",
+        requested_count: 20,
+        status: "completed",
+        claimed_by: "muse-direct",
+        claimed_at: "2026-11-28T03:59:00Z",
+        attempts: 1,
+        max_attempts: 3,
+        result_summary_json: JSON.stringify({ run_id: raceRunId, qualified_count: 8, run_status: "completed", telegram_summary: "D1 direct race" }),
+        requested_by_chat_id: "999001",
+        notified_at: null,
+        updated_at: "2026-11-28T04:01:00Z",
+      }
+    );
+    driveReports12 = [{
+      id: "1RptRaceDrive",
+      name: "trend_report_race.json",
+      mimeType: "application/json",
+      size: "700",
+      modifiedTime: "2026-11-28T04:01:05Z",
+      body: {
+        run_id: raceRunId,
+        request_id: raceReqId,
+        generated_at: "2026-11-28T04:01:05Z",
+        run_status: "completed",
+        telegram_summary: "Drive report race",
+      },
+    }];
+    v1Files12 = [{
+      id: "1V1RaceFile",
+      name: "threads_crawl_race.json",
+      mimeType: "application/json",
+      size: "700",
+      createdTime: "2026-11-28T04:01:06Z",
+      modifiedTime: "2026-11-28T04:01:06Z",
+      body: {
+        run_id: raceRunId,
+        request_id: raceReqId,
+        status: "completed",
+        started_at: new Date(Date.now() - 10_000).toISOString(),
+        ended_at: new Date().toISOString(),
+        posts: [{ id: "p_race_1" }],
+      },
+    }];
+    const tgBeforeRace = tgCalls12.length;
+    await Promise.all([
+      worker.fetch(
+        new Request(`https://example.workers.dev/api/app/crawl-requests/${raceReqId}/complete`, {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "completed",
+            attempt: 1,
+            claimed_by: "muse-racer",
+            result_summary: { run_id: raceRunId, qualified_count: 8, run_status: "completed", telegram_summary: "API complete race" },
+          }),
+        }),
+        env12
+      ),
+      worker.scheduled({}, env12, {}),
+      worker.scheduled({}, env12, {}),
+      worker.scheduled({}, env12, {}),
+    ]);
+    assert.equal(tgCalls12.length - tgBeforeRace, 1);
+
+    // 12c: expireStaleLeases MUST still execute independently if notifyNewCrawl throws
+    const expiredIso = new Date(Date.now() - 10 * 60_000).toISOString();
+    env12.DB.commands.push({
+      id: "cmd_expired_12",
+      command_type: "sync_now",
+      status: "running",
+      claimed_by: "app-crashed",
+      lease_expires_at: expiredIso,
+      attempts: 1,
+      max_attempts: 3,
+      updated_at: expiredIso,
+    });
+    env12.DB.crawlRequests.push({
+      id: "crw_expired_12",
+      platform: "threads",
+      status: "running",
+      claimed_by: "muse-crashed",
+      lease_expires_at: expiredIso,
+      attempts: 1,
+      max_attempts: 3,
+      updated_at: expiredIso,
+    });
+    const origPrepare12 = env12.DB.prepare.bind(env12.DB);
+    env12.DB.prepare = (sql) => {
+      if (String(sql).includes("FROM crawl_notifications") && String(sql).includes("status = 'delivery_failed'")) {
+        return {
+          bind() { return this; },
+          async all() { throw new Error("Simulated notifyNewCrawl fatal D1 failure"); },
+        };
+      }
+      return origPrepare12(sql);
+    };
+    let schedFailed = false;
+    try {
+      await worker.scheduled({}, env12, {});
+    } catch (err) {
+      schedFailed = String(err?.message || "").includes("notify");
+    } finally {
+      env12.DB.prepare = origPrepare12;
+    }
+    assert.equal(schedFailed, true);
+    const recoveredCmd = env12.DB.commands.find((c) => c.id === "cmd_expired_12");
+    const recoveredCrw = env12.DB.crawlRequests.find((c) => c.id === "crw_expired_12");
+    assert.equal(recoveredCmd.status, "queued");
+    assert.equal(recoveredCmd.claimed_by, null);
+    assert.equal(recoveredCrw.status, "queued");
+    assert.equal(recoveredCrw.claimed_by, null);
+  } finally {
+    globalThis.fetch = prevFetch12;
   }
 }
 

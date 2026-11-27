@@ -168,10 +168,13 @@ class MarketSyncService:
                 seen_page_tokens = set()
                 page_token = None
                 pagination_error: Optional[str] = None
+                active_file_ids: Optional[List[str]] = None
                 for page_idx in range(self.max_list_pages):
                     listing = self.client.list_market_files(cursor=cursor, limit=100, page_token=page_token)
                     if listing.get("status") == "partial_error" or listing.get("partial_error"):
                         pagination_error = f"Worker pagination partial_error ({listing.get('partial_error') or 'incomplete'})"
+                    if not pagination_error and page_token is None and isinstance(listing.get("active_file_ids"), list):
+                        active_file_ids = [str(fid) for fid in listing.get("active_file_ids") if fid]
                     page_files = listing.get("files", []) or []
                     for fmeta in page_files:
                         fid = fmeta.get("file_id") or fmeta.get("id")
@@ -207,6 +210,7 @@ class MarketSyncService:
                 latest_mtime = cursor
 
                 file_errors = []
+                explicitly_archived_fids = []
                 for fmeta in files:
                     fid = fmeta.get("file_id") or fmeta.get("id")
                     fname = fmeta.get("name") or f"{fid}.json"
@@ -216,6 +220,8 @@ class MarketSyncService:
                     platform_hint = fmeta.get("platform_hint")
 
                     if is_archive_path(folder_path) or is_archive_path(fname):
+                        if fid:
+                            explicitly_archived_fids.append(str(fid))
                         if mtime and (not latest_mtime or mtime > latest_mtime):
                             latest_mtime = mtime
                         continue
@@ -254,6 +260,11 @@ class MarketSyncService:
                 if pagination_error:
                     all_errors.append(pagination_error)
                 all_ok = len(all_errors) == 0
+
+                if explicitly_archived_fids:
+                    self.store.mark_files_archived(explicitly_archived_fids)
+                if not pagination_error and not file_errors and active_file_ids is not None:
+                    self.store.reconcile_moved_archive_files(active_file_ids)
 
                 # Never commit drive_cursor when pagination or file downloads were incomplete
                 if all_ok and latest_mtime:

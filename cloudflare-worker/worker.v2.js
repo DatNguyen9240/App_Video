@@ -378,6 +378,7 @@ async function paginateDriveFolderChildren(token, folderId, maxPages = DEFAULT_M
 
 async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso = null, limit = 50, pageToken = null, maxDrivePages = DEFAULT_MAX_DRIVE_LIST_PAGES) {
     const results = [];
+    const allActiveIds = [];
     let frontier = [{ id: rootMarketFolderId, relPath: "", depth: 0 }];
     const maxDepth = 3;
     const cursorMs = cursorIso ? Date.parse(cursorIso) : null;
@@ -421,6 +422,7 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
                     (f.name && f.name.toLowerCase().endsWith(".json")) ||
                     f.mimeType === "application/json";
                 if (!isJson) continue;
+                allActiveIds.push(f.id);
                 const itemMs = f.modifiedTime ? (Date.parse(f.modifiedTime) || 0) : 0;
                 // Inclusive >= on cursorMs ensures multiple files sharing cursor timestamp are never dropped
                 if (cursorMs !== null && Number.isFinite(cursorMs) && itemMs > 0 && itemMs < cursorMs) continue;
@@ -466,7 +468,8 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
         total_matched: results.length,
         has_more: hasMore,
         next_page_token: nextPageToken,
-        next_cursor: nextCursor
+        next_cursor: nextCursor,
+        ...(!partialError && !pageToken ? { active_file_ids: allActiveIds } : {})
     };
 }
 
@@ -869,105 +872,340 @@ async function getLatestCrawl(env) {
 }
 
 function isDefiniteUnsentTransientTelegram(httpStatus, data) {
+    // Only Telegram explicit rate-limit (429) or runtime-guaranteed pre-send signal proves non-delivery.
+    // Generic HTTP 408/503 MUST NOT be presumed unsent.
     const apiStatus = Number(httpStatus || 0);
     const errCode = Number(data?.error_code || 0);
-    return apiStatus === 429 || errCode === 429 || apiStatus === 408 || apiStatus === 503;
+    return apiStatus === 429 || errCode === 429 || data?.parameters?.definitely_not_sent === true;
 }
 
-function computeTelegramRetryDelayMs(attemptIdx, data, env) {
+function computeTelegramDeferredDelayMs(retryCount, data, env) {
     const baseMs = Math.max(0, Number(env?.TELEGRAM_RETRY_BASE_MS ?? 400));
-    const maxWaitMs = Math.max(baseMs, Number(env?.TELEGRAM_RETRY_MAX_WAIT_MS ?? 5000));
+    const maxDeferredMs = Math.max(baseMs, Number(env?.TELEGRAM_MAX_DEFERRED_BACKOFF_MS ?? 300000));
     const retryAfterSec = Number(data?.parameters?.retry_after || 0);
     if (Number.isFinite(retryAfterSec) && retryAfterSec > 0) {
-        return Math.min(Math.round(retryAfterSec * 1000), maxWaitMs);
+        // Strictly honor Telegram retry_after when scheduling next_retry_at
+        return Math.ceil(retryAfterSec * 1000);
     }
-    return Math.min(Math.round(baseMs * Math.pow(2, attemptIdx)), maxWaitMs);
+    return Math.min(Math.round(baseMs * Math.pow(2, Math.max(0, retryCount))), maxDeferredMs);
 }
 
 async function checkExistingNotificationKeys(env, keysToCheck) {
     const unique = Array.from(new Set(keysToCheck.filter(Boolean)));
     for (const k of unique) {
+        let row = null;
         try {
-            const row = await env.DB.prepare("SELECT status, created_at FROM crawl_notifications WHERE run_id = ?")
-                .bind(k)
-                .first();
-            if (row) return { key: k, row };
-        } catch {}
+            row = await env.DB.prepare(
+                "SELECT run_id, status, created_at, retry_count, max_retries, next_retry_at, retryable FROM crawl_notifications WHERE run_id = ?"
+            ).bind(k).first();
+        } catch {
+            row = await env.DB.prepare("SELECT run_id, status, created_at FROM crawl_notifications WHERE run_id = ?")
+                .bind(k).first();
+        }
+        if (row) return { key: k, row };
     }
     return null;
+}
+
+async function claimCrawlRequestNotificationSlot(env, requestId) {
+    if (!requestId) return true;
+    const upd = await env.DB.prepare(
+        "UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL"
+    ).bind(new Date().toISOString(), String(requestId)).run();
+    return upd?.meta?.changes === 1;
+}
+
+async function finalizeNotificationState(env, notifKey, fields) {
+    const {
+        status,
+        sentAt = null,
+        retryCount = null,
+        nextRetryAt = null,
+        retryable = 0,
+        lastError = null,
+        retryPayloadJson = null,
+    } = fields;
+    try {
+        await env.DB.prepare(`
+            UPDATE crawl_notifications
+            SET status = ?,
+                sent_at = COALESCE(?, sent_at),
+                retry_count = COALESCE(?, retry_count),
+                next_retry_at = ?,
+                retryable = ?,
+                last_error = ?,
+                retry_payload_json = COALESCE(?, retry_payload_json)
+            WHERE run_id = ?
+        `).bind(status, sentAt, retryCount, nextRetryAt, retryable ? 1 : 0, lastError, retryPayloadJson, notifKey).run();
+    } catch {
+        // Graceful compatibility if migration 0002 has not been applied yet
+        if (status === "sent") {
+            await env.DB.prepare("UPDATE crawl_notifications SET status = 'sent', sent_at = ? WHERE run_id = ?")
+                .bind(sentAt || new Date().toISOString(), notifKey).run();
+        } else {
+            await env.DB.prepare("UPDATE crawl_notifications SET status = ? WHERE run_id = ?")
+                .bind(status, notifKey).run();
+        }
+    }
 }
 
 async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, text, options = {}) {
     const aliasKeys = Array.isArray(options.aliasKeys) ? options.aliasKeys : [];
     const replyMarkup = options.replyMarkup || mainInlineKeyboard();
     const usePrimaryMessage = Boolean(options.usePrimaryMessage);
+    const requestId = options.requestId ? String(options.requestId) : null;
+    const bypassRequestClaim = Boolean(options.bypassRequestClaim);
+    const bypassAliasPrecheck = Boolean(options.bypassAliasPrecheck);
+    const maxRetries = Math.min(Math.max(Number(env?.TELEGRAM_MAX_RETRIES || 5), 1), 10);
+    const immediateMaxWaitMs = Math.max(
+        0,
+        Number(env?.TELEGRAM_IMMEDIATE_RETRY_MAX_MS ?? env?.TELEGRAM_RETRY_MAX_WAIT_MS ?? 2000)
+    );
+    const retryPayloadJson = JSON.stringify({
+        chatId: String(chatId),
+        text: String(text),
+        usePrimaryMessage,
+        recordCount,
+        requestId,
+    });
 
-    // Check canonical key AND aliases first — never auto-resend `sent`, `sending`, or `delivery_uncertain`
-    const existingHit = await checkExistingNotificationKeys(env, [notifKey, ...aliasKeys]);
-    if (existingHit) {
-        const st = existingHit.row.status;
-        if (st === "sent" || st === "sending" || st === "delivery_uncertain") {
-            return { claimed: false, delivered: st === "sent", status: st, retries: 0 };
+    const nowIso = new Date().toISOString();
+
+    // 1. Check aliases first (for distinct keys linking the same run/request) unless already reclaiming exact notifKey
+    if (!bypassAliasPrecheck && aliasKeys.length > 0) {
+        const aliasHit = await checkExistingNotificationKeys(env, aliasKeys);
+        if (aliasHit && aliasHit.key !== notifKey) {
+            const st = aliasHit.row.status;
+            if (st === "sent" || st === "sending" || st === "delivery_uncertain" || st === "delivery_failed") {
+                return { claimed: false, delivered: st === "sent", status: st, retries: 0 };
+            }
         }
     }
 
-    const claim = await env.DB.prepare(`
-        INSERT OR IGNORE INTO crawl_notifications
-        (run_id, record_count, status, created_at)
-        VALUES (?, ?, 'sending', ?)
-    `).bind(notifKey, recordCount, new Date().toISOString()).run();
+    // 2. Check existing state of exact notifKey
+    const existingExact = await checkExistingNotificationKeys(env, [notifKey]);
+    let isReclaim = false;
+    let currentRetryCount = 0;
 
-    if (claim.meta.changes !== 1) {
-        return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
+    if (existingExact) {
+        const row = existingExact.row;
+        const st = row.status;
+        if (st === "sent" || st === "sending" || st === "delivery_uncertain") {
+            return { claimed: false, delivered: st === "sent", status: st, retries: 0 };
+        }
+        if (st === "delivery_failed") {
+            const isRetryable = Number(row.retryable || 0) === 1;
+            const rCount = Number(row.retry_count || 0);
+            const rMax = Number(row.max_retries || maxRetries);
+            if (!isRetryable || rCount >= rMax) {
+                return { claimed: false, delivered: false, status: "delivery_failed", retryable: false, retries: 0 };
+            }
+            if (row.next_retry_at && String(row.next_retry_at) > nowIso) {
+                return { claimed: false, delivered: false, status: "retry_scheduled", next_retry_at: row.next_retry_at, retries: 0 };
+            }
+        }
     }
 
-    const maxAttempts = Math.min(Math.max(Number(env?.TELEGRAM_MAX_ATTEMPTS || 3), 1), 5);
-    let retries = 0;
+    // 3. Atomic request-slot claim BEFORE sending when linked to crawl_requests (stops concurrent complete/D1/Drive double-send)
+    if (!existingExact && requestId && !bypassRequestClaim) {
+        const slotWon = await claimCrawlRequestNotificationSlot(env, requestId);
+        if (!slotWon) {
+            return { claimed: false, delivered: false, status: "duplicate_request", retries: 0 };
+        }
+    }
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // 4. Initial atomic INSERT OR IGNORE or atomic reclaim UPDATE for retryable delivery_failed
+    if (!existingExact) {
+        let claim;
+        try {
+            claim = await env.DB.prepare(`
+                INSERT OR IGNORE INTO crawl_notifications
+                (run_id, record_count, status, created_at, retry_count, max_retries, next_retry_at, retryable, last_error, retry_payload_json)
+                VALUES (?, ?, 'sending', ?, 0, ?, NULL, 0, NULL, ?)
+            `).bind(notifKey, recordCount, nowIso, maxRetries, retryPayloadJson).run();
+        } catch {
+            claim = await env.DB.prepare(`
+                INSERT OR IGNORE INTO crawl_notifications
+                (run_id, record_count, status, created_at)
+                VALUES (?, ?, 'sending', ?)
+            `).bind(notifKey, recordCount, nowIso).run();
+        }
+        if (claim.meta.changes !== 1) {
+            return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
+        }
+    } else {
+        // Atomic reclaim: ONLY delivery_failed + retryable=1 + retry_count < max_retries + next_retry_at elapsed
+        const reclaimNowIso = new Date().toISOString();
+        let reclaim;
+        try {
+            reclaim = await env.DB.prepare(`
+                UPDATE crawl_notifications
+                SET status = 'sending',
+                    created_at = ?,
+                    retry_count = retry_count + 1,
+                    next_retry_at = NULL,
+                    retry_payload_json = COALESCE(?, retry_payload_json)
+                WHERE run_id = ?
+                  AND status = 'delivery_failed'
+                  AND retryable = 1
+                  AND retry_count < max_retries
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            `).bind(reclaimNowIso, retryPayloadJson, notifKey, reclaimNowIso).run();
+        } catch {
+            return { claimed: false, delivered: false, status: "delivery_failed", retries: 0 };
+        }
+        if (reclaim.meta.changes !== 1) {
+            return { claimed: false, delivered: false, status: "reclaim_rejected", retries: 0 };
+        }
+        isReclaim = true;
+        currentRetryCount = Number(existingExact.row.retry_count || 0) + 1;
+    }
+
+    const maxImmediateAttempts = Math.min(Math.max(Number(env?.TELEGRAM_MAX_ATTEMPTS || 3), 1), 5);
+    let retriesInCall = 0;
+
+    for (let attempt = 0; attempt < maxImmediateAttempts; attempt++) {
         try {
             const res = usePrimaryMessage
                 ? await updatePrimaryProgressMessage(env, chatId, text, replyMarkup)
                 : await sendTelegramMessage(env, chatId, text, replyMarkup);
 
             if (res.ok) {
-                await env.DB.prepare("UPDATE crawl_notifications SET status = 'sent', sent_at = ? WHERE run_id = ?")
-                    .bind(new Date().toISOString(), notifKey).run();
-                return { claimed: true, delivered: true, status: "sent", retries };
+                await finalizeNotificationState(env, notifKey, {
+                    status: "sent",
+                    sentAt: new Date().toISOString(),
+                    retryCount: currentRetryCount,
+                    nextRetryAt: null,
+                    retryable: 0,
+                    lastError: null,
+                });
+                return { claimed: true, delivered: true, status: "sent", retries: retriesInCall, reclaimed: isReclaim };
             }
 
             const apiStatus = Number(res.httpStatus || 0);
             if (isDefiniteUnsentTransientTelegram(apiStatus, res.data)) {
-                if (attempt < maxAttempts - 1) {
-                    const delayMs = computeTelegramRetryDelayMs(attempt, res.data, env);
-                    retries += 1;
-                    await sleepMs(delayMs);
+                const retryDelayMs = computeTelegramDeferredDelayMs(currentRetryCount, res.data, env);
+                if (attempt < maxImmediateAttempts - 1 && retryDelayMs <= immediateMaxWaitMs && currentRetryCount < maxRetries) {
+                    retriesInCall += 1;
+                    currentRetryCount += 1;
+                    await sleepMs(retryDelayMs);
                     continue;
                 }
-                await env.DB.prepare("UPDATE crawl_notifications SET status = 'delivery_failed' WHERE run_id = ?")
-                    .bind(notifKey).run();
-                return { claimed: true, delivered: false, status: "delivery_failed", retries, retryableExhausted: true };
+                const canScheduleReclaim = currentRetryCount < maxRetries;
+                const nextRetryIso = canScheduleReclaim ? new Date(Date.now() + retryDelayMs).toISOString() : null;
+                await finalizeNotificationState(env, notifKey, {
+                    status: "delivery_failed",
+                    retryCount: currentRetryCount,
+                    nextRetryAt: nextRetryIso,
+                    retryable: canScheduleReclaim ? 1 : 0,
+                    lastError: `HTTP ${apiStatus}: definite unsent transient error`,
+                    retryPayloadJson,
+                });
+                return {
+                    claimed: true,
+                    delivered: false,
+                    status: "delivery_failed",
+                    retryable: canScheduleReclaim,
+                    next_retry_at: nextRetryIso,
+                    retries: retriesInCall,
+                    retryableExhausted: true,
+                };
             }
 
-            const nextState = apiStatus >= 400 && apiStatus < 500 ? "delivery_failed" : "delivery_uncertain";
-            await env.DB.prepare("UPDATE crawl_notifications SET status = ? WHERE run_id = ?")
-                .bind(nextState, notifKey).run();
-            return { claimed: true, delivered: false, status: nextState, retries };
+            // Permanent 4xx (except 429/408 handled separately): permanent delivery_failed (not retryable).
+            // 408, 500, 502, 503, 504: uncertain whether Telegram processed -> delivery_uncertain, NEVER retry.
+            const isPermanent4xx = apiStatus >= 400 && apiStatus < 500 && apiStatus !== 408 && apiStatus !== 429;
+            const nextState = isPermanent4xx ? "delivery_failed" : "delivery_uncertain";
+            await finalizeNotificationState(env, notifKey, {
+                status: nextState,
+                retryCount: currentRetryCount,
+                nextRetryAt: null,
+                retryable: 0,
+                lastError: `HTTP ${apiStatus}`,
+            });
+            return { claimed: true, delivered: false, status: nextState, retryable: false, retries: retriesInCall };
         } catch (err) {
-            // Only retry transport exception when caller/runtime explicitly guarantees pre-send failure;
-            // ambiguous network timeout/reset MUST become delivery_uncertain and NEVER auto-retry.
-            if (err && (err.notSent === true || err.code === "ECONNREFUSED") && attempt < maxAttempts - 1) {
-                const delayMs = computeTelegramRetryDelayMs(attempt, null, env);
-                retries += 1;
-                await sleepMs(delayMs);
-                continue;
+            if (err && (err.notSent === true || err.code === "ECONNREFUSED")) {
+                const retryDelayMs = computeTelegramDeferredDelayMs(currentRetryCount, null, env);
+                if (attempt < maxImmediateAttempts - 1 && retryDelayMs <= immediateMaxWaitMs && currentRetryCount < maxRetries) {
+                    retriesInCall += 1;
+                    currentRetryCount += 1;
+                    await sleepMs(retryDelayMs);
+                    continue;
+                }
+                const canScheduleReclaim = currentRetryCount < maxRetries;
+                const nextRetryIso = canScheduleReclaim ? new Date(Date.now() + retryDelayMs).toISOString() : null;
+                await finalizeNotificationState(env, notifKey, {
+                    status: "delivery_failed",
+                    retryCount: currentRetryCount,
+                    nextRetryAt: nextRetryIso,
+                    retryable: canScheduleReclaim ? 1 : 0,
+                    lastError: String(err.message || err.code || "Pre-send network failure").slice(0, 200),
+                    retryPayloadJson,
+                });
+                return {
+                    claimed: true,
+                    delivered: false,
+                    status: "delivery_failed",
+                    retryable: canScheduleReclaim,
+                    next_retry_at: nextRetryIso,
+                    retries: retriesInCall,
+                    retryableExhausted: true,
+                };
             }
-            await env.DB.prepare("UPDATE crawl_notifications SET status = 'delivery_uncertain' WHERE run_id = ?")
-                .bind(notifKey).run();
-            return { claimed: true, delivered: false, status: "delivery_uncertain", retries };
+            // Ambiguous transport throw (timeout/reset) -> delivery_uncertain, NEVER retryable
+            await finalizeNotificationState(env, notifKey, {
+                status: "delivery_uncertain",
+                retryCount: currentRetryCount,
+                nextRetryAt: null,
+                retryable: 0,
+                lastError: String(err?.message || "Transport timeout").slice(0, 200),
+            });
+            return { claimed: true, delivered: false, status: "delivery_uncertain", retryable: false, retries: retriesInCall };
         }
     }
-    return { claimed: true, delivered: false, status: "delivery_failed", retries, retryableExhausted: true };
+    return { claimed: true, delivered: false, status: "delivery_failed", retryable: false, retries: retriesInCall };
+}
+
+async function reclaimDueRetryNotifications(env, limit = 10) {
+    const nowIso = new Date().toISOString();
+    let dueRows = [];
+    try {
+        dueRows = (await env.DB.prepare(`
+            SELECT run_id, record_count, retry_count, max_retries, next_retry_at, retry_payload_json
+            FROM crawl_notifications
+            WHERE status = 'delivery_failed'
+              AND retryable = 1
+              AND retry_count < max_retries
+              AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            ORDER BY COALESCE(next_retry_at, created_at) ASC
+            LIMIT ?
+        `).bind(nowIso, limit).all()).results || [];
+    } catch (err) {
+        const msg = String(err?.message || "").toLowerCase();
+        if (msg.includes("no such column") || msg.includes("no such table")) return;
+        throw err;
+    }
+    for (const row of dueRows) {
+        if (!row.retry_payload_json) continue;
+        let p = null;
+        try { p = JSON.parse(row.retry_payload_json); } catch {}
+        if (!p || !p.chatId || !p.text) continue;
+        const delivery = await deliverWithUncertaintyGuard(
+            env,
+            row.run_id,
+            Number(row.record_count ?? p.recordCount ?? 0),
+            p.chatId,
+            p.text,
+            {
+                usePrimaryMessage: Boolean(p.usePrimaryMessage),
+                requestId: p.requestId || null,
+                bypassRequestClaim: true,
+                bypassAliasPrecheck: true,
+            }
+        );
+        if (delivery.retryableExhausted) break;
+    }
 }
 
 function parseCompositeCursor(rawCursor) {
@@ -1028,6 +1266,9 @@ async function notifyNewCrawl(env) {
     const cutoffMs = Date.parse("2026-11-26T12:25:00+07:00");
     const batchSize = Math.min(Math.max(Number(env?.NOTIFY_BATCH_SIZE) || DEFAULT_NOTIFY_BATCH_SIZE, 1), 25);
     const notifiedRequestIds = new Set();
+
+    // 0. Atomically reclaim due retryable `delivery_failed` notifications whose next_retry_at has elapsed
+    await reclaimDueRetryNotifications(env, batchSize);
 
     // 1. Batch + durable cursor backlog over Drive Reports (`01_Market_Data/Reports/`) — never misses >20 files
     try {
@@ -1112,7 +1353,12 @@ async function notifyNewCrawl(env) {
                     const recCount = Number(stats.qualified ?? stats.scanned ?? d.totals?.records ?? 0);
                     const summaryText = buildMuseTelegramNotificationText(d, item.file?.name, item.isCorr);
 
-                    const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText, { aliasKeys });
+                    const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText, {
+                        aliasKeys,
+                        requestId: reqId,
+                        bypassRequestClaim: item.isCorr,
+                        bypassAliasPrecheck: item.isCorr,
+                    });
                     if (delivery.retryableExhausted) {
                         transientDeliveryHalted = true;
                         break;
@@ -1188,7 +1434,10 @@ async function notifyNewCrawl(env) {
             const chatId = req.requested_by_chat_id || env.TELEGRAM_OWNER_ID;
             const text = buildDirectD1CrawlNotificationText(req, summary);
 
-            const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, chatId, text, { aliasKeys });
+            const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, chatId, text, {
+                aliasKeys,
+                requestId: req.id,
+            });
             if (delivery.retryableExhausted) {
                 break;
             }
@@ -1336,7 +1585,12 @@ async function notifyNewCrawl(env) {
                   `🕒 Hoàn thành: ${time}\n\n` +
                   "🔄 Auto Sync đang chạy ngầm (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).";
 
-            const delivery = await deliverWithUncertaintyGuard(env, notifKey, postsLen, env.TELEGRAM_OWNER_ID, text, { aliasKeys });
+            const delivery = await deliverWithUncertaintyGuard(env, notifKey, postsLen, env.TELEGRAM_OWNER_ID, text, {
+                aliasKeys,
+                requestId: data.request_id || null,
+                bypassRequestClaim: isCorr,
+                bypassAliasPrecheck: isCorr,
+            });
             if (delivery.retryableExhausted) break;
             lastCleanV1 = entry;
         }
@@ -2087,10 +2341,10 @@ async function handleAppApi(request, env, url) {
                 recCount,
                 existing.requested_by_chat_id,
                 text,
-                { usePrimaryMessage: true, aliasKeys }
+                { usePrimaryMessage: true, aliasKeys, requestId: crawlId }
             );
             if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
-                await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ?").bind(nowIso, crawlId).run();
+                await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL").bind(nowIso, crawlId).run();
             }
         }
         return jsonResponse({ ok: true, already_finalized: false, status: nextStatus });
@@ -2954,12 +3208,22 @@ async function handleTelegramUpdate(request, env) {
 
 export default {
     async scheduled(controller, env, ctx) {
+        let notifyErr = null;
+        let leaseErr = null;
         try {
             await notifyNewCrawl(env);
+        } catch (err) {
+            notifyErr = err;
+            console.error("Scheduled notifyNewCrawl failed:", err?.message || err);
+        }
+        try {
             await expireStaleLeases(env);
-        } catch {
-            console.error("Scheduled check failed");
-            throw new Error("Scheduled check failed");
+        } catch (err) {
+            leaseErr = err;
+            console.error("Scheduled expireStaleLeases failed:", err?.message || err);
+        }
+        if (notifyErr || leaseErr) {
+            throw new Error(`Scheduled check failed (${notifyErr ? "notify" : ""}${leaseErr ? " lease" : ""})`.trim());
         }
     },
 

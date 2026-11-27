@@ -36,6 +36,7 @@ from market_intelligence import (
     RemoteCommandPoller,
     mask_secret,
 )
+from market_intelligence.normalizer import is_archive_path
 
 
 class MockCloudflareTransportClient(CloudflareBridgeClient):
@@ -125,13 +126,21 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
         has_more = len(filtered) > eff_lim
         next_tok = f"{page[-1]['modified_time']}|{page[-1]['file_id']}" if (has_more and page) else None
         next_cur = page[-1]["modified_time"] if page else cursor
-        return {
+        all_active_ids = [
+            str(f["file_id"])
+            for f in ordered
+            if not is_archive_path(f.get("folder_path")) and not is_archive_path(f.get("name"))
+        ]
+        res = {
             "ok": True,
             "files": page,
             "has_more": has_more,
             "next_page_token": next_tok,
             "next_cursor": next_cur,
         }
+        if not page_token:
+            res["active_file_ids"] = all_active_ids
+        return res
 
     def download_market_file(self, file_id: str):
         if self.slow_download_delay > 0:
@@ -936,6 +945,112 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
             self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
         finally:
             self.client.list_market_files = orig_list
+
+    def test_moved_to_archive_after_sqlite_sync_preserves_history_excludes_active(self):
+        """Scenario #3: Files already synced to SQLite and later moved into Archive/ on Drive exit active reporting while preserving full DB + disk history."""
+        with open(os.path.join(FIXTURES_DIR, "threads_crawl_poc_002.json"), "rb") as f:
+            v2_bytes = f.read()
+        with open(os.path.join(FIXTURES_DIR, "threads_trend_20261126.json"), "rb") as f:
+            v3_posts_bytes = f.read()
+        with open(os.path.join(FIXTURES_DIR, "trend_report_v3_20261126.json"), "rb") as f:
+            v3_report_bytes = f.read()
+
+        # Sync historical V2 + active V3.1 crawl & report into SQLite
+        self.client.add_drive_file(
+            "f_hist_v2",
+            "threads_crawl_poc_002.json",
+            v2_bytes,
+            "2026-11-25T08:00:00Z",
+            "md5_hist_v2",
+            platform_hint="threads",
+            folder_path="Threads",
+        )
+        self.client.add_drive_file(
+            "f_v3_posts",
+            "threads_trend_20261126.json",
+            v3_posts_bytes,
+            "2026-11-26T09:00:00Z",
+            "md5_v3_posts",
+            platform_hint="threads",
+            folder_path="Threads",
+        )
+        self.client.add_drive_file(
+            "f_v3_report",
+            "trend_report_v3_20261126.json",
+            v3_report_bytes,
+            "2026-11-26T09:05:00Z",
+            "md5_v3_report",
+            platform_hint="threads",
+            folder_path="Reports",
+        )
+
+        res1 = self.sync_service.sync_now(trigger_source="initial_sync")
+        self.assertEqual(res1["status"], "completed")
+
+        stats_before = self.store.get_stats()
+        total_before = stats_before["total_items"]
+        self.assertGreater(total_before, 3)
+        self.assertIsNotNone(stats_before.get("trends_snapshot"))
+        self.assertIsNotNone(stats_before.get("latest_v3_screening"))
+        rep_before = self.store.build_evidence_report("all")
+        self.assertEqual(rep_before.get("schema_version"), "v3.1")
+        self.assertTrue(len(self.store.list_reports()) >= 1)
+
+        with self.store._lock:
+            raw_files_total_before = self.store._conn.execute("SELECT COUNT(*) FROM raw_drive_files").fetchone()[0]
+            items_total_before = self.store._conn.execute("SELECT COUNT(*) FROM market_items").fetchone()[0]
+            reports_total_before = self.store._conn.execute("SELECT COUNT(*) FROM market_reports").fetchone()[0]
+            raw_paths_before = [
+                r["raw_path"]
+                for r in self.store._conn.execute("SELECT raw_path FROM raw_drive_files").fetchall()
+            ]
+        for p in raw_paths_before:
+            self.assertTrue(p and os.path.exists(p), f"Expected raw file on disk: {p}")
+
+        # Now move both V3.1 files into Archive/ on Drive (even WITHOUT bumping modified_time)
+        self.client.mock_files["f_v3_posts"]["folder_path"] = "Threads/Archive"
+        self.client.mock_files["f_v3_report"]["folder_path"] = "Reports/Archive"
+
+        res2 = self.sync_service.sync_now(trigger_source="after_move_to_archive")
+        self.assertEqual(res2["status"], "completed")
+
+        # 1) Moved files no longer participate in active/current stats, items, trends_snapshot, screening, or reports
+        stats_after = self.store.get_stats()
+        self.assertLess(stats_after["total_items"], total_before)
+        self.assertIsNone(stats_after.get("trends_snapshot"))
+        self.assertIsNone(stats_after.get("latest_v3_screening"))
+        self.assertEqual(len(self.store.list_reports()), 0)
+
+        active_items = self.store.query_items(limit=200)["items"]
+        active_file_ids = {it["raw_file_id"] for it in active_items}
+        self.assertNotIn("f_v3_posts", active_file_ids)
+        self.assertIn("f_hist_v2", active_file_ids)
+
+        rep_after = self.store.build_evidence_report("all")
+        self.assertIsNone(rep_after.get("latest_muse_report"))
+        self.assertIsNone(rep_after.get("trends_snapshot"))
+
+        # 2) Historical SQLite records & raw JSON files on disk MUST remain 100% intact (never deleted)
+        with self.store._lock:
+            raw_files_total_after = self.store._conn.execute("SELECT COUNT(*) FROM raw_drive_files").fetchone()[0]
+            items_total_after = self.store._conn.execute("SELECT COUNT(*) FROM market_items").fetchone()[0]
+            reports_total_after = self.store._conn.execute("SELECT COUNT(*) FROM market_reports").fetchone()[0]
+            archived_flags = {
+                r["file_id"]: int(r["is_archived"] or 0)
+                for r in self.store._conn.execute("SELECT file_id, is_archived FROM raw_drive_files").fetchall()
+            }
+        self.assertEqual(raw_files_total_after, raw_files_total_before)
+        self.assertEqual(items_total_after, items_total_before)
+        self.assertEqual(reports_total_after, reports_total_before)
+        self.assertEqual(archived_flags.get("f_v3_posts"), 1)
+        self.assertEqual(archived_flags.get("f_v3_report"), 1)
+        self.assertEqual(archived_flags.get("f_hist_v2"), 0)
+        for p in raw_paths_before:
+            self.assertTrue(os.path.exists(p), f"Historical raw file was deleted: {p}")
+
+        # Explicit include_archived=True still sees full historical data
+        self.assertEqual(len(self.store.list_reports(include_archived=True)), 1)
+        self.assertEqual(self.store.query_items(limit=200, include_archived=True)["total"], items_total_before)
 
 
 if __name__ == "__main__":

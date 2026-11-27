@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .normalizer import NON_CRAWL_ROLES, is_archive_path, normalize_payload
 from .report_normalizer import (
@@ -31,7 +31,8 @@ def _utc_now_iso() -> str:
 
 
 _NOT_ARCHIVE_RAW_SQL = (
-    "('/' || lower(replace(COALESCE(r.folder_path, ''), '\\', '/')) || '/' NOT LIKE '%/archive/%' "
+    "(COALESCE(r.is_archived, 0) = 0 "
+    "AND '/' || lower(replace(COALESCE(r.folder_path, ''), '\\', '/')) || '/' NOT LIKE '%/archive/%' "
     "AND '/' || lower(replace(COALESCE(r.file_name, ''), '\\', '/')) || '/' NOT LIKE '%/archive/%')"
 )
 
@@ -193,6 +194,9 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("raw_drive_files", "data_quality_status", "TEXT")
         self._add_column_if_missing("raw_drive_files", "business_usable_records", "INTEGER")
         self._add_column_if_missing("raw_drive_files", "run_meta_json", "TEXT DEFAULT '{}'")
+        self._add_column_if_missing("raw_drive_files", "is_archived", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("raw_drive_files", "archived_at", "TEXT")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_drive_files_archived ON raw_drive_files(is_archived);")
 
         self._add_column_if_missing("market_items", "data_quality", "TEXT")
         self._add_column_if_missing("market_items", "quality_issues_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -430,7 +434,9 @@ class MarketIntelligenceStore:
                     technical_status = excluded.technical_status,
                     data_quality_status = excluded.data_quality_status,
                     business_usable_records = excluded.business_usable_records,
-                    run_meta_json = excluded.run_meta_json
+                    run_meta_json = excluded.run_meta_json,
+                    is_archived = 0,
+                    archived_at = NULL
                 """,
                 (
                     file_id,
@@ -873,6 +879,7 @@ class MarketIntelligenceStore:
         search: Optional[str] = None,
         sort_by: str = "recent",
         affiliate_only: bool = False,
+        include_archived: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
@@ -943,7 +950,8 @@ class MarketIntelligenceStore:
             )
             params.extend([like, like, like, like, like, like, like, like, like])
 
-        clauses.insert(0, f"(m.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})")
+        if not include_archived:
+            clauses.insert(0, f"(m.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})")
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         lim = max(1, min(int(limit), 200))
         off = max(0, int(offset))
@@ -1270,40 +1278,43 @@ class MarketIntelligenceStore:
         }
 
     def get_filter_options(self) -> Dict[str, List[str]]:
+        active_join = f"LEFT JOIN raw_drive_files r ON m.raw_file_id = r.file_id WHERE (m.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})"
         with self._lock:
             platforms = [
                 r["platform"]
-                for r in self._conn.execute("SELECT DISTINCT platform FROM market_items ORDER BY platform").fetchall()
+                for r in self._conn.execute(
+                    f"SELECT DISTINCT m.platform FROM market_items m {active_join} ORDER BY m.platform"
+                ).fetchall()
                 if r["platform"]
             ]
             content_groups = [
                 r["content_group"]
                 for r in self._conn.execute(
-                    "SELECT DISTINCT content_group FROM market_items WHERE content_group IS NOT NULL ORDER BY content_group"
+                    f"SELECT DISTINCT m.content_group FROM market_items m {active_join} AND m.content_group IS NOT NULL ORDER BY m.content_group"
                 ).fetchall()
             ]
             purchase_intents = [
                 r["purchase_intent"]
                 for r in self._conn.execute(
-                    "SELECT DISTINCT purchase_intent FROM market_items WHERE purchase_intent IS NOT NULL ORDER BY purchase_intent"
+                    f"SELECT DISTINCT m.purchase_intent FROM market_items m {active_join} AND m.purchase_intent IS NOT NULL ORDER BY m.purchase_intent"
                 ).fetchall()
             ]
             trend_tiers = [
                 r["trend_tier"]
                 for r in self._conn.execute(
-                    "SELECT DISTINCT trend_tier FROM market_items WHERE trend_tier IS NOT NULL ORDER BY trend_tier"
+                    f"SELECT DISTINCT m.trend_tier FROM market_items m {active_join} AND m.trend_tier IS NOT NULL ORDER BY m.trend_tier"
                 ).fetchall()
             ]
             trend_groups = [
                 r["trend_group"]
                 for r in self._conn.execute(
-                    "SELECT DISTINCT trend_group FROM market_items WHERE trend_group IS NOT NULL ORDER BY trend_group"
+                    f"SELECT DISTINCT m.trend_group FROM market_items m {active_join} AND m.trend_group IS NOT NULL ORDER BY m.trend_group"
                 ).fetchall()
             ]
             verification_statuses = [
                 r["verification_status"]
                 for r in self._conn.execute(
-                    "SELECT DISTINCT verification_status FROM market_items WHERE verification_status IS NOT NULL ORDER BY verification_status"
+                    f"SELECT DISTINCT m.verification_status FROM market_items m {active_join} AND m.verification_status IS NOT NULL ORDER BY m.verification_status"
                 ).fetchall()
             ]
         return {
@@ -1315,10 +1326,71 @@ class MarketIntelligenceStore:
             "verification_statuses": verification_statuses,
         }
 
-    def list_raw_files(self, limit: int = 30) -> List[Dict[str, Any]]:
+    def mark_files_archived(self, file_ids: Iterable[str]) -> int:
+        """Mark explicitly listed Drive files as moved to Archive/ without deleting historical rows."""
+        ids = [str(fid).strip() for fid in (file_ids or []) if str(fid or "").strip()]
+        if not ids:
+            return 0
+        now_iso = _utc_now_iso()
+        updated = 0
+        with self._lock:
+            for fid in ids:
+                cur = self._conn.execute(
+                    """
+                    UPDATE raw_drive_files
+                    SET is_archived = 1, archived_at = COALESCE(archived_at, ?)
+                    WHERE file_id = ? AND COALESCE(is_archived, 0) = 0
+                    """,
+                    (now_iso, fid),
+                )
+                updated += int(cur.rowcount or 0)
+            if updated:
+                self._conn.commit()
+        return updated
+
+    def reconcile_moved_archive_files(self, active_file_ids: Iterable[str]) -> Dict[str, int]:
+        """
+        Reconcile previously synced Drive files after files are moved into (or restored from) Archive/.
+        Excludes archived files from current reporting via `is_archived=1` while preserving all
+        historical SQLite rows (`raw_drive_files`, `market_items`, `market_reports`) and disk files.
+        """
+        active_ids = {str(fid).strip() for fid in (active_file_ids or []) if str(fid or "").strip()}
+        now_iso = _utc_now_iso()
+        archived_count = 0
+        restored_count = 0
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT * FROM raw_drive_files r WHERE {_NOT_ARCHIVE_RAW_SQL} ORDER BY r.is_corrected DESC, r.synced_at DESC LIMIT ?",
+                """
+                SELECT file_id, COALESCE(is_archived, 0) AS is_archived
+                FROM raw_drive_files
+                WHERE file_id NOT LIKE 'local_%'
+                  AND COALESCE(folder_path, '') NOT IN ('local_import', 'local_upload')
+                """
+            ).fetchall()
+            for r in rows:
+                fid = r["file_id"]
+                was_archived = int(r["is_archived"] or 0) == 1
+                if fid not in active_ids and not was_archived:
+                    self._conn.execute(
+                        "UPDATE raw_drive_files SET is_archived = 1, archived_at = COALESCE(archived_at, ?) WHERE file_id = ?",
+                        (now_iso, fid),
+                    )
+                    archived_count += 1
+                elif fid in active_ids and was_archived:
+                    self._conn.execute(
+                        "UPDATE raw_drive_files SET is_archived = 0, archived_at = NULL WHERE file_id = ?",
+                        (fid,),
+                    )
+                    restored_count += 1
+            if archived_count or restored_count:
+                self._conn.commit()
+        return {"archived": archived_count, "restored": restored_count}
+
+    def list_raw_files(self, limit: int = 30, include_archived: bool = False) -> List[Dict[str, Any]]:
+        with self._lock:
+            where_sql = "" if include_archived else f"WHERE {_NOT_ARCHIVE_RAW_SQL}"
+            rows = self._conn.execute(
+                f"SELECT * FROM raw_drive_files r {where_sql} ORDER BY r.is_corrected DESC, r.synced_at DESC LIMIT ?",
                 (max(1, min(int(limit), 200)),),
             ).fetchall()
             return [dict(r) for r in rows]
@@ -1565,8 +1637,9 @@ class MarketIntelligenceStore:
                 return ts, False
         return 0.0, False
 
-    def list_reports(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Return non-archived reports ordered between runs strictly by crawl execution time; revision time breaks ties within the same run."""
+    def list_reports(self, limit: int = 20, include_archived: bool = False) -> List[Dict[str, Any]]:
+        """Return reports (non-archived by default) ordered between runs strictly by crawl execution time; revision time breaks ties within the same run."""
+        where_sql = "" if include_archived else f"WHERE (mr.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})"
         with self._lock:
             rows = self._conn.execute(
                 f"""
@@ -1576,7 +1649,7 @@ class MarketIntelligenceStore:
                        r.modified_time AS raw_modified_time, r.folder_path AS raw_folder_path
                 FROM market_reports mr
                 LEFT JOIN raw_drive_files r ON mr.raw_file_id = r.file_id
-                WHERE (mr.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})
+                {where_sql}
                 ORDER BY COALESCE(mr.crawl_time, mr.generated_at, mr.updated_at) DESC
                 LIMIT 500
                 """
@@ -1586,15 +1659,16 @@ class MarketIntelligenceStore:
         file_name_to_group: Dict[str, str] = {}
         for r in rows:
             d = dict(r)
-            if is_archive_path(d.pop("raw_folder_path", None)):
+            if not include_archived and is_archive_path(d.pop("raw_folder_path", None)):
                 continue
+            d.pop("raw_folder_path", None)
             d["is_corrected"] = bool(d.get("is_corrected"))
             try:
                 d["report"] = json.loads(d.pop("report_json") or "{}")
             except Exception:
                 d["report"] = {}
             fname = str((d["report"] or {}).get("file_name") or "").strip().lower()
-            if is_archive_path(fname):
+            if not include_archived and is_archive_path(fname):
                 continue
             grp = str(d.get("request_id") or d.get("run_id") or d.get("report_key"))
             if fname:
