@@ -34,15 +34,34 @@ class MockD1Database {
     this.runtimeState = new Map();
     this.postRegistry = new Map();
     this.postSnapshots = new Map();
+    this.registryOutbox = [];
     this.failRegistry = false;
+    this.failRegistryOnSnapshotCallsRemaining = 0;
+    this.snapshotInsertAttempts = 0;
     this.onBeforeRegistryInsert = null;
     this.onBatchStep = null;
+  }
+  _countSnaps(dedupKey) {
+    let c = 0;
+    for (const s of this.postSnapshots.values()) {
+      if (s.dedup_key === dedupKey) c += 1;
+    }
+    return c;
+  }
+  _parseObsTs(v) {
+    if (!v || typeof v !== "string") return 0;
+    const t = v.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return Date.parse(`${t}T00:00:00Z`) || 0;
+    return Date.parse(t) || 0;
   }
   async batch(stmts) {
     const snapCommands = this.commands.map((x) => ({ ...x }));
     const snapRequests = this.crawlRequests.map((x) => ({ ...x }));
     const snapNotifications = this.notifications.map((x) => ({ ...x }));
+    const snapOutbox = this.registryOutbox.map((x) => ({ ...x }));
     const snapState = new Map(this.runtimeState);
+    const snapRegistry = new Map(Array.from(this.postRegistry.entries(), ([k, v]) => [k, { ...v }]));
+    const snapSnapshots = new Map(Array.from(this.postSnapshots.entries(), ([k, v]) => [k, { ...v }]));
     try {
       const results = [];
       for (let i = 0; i < stmts.length; i++) {
@@ -56,7 +75,10 @@ class MockD1Database {
       this.commands = snapCommands;
       this.crawlRequests = snapRequests;
       this.notifications = snapNotifications;
+      this.registryOutbox = snapOutbox;
       this.runtimeState = snapState;
+      this.postRegistry = snapRegistry;
+      this.postSnapshots = snapSnapshots;
       throw err;
     }
   }
@@ -150,9 +172,71 @@ class MockD1Database {
           }
           return null;
         }
+        if (norm.includes("FROM market_post_snapshots")) {
+          if (db.failRegistry) throw new Error("Simulated D1 registry outage");
+        }
+        if (norm.startsWith("SELECT id FROM market_post_snapshots WHERE snapshot_idempotency_key = ?")) {
+          const [idempKey, newKey, runFlag, runId, measAt] = this.args;
+          if (db.postSnapshots.has(idempKey)) {
+            return { id: db.postSnapshots.get(idempKey).id };
+          }
+          if (runFlag) {
+            for (const s of db.postSnapshots.values()) {
+              if (s.dedup_key === newKey && s.run_id === runId && String(s.measured_at || "") === String(measAt || "")) {
+                return { id: s.id };
+              }
+            }
+          }
+          return null;
+        }
+        if (norm.startsWith("SELECT id FROM market_post_snapshots WHERE dedup_key = ? AND run_id = ?")) {
+          const [dedupKey, runId, measAt] = this.args;
+          for (const s of db.postSnapshots.values()) {
+            if (s.dedup_key === dedupKey && s.run_id === runId && String(s.measured_at || "") === String(measAt || "")) {
+              return { id: s.id };
+            }
+          }
+          return null;
+        }
+        if (norm.startsWith("SELECT COUNT(*) AS cnt FROM registry_sync_outbox")) {
+          const [reqId] = this.args;
+          return {
+            cnt: db.registryOutbox.filter((o) => o.request_id === reqId && ["pending", "error"].includes(o.status)).length,
+          };
+        }
         return null;
       },
       async all() {
+        if (norm.startsWith("SELECT * FROM market_post_snapshots WHERE dedup_key = ?")) {
+          const [dedupKey] = this.args;
+          if (db.failRegistry) throw new Error("Simulated D1 registry outage");
+          return {
+            results: [...db.postSnapshots.values()].filter((s) => s.dedup_key === dedupKey).map((s) => ({ ...s })),
+          };
+        }
+        if (norm.startsWith("SELECT * FROM registry_sync_outbox WHERE request_id = ?")) {
+          const [reqId] = this.args;
+          return {
+            results: db.registryOutbox
+              .filter((o) => o.request_id === reqId && ["pending", "error"].includes(o.status))
+              .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+              .map((o) => ({ ...o })),
+          };
+        }
+        if (norm.startsWith("SELECT DISTINCT request_id FROM registry_sync_outbox")) {
+          const seenReqs = [];
+          const set = new Set();
+          const ordered = db.registryOutbox
+            .filter((o) => ["pending", "error"].includes(o.status) && o.request_id)
+            .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+          for (const o of ordered) {
+            if (!set.has(o.request_id)) {
+              set.add(o.request_id);
+              seenReqs.push({ request_id: o.request_id });
+            }
+          }
+          return { results: seenReqs.slice(0, Number(this.args[0] || 10)) };
+        }
         if (norm.includes("FROM app_commands")) {
           return { results: [...db.commands].reverse().slice(0, 8) };
         }
@@ -346,20 +430,60 @@ class MockD1Database {
           db.postRegistry.set(newKey, row);
           return { meta: { changes: 1 } };
         }
-        if (norm.startsWith("UPDATE market_post_registry SET canonical_url = COALESCE(?, canonical_url), post_id = COALESCE(?, post_id), post_pk = COALESCE(?, post_pk), content_hash = COALESCE(?, content_hash) WHERE dedup_key = ?")) {
+        if (norm.startsWith("UPDATE market_post_registry SET snapshot_count = COALESCE((SELECT COUNT(*)")) {
+          const [dedupKey] = this.args;
+          const row = db.postRegistry.get(dedupKey);
+          if (!row) return { meta: { changes: 0 } };
+          row.snapshot_count = Math.max(Number(row.snapshot_count || 1), db._countSnaps(dedupKey));
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE market_post_registry SET canonical_url = COALESCE(canonical_url, ?)")) {
+          if (norm.includes("last_seen_at")) {
+            // Unexpected shape guard
+          }
+          if (norm.includes("first_seen_at = CASE")) {
+            if (this.args.length === 8) {
+              // Older late snapshot backfill update
+              const [cUrl, postId, postPk, contentHash, fs1, fs2, fs3, dedupKey] = this.args;
+              const row = db.postRegistry.get(dedupKey);
+              if (!row) return { meta: { changes: 0 } };
+              if (!row.canonical_url && cUrl) row.canonical_url = cUrl;
+              if (!row.post_id && postId) row.post_id = postId;
+              if (!row.post_pk && postPk) row.post_pk = postPk;
+              if (!row.content_hash && contentHash) row.content_hash = contentHash;
+              if (fs1 && (!row.first_seen_at || fs1 < row.first_seen_at)) row.first_seen_at = fs1;
+              row.snapshot_count = Math.max(1, db._countSnaps(dedupKey));
+              return { meta: { changes: 1 } };
+            }
+            // Merge URL -> post_id case (6 args)
+            const [cUrl, postPk, fs1, fs2, fs3, dedupKey] = this.args;
+            const row = db.postRegistry.get(dedupKey);
+            if (!row) return { meta: { changes: 0 } };
+            if (!row.canonical_url && cUrl) row.canonical_url = cUrl;
+            if (!row.post_pk && postPk) row.post_pk = postPk;
+            if (fs1 && (!row.first_seen_at || fs1 < row.first_seen_at)) row.first_seen_at = fs1;
+            row.snapshot_count = Math.max(1, db._countSnaps(dedupKey));
+            return { meta: { changes: 1 } };
+          }
+          // Existing duplicate snapshot metadata backfill (5 args)
           const [cUrl, postId, postPk, contentHash, dedupKey] = this.args;
           const row = db.postRegistry.get(dedupKey);
           if (!row) return { meta: { changes: 0 } };
-          if (cUrl) row.canonical_url = cUrl;
-          if (postId) row.post_id = postId;
-          if (postPk) row.post_pk = postPk;
-          if (contentHash) row.content_hash = contentHash;
+          if (!row.canonical_url && cUrl) row.canonical_url = cUrl;
+          if (!row.post_id && postId) row.post_id = postId;
+          if (!row.post_pk && postPk) row.post_pk = postPk;
+          if (!row.content_hash && contentHash) row.content_hash = contentHash;
+          row.snapshot_count = Math.max(1, db._countSnaps(dedupKey));
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE market_post_registry SET")) {
           const [
-            cUrl, postId, postPk, contentHash, runId, lastSeenAt, nextSnap,
-            vDisp, vPrec, vSrc, vMeas, vEv, latestMetricsJson, dedupKey
+            cUrl, postId, postPk, contentHash, runId,
+            fs1, fs2, fs3,
+            ls1, ls2, ls3,
+            vDisp, vPrec, vSrc,
+            vm1, vm2, vm3,
+            vEv, latestMetricsJson, dedupKey
           ] = this.args;
           const row = db.postRegistry.get(dedupKey);
           if (!row) return { meta: { changes: 0 } };
@@ -368,22 +492,43 @@ class MockD1Database {
           if (postPk) row.post_pk = postPk;
           if (contentHash) row.content_hash = contentHash;
           if (runId) row.last_run_id = runId;
-          row.last_seen_at = lastSeenAt;
-          row.snapshot_count = nextSnap;
+          if (fs1 && (!row.first_seen_at || fs1 < row.first_seen_at)) row.first_seen_at = fs1;
+          if (ls1 && (!row.last_seen_at || ls1 >= row.last_seen_at)) row.last_seen_at = ls1;
+          row.snapshot_count = Math.max(1, db._countSnaps(dedupKey));
           if (vDisp) row.latest_views_display = vDisp;
           if (vPrec) row.latest_views_precision = vPrec;
           if (vSrc) row.latest_views_source = vSrc;
-          if (vMeas) row.latest_views_measured_at = vMeas;
+          if (vm1 && (!row.latest_views_measured_at || vm1 >= row.latest_views_measured_at)) row.latest_views_measured_at = vm1;
           if (vEv) row.latest_views_evidence_url = vEv;
           row.latest_metrics_json = latestMetricsJson;
           return { meta: { changes: 1 } };
         }
+        if (norm.startsWith("DELETE FROM market_post_registry WHERE dedup_key = ?")) {
+          const existed = db.postRegistry.delete(this.args[0]);
+          return { meta: { changes: existed ? 1 : 0 } };
+        }
         if (norm.startsWith("INSERT OR IGNORE INTO market_post_snapshots")) {
+          db.snapshotInsertAttempts += 1;
+          if (db.failRegistryOnSnapshotCallsRemaining > 0) {
+            db.failRegistryOnSnapshotCallsRemaining -= 1;
+            if (db.failRegistryOnSnapshotCallsRemaining === 0) {
+              throw new Error("Simulated mid-batch D1 snapshot outage");
+            }
+          }
           const [
             id, snapshot_idempotency_key, dedup_key, platform, post_id, run_id, measured_at,
             likes_count, comments_count, reposts_count, quotes_count, shares_count, views_count,
             views_display, views_precision, views_source, views_evidence_url, classification, created_at
           ] = this.args;
+          if (norm.includes("WHERE EXISTS ( SELECT 1 FROM market_post_registry")) {
+            const gKey = this.args[19];
+            const gRun = this.args[20];
+            const gFirst = this.args[21];
+            const regRow = db.postRegistry.get(gKey);
+            if (!regRow || String(regRow.first_run_id || "") !== String(gRun || "") || String(regRow.first_seen_at || "") !== String(gFirst || "")) {
+              return { meta: { changes: 0 } };
+            }
+          }
           if (db.postSnapshots.has(snapshot_idempotency_key)) {
             return { meta: { changes: 0 } };
           }
@@ -395,22 +540,86 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE market_post_snapshots SET dedup_key = ?")) {
-          const [newKey, postId, oldKey] = this.args;
-          let changes = 0;
-          for (const snap of db.postSnapshots.values()) {
-            if (snap.dedup_key === oldKey) {
-              snap.dedup_key = newKey;
-              if (postId) snap.post_id = postId;
-              changes++;
+          const [newKey, postId, newIdemp, id] = this.args;
+          let foundEntry = null;
+          for (const [k, snap] of db.postSnapshots.entries()) {
+            if (snap.id === id) {
+              foundEntry = [k, snap];
+              break;
             }
           }
-          return { meta: { changes } };
+          if (!foundEntry) return { meta: { changes: 0 } };
+          const [oldIdemp, snap] = foundEntry;
+          db.postSnapshots.delete(oldIdemp);
+          snap.dedup_key = newKey;
+          if (postId) snap.post_id = postId;
+          snap.snapshot_idempotency_key = newIdemp;
+          db.postSnapshots.set(newIdemp, snap);
+          return { meta: { changes: 1 } };
         }
-        if (norm.startsWith("UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?")) {
-          const [result_summary_json, id] = this.args;
+        if (norm.startsWith("DELETE FROM market_post_snapshots WHERE id = ?")) {
+          const targetId = this.args[0];
+          for (const [k, snap] of db.postSnapshots.entries()) {
+            if (snap.id === targetId) {
+              db.postSnapshots.delete(k);
+              return { meta: { changes: 1 } };
+            }
+          }
+          return { meta: { changes: 0 } };
+        }
+        if (norm.startsWith("INSERT INTO registry_sync_outbox") && norm.includes("SELECT ?, ?, ?, ?, ?, 'pending'")) {
+          const [
+            id, request_id, run_id, crawled_at, payload_json, created_at, updated_at,
+            guardReqId, guardOwner, guardAttempt, guardNowIso
+          ] = this.args;
+          const eligible = db.crawlRequests.some(
+            (c) =>
+              c.id === guardReqId &&
+              c.status === "running" &&
+              c.claimed_by === guardOwner &&
+              c.attempts === guardAttempt &&
+              (!c.lease_expires_at || c.lease_expires_at >= guardNowIso)
+          );
+          if (!eligible) return { meta: { changes: 0 } };
+          db.registryOutbox.push({
+            id, request_id, run_id, crawled_at, payload_json,
+            status: "pending", attempts: 0, last_error: null, created_at, updated_at,
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("INSERT INTO registry_sync_outbox")) {
+          const [id, request_id, run_id, crawled_at, payload_json, created_at, updated_at] = this.args;
+          db.registryOutbox.push({
+            id, request_id, run_id, crawled_at, payload_json,
+            status: "pending", attempts: 0, last_error: null, created_at, updated_at,
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("DELETE FROM registry_sync_outbox WHERE id = ?")) {
+          const before = db.registryOutbox.length;
+          db.registryOutbox = db.registryOutbox.filter((o) => o.id !== this.args[0]);
+          return { meta: { changes: before - db.registryOutbox.length } };
+        }
+        if (norm.startsWith("UPDATE registry_sync_outbox SET status = 'error'")) {
+          const [last_error, updated_at, id] = this.args;
+          const row = db.registryOutbox.find((o) => o.id === id);
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "error";
+          row.attempts = Number(row.attempts || 0) + 1;
+          row.last_error = last_error;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (
+          norm.startsWith("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?") ||
+          norm.startsWith("UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?")
+        ) {
+          const result_summary_json = this.args[0];
+          const id = this.args[this.args.length - 1];
           const row = db.crawlRequests.find((c) => c.id === id);
           if (!row) return { meta: { changes: 0 } };
           row.result_summary_json = result_summary_json;
+          if (this.args.length === 3) row.updated_at = this.args[1];
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("INSERT INTO crawl_requests")) {
@@ -3065,6 +3274,7 @@ assert.equal(v3StartBtns.length, 6);
           views_precision: "display_approx",
           views_source: "threads_web_browser",
           views_measured_at: "2026-11-27T10:15:00Z",
+          views_evidence_url: "https://threads.net/@myqnam/post/SHARED_001",
           likes: 1200,
           comments: 95,
           shares: 88,
@@ -3119,6 +3329,11 @@ assert.equal(v3StartBtns.length, 6);
       post_id: "RACE_POST_1",
       canonical_url: "https://threads.net/@race/post/RACE_POST_1",
       views: 9200,
+      views_display: "9.2K",
+      views_precision: "rounded_display",
+      views_source: "threads_web_browser",
+      views_measured_at: "2026-11-27T11:00:00Z",
+      views_evidence_url: "https://threads.net/@race/post/RACE_POST_1",
       likes: 340,
       shares: 12,
       reposts: 5,
@@ -3387,6 +3602,303 @@ assert.equal(v3StartBtns.length, 6);
     assert.ok(v32Text.includes("@sandeal.shopee"));
   } finally {
     globalThis.fetch = prevFetch16;
+  }
+}
+
+// 17. Data Integrity Hardening (GPT 5c2f1f1 Review):
+//     Outbox /complete recovery, strict V3.2 qualification, monotonic late snapshots, atomic snapshot_count,
+//     URL->post_id re-sync without duplicate snapshots, and 0004 canonical snapshot_idempotency_key congruence
+{
+  const env17 = {
+    DB: new MockD1Database(),
+    APP_VIDEO_API_TOKEN: "test-token-17",
+    TELEGRAM_OWNER_ID: "999017",
+    TELEGRAM_BOT_TOKEN_VIDEO: "tg-bot-token",
+    TELEGRAM_WEBHOOK_SECRET: "tg-webhook-secret",
+  };
+  const h17 = {
+    Authorization: "Bearer test-token-17",
+    "Content-Type": "application/json",
+    "X-Client-Id": "muse-integrity",
+  };
+  const tgCalls17 = [];
+  const prevFetch17 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.includes("api.telegram.org")) {
+      tgCalls17.push({ url: sUrl, body: init.body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 917 } }), { status: 200 });
+    }
+    throw new Error("Unexpected fetch: " + sUrl);
+  };
+
+  try {
+    // 17a: Mid-batch outage on /complete writes registry_sync_outbox + sets registry_sync_status=error;
+    //      retry on SAME /complete MUST recover (NOT return already_finalized) and finish notification
+    const crw17 = (await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "recovery_test" }),
+      }),
+      env17
+    )).json()).request;
+    const rRow17 = env17.DB.crawlRequests.find((c) => c.id === crw17.id);
+    rRow17.status = "running";
+    rRow17.claimed_by = "muse-rec-1";
+    rRow17.attempts = 1;
+    rRow17.requested_by_chat_id = "999017";
+
+    const recItems150 = Array.from({ length: 150 }, (_, i) => ({
+      platform: "threads",
+      post_id: `REC_${i}`,
+      canonical_url: `https://threads.net/@rec/post/REC_${i}`,
+      views: 5000 + i,
+      views_display: "5K",
+      views_precision: "rounded_display",
+      views_source: "threads_web_browser",
+      views_measured_at: "2026-11-27T11:30:00Z",
+      views_evidence_url: `https://threads.net/@rec/post/REC_${i}`,
+      likes: 100 + i,
+    }));
+
+    // Fail on the 101st snapshot insert (chunk #2!)
+    env17.DB.failRegistryOnSnapshotCallsRemaining = 101;
+    const compBody = {
+      claimed_by: "muse-rec-1",
+      attempt: 1,
+      status: "completed",
+      result_summary: {
+        run_id: "run_rec_150",
+        crawled_at: "2026-11-27T11:30:00Z",
+        items: recItems150,
+      },
+    };
+
+    const failComp = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crw17.id}/complete`, {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify(compBody),
+      }),
+      env17
+    );
+    assert.equal(failComp.status, 503);
+    const failJson = await failComp.json();
+    assert.equal(failJson.recovery_pending, true);
+    assert.equal(env17.DB.registryOutbox.length, 1, "Chunk #2 (50 items) must remain durable in registry_sync_outbox");
+    assert.equal(env17.DB.registryOutbox[0].status, "error");
+    const refreshedErrRow = env17.DB.crawlRequests.find((c) => c.id === crw17.id);
+    const savedErrSummary = JSON.parse(refreshedErrRow.result_summary_json);
+    assert.equal(savedErrSummary.registry_sync_status, "error");
+    assert.equal(refreshedErrRow.notified_at, null, "Notification waits until registry recovery succeeds");
+
+    // Retry SAME /complete -> MUST recover chunk #2 instead of skipping with already_finalized!
+    const beforeRecTg = tgCalls17.length;
+    const retryComp = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crw17.id}/complete`, {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify(compBody),
+      }),
+      env17
+    );
+    assert.equal(retryComp.status, 200);
+    const retryJson = await retryComp.json();
+    assert.equal(retryJson.already_finalized, false);
+    assert.equal(retryJson.recovered_registry_sync, true);
+    assert.equal(env17.DB.registryOutbox.length, 0);
+    const refreshedOkRow = env17.DB.crawlRequests.find((c) => c.id === crw17.id);
+    assert.equal(JSON.parse(refreshedOkRow.result_summary_json).registry_sync_status, "ok");
+    assert.equal(retryJson.dedup_stats.total_processed, 150);
+    assert.equal(retryJson.dedup_stats.new_qualified_count, 150);
+    for (let i = 0; i < 150; i++) {
+      assert.ok(env17.DB.postRegistry.has(`threads:post:REC_${i}`), `Missing recovered post REC_${i}`);
+    }
+    assert.ok(tgCalls17.slice(beforeRecTg).some((c) => c.url.includes("/sendMessage")), "Expected delayed completion notification after recovery");
+
+    // Subsequent retry now sees registry_sync_status=ok and returns already_finalized=true cleanly
+    const idempComp = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crw17.id}/complete`, {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify(compBody),
+      }),
+      env17
+    );
+    assert.equal((await idempComp.json()).already_finalized, true);
+
+    // 17b: Scheduled cron drains pending/errored outbox even if caller never retries
+    const crwCron = (await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "cron_outbox" }),
+      }),
+      env17
+    )).json()).request;
+    const cronRow = env17.DB.crawlRequests.find((c) => c.id === crwCron.id);
+    cronRow.status = "running";
+    cronRow.claimed_by = "muse-cron";
+    cronRow.attempts = 1;
+    env17.DB.failRegistryOnSnapshotCallsRemaining = 1;
+    const failCronComp = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crwCron.id}/complete`, {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({
+          claimed_by: "muse-cron",
+          attempt: 1,
+          status: "completed",
+          result_summary: {
+            run_id: "run_cron_rec",
+            items: [{
+              platform: "threads",
+              post_id: "CRON_REC_1",
+              views: 8000,
+              views_display: "8K",
+              views_precision: "rounded_display",
+              views_source: "threads_web_browser",
+              views_measured_at: "2026-11-27T11:35:00Z",
+              views_evidence_url: "https://threads.net/@c/post/CRON_REC_1",
+            }],
+          },
+        }),
+      }),
+      env17
+    );
+    assert.equal(failCronComp.status, 503);
+    assert.equal(env17.DB.registryOutbox.length, 1);
+    await worker.scheduled({}, env17, {});
+    assert.equal(env17.DB.registryOutbox.length, 0);
+    const refreshedCronRow = env17.DB.crawlRequests.find((c) => c.id === crwCron.id);
+    assert.equal(JSON.parse(refreshedCronRow.result_summary_json).registry_sync_status, "ok");
+    assert.ok(env17.DB.postRegistry.has("threads:post:CRON_REC_1"));
+
+    // 17c: Numeric views alone is NOT enough for new_qualified_count (requires all 5 V3.2 fields)
+    const qualTestItems = [
+      { platform: "threads", post_id: "QUAL_NO_SRC", views: 25000, views_display: "25K", views_precision: "rounded_display", views_measured_at: "2026-11-27T10:00:00Z", views_evidence_url: "https://threads.net/@a/post/1" },
+      { platform: "threads", post_id: "QUAL_BAD_SRC", views: 25000, views_display: "25K", views_precision: "rounded_display", views_source: "threads_cli_search", views_measured_at: "2026-11-27T10:00:00Z", views_evidence_url: "https://threads.net/@a/post/2" },
+      { platform: "threads", post_id: "QUAL_NO_DISP", views: 25000, views_precision: "rounded_display", views_source: "threads_web_browser", views_measured_at: "2026-11-27T10:00:00Z", views_evidence_url: "https://threads.net/@a/post/3" },
+      { platform: "threads", post_id: "QUAL_BAD_PREC", views: 25000, views_display: "25K", views_precision: "guessed", views_source: "threads_web_browser", views_measured_at: "2026-11-27T10:00:00Z", views_evidence_url: "https://threads.net/@a/post/4" },
+      { platform: "threads", post_id: "QUAL_NO_MEAS", views: 25000, views_display: "25K", views_precision: "rounded_display", views_source: "threads_web_browser", views_evidence_url: "https://threads.net/@a/post/5" },
+      { platform: "threads", post_id: "QUAL_NO_EV", views: 25000, views_display: "25K", views_precision: "rounded_display", views_source: "threads_web_browser", views_measured_at: "2026-11-27T10:00:00Z" },
+      { platform: "threads", post_id: "QUAL_FULL_OK", views: 25000, views_display: "25K", views_precision: "rounded_display", views_source: "threads_web_browser", views_measured_at: "2026-11-27T10:00:00Z", views_evidence_url: "https://threads.net/@a/post/QUAL_FULL_OK" },
+    ];
+    const qualRes = await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({ run_id: "run_qual_strict", crawled_at: "2026-11-27T10:00:00Z", items: qualTestItems }),
+      }),
+      env17
+    )).json();
+    assert.equal(qualRes.new_count, 7);
+    assert.equal(qualRes.new_qualified_count, 1, "Only the single post meeting all 5 V3.2 provenance rules qualifies");
+    assert.equal(qualRes.unverified_count, 6);
+
+    // 17d: Late older snapshot MUST NOT overwrite newer latest_metrics_json or last_seen_at; snapshot_count stays atomic
+    await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({
+          run_id: "run_newer_t2",
+          crawled_at: "2026-11-27T12:00:00Z",
+          items: [{
+            platform: "threads",
+            post_id: "LATE_GUARD_1",
+            canonical_url: "https://threads.net/@lg/post/LATE_GUARD_1",
+            views: 50000,
+            views_display: "50K",
+            views_precision: "rounded_display",
+            views_source: "threads_web_browser",
+            views_measured_at: "2026-11-27T12:00:00Z",
+            views_evidence_url: "https://threads.net/@lg/post/LATE_GUARD_1",
+            likes: 1200,
+          }],
+        }),
+      }),
+      env17
+    );
+    const lateOldRes = await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({
+          run_id: "run_older_t1",
+          crawled_at: "2026-11-25T08:00:00Z",
+          items: [{
+            platform: "threads",
+            post_id: "LATE_GUARD_1",
+            canonical_url: "https://threads.net/@lg/post/LATE_GUARD_1",
+            views: 1200,
+            views_display: "1.2K",
+            views_precision: "rounded_display",
+            views_source: "threads_web_browser",
+            views_measured_at: "2026-11-25T08:00:00Z",
+            views_evidence_url: "https://threads.net/@lg/post/LATE_GUARD_1",
+            likes: 40,
+          }],
+        }),
+      }),
+      env17
+    )).json();
+    assert.equal(lateOldRes.updated_count, 0, "Older late snapshot must not report updating current metrics");
+    const lgRow = env17.DB.postRegistry.get("threads:post:LATE_GUARD_1");
+    assert.equal(lgRow.snapshot_count, 2);
+    assert.equal(lgRow.first_seen_at, "2026-11-25T08:00:00Z");
+    assert.equal(lgRow.last_seen_at, "2026-11-27T12:00:00Z");
+    assert.equal(JSON.parse(lgRow.latest_metrics_json).views, 50000);
+    assert.equal(JSON.parse(lgRow.latest_metrics_json).likes, 1200);
+
+    // 17e: URL -> post_id promotion + re-sync of original run does NOT duplicate snapshot
+    await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({
+          run_id: "run_url_first_old",
+          crawled_at: "2026-11-26T09:00:00Z",
+          items: [{ platform: "threads", canonical_url: "https://threads.net/@u2p/post/UP22", views: 2000, likes: 30 }],
+        }),
+      }),
+      env17
+    );
+    await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({
+          run_id: "run_url_first_new",
+          crawled_at: "2026-11-27T09:00:00Z",
+          items: [{ platform: "threads", post_id: "UP22", canonical_url: "https://threads.net/@u2p/post/UP22", views: 9000, likes: 120 }],
+        }),
+      }),
+      env17
+    );
+    // Re-sync old run now carrying discovered post_id="UP22"
+    const resyncOld = await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: h17,
+        body: JSON.stringify({
+          run_id: "run_url_first_old",
+          crawled_at: "2026-11-26T09:00:00Z",
+          items: [{ platform: "threads", post_id: "UP22", canonical_url: "https://threads.net/@u2p/post/UP22", views: 2000, likes: 30 }],
+        }),
+      }),
+      env17
+    )).json();
+    assert.equal(resyncOld.snapshots_created, 0, "Re-sync of promoted URL-first run must NOT duplicate old snapshot");
+    assert.equal(resyncOld.snapshots_deduped, 1);
+    assert.equal(env17.DB.postRegistry.get("threads:post:UP22").snapshot_count, 2);
+
+    // 17f: Verify 0004 canonical snapshot_idempotency_key format matches Worker V2 + Muse SQL guide
+    const m0004Sql17 = fs.readFileSync(path.join(__dirname, "../cloudflare-worker/migrations/0004_seed_post_identity_index_171.sql"), "utf8");
+    assert.ok(m0004Sql17.includes("threads:post:DgC-8Jun454|threads-poc-001-20261125|2026-11-25|:140::::"));
+  } finally {
+    globalThis.fetch = prevFetch17;
   }
 }
 

@@ -22,6 +22,7 @@ from .normalizer import (
     NON_CRAWL_ROLES,
     extract_v32_counters,
     is_archive_path,
+    is_valid_v32_views_provenance,
     normalize_payload,
 )
 from .report_normalizer import (
@@ -454,8 +455,8 @@ class MarketIntelligenceStore:
 
     @staticmethod
     def _is_item_qualified_v32(item: Dict[str, Any]) -> bool:
-        """Data Contract V3.2: Only records passing quality/verification WITH verified views count toward new_qualified_count."""
-        if item.get("views_count") is None:
+        """Data Contract V3.2: Only records passing quality/verification WITH full valid V3.2 views provenance count toward new_qualified_count."""
+        if not is_valid_v32_views_provenance(item):
             return False
         if str(item.get("verification_status") or "").lower() == "unverified":
             return False
@@ -981,20 +982,119 @@ class MarketIntelligenceStore:
                         incoming_run = effective_run_id or ""
                         same_run = bool(existing_run and incoming_run and existing_run == incoming_run)
                         same_or_unknown_run = same_run or not existing_run or not incoming_run
-                        existing_ts = self._parse_iso_ts(existing["crawled_at"] or existing["published_at"])
-                        incoming_ts = self._parse_iso_ts(item.get("crawled_at") or item.get("published_at") or modified_time)
+                        existing_ts = self._parse_iso_ts(
+                            existing["views_measured_at"] or existing["crawled_at"] or existing["published_at"]
+                        )
+                        incoming_ts = self._parse_iso_ts(
+                            measured_at or item.get("crawled_at") or item.get("published_at") or modified_time
+                        )
                         is_newer_distinct_run = bool(
                             existing_run and incoming_run and existing_run != incoming_run and incoming_ts >= existing_ts
                         )
 
-                        # Original files must NEVER overwrite corrected_v2 within the same run or from an older run
-                        if (incoming_prio < existing_prio and not is_newer_distinct_run) or (
+                        is_older_late_snapshot = bool(
                             not same_or_unknown_run and existing_ts > 0 and incoming_ts > 0 and incoming_ts < existing_ts
-                        ):
-                            self._conn.execute(
-                                "UPDATE market_items SET last_seen_at = COALESCE(?, last_seen_at) WHERE id = ?",
-                                (measured_at, existing["id"]),
+                        )
+
+                        # Original files must NEVER overwrite corrected_v2 within the same run; older late runs never overwrite newer metrics or last_seen_at
+                        if is_older_late_snapshot:
+                            hist_snap_key = self._snapshot_source_key(
+                                existing["id"],
+                                file_id,
+                                computed_md5,
+                                dedup_key=eff_dedup_key,
+                                run_id=effective_run_id,
+                                measured_at=measured_at,
                             )
+                            hist_snap_exists = (
+                                self._conn.execute(
+                                    """
+                                    SELECT 1 FROM market_item_snapshots
+                                    WHERE snapshot_source_key = ?
+                                       OR (item_id = ? AND ? != '' AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, ''))
+                                    """,
+                                    (hist_snap_key, existing["id"], effective_run_id or "", effective_run_id, measured_at),
+                                ).fetchone()
+                                is not None
+                            )
+                            if not hist_snap_exists:
+                                self._conn.execute(
+                                    """
+                                    INSERT INTO market_item_snapshots (
+                                        id, snapshot_source_key, item_id, dedup_key, canonical_url, platform,
+                                        run_id, raw_file_id, snapshot_at, measured_at,
+                                        views_count, views_display, views_precision, views_source, views_evidence_url,
+                                        likes_count, comments_count, shares_count, reposts_count, quotes_count, price, sold_count,
+                                        views_delta, likes_delta, comments_delta, shares_delta, reposts_delta,
+                                        classification, change_type, created_at
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, 'historical_backfill', ?)
+                                    ON CONFLICT(snapshot_source_key) DO NOTHING
+                                    """,
+                                    (
+                                        str(uuid.uuid4()),
+                                        hist_snap_key,
+                                        existing["id"],
+                                        eff_dedup_key,
+                                        c_url or existing["canonical_url"],
+                                        item["platform"],
+                                        effective_run_id,
+                                        file_id,
+                                        snap_at,
+                                        measured_at,
+                                        item["views_count"],
+                                        item.get("views_display"),
+                                        item.get("views_precision"),
+                                        item.get("views_source"),
+                                        item.get("views_evidence_url"),
+                                        item["likes_count"],
+                                        item["comments_count"],
+                                        item["shares_count"],
+                                        item.get("reposts_count"),
+                                        item.get("quotes_count"),
+                                        item["price"],
+                                        item["sold_count"],
+                                        item.get("classification") or "DUPLICATE_HISTORY",
+                                        now_iso,
+                                    ),
+                                )
+                            self._conn.execute(
+                                """
+                                UPDATE market_items
+                                SET canonical_url = COALESCE(canonical_url, ?),
+                                    post_id = COALESCE(post_id, ?),
+                                    post_pk = COALESCE(post_pk, ?),
+                                    first_seen_at = CASE
+                                        WHEN ? IS NOT NULL AND (first_seen_at IS NULL OR ? < first_seen_at) THEN ?
+                                        ELSE first_seen_at
+                                    END,
+                                    snapshot_count = COALESCE((SELECT COUNT(*) FROM market_item_snapshots WHERE item_id = ?), snapshot_count)
+                                WHERE id = ?
+                                """,
+                                (c_url, eff_post_id, item.get("post_pk"), measured_at, measured_at, measured_at, existing["id"], existing["id"]),
+                            )
+                            batch_registry_items.append({
+                                "dedup_key": eff_dedup_key,
+                                "platform": item["platform"],
+                                "post_id": eff_post_id,
+                                "post_pk": item.get("post_pk") or existing["post_pk"],
+                                "canonical_url": c_url or existing["canonical_url"],
+                                "content_hash": item.get("content_hash") or existing["content_hash"],
+                                "run_id": effective_run_id,
+                                "measured_at": measured_at,
+                                "snapshot_idempotency_key": hist_snap_key,
+                                "classification": item.get("classification") or "DUPLICATE_HISTORY",
+                                "views_display": item.get("views_display"),
+                                "views_precision": item.get("views_precision"),
+                                "views_source": item.get("views_source"),
+                                "views_measured_at": item.get("views_measured_at"),
+                                "views_evidence_url": item.get("views_evidence_url"),
+                                "metrics": item["metrics"],
+                            })
+                            deduped += 1
+                            duplicate_count += 1
+                            continue
+
+                        if incoming_prio < existing_prio and not is_newer_distinct_run:
                             deduped += 1
                             duplicate_count += 1
                             continue
@@ -1143,8 +1243,12 @@ class MarketIntelligenceStore:
                         )
                         snap_exists = (
                             self._conn.execute(
-                                "SELECT 1 FROM market_item_snapshots WHERE snapshot_source_key = ?",
-                                (snap_src_key,),
+                                """
+                                SELECT 1 FROM market_item_snapshots
+                                WHERE snapshot_source_key = ?
+                                   OR (item_id = ? AND ? != '' AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, ''))
+                                """,
+                                (snap_src_key, existing["id"], effective_run_id or "", effective_run_id, measured_at),
                             ).fetchone()
                             is not None
                         )
@@ -1233,7 +1337,8 @@ class MarketIntelligenceStore:
                                     last_reposts_delta = COALESCE(?, last_reposts_delta),
                                     metrics_json = ?, extra_meta_json = ?, schema_version = ?,
                                     raw_file_id = ?, raw_payload_json = ?,
-                                    last_seen_at = COALESCE(?, last_seen_at), updated_at = ?
+                                    last_seen_at = CASE WHEN ? IS NOT NULL AND (last_seen_at IS NULL OR ? >= last_seen_at) THEN ? ELSE last_seen_at END,
+                                    updated_at = ?
                                 WHERE id = ?
                                 """,
                                 (
@@ -1294,6 +1399,8 @@ class MarketIntelligenceStore:
                                     file_id,
                                     item["raw_payload_json"],
                                     measured_at,
+                                    measured_at,
+                                    measured_at,
                                     now_iso,
                                     existing["id"],
                                 ),
@@ -1303,13 +1410,13 @@ class MarketIntelligenceStore:
                             self._conn.execute(
                                 """
                                 UPDATE market_items
-                                SET last_seen_at = COALESCE(?, last_seen_at),
+                                SET last_seen_at = CASE WHEN ? IS NOT NULL AND (last_seen_at IS NULL OR ? >= last_seen_at) THEN ? ELSE last_seen_at END,
                                     snapshot_count = ?,
                                     last_change_type = ?,
                                     canonical_url = COALESCE(?, canonical_url)
                                 WHERE id = ?
                                 """,
-                                (measured_at, snap_cnt, snap_change_type, merged_c_url, existing["id"]),
+                                (measured_at, measured_at, measured_at, snap_cnt, snap_change_type, merged_c_url, existing["id"]),
                             )
                             deduped += 1
 

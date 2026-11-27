@@ -752,6 +752,59 @@ function haveRegistryMetricsChanged(incoming, existing) {
     return false;
 }
 
+function parseObsTimeMs(rawVal) {
+    if (!rawVal || typeof rawVal !== "string") return 0;
+    const trimmed = rawVal.trim();
+    if (!trimmed) return 0;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return Date.parse(`${trimmed}T00:00:00Z`) || 0;
+    }
+    const ms = Date.parse(trimmed);
+    return Number.isFinite(ms) ? ms : 0;
+}
+
+function isValidV32ViewsProvenance(meta) {
+    if (!meta || !meta.metrics) return false;
+    const v = meta.metrics.views;
+    if (v === undefined || v === null || !Number.isFinite(Number(v)) || Number(v) < 0) {
+        return false;
+    }
+    const vDisp = String(meta.viewsDisplay || "").trim();
+    if (!vDisp || !/^\d+(?:[.,]\d+)?\s*[KMBkmb]?$/.test(vDisp)) {
+        return false;
+    }
+    const vPrec = String(meta.viewsPrecision || "").trim().toLowerCase();
+    if (!["rounded_display", "display_approx", "exact"].includes(vPrec)) {
+        return false;
+    }
+    const plat = String(meta.plat || "threads").trim().toLowerCase();
+    const vSrc = String(meta.viewsSource || "").trim().toLowerCase();
+    if (plat === "threads") {
+        if (vSrc !== "threads_web_browser") return false;
+    } else if (!vSrc) {
+        return false;
+    }
+    const vMeas = String(meta.viewsMeasuredAtRaw || "").trim();
+    if (!vMeas || Number.isNaN(Date.parse(vMeas))) {
+        return false;
+    }
+    const vEv = String(meta.viewsEvidenceUrl || "").trim();
+    if (!vEv) return false;
+    try {
+        const parsedEv = new URL(vEv);
+        const proto = (parsedEv.protocol || "").toLowerCase();
+        if (proto !== "http:" && proto !== "https:") return false;
+        if (!parsedEv.hostname) return false;
+        if (plat === "threads") {
+            const host = parsedEv.hostname.toLowerCase();
+            if (!host.includes("threads.net") && !host.includes("threads.com")) return false;
+        }
+    } catch {
+        return false;
+    }
+    return true;
+}
+
 function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt = null) {
     const metrics = extractRegistryMetrics(rawItem);
     const key = buildCanonicalDedupKey(rawItem);
@@ -766,18 +819,14 @@ function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt
     const viewsPrecision = rawItem?.views_precision ?? rawItem?.metrics?.views_precision ?? null;
     const viewsSource = rawItem?.views_source ?? rawItem?.metrics?.views_source ?? null;
     const viewsEvidenceUrl = rawItem?.views_evidence_url ?? rawItem?.metrics?.views_evidence_url ?? null;
-    const measuredAt = rawItem?.views_measured_at || rawItem?.measured_at || rawItem?.crawled_at || rawItem?.scraped_at || defaultMeasuredAt || null;
+    const viewsMeasuredAtRaw = rawItem?.views_measured_at ?? rawItem?.metrics?.views_measured_at ?? null;
+    const measuredAt = viewsMeasuredAtRaw || rawItem?.measured_at || rawItem?.crawled_at || rawItem?.scraped_at || defaultMeasuredAt || null;
     const cls = String(rawItem?.classification || "").trim().toUpperCase();
     const isRejected = cls === "REJECTED" || String(rawItem?.data_quality || "").toLowerCase() === "rejected";
     const hasVerifiedViews = metrics.views !== undefined && metrics.views !== null;
-    const isUnverified =
-        cls === "UNVERIFIED" ||
-        !hasVerifiedViews ||
-        String(rawItem?.verification_status || "").toLowerCase() === "unverified";
-    const isNewQualified = !isRejected && !isUnverified && hasVerifiedViews;
-    const effCls = cls || (isRejected ? "REJECTED" : (isUnverified ? "UNVERIFIED" : "NEW"));
     const itemRunId = rawItem?.run_id || rawItem?.last_seen_run_id || defaultRunId || null;
-    return {
+
+    const meta = {
         metrics,
         key,
         plat,
@@ -789,14 +838,29 @@ function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt
         viewsPrecision: viewsPrecision ? String(viewsPrecision).trim() : null,
         viewsSource: viewsSource ? String(viewsSource).trim() : null,
         viewsEvidenceUrl: viewsEvidenceUrl ? String(viewsEvidenceUrl).trim() : null,
+        viewsMeasuredAtRaw: viewsMeasuredAtRaw ? String(viewsMeasuredAtRaw).trim() : null,
         measuredAt: measuredAt ? String(measuredAt).trim() : null,
         isRejected,
         hasVerifiedViews,
-        isUnverified,
-        isNewQualified,
-        classification: effCls,
+        hasQualifiedV32Views: false,
+        isUnverified: true,
+        isNewQualified: false,
+        classification: cls,
         runId: itemRunId ? String(itemRunId).trim() : null,
     };
+
+    const hasQualifiedV32Views = isValidV32ViewsProvenance(meta);
+    const isUnverified =
+        cls === "UNVERIFIED" ||
+        !hasQualifiedV32Views ||
+        String(rawItem?.verification_status || "").toLowerCase() === "unverified" ||
+        String(rawItem?.data_quality || "").toLowerCase() === "needs_verification" ||
+        String(rawItem?.trend_tier || "").toLowerCase() === "unverified";
+    meta.hasQualifiedV32Views = hasQualifiedV32Views;
+    meta.isUnverified = isUnverified;
+    meta.isNewQualified = !isRejected && !isUnverified && hasQualifiedV32Views;
+    meta.classification = cls || (isRejected ? "REJECTED" : (isUnverified ? "UNVERIFIED" : "NEW"));
+    return meta;
 }
 
 function buildSnapshotIdempotencyKey({ dedupKey, runId, measuredAt, metrics }) {
@@ -875,6 +939,84 @@ async function checkCrossRunDedupInD1(env, rawItems) {
     };
 }
 
+async function migrateSnapshotsOnKeyPromotion(env, oldKey, newKey, postId) {
+    const oldSnapsRes = await env.DB.prepare("SELECT * FROM market_post_snapshots WHERE dedup_key = ?").bind(oldKey).all();
+    const oldSnaps = oldSnapsRes?.results || [];
+    for (const sn of oldSnaps) {
+        const oldIdemp = String(sn.snapshot_idempotency_key || "");
+        const newIdemp = oldIdemp.startsWith(`${oldKey}|`)
+            ? `${newKey}|${oldIdemp.slice(oldKey.length + 1)}`
+            : buildSnapshotIdempotencyKey({
+                dedupKey: newKey,
+                runId: sn.run_id,
+                measuredAt: sn.measured_at,
+                metrics: {
+                    views: sn.views_count,
+                    likes: sn.likes_count,
+                    comments: sn.comments_count,
+                    shares: sn.shares_count,
+                    reposts: sn.reposts_count,
+                    quotes: sn.quotes_count,
+                },
+            });
+        const dup = await env.DB.prepare(`
+            SELECT id FROM market_post_snapshots
+            WHERE snapshot_idempotency_key = ?
+               OR (dedup_key = ? AND ? != '' AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, ''))
+            LIMIT 1
+        `).bind(newIdemp, newKey, String(sn.run_id || ""), sn.run_id, sn.measured_at).first();
+        if (dup && dup.id !== sn.id) {
+            await env.DB.prepare("DELETE FROM market_post_snapshots WHERE id = ?").bind(sn.id).run();
+        } else {
+            await env.DB.prepare(`
+                UPDATE market_post_snapshots
+                SET dedup_key = ?, post_id = COALESCE(?, post_id), snapshot_idempotency_key = ?
+                WHERE id = ?
+            `).bind(newKey, postId, newIdemp, sn.id).run();
+        }
+    }
+}
+
+async function promoteOrMergeUrlToPostIdInD1(env, row, meta) {
+    if (
+        !row ||
+        !String(row.dedup_key || "").includes(":url:") ||
+        !meta.key ||
+        meta.key.includes(":url:") ||
+        meta.key === row.dedup_key
+    ) {
+        return row;
+    }
+    const oldKey = row.dedup_key;
+    const targetTaken = await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(meta.key).first();
+    if (!targetTaken) {
+        const prom = await env.DB.prepare(`
+            UPDATE market_post_registry
+            SET dedup_key = ?, post_id = COALESCE(?, post_id), post_pk = COALESCE(?, post_pk)
+            WHERE dedup_key = ?
+        `).bind(meta.key, meta.postId, meta.postPk, oldKey).run();
+        if (Number(prom?.meta?.changes || 0) === 1) {
+            await migrateSnapshotsOnKeyPromotion(env, oldKey, meta.key, meta.postId);
+            return { ...row, dedup_key: meta.key, post_id: meta.postId || row.post_id, post_pk: meta.postPk || row.post_pk };
+        }
+        const refreshed = await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(meta.key).first();
+        if (refreshed) return refreshed;
+        return row;
+    }
+    // Target post_id row already exists separately: merge URL-row snapshots into target without duplication
+    await migrateSnapshotsOnKeyPromotion(env, oldKey, targetTaken.dedup_key, meta.postId || targetTaken.post_id);
+    await env.DB.prepare(`
+        UPDATE market_post_registry
+        SET canonical_url = COALESCE(canonical_url, ?),
+            post_pk = COALESCE(post_pk, ?),
+            first_seen_at = CASE WHEN ? IS NOT NULL AND (first_seen_at IS NULL OR ? < first_seen_at) THEN ? ELSE first_seen_at END,
+            snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count)
+        WHERE dedup_key = ?
+    `).bind(row.canonical_url, row.post_pk, row.first_seen_at, row.first_seen_at, row.first_seen_at, targetTaken.dedup_key).run();
+    await env.DB.prepare("DELETE FROM market_post_registry WHERE dedup_key = ?").bind(oldKey).run();
+    return (await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(targetTaken.dedup_key).first()) || targetTaken;
+}
+
 async function insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls, nowIso) {
     const idempKey = buildSnapshotIdempotencyKey({
         dedupKey: targetDedupKey,
@@ -882,6 +1024,16 @@ async function insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls,
         measuredAt: meta.measuredAt,
         metrics: meta.metrics,
     });
+    if (meta.runId) {
+        const existingRunSnap = await env.DB.prepare(`
+            SELECT id FROM market_post_snapshots
+            WHERE dedup_key = ? AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, '')
+            LIMIT 1
+        `).bind(targetDedupKey, meta.runId, meta.measuredAt).first();
+        if (existingRunSnap) {
+            return false;
+        }
+    }
     const snapId = `snp_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const ins = await env.DB.prepare(`
         INSERT OR IGNORE INTO market_post_snapshots
@@ -906,7 +1058,7 @@ async function insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls,
         meta.viewsSource,
         meta.viewsEvidenceUrl,
         snapCls,
-        nowIso
+        meta.measuredAt || nowIso
     ).run();
     return Number(ins?.meta?.changes || 0) === 1;
 }
@@ -941,7 +1093,15 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
 
                 if (!row) {
                     const firstSeen = meta.measuredAt || nowIso;
-                    const ins = await env.DB.prepare(`
+                    const idempKey = buildSnapshotIdempotencyKey({
+                        dedupKey: meta.key,
+                        runId: meta.runId,
+                        measuredAt: meta.measuredAt,
+                        metrics: meta.metrics,
+                    });
+                    const snapId = `snp_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+                    const snapClsNew = meta.classification || "NEW";
+                    const regInsStmt = env.DB.prepare(`
                         INSERT OR IGNORE INTO market_post_registry
                         (dedup_key, platform, post_id, post_pk, canonical_url, content_hash, first_run_id, last_run_id, first_seen_at, last_seen_at, snapshot_count, latest_views_display, latest_views_precision, latest_views_source, latest_views_measured_at, latest_views_evidence_url, latest_metrics_json)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
@@ -959,25 +1119,64 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                         meta.viewsDisplay,
                         meta.viewsPrecision,
                         meta.viewsSource,
-                        meta.measuredAt,
+                        meta.viewsMeasuredAtRaw || (meta.hasVerifiedViews ? meta.measuredAt : null),
                         meta.viewsEvidenceUrl,
                         JSON.stringify(meta.metrics)
-                    ).run();
+                    );
+                    const snapInsStmt = env.DB.prepare(`
+                        INSERT OR IGNORE INTO market_post_snapshots
+                        (id, snapshot_idempotency_key, dedup_key, platform, post_id, run_id, measured_at, likes_count, comments_count, reposts_count, quotes_count, shares_count, views_count, views_display, views_precision, views_source, views_evidence_url, classification, created_at)
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        WHERE EXISTS (
+                            SELECT 1 FROM market_post_registry
+                            WHERE dedup_key = ? AND COALESCE(first_run_id, '') = COALESCE(?, '') AND first_seen_at = ?
+                        )
+                    `).bind(
+                        snapId,
+                        idempKey,
+                        meta.key,
+                        meta.plat,
+                        meta.postId,
+                        meta.runId,
+                        meta.measuredAt,
+                        meta.metrics.likes ?? null,
+                        meta.metrics.comments ?? null,
+                        meta.metrics.reposts ?? null,
+                        meta.metrics.quotes ?? null,
+                        meta.metrics.shares ?? null,
+                        meta.metrics.views ?? null,
+                        meta.viewsDisplay,
+                        meta.viewsPrecision,
+                        meta.viewsSource,
+                        meta.viewsEvidenceUrl,
+                        snapClsNew,
+                        meta.measuredAt || nowIso,
+                        meta.key,
+                        meta.runId,
+                        firstSeen
+                    );
 
-                    if (Number(ins?.meta?.changes || 0) === 1) {
+                    let regChanges = 0;
+                    let snapChanges = 0;
+                    if (typeof env.DB.batch === "function") {
+                        const batchRes = await env.DB.batch([regInsStmt, snapInsStmt]);
+                        regChanges = Number(batchRes?.[0]?.meta?.changes || 0);
+                        snapChanges = Number(batchRes?.[1]?.meta?.changes || 0);
+                    } else {
+                        const ins = await regInsStmt.run();
+                        regChanges = Number(ins?.meta?.changes || 0);
+                        if (regChanges === 1) {
+                            snapChanges = (await insertMeasurementSnapshotInD1(env, meta.key, meta, snapClsNew, nowIso)) ? 1 : 0;
+                        }
+                    }
+
+                    if (regChanges === 1) {
                         newCount += 1;
                         if (meta.isRejected) rejectedCount += 1;
                         else if (meta.isNewQualified) newQualifiedCount += 1;
                         else unverifiedCount += 1;
 
-                        const snapInserted = await insertMeasurementSnapshotInD1(
-                            env,
-                            meta.key,
-                            meta,
-                            meta.classification || "NEW",
-                            nowIso
-                        );
-                        if (snapInserted) snapshotsCreated += 1;
+                        if (snapChanges === 1) snapshotsCreated += 1;
                         else snapshotsDeduped += 1;
                         continue;
                     }
@@ -988,51 +1187,34 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                     }
                 }
 
-                let targetDedupKey = row.dedup_key;
-                if (
-                    String(row.dedup_key || "").includes(":url:") &&
-                    meta.key &&
-                    !meta.key.includes(":url:") &&
-                    meta.key !== row.dedup_key
-                ) {
-                    const targetTaken = await env.DB.prepare("SELECT dedup_key FROM market_post_registry WHERE dedup_key = ?")
-                        .bind(meta.key).first();
-                    if (!targetTaken) {
-                        const prom = await env.DB.prepare(`
-                            UPDATE market_post_registry
-                            SET dedup_key = ?, post_id = COALESCE(?, post_id), post_pk = COALESCE(?, post_pk)
-                            WHERE dedup_key = ?
-                        `).bind(meta.key, meta.postId, meta.postPk, row.dedup_key).run();
-                        if (Number(prom?.meta?.changes || 0) === 1) {
-                            await env.DB.prepare(`
-                                UPDATE market_post_snapshots
-                                SET dedup_key = ?, post_id = COALESCE(?, post_id)
-                                WHERE dedup_key = ?
-                            `).bind(meta.key, meta.postId, row.dedup_key).run();
-                            targetDedupKey = meta.key;
-                            row.dedup_key = meta.key;
-                        }
-                    }
-                }
+                row = await promoteOrMergeUrlToPostIdInD1(env, row, meta);
+                const targetDedupKey = row.dedup_key;
+
+                const incomingObsTs = parseObsTimeMs(meta.measuredAt);
+                const existingLastTs = parseObsTimeMs(row.last_seen_at);
+                const isOlderLateSnapshot = incomingObsTs > 0 && existingLastTs > 0 && incomingObsTs < existingLastTs;
 
                 let prevMetrics = {};
                 try { prevMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
-                const changed = haveRegistryMetricsChanged(meta.metrics, prevMetrics);
+                const changed = !isOlderLateSnapshot && haveRegistryMetricsChanged(meta.metrics, prevMetrics);
                 const snapCls = meta.isRejected
                     ? "REJECTED"
-                    : (meta.isUnverified ? "UNVERIFIED" : (changed ? "UPDATED_METRICS" : "DUPLICATE_HISTORY"));
+                    : (isOlderLateSnapshot
+                        ? "DUPLICATE_HISTORY"
+                        : (meta.isUnverified ? "UNVERIFIED" : (changed ? "UPDATED_METRICS" : "DUPLICATE_HISTORY")));
 
                 const snapInserted = await insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls, nowIso);
                 if (!snapInserted) {
                     snapshotsDeduped += 1;
                     duplicateCount += 1;
-                    if (meta.cUrl || meta.postId) {
+                    if (meta.cUrl || meta.postId || meta.postPk || meta.contentHash) {
                         await env.DB.prepare(`
                             UPDATE market_post_registry
-                            SET canonical_url = COALESCE(?, canonical_url),
-                                post_id = COALESCE(?, post_id),
-                                post_pk = COALESCE(?, post_pk),
-                                content_hash = COALESCE(?, content_hash)
+                            SET canonical_url = COALESCE(canonical_url, ?),
+                                post_id = COALESCE(post_id, ?),
+                                post_pk = COALESCE(post_pk, ?),
+                                content_hash = COALESCE(content_hash, ?),
+                                snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count)
                             WHERE dedup_key = ?
                         `).bind(meta.cUrl, meta.postId, meta.postPk, meta.contentHash, targetDedupKey).run();
                     }
@@ -1040,9 +1222,37 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                 }
 
                 snapshotsCreated += 1;
+                if (isOlderLateSnapshot) {
+                    // Older backfill snapshot arriving out-of-order MUST NEVER clobber newer latest_metrics_json or last_seen_at
+                    await env.DB.prepare(`
+                        UPDATE market_post_registry
+                        SET canonical_url = COALESCE(canonical_url, ?),
+                            post_id = COALESCE(post_id, ?),
+                            post_pk = COALESCE(post_pk, ?),
+                            content_hash = COALESCE(content_hash, ?),
+                            first_seen_at = CASE
+                                WHEN ? IS NOT NULL AND (first_seen_at IS NULL OR ? < first_seen_at) THEN ?
+                                ELSE first_seen_at
+                            END,
+                            snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count + 1)
+                        WHERE dedup_key = ?
+                    `).bind(
+                        meta.cUrl,
+                        meta.postId,
+                        meta.postPk,
+                        meta.contentHash,
+                        meta.measuredAt,
+                        meta.measuredAt,
+                        meta.measuredAt,
+                        targetDedupKey
+                    ).run();
+                    duplicateCount += 1;
+                    continue;
+                }
+
                 const mergedMetrics = { ...prevMetrics, ...meta.metrics };
-                const nextSnap = Number(row.snapshot_count || 1) + 1;
                 const effSeenAt = meta.measuredAt || nowIso;
+                const effViewsMeas = meta.viewsMeasuredAtRaw || (meta.hasVerifiedViews ? meta.measuredAt : null);
                 await env.DB.prepare(`
                     UPDATE market_post_registry
                     SET canonical_url = COALESCE(?, canonical_url),
@@ -1050,12 +1260,22 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                         post_pk = COALESCE(?, post_pk),
                         content_hash = COALESCE(?, content_hash),
                         last_run_id = COALESCE(?, last_run_id),
-                        last_seen_at = ?,
-                        snapshot_count = ?,
+                        first_seen_at = CASE
+                            WHEN ? IS NOT NULL AND (first_seen_at IS NULL OR ? < first_seen_at) THEN ?
+                            ELSE first_seen_at
+                        END,
+                        last_seen_at = CASE
+                            WHEN ? IS NOT NULL AND (last_seen_at IS NULL OR ? >= last_seen_at) THEN ?
+                            ELSE last_seen_at
+                        END,
+                        snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count + 1),
                         latest_views_display = COALESCE(?, latest_views_display),
                         latest_views_precision = COALESCE(?, latest_views_precision),
                         latest_views_source = COALESCE(?, latest_views_source),
-                        latest_views_measured_at = COALESCE(?, latest_views_measured_at),
+                        latest_views_measured_at = CASE
+                            WHEN ? IS NOT NULL AND (latest_views_measured_at IS NULL OR ? >= latest_views_measured_at) THEN ?
+                            ELSE latest_views_measured_at
+                        END,
                         latest_views_evidence_url = COALESCE(?, latest_views_evidence_url),
                         latest_metrics_json = ?
                     WHERE dedup_key = ?
@@ -1065,12 +1285,18 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                     meta.postPk,
                     meta.contentHash,
                     meta.runId,
+                    meta.measuredAt,
+                    meta.measuredAt,
+                    meta.measuredAt,
                     effSeenAt,
-                    nextSnap,
+                    effSeenAt,
+                    effSeenAt,
                     meta.viewsDisplay,
                     meta.viewsPrecision,
                     meta.viewsSource,
-                    meta.measuredAt,
+                    effViewsMeas,
+                    effViewsMeas,
+                    effViewsMeas,
                     meta.viewsEvidenceUrl,
                     JSON.stringify(mergedMetrics),
                     targetDedupKey
@@ -1100,6 +1326,215 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
         snapshots_deduped: snapshotsDeduped,
         total_processed: items.length,
     };
+}
+
+function mergeDedupStatsIntoSummary(summaryObj, dRes) {
+    const prev = (summaryObj._partial_dedup_stats && typeof summaryObj._partial_dedup_stats === "object")
+        ? summaryObj._partial_dedup_stats
+        : null;
+    const agg = prev
+        ? {
+            new_count: Number(prev.new_count || 0) + Number(dRes.new_count || 0),
+            new_qualified_count: Number(prev.new_qualified_count || 0) + Number(dRes.new_qualified_count || 0),
+            duplicate_count: Number(prev.duplicate_count || 0) + Number(dRes.duplicate_count || 0),
+            duplicate_history_count: Number(prev.duplicate_history_count || 0) + Number(dRes.duplicate_history_count || 0),
+            updated_count: Number(prev.updated_count || 0) + Number(dRes.updated_count || 0),
+            updated_metrics_count: Number(prev.updated_metrics_count || 0) + Number(dRes.updated_metrics_count || 0),
+            missing_views_count: Number(prev.missing_views_count || 0) + Number(dRes.missing_views_count || 0),
+            unverified_count: Number(prev.unverified_count || 0) + Number(dRes.unverified_count || 0),
+            rejected_count: Number(prev.rejected_count || 0) + Number(dRes.rejected_count || 0),
+            snapshots_created: Number(prev.snapshots_created || 0) + Number(dRes.snapshots_created || 0),
+            snapshots_deduped: Number(prev.snapshots_deduped || 0) + Number(dRes.snapshots_deduped || 0),
+            total_processed: Number(prev.total_processed || 0) + Number(dRes.total_processed || 0),
+        }
+        : dRes;
+
+    delete summaryObj._partial_dedup_stats;
+    summaryObj.new_count = summaryObj.new_count !== undefined ? summaryObj.new_count : agg.new_count;
+    summaryObj.new_qualified_count = summaryObj.new_qualified_count !== undefined ? summaryObj.new_qualified_count : agg.new_qualified_count;
+    if (summaryObj.duplicate_history_count === undefined && summaryObj.duplicate_count === undefined) {
+        summaryObj.duplicate_history_count = agg.duplicate_history_count;
+        summaryObj.duplicate_count = agg.duplicate_count;
+    }
+    if (summaryObj.updated_metrics_count === undefined && summaryObj.updated_count === undefined) {
+        summaryObj.updated_metrics_count = agg.updated_metrics_count;
+        summaryObj.updated_count = agg.updated_count;
+    }
+    if (summaryObj.missing_views_count === undefined) {
+        summaryObj.missing_views_count = agg.missing_views_count;
+    }
+    summaryObj.dedup_stats = agg;
+    return agg;
+}
+
+async function enqueueRegistryOutboxStatements(env, requestId, runId, crawledAt, items, guard, nowIso) {
+    const stmts = [];
+    const chunkSize = 100;
+    for (let i = 0; i < items.length; i += chunkSize) {
+        const chunk = items.slice(i, i + chunkSize);
+        const bid = `rout_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+        stmts.push(
+            env.DB.prepare(`
+                INSERT INTO registry_sync_outbox
+                (id, request_id, run_id, crawled_at, payload_json, status, attempts, last_error, created_at, updated_at)
+                SELECT ?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?
+                WHERE EXISTS (
+                    SELECT 1 FROM crawl_requests
+                    WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+                      AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+                )
+            `).bind(
+                bid,
+                requestId,
+                runId || requestId,
+                crawledAt || null,
+                JSON.stringify(chunk),
+                nowIso,
+                nowIso,
+                requestId,
+                guard.callerOwner,
+                guard.parsedAttempt,
+                guard.nowIso
+            )
+        );
+    }
+    return stmts;
+}
+
+async function enqueueRecoveryOutboxForFinalizedRequest(env, requestId, runId, crawledAt, items, nowIso) {
+    const chunkSize = 100;
+    for (let i = 0; i < items.length; i += chunkSize) {
+        const chunk = items.slice(i, i + chunkSize);
+        const bid = `rout_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+        await env.DB.prepare(`
+            INSERT INTO registry_sync_outbox
+            (id, request_id, run_id, crawled_at, payload_json, status, attempts, last_error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
+        `).bind(bid, requestId, runId || requestId, crawledAt || null, JSON.stringify(chunk), nowIso, nowIso).run();
+    }
+}
+
+async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCrawledAt = null) {
+    const outboxRes = await env.DB.prepare(`
+        SELECT * FROM registry_sync_outbox
+        WHERE request_id = ? AND status IN ('pending', 'error')
+        ORDER BY created_at ASC
+    `).bind(crawlId).all();
+    const pendingRows = outboxRes?.results || [];
+    const nowIso = new Date().toISOString();
+    const totalAgg = {
+        new_count: 0,
+        new_qualified_count: 0,
+        duplicate_count: 0,
+        duplicate_history_count: 0,
+        updated_count: 0,
+        updated_metrics_count: 0,
+        missing_views_count: 0,
+        unverified_count: 0,
+        rejected_count: 0,
+        snapshots_created: 0,
+        snapshots_deduped: 0,
+        total_processed: 0,
+    };
+
+    for (const row of pendingRows) {
+        let chunkItems = [];
+        try { chunkItems = JSON.parse(row.payload_json || "[]"); } catch {}
+        try {
+            const cRes = await recordCrossRunDedupInD1(env, chunkItems, row.run_id || summaryObj.run_id || crawlId, {
+                crawledAt: row.crawled_at || defaultCrawledAt || null,
+            });
+            for (const k of Object.keys(totalAgg)) {
+                totalAgg[k] += Number(cRes[k] || 0);
+            }
+            await env.DB.prepare("DELETE FROM registry_sync_outbox WHERE id = ?").bind(row.id).run();
+        } catch (err) {
+            const errMsg = String(err?.message || "D1 registry unavailable");
+            try {
+                await env.DB.prepare(`
+                    UPDATE registry_sync_outbox
+                    SET status = 'error', attempts = attempts + 1, last_error = ?, updated_at = ?
+                    WHERE id = ?
+                `).bind(errMsg.slice(0, 400), nowIso, row.id).run();
+            } catch {}
+            const prevPart = (summaryObj._partial_dedup_stats && typeof summaryObj._partial_dedup_stats === "object")
+                ? summaryObj._partial_dedup_stats
+                : null;
+            if (prevPart) {
+                for (const k of Object.keys(totalAgg)) {
+                    totalAgg[k] += Number(prevPart[k] || 0);
+                }
+            }
+            summaryObj._partial_dedup_stats = totalAgg;
+            summaryObj.registry_sync_status = "error";
+            summaryObj.registry_sync_error = errMsg;
+            await env.DB.prepare("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?")
+                .bind(JSON.stringify(summaryObj), nowIso, crawlId).run();
+            throw err;
+        }
+    }
+
+    summaryObj.registry_sync_status = "ok";
+    delete summaryObj.registry_sync_error;
+    mergeDedupStatsIntoSummary(summaryObj, totalAgg);
+    await env.DB.prepare("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?")
+        .bind(JSON.stringify(summaryObj), nowIso, crawlId).run();
+    return summaryObj.dedup_stats;
+}
+
+async function drainPendingRegistryOutboxInD1(env, limit = 10) {
+    let pendingReqs = [];
+    try {
+        const rows = await env.DB.prepare(`
+            SELECT DISTINCT request_id FROM registry_sync_outbox
+            WHERE status IN ('pending', 'error') AND request_id IS NOT NULL
+            ORDER BY created_at ASC LIMIT ?
+        `).bind(limit).all();
+        pendingReqs = rows?.results || [];
+    } catch {
+        return;
+    }
+    for (const entry of pendingReqs) {
+        const reqId = entry.request_id;
+        if (!reqId) continue;
+        const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(reqId).first();
+        if (!reqRow || !["completed", "failed"].includes(reqRow.status)) continue;
+        let summaryObj = {};
+        try { summaryObj = JSON.parse(reqRow.result_summary_json || "{}"); } catch {}
+        try {
+            await drainRegistryOutboxForRequest(
+                env,
+                reqId,
+                summaryObj,
+                summaryObj.crawled_at || summaryObj.generated_at || null
+            );
+            if (reqRow.requested_by_chat_id && !reqRow.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+                const notifKey = resolveCanonicalNotificationKey({
+                    requestId: reqId,
+                    runId: summaryObj.run_id || null,
+                    status: reqRow.status,
+                });
+                const aliasKeys = [
+                    resolveCanonicalNotificationKey({ requestId: reqId, status: reqRow.status }),
+                    summaryObj.run_id ? resolveCanonicalNotificationKey({ runId: summaryObj.run_id, isCorrected: true }) : null,
+                ].filter(Boolean);
+                const text = buildDirectD1CrawlNotificationText(reqRow, summaryObj);
+                const recCount = Number(summaryObj.new_qualified_count ?? summaryObj.qualified_count ?? summaryObj.record_count ?? 0);
+                const delivery = await deliverWithUncertaintyGuard(
+                    env,
+                    notifKey,
+                    recCount,
+                    reqRow.requested_by_chat_id,
+                    text,
+                    { usePrimaryMessage: true, aliasKeys, requestId: reqId, replyMarkup: reportActionsInlineKeyboard(false) }
+                );
+                if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+                    await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
+                        .bind(new Date().toISOString(), reqId).run();
+                }
+            }
+        } catch {}
+    }
 }
 
 function pickFirstFiniteInt(...vals) {
@@ -3472,6 +3907,14 @@ async function handleAppApi(request, env, url) {
 
         const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
         if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+
+        const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
+            ? { ...body.result_summary }
+            : {};
+        const bodyDedupItems = Array.isArray(bodySummaryObj.items)
+            ? bodySummaryObj.items
+            : (Array.isArray(body.items) ? body.items : null);
+
         if (["completed", "failed", "cancelled"].includes(existing.status)) {
             if (
                 (existing.claimed_by && callerOwner !== existing.claimed_by) ||
@@ -3479,6 +3922,91 @@ async function handleAppApi(request, env, url) {
                 existing.status !== nextStatus
             ) {
                 return jsonResponse({ ok: false, error: "Crawl request already finalized by another worker/attempt", conflict: true }, 409);
+            }
+            let existingSummary = {};
+            try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
+            let pendingOutboxCount = 0;
+            try {
+                const cntRow = await env.DB.prepare(`
+                    SELECT COUNT(*) AS cnt FROM registry_sync_outbox
+                    WHERE request_id = ? AND status IN ('pending', 'error')
+                `).bind(crawlId).first();
+                pendingOutboxCount = Number(cntRow?.cnt || 0);
+            } catch {}
+
+            const needsRecovery =
+                existingSummary.registry_sync_status === "error" ||
+                existingSummary.registry_sync_status === "pending" ||
+                pendingOutboxCount > 0;
+
+            if (needsRecovery) {
+                if (pendingOutboxCount === 0) {
+                    const fallbackItems = bodyDedupItems && bodyDedupItems.length > 0
+                        ? bodyDedupItems
+                        : (Array.isArray(existingSummary.items) ? existingSummary.items : []);
+                    if (fallbackItems.length > 0) {
+                        await enqueueRecoveryOutboxForFinalizedRequest(
+                            env,
+                            crawlId,
+                            existingSummary.run_id || bodySummaryObj.run_id || crawlId,
+                            existingSummary.crawled_at || bodySummaryObj.crawled_at || existingSummary.generated_at || null,
+                            fallbackItems,
+                            nowIso
+                        );
+                    }
+                }
+                try {
+                    const recoveredStats = await drainRegistryOutboxForRequest(
+                        env,
+                        crawlId,
+                        existingSummary,
+                        existingSummary.crawled_at || existingSummary.generated_at || null
+                    );
+                    if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+                        const notifKey = resolveCanonicalNotificationKey({
+                            requestId: crawlId,
+                            runId: existingSummary.run_id || null,
+                            status: existing.status,
+                        });
+                        const aliasKeys = [
+                            resolveCanonicalNotificationKey({ requestId: crawlId, status: existing.status }),
+                            existingSummary.run_id ? resolveCanonicalNotificationKey({ runId: existingSummary.run_id, isCorrected: true }) : null,
+                        ].filter(Boolean);
+                        const pseudoReq = { ...existing, updated_at: nowIso };
+                        const text = buildDirectD1CrawlNotificationText(pseudoReq, existingSummary);
+                        const recCount = Number(existingSummary.new_qualified_count ?? existingSummary.qualified_count ?? existingSummary.record_count ?? 0);
+                        const delivery = await deliverWithUncertaintyGuard(
+                            env,
+                            notifKey,
+                            recCount,
+                            existing.requested_by_chat_id,
+                            text,
+                            { usePrimaryMessage: true, aliasKeys, requestId: crawlId, replyMarkup: reportActionsInlineKeyboard(false) }
+                        );
+                        if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+                            await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
+                                .bind(nowIso, crawlId).run();
+                        }
+                    }
+                    return jsonResponse({
+                        ok: true,
+                        already_finalized: false,
+                        recovered_registry_sync: true,
+                        status: existing.status,
+                        dedup_stats: recoveredStats,
+                    });
+                } catch (err) {
+                    return jsonResponse(
+                        {
+                            ok: false,
+                            registry_unavailable: true,
+                            completed_status: existing.status,
+                            recovery_pending: true,
+                            error: String(err?.message || "D1 registry unavailable"),
+                        },
+                        503
+                    );
+                }
             }
             return jsonResponse({ ok: true, already_finalized: true, status: existing.status });
         }
@@ -3497,12 +4025,25 @@ async function handleAppApi(request, env, url) {
             return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
         }
 
-        const summaryObj = (body.result_summary && typeof body.result_summary === "object")
-            ? { ...body.result_summary }
-            : {};
+        const summaryObj = { ...bodySummaryObj };
+        const dedupSourceItems = bodyDedupItems;
+        if (dedupSourceItems && dedupSourceItems.length > 0) {
+            summaryObj.registry_sync_status = "pending";
+        }
 
-        // Atomic completion guard FIRST so expired/conflicting requests NEVER mutate market_post_registry
-        const upd = await env.DB.prepare(`
+        // Atomic batch transaction: write durable registry_sync_outbox + finalize crawl_requests ONLY if active lease/owner/attempt hold
+        const outboxStmts = (dedupSourceItems && dedupSourceItems.length > 0)
+            ? await enqueueRegistryOutboxStatements(
+                env,
+                crawlId,
+                summaryObj.run_id || crawlId,
+                summaryObj.crawled_at || summaryObj.generated_at || null,
+                dedupSourceItems,
+                { callerOwner, parsedAttempt, nowIso },
+                nowIso
+            )
+            : [];
+        const updateReqStmt = env.DB.prepare(`
             UPDATE crawl_requests
             SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
             WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
@@ -3517,47 +4058,39 @@ async function handleAppApi(request, env, url) {
             callerOwner,
             parsedAttempt,
             nowIso
-        ).run();
+        );
 
-        if (upd.meta.changes !== 1) {
+        let upd = null;
+        if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
+            const batchResults = await env.DB.batch([...outboxStmts, updateReqStmt]);
+            upd = batchResults[batchResults.length - 1];
+        } else {
+            for (const st of outboxStmts) {
+                await st.run();
+            }
+            upd = await updateReqStmt.run();
+        }
+
+        if (Number(upd?.meta?.changes || 0) !== 1) {
             return jsonResponse({ ok: false, error: "Crawl completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
         }
 
-        const dedupSourceItems = Array.isArray(summaryObj.items)
-            ? summaryObj.items
-            : (Array.isArray(body.items) ? body.items : null);
         if (dedupSourceItems && dedupSourceItems.length > 0) {
             try {
-                const dRes = await recordCrossRunDedupInD1(env, dedupSourceItems, summaryObj.run_id || crawlId, {
-                    crawledAt: summaryObj.crawled_at || summaryObj.generated_at || null,
-                });
-                if (summaryObj.new_count === undefined) summaryObj.new_count = dRes.new_count;
-                if (summaryObj.new_qualified_count === undefined) summaryObj.new_qualified_count = dRes.new_qualified_count;
-                if (summaryObj.duplicate_history_count === undefined && summaryObj.duplicate_count === undefined) {
-                    summaryObj.duplicate_history_count = dRes.duplicate_history_count;
-                    summaryObj.duplicate_count = dRes.duplicate_count;
-                }
-                if (summaryObj.updated_metrics_count === undefined && summaryObj.updated_count === undefined) {
-                    summaryObj.updated_metrics_count = dRes.updated_metrics_count;
-                    summaryObj.updated_count = dRes.updated_count;
-                }
-                if (summaryObj.missing_views_count === undefined) summaryObj.missing_views_count = dRes.missing_views_count;
-                summaryObj.dedup_stats = summaryObj.dedup_stats || dRes;
-                await env.DB.prepare(`
-                    UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?
-                `).bind(JSON.stringify(summaryObj), crawlId).run();
+                await drainRegistryOutboxForRequest(
+                    env,
+                    crawlId,
+                    summaryObj,
+                    summaryObj.crawled_at || summaryObj.generated_at || null
+                );
             } catch (err) {
-                summaryObj.registry_sync_status = "error";
-                summaryObj.registry_sync_error = String(err?.message || "D1 registry unavailable");
-                await env.DB.prepare(`
-                    UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?
-                `).bind(JSON.stringify(summaryObj), crawlId).run();
                 return jsonResponse(
                     {
                         ok: false,
                         registry_unavailable: true,
                         completed_status: nextStatus,
-                        error: summaryObj.registry_sync_error,
+                        recovery_pending: true,
+                        error: String(err?.message || "D1 registry unavailable"),
                     },
                     503
                 );
@@ -4390,6 +4923,11 @@ export default {
         } catch (err) {
             leaseErr = err;
             console.error("Scheduled expireStaleLeases failed:", err?.message || err);
+        }
+        try {
+            await drainPendingRegistryOutboxInD1(env);
+        } catch (err) {
+            console.error("Scheduled drainPendingRegistryOutboxInD1 failed:", err?.message || err);
         }
         if (notifyErr || leaseErr) {
             throw new Error(`Scheduled check failed (${notifyErr ? "notify" : ""}${leaseErr ? " lease" : ""})`.trim());

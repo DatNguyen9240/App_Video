@@ -11,6 +11,7 @@ and ignores Archive/ folders cleanly.
 import hashlib
 import json
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -500,10 +501,15 @@ def normalize_record(
         or item.get("frame_start_at")
     )
     crawled_at = _clean_str(
-        item.get("collected_at")
+        item.get("crawled_at")
+        or item.get("crawl_time")
+        or envelope.get("crawled_at")
+        or envelope.get("crawl_time")
+        or item.get("collected_at")
         or envelope.get("ended_at")
         or envelope.get("collected_at")
         or envelope.get("started_at")
+        or item.get("views_measured_at")
     )
     language = _clean_str(item.get("language"))
 
@@ -536,7 +542,7 @@ def normalize_record(
     elif views_display and views_count is None:
         views_precision = "rounded_display"
     views_source = _clean_str(item.get("views_source"))
-    views_measured_at = _clean_str(item.get("views_measured_at") or item.get("measured_at"))
+    views_measured_at = _clean_str(item.get("views_measured_at"))
     views_evidence_url = _clean_str(item.get("views_evidence_url"))
     classification = _clean_str(item.get("classification"))
     if classification:
@@ -879,6 +885,66 @@ def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) 
         "counters_reconciled": counters_reconciled,
         "reconciliation_diff": reconciliation_diff,
     }
+
+
+def is_valid_v32_views_provenance(item: Dict[str, Any]) -> bool:
+    """
+    Validate full Data Contract V3.2 views provenance criteria:
+      - Non-negative integer views_count
+      - Non-empty views_display (e.g. '513K', '3.6K', '850')
+      - Allowed views_precision ('rounded_display', 'display_approx', 'exact')
+      - Valid views_source ('threads_web_browser' for Threads)
+      - Valid ISO timestamp/date views_measured_at
+      - Valid HTTP/HTTPS views_evidence_url (Threads host when platform == 'threads')
+    Having only numeric views without provenance MUST NOT qualify.
+    """
+    if not isinstance(item, dict):
+        return False
+    views_cnt = item.get("views_count")
+    if views_cnt is None:
+        views_cnt = _clean_int(item.get("views"))
+    if views_cnt is None or isinstance(views_cnt, bool) or int(views_cnt) < 0:
+        return False
+
+    plat = str(item.get("platform") or "threads").strip().lower() or "threads"
+    v_disp = _clean_str(item.get("views_display"))
+    if not v_disp or not re.match(r"^\d+(?:[.,]\d+)?\s*[KMBkmb]?$", v_disp):
+        return False
+
+    v_prec = (_clean_str(item.get("views_precision")) or "").lower()
+    if v_prec not in {"rounded_display", "display_approx", "exact"}:
+        return False
+
+    v_src = (_clean_str(item.get("views_source")) or "").lower()
+    if plat == "threads":
+        if v_src != "threads_web_browser":
+            return False
+    elif not v_src:
+        return False
+
+    v_meas = _clean_str(item.get("views_measured_at"))
+    if not v_meas:
+        return False
+    try:
+        iso_norm = v_meas[:-1] + "+00:00" if v_meas.endswith("Z") else v_meas
+        datetime.fromisoformat(iso_norm)
+    except Exception:
+        return False
+
+    v_ev = _clean_str(item.get("views_evidence_url"))
+    if not v_ev:
+        return False
+    try:
+        parsed_ev = urlparse(v_ev)
+    except Exception:
+        return False
+    if parsed_ev.scheme.lower() not in {"http", "https"} or not parsed_ev.netloc:
+        return False
+    if plat == "threads":
+        host = parsed_ev.netloc.lower()
+        if "threads.net" not in host and "threads.com" not in host:
+            return False
+    return True
 
 
 def normalize_payload(

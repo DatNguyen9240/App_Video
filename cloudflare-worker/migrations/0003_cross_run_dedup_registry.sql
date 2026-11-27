@@ -55,3 +55,21 @@ CREATE INDEX IF NOT EXISTS idx_market_post_snapshots_key
     ON market_post_snapshots(dedup_key, measured_at ASC);
 CREATE INDEX IF NOT EXISTS idx_market_post_snapshots_run
     ON market_post_snapshots(run_id);
+
+CREATE TABLE IF NOT EXISTS registry_sync_outbox (
+    id TEXT PRIMARY KEY,
+    request_id TEXT,
+    run_id TEXT,
+    crawled_at TEXT,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_registry_sync_outbox_status
+    ON registry_sync_outbox(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_registry_sync_outbox_request
+    ON registry_sync_outbox(request_id, status);

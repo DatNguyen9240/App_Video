@@ -1001,6 +1001,11 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
                     "author_handle": "@canonmerge",
                     "summary_vi": "URL xuất hiện trước khi biết post_id",
                     "views": 3600,
+                    "views_display": "3.6K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T09:00:00Z",
+                    "views_evidence_url": "https://threads.net/@canonmerge/post/MERGE77",
                     "likes": 40,
                     "shares": 3,
                     "reposts": 9,
@@ -1133,6 +1138,104 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertTrue(norm_rpt["counters"]["counters_reconciled"])
         self.assertEqual(norm_rpt["growth_tracking"][0]["post"], "@sandeal.shopee")
         self.assertEqual(norm_rpt["priority_actions"][0], "Test son dưỡng 8h")
+
+        # 7) Point 2: Numeric views alone WITHOUT valid 5-field V3.2 provenance MUST NOT count in new_qualified_count
+        incomplete_views_run = {
+            "run_id": "run-v32-strict-qual",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T12:15:00Z",
+            "records": [
+                {
+                    "post_id": "STRICT_NUMERIC_ONLY",
+                    "post_url": "https://threads.net/@s/post/STRICT_NUMERIC_ONLY",
+                    "views": 45000,
+                    "likes": 300,
+                },
+                {
+                    "post_id": "STRICT_BAD_SRC",
+                    "post_url": "https://threads.net/@s/post/STRICT_BAD_SRC",
+                    "views": 45000,
+                    "views_display": "45K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_cli_search",
+                    "views_measured_at": "2026-11-27T12:15:00Z",
+                    "views_evidence_url": "https://threads.net/@s/post/STRICT_BAD_SRC",
+                },
+                {
+                    "post_id": "STRICT_FULL_PASS",
+                    "post_url": "https://threads.net/@s/post/STRICT_FULL_PASS",
+                    "views": 45000,
+                    "views_display": "45K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T12:15:00Z",
+                    "views_evidence_url": "https://threads.net/@s/post/STRICT_FULL_PASS",
+                },
+            ],
+        }
+        r_strict = self.store.ingest_raw_file("f_strict", "threads_trend_strict.json", json.dumps(incomplete_views_run).encode("utf-8"))
+        self.assertEqual(r_strict["new_count"], 3)
+        self.assertEqual(r_strict["new_qualified_count"], 1)  # Only STRICT_FULL_PASS satisfies all 5 views fields
+
+        # 8) Point 3: Late-arriving older snapshot preserves chronological history without overwriting newer metrics/last_seen_at
+        later_first = {
+            "run_id": "run-t2-latest",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T15:00:00Z",
+            "records": [
+                {
+                    "post_id": "SQLITE_LATE_GUARD",
+                    "post_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "views": 99000,
+                    "views_display": "99K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T15:00:00Z",
+                    "views_evidence_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "likes": 2500,
+                }
+            ],
+        }
+        older_late = {
+            "run_id": "run-t1-backfill",
+            "platform": "threads",
+            "crawled_at": "2026-11-25T07:00:00Z",
+            "records": [
+                {
+                    "post_id": "SQLITE_LATE_GUARD",
+                    "post_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "views": 1100,
+                    "views_display": "1.1K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-25T07:00:00Z",
+                    "views_evidence_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "likes": 20,
+                }
+            ],
+        }
+        self.store.ingest_raw_file("f_lg_t2", "threads_trend_lgt2.json", json.dumps(later_first).encode("utf-8"))
+        self.store.ingest_raw_file("f_lg_t1", "threads_trend_lgt1.json", json.dumps(older_late).encode("utf-8"))
+        lg_item = next(x for x in self.store.query_items(limit=50)["items"] if x.get("post_id") == "SQLITE_LATE_GUARD")
+        lg_detail = self.store.get_item_detail(lg_item["id"])
+        self.assertEqual(lg_detail["views_count"], 99000)
+        self.assertEqual(lg_detail["likes_count"], 2500)
+        self.assertEqual(lg_detail["last_seen_at"], "2026-11-27T15:00:00Z")
+        self.assertEqual(lg_detail["first_seen_at"], "2026-11-25T07:00:00Z")
+        self.assertEqual(lg_detail["snapshot_count"], 2)
+        self.assertEqual(len(lg_detail["snapshots"]), 2)
+
+        # 9) Point 3: URL->post_id re-sync of old run does NOT duplicate snapshot in SQLite
+        resync_u1 = {
+            "run_id": "run-v32-views-01",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T09:00:00Z",
+            "records": [{"post_id": "MERGE77", "post_url": "https://www.threads.net/@canonmerge/post/MERGE77?x=1", "views": 3600, "likes": 40}],
+        }
+        self.store.ingest_raw_file("f_resync_u1", "threads_trend_resync_u1.json", json.dumps(resync_u1).encode("utf-8"))
+        merged_after = next(x for x in self.store.query_items(limit=50)["items"] if x.get("post_id") == "MERGE77")
+        self.assertEqual(merged_after["snapshot_count"], 2)
+        self.assertEqual(len(self.store.get_item_detail(merged_after["id"])["snapshots"]), 2)
 
 
 if __name__ == "__main__":
