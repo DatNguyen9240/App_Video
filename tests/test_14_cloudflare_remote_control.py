@@ -1431,6 +1431,25 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         # Expire lease -> progress update fails
         conn.execute("UPDATE crawl_requests SET lease_expires_at = ? WHERE id = 'crw_th1_p2'", (lease_past,))
         self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":20}", t0, "crw_th1_p2", "muse-ai", 1, t0)).rowcount, 0)
+
+        # Real SQLite check of insertMeasurementSnapshotInD1 (dedup_key, run_id) guard across Completion API vs Desktop Sync
+        conn.execute(
+            """
+            INSERT INTO market_post_snapshots (
+                id, snapshot_idempotency_key, dedup_key, platform, post_id, run_id, measured_at, classification, created_at
+            ) VALUES ('snp_comp_1', 'threads:post:P_SYNC|run_sync_1|2026-11-27T14:25:00+07:00|:1:0::::', 'threads:post:P_SYNC', 'threads', 'P_SYNC', 'run_sync_1', '2026-11-27T14:25:00+07:00', 'NEW', '2026-11-27T14:25:00+07:00')
+            """
+        )
+        dup_hit = conn.execute(
+            """
+            SELECT id FROM market_post_snapshots
+            WHERE (dedup_key = ? OR (? IS NOT NULL AND platform = ? AND post_id = ?))
+              AND run_id = ?
+            LIMIT 1
+            """,
+            ("threads:post:P_SYNC", "P_SYNC", "threads", "P_SYNC", "run_sync_1"),
+        ).fetchone()
+        self.assertIsNotNone(dup_hit)
         conn.close()
 
 

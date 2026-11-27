@@ -962,9 +962,9 @@ async function migrateSnapshotsOnKeyPromotion(env, oldKey, newKey, postId) {
         const dup = await env.DB.prepare(`
             SELECT id FROM market_post_snapshots
             WHERE snapshot_idempotency_key = ?
-               OR (dedup_key = ? AND ? != '' AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, ''))
+               OR (dedup_key = ? AND ? != '' AND run_id = ?)
             LIMIT 1
-        `).bind(newIdemp, newKey, String(sn.run_id || ""), sn.run_id, sn.measured_at).first();
+        `).bind(newIdemp, newKey, String(sn.run_id || ""), sn.run_id).first();
         if (dup && dup.id !== sn.id) {
             await env.DB.prepare("DELETE FROM market_post_snapshots WHERE id = ?").bind(sn.id).run();
         } else {
@@ -1024,12 +1024,14 @@ async function insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls,
         measuredAt: meta.measuredAt,
         metrics: meta.metrics,
     });
-    if (meta.runId) {
+    const hasCanonicalRunId = Boolean(meta.runId && meta.runId !== "no_run");
+    if (hasCanonicalRunId) {
         const existingRunSnap = await env.DB.prepare(`
             SELECT id FROM market_post_snapshots
-            WHERE dedup_key = ? AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, '')
+            WHERE (dedup_key = ? OR (? IS NOT NULL AND platform = ? AND post_id = ?))
+              AND run_id = ?
             LIMIT 1
-        `).bind(targetDedupKey, meta.runId, meta.measuredAt).first();
+        `).bind(targetDedupKey, meta.postId, meta.plat, meta.postId, meta.runId).first();
         if (existingRunSnap) {
             return false;
         }
@@ -2994,6 +2996,101 @@ function buildDirectD1CrawlNotificationText(req, summary) {
     );
 }
 
+function isV32CrawlContext(reportData = null, reqRow = null, reqSummary = null) {
+    const cvReport = String(reportData?.contract_version || reportData?.schema_version || "").trim().toLowerCase();
+    const cvSum = String(reqSummary?.contract_version || reqSummary?.schema_version || "").trim().toLowerCase();
+    if (cvReport.startsWith("3.2") || cvReport.includes("v3.2") || cvSum.startsWith("3.2") || cvSum.includes("v3.2")) {
+        return true;
+    }
+    if (String(reportData?.report || "").toLowerCase().includes("v3.2")) {
+        return true;
+    }
+    if (reqSummary && (reqSummary.registry_sync_status !== undefined || reqSummary.dedup_stats !== undefined)) {
+        return true;
+    }
+    if (String(reqRow?.claimed_by || "").trim() === MUSE_DEFAULT_CLAIM_OWNER) {
+        return true;
+    }
+    if (
+        reportData?.counters?.new_qualified_count !== undefined ||
+        reportData?.sections?.["1_screening"]?.new_qualified_count !== undefined
+    ) {
+        return true;
+    }
+    return false;
+}
+
+async function evaluateDriveRequestNotificationGate(env, { requestId, reportData = null, reportEffStatus = "completed", isCorrected = false }) {
+    if (!requestId) {
+        if (await isRequestBlockedByPendingRegistrySync(env, { id: null, result_summary: reportData || {} })) {
+            return { action: "block_cursor", linkedReqRow: null };
+        }
+        return { action: "allow", linkedReqRow: null };
+    }
+
+    const reqIdStr = String(requestId);
+    let linkedReqRow = null;
+    try {
+        linkedReqRow = await env.DB.prepare(
+            "SELECT id, status, claimed_by, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
+        ).bind(reqIdStr).first();
+    } catch {
+        // Fail closed on D1 lookup error so cursor never skips a pending request report
+        return { action: "block_cursor", linkedReqRow: null };
+    }
+
+    if (!linkedReqRow) {
+        if (reportEffStatus === "failed") {
+            return { action: "skip", linkedReqRow: null };
+        }
+        if (isV32CrawlContext(reportData, null, null)) {
+            return { action: "skip", linkedReqRow: null };
+        }
+        if (await isRequestBlockedByPendingRegistrySync(env, { id: reqIdStr, result_summary: reportData || {} })) {
+            return { action: "block_cursor", linkedReqRow: null };
+        }
+        return { action: "allow", linkedReqRow: null };
+    }
+
+    const reqStatus = String(linkedReqRow.status || "").trim().toLowerCase();
+    if (reqStatus === "queued" || reqStatus === "running") {
+        return { action: "block_cursor", linkedReqRow };
+    }
+    if (reqStatus === "cancelled") {
+        return { action: "skip", linkedReqRow };
+    }
+    if (reqStatus === "failed" || reportEffStatus === "failed") {
+        return { action: "skip", linkedReqRow };
+    }
+    if (reqStatus !== "completed") {
+        return { action: "skip", linkedReqRow };
+    }
+
+    if (linkedReqRow.notified_at && !isCorrected) {
+        return { action: "already_notified", linkedReqRow };
+    }
+
+    if (
+        await isRequestBlockedByPendingRegistrySync(env, linkedReqRow) ||
+        await isRequestBlockedByPendingRegistrySync(env, { id: reqIdStr, result_summary: reportData || {} })
+    ) {
+        return { action: "block_cursor", linkedReqRow };
+    }
+
+    let reqSummary = {};
+    if (typeof linkedReqRow.result_summary_json === "string" && linkedReqRow.result_summary_json.trim()) {
+        try { reqSummary = JSON.parse(linkedReqRow.result_summary_json); } catch {}
+    }
+    if (isV32CrawlContext(reportData, linkedReqRow, reqSummary)) {
+        const regStatus = String(reqSummary?.registry_sync_status || "").trim().toLowerCase();
+        if (regStatus !== "ok") {
+            return { action: "block_cursor", linkedReqRow };
+        }
+    }
+
+    return { action: "allow", linkedReqRow };
+}
+
 async function notifyNewCrawl(env) {
     if (!env.TELEGRAM_OWNER_ID || !env.TELEGRAM_BOT_TOKEN_VIDEO) return;
     const cutoffMs = Date.parse("2026-11-26T12:25:00+07:00");
@@ -3034,6 +3131,7 @@ async function notifyNewCrawl(env) {
             }
             if (batchEntries.length > 0) {
                 const batchIds = new Set(batchEntries.map(e => e.file.id));
+                const batchIndexById = new Map(batchEntries.map((e, idx) => [e.file.id, idx]));
                 const batchStems = new Set(batchEntries.map(e => getReportStem(e.file.name)));
                 // Pull sibling original/_corrected sharing same stem so corrected beats original even across batch boundary
                 const fetchFiles = batchEntries.map(e => e.file);
@@ -3045,6 +3143,16 @@ async function notifyNewCrawl(env) {
 
                 const { parsedCandidates, fetchErrorCount } = await fetchAndParseDriveReports(token, reportsFolderId, fetchFiles);
                 const ranked = rankParsedReportCandidates(parsedCandidates);
+                const groupMinIdxMap = new Map();
+                for (const cand of ranked) {
+                    const bIdx = batchIndexById.get(cand.file?.id);
+                    if (bIdx === undefined) continue;
+                    const prevIdx = groupMinIdxMap.get(cand.groupKey);
+                    if (prevIdx === undefined || bIdx < prevIdx) {
+                        groupMinIdxMap.set(cand.groupKey, bIdx);
+                    }
+                }
+
                 const byGroup = new Map();
                 for (const item of ranked) {
                     if (!byGroup.has(item.groupKey)) {
@@ -3056,37 +3164,49 @@ async function notifyNewCrawl(env) {
 
                 let transientDeliveryHalted = false;
                 let blockedDriveEncountered = false;
+                let minBlockedBatchIdx = Infinity;
+                const markGroupBlocked = (groupKey) => {
+                    blockedDriveEncountered = true;
+                    const bIdx = groupMinIdxMap.get(groupKey);
+                    if (bIdx !== undefined && bIdx < minBlockedBatchIdx) {
+                        minBlockedBatchIdx = bIdx;
+                    }
+                };
+
                 for (const item of winningReports) {
                     const d = item.data || {};
                     if (item.groupCrawlTs && item.groupCrawlTs < cutoffMs) continue;
                     const effStatus = String(d.run_status || d.technical_status || "completed").toLowerCase();
+                    const reqId = d.request_id ? String(d.request_id) : null;
+
+                    const gate = await evaluateDriveRequestNotificationGate(env, {
+                        requestId: reqId,
+                        reportData: d,
+                        reportEffStatus: effStatus,
+                        isCorrected: item.isCorr,
+                    });
+                    if (gate.action === "block_cursor") {
+                        markGroupBlocked(item.groupKey);
+                        continue;
+                    }
+                    if (gate.action === "already_notified") {
+                        if (reqId) notifiedRequestIds.add(reqId);
+                        continue;
+                    }
+                    if (gate.action === "skip") {
+                        continue;
+                    }
+
                     if (!["completed", "partial", "failed", "source_error", "no_qualifying_posts", "insufficient_data"].includes(effStatus)) continue;
 
                     const rawRunId = d.run_id || item.file?.name || "report";
                     const notifKey = resolveCanonicalNotificationKey({ runId: rawRunId, isCorrected: item.isCorr });
-                    const reqId = d.request_id ? String(d.request_id) : null;
-
-                    // Cross-check if request_id was already notified (e.g. via /complete or direct D1) or blocked by pending/error registry sync
                     const aliasKeys = [];
-                    let linkedReqRow = null;
                     if (reqId) {
                         aliasKeys.push(
                             resolveCanonicalNotificationKey({ requestId: reqId, status: "completed" }),
                             resolveCanonicalNotificationKey({ requestId: reqId, status: "failed" })
                         );
-                        try {
-                            linkedReqRow = await env.DB.prepare(
-                                "SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
-                            ).bind(reqId).first();
-                            if (linkedReqRow && linkedReqRow.notified_at && !item.isCorr) {
-                                notifiedRequestIds.add(reqId);
-                                continue;
-                            }
-                        } catch {}
-                    }
-                    if (await isRequestBlockedByPendingRegistrySync(env, linkedReqRow || { id: reqId, result_summary: d })) {
-                        blockedDriveEncountered = true;
-                        continue;
                     }
 
                     const stats = extractMuseReportStats(d) || {};
@@ -3113,15 +3233,21 @@ async function notifyNewCrawl(env) {
                     }
                 }
 
-                // Never commit durable cursor if Drive pagination hit partialError, blocked item, or fetch/rate-limit failed
-                if (!partialError && fetchErrorCount === 0 && !transientDeliveryHalted && !blockedDriveEncountered) {
-                    const lastEntry = batchEntries[batchEntries.length - 1];
-                    const lastKey = `${lastEntry.mtimeStr}|${lastEntry.file.id}`;
-                    if (!usedRoundRobin) {
-                        await setRuntimeState(env, "notify_drive_cursor", lastKey);
-                    } else {
-                        await setRuntimeState(env, "notify_drive_rr_cursor", lastKey);
-                        if (!rawCursor) await setRuntimeState(env, "notify_drive_cursor", lastKey);
+                // Never advance durable cursor past an item awaiting completion or registry_sync_status=ok
+                if (!partialError && fetchErrorCount === 0 && !transientDeliveryHalted) {
+                    const cursorEntry = !blockedDriveEncountered
+                        ? batchEntries[batchEntries.length - 1]
+                        : (Number.isFinite(minBlockedBatchIdx) && minBlockedBatchIdx > 0
+                            ? batchEntries[minBlockedBatchIdx - 1]
+                            : null);
+                    if (cursorEntry) {
+                        const lastKey = `${cursorEntry.mtimeStr}|${cursorEntry.file.id}`;
+                        if (!usedRoundRobin) {
+                            await setRuntimeState(env, "notify_drive_cursor", lastKey);
+                        } else {
+                            await setRuntimeState(env, "notify_drive_rr_cursor", lastKey);
+                            if (!rawCursor) await setRuntimeState(env, "notify_drive_cursor", lastKey);
+                        }
                     }
                 }
             }
@@ -3166,6 +3292,13 @@ async function notifyNewCrawl(env) {
             }
             let summary = {};
             try { summary = JSON.parse(req.result_summary_json || "{}"); } catch {}
+            if (req.status === "completed" && isV32CrawlContext(summary, req, summary)) {
+                const regStatus = String(summary?.registry_sync_status || "").trim().toLowerCase();
+                if (regStatus !== "ok") {
+                    blockedD1Encountered = true;
+                    continue;
+                }
+            }
             const notifKey = resolveCanonicalNotificationKey({
                 requestId: req.id,
                 runId: summary.run_id || null,
@@ -3312,22 +3445,22 @@ async function notifyNewCrawl(env) {
                 continue;
             }
 
-            if (data.request_id) {
-                try {
-                    const v1ReqRow = await env.DB.prepare(
-                        "SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
-                    ).bind(String(data.request_id)).first();
-                    if (await isRequestBlockedByPendingRegistrySync(env, v1ReqRow || { id: String(data.request_id), result_summary: data })) {
-                        blockedV1Encountered = true;
-                        continue;
-                    }
-                } catch {}
-            } else if (await isRequestBlockedByPendingRegistrySync(env, { result_summary: data })) {
+            const isCorr = String(file.name || "").toLowerCase().includes("_corrected") || Boolean(data.corrects_report);
+            const v1Gate = await evaluateDriveRequestNotificationGate(env, {
+                requestId: data.request_id ? String(data.request_id) : null,
+                reportData: data,
+                reportEffStatus: String(data.status || "completed").toLowerCase(),
+                isCorrected: isCorr,
+            });
+            if (v1Gate.action === "block_cursor") {
                 blockedV1Encountered = true;
                 continue;
             }
+            if (v1Gate.action === "skip" || v1Gate.action === "already_notified") {
+                if (!blockedV1Encountered) lastCleanV1 = entry;
+                continue;
+            }
 
-            const isCorr = String(file.name || "").toLowerCase().includes("_corrected") || Boolean(data.corrects_report);
             const notifKey = resolveCanonicalNotificationKey({ runId: data.run_id, isCorrected: isCorr });
             const corrAlias = resolveCanonicalNotificationKey({ runId: data.run_id, isCorrected: true });
             const reqAlias = data.request_id
@@ -5481,6 +5614,8 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
     const dedupSourceItems = bodyDedupItems;
     if (dedupSourceItems && dedupSourceItems.length > 0) {
         summaryObj.registry_sync_status = "pending";
+    } else if (nextStatus === "completed") {
+        summaryObj.registry_sync_status = summaryObj.registry_sync_status || "ok";
     }
 
     const outboxStmts = (dedupSourceItems && dedupSourceItems.length > 0)

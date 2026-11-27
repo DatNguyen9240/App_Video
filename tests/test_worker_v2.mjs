@@ -152,6 +152,7 @@ class MockD1Database {
         if (
           norm.startsWith("SELECT status, notified_at FROM crawl_requests WHERE id = ?") ||
           norm.startsWith("SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?") ||
+          norm.startsWith("SELECT id, status, claimed_by, notified_at, result_summary_json FROM crawl_requests WHERE id = ?") ||
           norm.startsWith("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
         ) {
           const row = db.crawlRequests.find((c) => c.id === this.args[0]);
@@ -159,6 +160,7 @@ class MockD1Database {
             ? {
                 id: row.id,
                 status: row.status,
+                claimed_by: row.claimed_by,
                 notified_at: row.notified_at,
                 result_summary_json: row.result_summary_json,
               }
@@ -274,15 +276,25 @@ class MockD1Database {
           if (db.failRegistry) throw new Error("Simulated D1 registry outage");
         }
         if (norm.startsWith("SELECT id FROM market_post_snapshots WHERE snapshot_idempotency_key = ?")) {
-          const [idempKey, newKey, runFlag, runId, measAt] = this.args;
+          const [idempKey, newKey, runFlag, runId] = this.args;
           if (db.postSnapshots.has(idempKey)) {
             return { id: db.postSnapshots.get(idempKey).id };
           }
           if (runFlag) {
             for (const s of db.postSnapshots.values()) {
-              if (s.dedup_key === newKey && s.run_id === runId && String(s.measured_at || "") === String(measAt || "")) {
+              if (s.dedup_key === newKey && s.run_id === runId) {
                 return { id: s.id };
               }
+            }
+          }
+          return null;
+        }
+        if (norm.startsWith("SELECT id FROM market_post_snapshots WHERE (dedup_key = ?")) {
+          const [dedupKey, postIdFilter, plat, postIdVal, runId] = this.args;
+          for (const s of db.postSnapshots.values()) {
+            const matchKey = s.dedup_key === dedupKey || (postIdFilter && s.platform === plat && s.post_id === postIdVal);
+            if (matchKey && s.run_id === runId) {
+              return { id: s.id };
             }
           }
           return null;
@@ -5334,6 +5346,381 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(zeroJson.registry_sync_status, "ok");
   } finally {
     globalThis.fetch = prevFetch21;
+  }
+}
+
+// 22. Telegram Cron Completion Gate, Failed Stream Separation, Cursor Preservation, Independent Reports & Desktop-vs-Complete Snapshot Dedup
+{
+  const tgCalls22 = [];
+  let driveReports22 = [];
+  const env22 = {
+    APP_VIDEO_API_TOKEN: "app-secret-22",
+    MUSE_APP_VIDEO_TOKEN: "muse-secret-22",
+    TELEGRAM_OWNER_ID: "999022",
+    TELEGRAM_BOT_TOKEN_VIDEO: "bot22-token",
+    TELEGRAM_WEBHOOK_SECRET: "whsec22",
+    GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: "sa@test.iam.gserviceaccount.com", private_key: privateKey }),
+    GOOGLE_DRIVE_FOLDER_ID: "drive-root-22",
+    NOTIFY_BATCH_SIZE: "25",
+    DB: new MockD1Database(),
+  };
+
+  const prevFetch22 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.startsWith("https://oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "mock-token-22" }), { status: 200 });
+    }
+    if (sUrl.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+      const q = new URL(sUrl).searchParams.get("q") || "";
+      if (q.includes("'drive-root-22' in parents") && q.includes("'01_Market_Data'")) {
+        return new Response(JSON.stringify({ files: [{ id: "mdata-22", name: "01_Market_Data" }] }), { status: 200 });
+      }
+      if (q.includes("'mdata-22' in parents") && q.includes("'Reports'")) {
+        return new Response(JSON.stringify({ files: [{ id: "reports-22", name: "Reports" }] }), { status: 200 });
+      }
+      if (q.includes("'reports-22' in parents")) {
+        return new Response(JSON.stringify({ files: driveReports22.map((r) => r.file) }), { status: 200 });
+      }
+      if (q.includes(`'${THREADS_ID}' in parents`)) {
+        return new Response(JSON.stringify({ files: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ files: [] }), { status: 200 });
+    }
+    const matched = driveReports22.find((r) =>
+      sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(r.file.id)}?alt=media`)
+    );
+    if (matched) {
+      return new Response(JSON.stringify(matched.data), { status: 200 });
+    }
+    if (sUrl.startsWith("https://api.telegram.org/bot")) {
+      tgCalls22.push({ url: sUrl, body: JSON.parse(init.body || "{}") });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 2200 + tgCalls22.length } }), { status: 200 });
+    }
+    throw new Error("Unexpected fetch22: " + sUrl);
+  };
+
+  try {
+    // 22a: Request states (queued, running, cancelled, missing registry_sync_status=ok) MUST NOT send completion report,
+    // cursor MUST NOT skip waiting requests, independent reports MUST send, and duplicates MUST remain suppressed.
+    env22.DB.crawlRequests.push(
+      {
+        id: "crw_22_queued",
+        platform: "threads",
+        keywords: "kw_q",
+        requested_count: 20,
+        status: "queued",
+        claimed_by: null,
+        attempts: 1,
+        max_attempts: 3,
+        requested_by_chat_id: "999022",
+        notified_at: null,
+        created_at: "2026-11-27T10:00:00.000Z",
+        updated_at: "2026-11-27T10:00:00.000Z",
+        result_summary_json: null,
+      },
+      {
+        id: "crw_22_running",
+        platform: "threads",
+        keywords: "kw_r",
+        requested_count: 20,
+        status: "running",
+        claimed_by: "muse-ai",
+        lease_expires_at: "2026-11-28T10:30:00.000Z",
+        attempts: 1,
+        max_attempts: 3,
+        requested_by_chat_id: "999022",
+        notified_at: null,
+        created_at: "2026-11-27T10:01:00.000Z",
+        updated_at: "2026-11-27T10:01:00.000Z",
+        result_summary_json: null,
+      },
+      {
+        id: "crw_22_cancelled",
+        platform: "threads",
+        keywords: "kw_c",
+        requested_count: 20,
+        status: "cancelled",
+        claimed_by: null,
+        attempts: 2,
+        max_attempts: 3,
+        requested_by_chat_id: "999022",
+        notified_at: null,
+        created_at: "2026-11-27T10:02:00.000Z",
+        updated_at: "2026-11-27T10:02:00.000Z",
+        result_summary_json: null,
+      }
+    );
+
+    driveReports22 = [
+      {
+        file: { id: "drv_22_cancelled", name: "trend_report_22_cancelled.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:05:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          request_id: "crw_22_cancelled",
+          run_id: "run_22_cancelled",
+          crawled_at: "2026-11-27T10:05:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 20, new_qualified_count: 0 },
+          telegram_summary: "CANCELLED MUST NEVER NOTIFY",
+        },
+      },
+      {
+        file: { id: "drv_22_queued", name: "trend_report_22_queued.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:06:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          request_id: "crw_22_queued",
+          run_id: "run_22_queued",
+          crawled_at: "2026-11-27T10:06:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 20, new_qualified_count: 4 },
+          telegram_summary: "QUEUED REPORT WAITING COMPLETION",
+        },
+      },
+      {
+        file: { id: "drv_22_running", name: "trend_report_22_running.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:07:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          request_id: "crw_22_running",
+          run_id: "run_22_running",
+          crawled_at: "2026-11-27T10:07:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 20, new_qualified_count: 6 },
+          telegram_summary: "RUNNING REPORT WAITING COMPLETION",
+        },
+      },
+      {
+        file: { id: "drv_22_indep", name: "trend_report_22_independent.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:08:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          run_id: "run_22_independent",
+          crawled_at: "2026-11-27T10:08:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 10, new_qualified_count: 3 },
+          telegram_summary: "INDEPENDENT REPORT OK",
+        },
+      },
+    ];
+
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 1, "Only independent report without request_id may notify on first tick");
+    assert.ok(tgCalls22[0].body.text.includes("INDEPENDENT REPORT OK"));
+    assert.equal(env22.DB.crawlRequests.find((c) => c.id === "crw_22_queued").notified_at, null);
+    assert.equal(env22.DB.crawlRequests.find((c) => c.id === "crw_22_running").notified_at, null);
+    assert.equal(env22.DB.crawlRequests.find((c) => c.id === "crw_22_cancelled").notified_at, null);
+    // Cursor MUST advance only to drv_22_cancelled (strictly BEFORE earliest blocked drv_22_queued!)
+    assert.equal(env22.DB.runtimeState.get("notify_drive_cursor"), "2026-11-27T10:05:00.000Z|drv_22_cancelled");
+
+    // Repeated Cron while queued/running stay uncompleted -> 0 new messages
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 1);
+
+    // Transition crw_22_queued to completed V3.2 WITHOUT registry_sync_status='ok' -> MUST STILL stay blocked!
+    const qRow22 = env22.DB.crawlRequests.find((c) => c.id === "crw_22_queued");
+    qRow22.status = "completed";
+    qRow22.result_summary_json = JSON.stringify({ contract_version: "3.2", run_id: "run_22_queued", new_qualified_count: 4 });
+    qRow22.updated_at = "2026-11-27T10:09:00.000Z";
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 1, "Completed V3.2 request without registry_sync_status=ok MUST NOT notify");
+    assert.equal(qRow22.notified_at, null);
+
+    // Now set registry_sync_status='ok' on crw_22_queued AND complete crw_22_running with registry_sync_status='ok'
+    qRow22.result_summary_json = JSON.stringify({
+      contract_version: "3.2",
+      run_id: "run_22_queued",
+      registry_sync_status: "ok",
+      new_qualified_count: 4,
+    });
+    const rRow22 = env22.DB.crawlRequests.find((c) => c.id === "crw_22_running");
+    rRow22.status = "completed";
+    rRow22.result_summary_json = JSON.stringify({
+      contract_version: "3.2",
+      run_id: "run_22_running",
+      registry_sync_status: "ok",
+      new_qualified_count: 6,
+    });
+    rRow22.updated_at = "2026-11-27T10:10:00.000Z";
+
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 3, "Both unblocked Drive reports notify ONCE without duplicating independent report");
+    assert.ok(tgCalls22.slice(1).some((c) => c.body.text.includes("QUEUED REPORT WAITING COMPLETION")));
+    assert.ok(tgCalls22.slice(1).some((c) => c.body.text.includes("RUNNING REPORT WAITING COMPLETION")));
+    assert.ok(qRow22.notified_at);
+    assert.ok(rRow22.notified_at);
+    assert.equal(env22.DB.runtimeState.get("notify_drive_cursor"), "2026-11-27T10:08:00.000Z|drv_22_indep");
+
+    // Re-running scheduled() must NOT duplicate notifications
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 3);
+
+    // _corrected Drive report for an already notified completed V3.2 request MUST still deliver cleanly
+    driveReports22.push({
+      file: { id: "drv_22_running_corr", name: "trend_report_22_running_corrected.json", mimeType: "application/json", size: "950", modifiedTime: "2026-11-27T10:11:00.000Z" },
+      data: {
+        contract_version: "3.2",
+        request_id: "crw_22_running",
+        run_id: "run_22_running",
+        corrects_report: "trend_report_22_running.json",
+        crawled_at: "2026-11-27T10:07:00.000Z",
+        run_status: "completed",
+        counters: { requested_count: 20, new_qualified_count: 7 },
+        telegram_summary: "RUNNING REPORT CORRECTED DELIVERED",
+      },
+    });
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 4);
+    assert.ok(tgCalls22[3].body.text.includes("RUNNING REPORT CORRECTED DELIVERED"));
+
+    // 22b: Failed request with Drive report -> dedicated failure path only, never completion stream
+    env22.DB.crawlRequests.push({
+      id: "crw_22_failed",
+      platform: "threads",
+      keywords: "kw_fail",
+      requested_count: 20,
+      status: "failed",
+      claimed_by: "muse-ai",
+      attempts: 3,
+      max_attempts: 3,
+      error_message: "Threads login wall",
+      requested_by_chat_id: "999022",
+      notified_at: null,
+      created_at: "2026-11-27T10:12:00.000Z",
+      updated_at: "2026-11-27T10:12:00.000Z",
+      result_summary_json: JSON.stringify({ contract_version: "3.2", run_id: "run_22_failed", run_status: "failed" }),
+    });
+    driveReports22.push({
+      file: { id: "drv_22_failed", name: "trend_report_22_failed.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:13:00.000Z" },
+      data: {
+        contract_version: "3.2",
+        request_id: "crw_22_failed",
+        run_id: "run_22_failed",
+        crawled_at: "2026-11-27T10:13:00.000Z",
+        run_status: "failed",
+        error_message: "Threads login wall",
+        telegram_summary: "SHOULD NOT COME FROM DRIVE COMPLETION STREAM",
+      },
+    });
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 5, "Failed request notifies ONCE via dedicated D1 failed flow, skipped in Drive completion");
+    assert.ok(!tgCalls22[4].body.text.includes("SHOULD NOT COME FROM DRIVE COMPLETION STREAM"));
+    assert.ok(tgCalls22[4].body.text.includes("Threads login wall"));
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 5);
+
+    // 22c: Desktop Sync vs Completion API snapshot idempotency (BOTH orders, even when ended_at vs item.measured_at differ)
+    const hMuse22 = { Authorization: "Bearer muse-secret-22", "Content-Type": "application/json" };
+    const hApp22 = { Authorization: "Bearer app-secret-22", "Content-Type": "application/json" };
+    env22.DB.crawlRequests.push({
+      id: "crw_22_snap_a",
+      platform: "threads",
+      keywords: "snap_a",
+      requested_count: 1,
+      status: "queued",
+      attempts: 0,
+      max_attempts: 3,
+      created_at: "2026-11-27T11:00:00.000Z",
+      updated_at: "2026-11-27T11:00:00.000Z",
+    });
+    const claimSnapA = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", {
+      method: "POST", headers: hMuse22, body: "{}",
+    }), env22)).json();
+    assert.equal(claimSnapA.request.id, "crw_22_snap_a");
+
+    const compSnapARes = await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST",
+      headers: hMuse22,
+      body: JSON.stringify({
+        request_id: "crw_22_snap_a",
+        attempt: 1,
+        result_summary: { contract_version: "3.2", run_id: "run_22_sync_a", crawled_at: "2026-11-27T14:35:00+07:00", run_status: "completed" },
+        items: [{
+          platform: "threads",
+          post_id: "P22_A",
+          canonical_url: "https://threads.net/@u22/post/P22_A",
+          measured_at: "2026-11-27T14:25:00+07:00",
+          views: 15000,
+          views_display: "15K",
+          views_precision: "rounded_display",
+          views_source: "threads_web_browser",
+          views_measured_at: "2026-11-27T14:25:00+07:00",
+          views_evidence_url: "https://threads.net/@u22/post/P22_A",
+          likes: 200,
+        }],
+      }),
+    }), env22);
+    assert.equal(compSnapARes.status, 200);
+    const snapCountBeforeDesktopA = env22.DB.postSnapshots.size;
+
+    // Desktop sync arrives with same run_id='run_22_sync_a' and fallback ended_at timestamp ('14:35:00+07:00')
+    const desktopResA = await (await worker.fetch(new Request("https://example.workers.dev/api/app/market/dedup/record", {
+      method: "POST",
+      headers: hApp22,
+      body: JSON.stringify({
+        run_id: "run_22_sync_a",
+        crawled_at: "2026-11-27T14:35:00+07:00",
+        items: [{
+          platform: "threads",
+          post_id: "P22_A",
+          canonical_url: "https://threads.net/@u22/post/P22_A",
+          measured_at: "2026-11-27T14:35:00+07:00",
+          views: 15000,
+          likes: 200,
+        }],
+      }),
+    }), env22)).json();
+    assert.equal(desktopResA.snapshots_created, 0, "Desktop sync MUST NOT create duplicate snapshot after /complete");
+    assert.equal(desktopResA.snapshots_deduped, 1);
+    assert.equal(env22.DB.postSnapshots.size, snapCountBeforeDesktopA);
+    assert.equal(env22.DB.postRegistry.get("threads:post:P22_A").snapshot_count, 1);
+
+    // Reverse order: Desktop sync first, then /complete second on run_22_sync_b
+    const desktopResB = await (await worker.fetch(new Request("https://example.workers.dev/api/app/market/dedup/record", {
+      method: "POST",
+      headers: hApp22,
+      body: JSON.stringify({
+        run_id: "run_22_sync_b",
+        crawled_at: "2026-11-27T14:55:00+07:00",
+        items: [{ platform: "threads", post_id: "P22_B", canonical_url: "https://threads.net/@u22/post/P22_B", likes: 80 }],
+      }),
+    }), env22)).json();
+    assert.equal(desktopResB.snapshots_created, 1);
+
+    env22.DB.crawlRequests.push({
+      id: "crw_22_snap_b",
+      platform: "threads",
+      keywords: "snap_b",
+      requested_count: 1,
+      status: "queued",
+      attempts: 0,
+      max_attempts: 3,
+      created_at: "2026-11-27T11:10:00.000Z",
+      updated_at: "2026-11-27T11:10:00.000Z",
+    });
+    const claimSnapB = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", {
+      method: "POST", headers: hMuse22, body: "{}",
+    }), env22)).json();
+    assert.equal(claimSnapB.request.id, "crw_22_snap_b");
+    const compSnapBRes = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST",
+      headers: hMuse22,
+      body: JSON.stringify({
+        request_id: "crw_22_snap_b",
+        attempt: 1,
+        result_summary: { contract_version: "3.2", run_id: "run_22_sync_b", crawled_at: "2026-11-27T14:50:00+07:00", run_status: "completed" },
+        items: [{
+          platform: "threads",
+          post_id: "P22_B",
+          canonical_url: "https://threads.net/@u22/post/P22_B",
+          measured_at: "2026-11-27T14:50:00+07:00",
+          likes: 80,
+        }],
+      }),
+    }), env22)).json();
+    assert.equal(compSnapBRes.dedup_stats.snapshots_created, 0);
+    assert.equal(compSnapBRes.dedup_stats.snapshots_deduped, 1);
+    assert.equal(env22.DB.postRegistry.get("threads:post:P22_B").snapshot_count, 1);
+  } finally {
+    globalThis.fetch = prevFetch22;
   }
 }
 
