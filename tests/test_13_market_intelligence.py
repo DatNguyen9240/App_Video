@@ -722,6 +722,521 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertTrue(empty_ok_rep["is_empty_market_valid"])
         self.assertIn("Không có bài đạt chuẩn", empty_ok_rep["run_status_label_vi"])
 
+    def test_crawl_time_ordering_ignores_newer_modified_time_and_keeps_statuses_distinct(self):
+        """Regression (Issues #1, #7, #8): Older run with newer modifiedTime never beats newer crawl; Archive ignored; statuses remain distinct."""
+        older_touched = {
+            "report": "Old Run Retouched Later",
+            "run_id": "run-old-20261125",
+            "ended_at": "2026-11-25T10:00:00Z",
+            "run_status": "completed",
+            "technical_status": "completed",
+            "data_quality_status": "dat",
+            "telegram_summary": "OLD RUN TOUCHED LATER",
+        }
+        newer_crawl = {
+            "report": "Newer Crawl V3.1 Report",
+            "run_id": "run-new-20261126",
+            "generated_at": "2026-11-26T22:52:00+07:00",
+            "run_status": "completed",
+            "telegram_summary": "NEWER CRAWL WINS",
+        }
+        newer_crawl_rev2 = {
+            **newer_crawl,
+            "report": "Newer Crawl V3.1 Report Rev 2",
+            "corrects_report": "trend_report_new_20261126.json",
+            "telegram_summary": "NEWER CRAWL REV 2",
+        }
+        # Newer crawl synced earlier, older run retouched days later with much newer modified_time
+        self.store.ingest_raw_file(
+            "f_new_1",
+            "trend_report_new_20261126.json",
+            json.dumps(newer_crawl).encode("utf-8"),
+            modified_time="2026-11-26T16:00:00Z",
+            folder_path="Reports",
+        )
+        self.store.ingest_raw_file(
+            "f_old_touched",
+            "market_report_old_20261125.json",
+            json.dumps(older_touched).encode("utf-8"),
+            modified_time="2026-11-29T23:59:59Z",
+            folder_path="Reports",
+        )
+
+        reports = self.store.list_reports(limit=5)
+        self.assertEqual(reports[0]["run_id"], "run-new-20261126")
+        ev = self.store.build_evidence_report(platform="all")
+        self.assertEqual(ev["latest_muse_report"]["run_id"], "run-new-20261126")
+        # Issue #8: run_status is 'completed' while missing technical_status / data_quality_status stay None (not fabricated!)
+        self.assertEqual(ev["run_status"], "completed")
+        self.assertIsNone(ev["technical_status"])
+        self.assertIsNone(ev["data_quality_status"])
+
+        # Revision within same run picks newer modified_time/corrected
+        self.store.ingest_raw_file(
+            "f_new_2",
+            "trend_report_new_20261126_corrected_v2.json",
+            json.dumps(newer_crawl_rev2).encode("utf-8"),
+            modified_time="2026-11-26T16:10:00Z",
+            folder_path="Reports",
+        )
+        reports_rev = self.store.list_reports(limit=5)
+        self.assertEqual(reports_rev[0]["run_id"], "run-new-20261126")
+        self.assertTrue(reports_rev[0]["is_corrected"])
+
+        # Issue #7: Direct ingest under Archive/ must not alter active counts or wipe historical rows
+        before_total = self.store.get_stats()["total_items"]
+        arch_res = self.store.ingest_raw_file(
+            "f_direct_arch",
+            "threads_trend_arch.json",
+            json.dumps({"run_id": "arch", "records": [{"post_id": "ARCH1", "post_url": "https://www.threads.com/@a/post/ARCH1", "likes": 999}]}).encode("utf-8"),
+            folder_path="Threads/Archive",
+        )
+        self.assertEqual(arch_res["file_role"], "archived")
+        self.assertEqual(self.store.get_stats()["total_items"], before_total)
+
+    def test_cross_run_dedup_three_runs_snapshots_and_activity_filters(self):
+        """Cross-run dedup across 3 consecutive runs keeps 1 primary item, 3 snapshots, preserves old metrics, handles canonical_url fallback, concurrency, and filters."""
+        # Run 1: Post A (with views/likes) + Post B (missing views)
+        run1 = {
+            "run_id": "run-cross-001",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T08:00:00Z",
+            "records": [
+                {
+                    "post_id": "CROSS_POST_A",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_A?xmt=111",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Chủ đề A lượt 1",
+                    "views": 1000,
+                    "likes": 50,
+                    "comment_count": 5,
+                    "trend_tier": "hot",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_id": "CROSS_POST_B",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_B",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Bài thiếu views lượt 1",
+                    "views": None,
+                    "likes": 15,
+                    "trend_tier": "watchlist",
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        r1 = self.store.ingest_raw_file("f_run_1", "threads_trend_run1.json", json.dumps(run1).encode("utf-8"))
+        self.assertEqual(r1["new_count"], 2)
+        self.assertEqual(r1["duplicate_count"], 0)
+        self.assertEqual(r1["engagement_updated_count"], 0)
+        self.assertEqual(r1["missing_views_count"], 1)
+        self.assertEqual(self.store.get_stats()["total_items"], 2)
+
+        # Concurrent duplicate sync of exact same file -> 0 extra snapshots!
+        r1_dup_sync = self.store.ingest_raw_file("f_run_1", "threads_trend_run1.json", json.dumps(run1).encode("utf-8"))
+        self.assertEqual(r1_dup_sync["new_count"], 0)
+        post_a_item = [it for it in self.store.query_items(limit=20)["items"] if it["post_id"] == "CROSS_POST_A"][0]
+        first_seen_run1 = post_a_item["first_seen_at"]
+        self.assertEqual(len(self.store.query_item_snapshots(post_a_item["id"])), 1)
+
+        # Run 2: Post A grew (views=3200, likes=180), Post B unchanged, Post C only has canonical URL without post_id
+        run2 = {
+            "run_id": "run-cross-002",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T14:00:00Z",
+            "records": [
+                {
+                    "post_id": "CROSS_POST_A",
+                    "post_url": "https://www.threads.net/@creator/post/CROSS_POST_A",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Chủ đề A lượt 2",
+                    "views": 3200,
+                    "likes": 180,
+                    "comment_count": 20,
+                    "trend_tier": "very_hot",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_id": "CROSS_POST_B",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_B",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Bài thiếu views lượt 2",
+                    "views": None,
+                    "likes": 15,
+                    "trend_tier": "watchlist",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_url": "https://www.threads.com/@canon/post/CANON_ONLY_1/?xmt=run2",
+                    "author_handle": "@canon",
+                    "content_summary_vi": "Bài C dùng canonical_url làm fallback",
+                    "views": 500,
+                    "likes": 25,
+                    "trend_tier": "emerging",
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        r2 = self.store.ingest_raw_file("f_run_2", "threads_trend_run2.json", json.dumps(run2).encode("utf-8"))
+        self.assertEqual(r2["new_count"], 1)  # Only Post C is new!
+        self.assertEqual(r2["engagement_updated_count"], 1)  # Post A updated
+        self.assertEqual(r2["duplicate_count"], 1)  # Post B unchanged
+        self.assertEqual(r2["missing_views_count"], 1)  # Post B missing views
+        self.assertEqual(self.store.get_stats()["total_items"], 3)
+
+        # Run 3: Post A appears again with identical metrics (duplicate, NOT new, NOT lost old snapshot); Post C appears on threads.net with updated views
+        run3 = {
+            "run_id": "run-cross-003",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T20:00:00Z",
+            "records": [
+                {
+                    "post_id": "CROSS_POST_A",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_A?igshid=99",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Chủ đề A lượt 3",
+                    "views": 3200,
+                    "likes": 180,
+                    "comment_count": 20,
+                    "trend_tier": "very_hot",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_url": "https://threads.net/@canon/post/CANON_ONLY_1?ref=web",
+                    "author_handle": "@canon",
+                    "content_summary_vi": "Bài C tăng trưởng qua threads.net",
+                    "views": 950,
+                    "likes": 60,
+                    "trend_tier": "hot",
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        r3 = self.store.ingest_raw_file("f_run_3", "threads_trend_run3.json", json.dumps(run3).encode("utf-8"))
+        self.assertEqual(r3["new_count"], 0)
+        self.assertEqual(r3["duplicate_count"], 1)  # Post A unchanged in Run 3
+        self.assertEqual(r3["engagement_updated_count"], 1)  # Post C matched by canonical_url & updated
+
+        # Verify: only 1 primary record per post (total 3), and Post A has exactly 3 chronological snapshots preserving Run 1's 1000/50
+        stats = self.store.get_stats()
+        self.assertEqual(stats["total_items"], 3)
+        detail_a = self.store.get_item_detail(post_a_item["id"])
+        self.assertEqual(detail_a["first_seen_at"], first_seen_run1)
+        self.assertEqual(detail_a["snapshot_count"], 3)
+        snaps_a = detail_a["snapshots"]
+        self.assertEqual(len(snaps_a), 3)
+        self.assertEqual([s["change_type"] for s in snaps_a], ["new", "updated", "duplicate"])
+        self.assertEqual(snaps_a[0]["views_count"], 1000)
+        self.assertEqual(snaps_a[1]["views_count"], 3200)
+        self.assertEqual(snaps_a[1]["views_delta"], 2200)
+        self.assertEqual(snaps_a[1]["likes_delta"], 130)
+        self.assertEqual(snaps_a[2]["views_count"], 3200)
+        self.assertEqual(snaps_a[2]["views_delta"], 0)
+
+        # Verify activity filters: 'new' has 0 items now (all seen >=2 runs!), 'growth' has A & C (2 items), 'all' has 3 items
+        self.assertEqual(self.store.query_items(activity_filter="new")["total"], 0)
+        growth_res = self.store.query_items(activity_filter="growth")
+        self.assertEqual(growth_res["total"], 2)
+        growth_pids = {it["post_id"] for it in growth_res["items"]}
+        self.assertIn("CROSS_POST_A", growth_pids)
+        self.assertEqual(self.store.query_items(activity_filter="all")["total"], 3)
+
+        # Ingest a brand new Post D in Run 4 -> activity_filter='new' shows only Post D
+        run4 = {
+            "run_id": "run-cross-004",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T21:00:00Z",
+            "records": [{"post_id": "CROSS_POST_D", "post_url": "https://threads.net/@new/post/CROSS_POST_D", "views": 400, "likes": 12}],
+        }
+        r4 = self.store.ingest_raw_file("f_run_4", "threads_trend_run4.json", json.dumps(run4).encode("utf-8"))
+        self.assertEqual(r4["new_count"], 1)
+        new_only = self.store.query_items(activity_filter="new")
+        self.assertEqual(new_only["total"], 1)
+        self.assertEqual(new_only["items"][0]["post_id"], "CROSS_POST_D")
+
+    def test_v32_views_display_shares_reposts_reconciliation_idempotency_and_seed171(self):
+        """V3.2: 513K views_display (no 513 truncation), separate shares/reposts, new vs new_qualified (35/50), 2-laptop snapshot idempotency, URL->post_id merge, 0004 seed 171, and report reconciliation."""
+        import sqlite3
+        from market_intelligence.normalizer import extract_v32_counters
+        from market_intelligence.report_normalizer import normalize_muse_report
+
+        # 1) Views 513K + display_approx + separate shares/reposts + absent views honesty
+        v32_posts = {
+            "run_id": "run-v32-views-01",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T09:00:00Z",
+            "records": [
+                {
+                    "post_id": "V32_513K",
+                    "post_url": "https://www.threads.com/@myqnam/post/V32_513K?ref=1",
+                    "author_handle": "@myqnam",
+                    "summary_vi": "Bài viral 513K views",
+                    "views": 513000,
+                    "views_display": "513K",
+                    "views_precision": "display_approx",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T09:00:00Z",
+                    "views_evidence_url": "https://threads.net/@myqnam/post/V32_513K",
+                    "likes": 1200,
+                    "comments": 95,
+                    "shares": 88,
+                    "reposts": 41,
+                    "data_quality": "usable",
+                },
+                {
+                    "post_id": "V32_DISPLAY_ONLY",
+                    "post_url": "https://threads.net/@nom/post/V32_DISPLAY_ONLY",
+                    "author_handle": "@nom",
+                    "summary_vi": "Chỉ có views_display không có integer",
+                    "views": "513K",
+                    "views_display": "513K",
+                    "views_precision": "display_approx",
+                    "likes": 45,
+                    "shares": 7,
+                    "reposts": 2,
+                    "verification_status": "unverified",
+                },
+                {
+                    "post_url": "https://www.threads.net/@canonmerge/post/MERGE77?x=1",
+                    "author_handle": "@canonmerge",
+                    "summary_vi": "URL xuất hiện trước khi biết post_id",
+                    "views": 3600,
+                    "views_display": "3.6K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T09:00:00Z",
+                    "views_evidence_url": "https://threads.net/@canonmerge/post/MERGE77",
+                    "likes": 40,
+                    "shares": 3,
+                    "reposts": 9,
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        res_1 = self.store.ingest_raw_file("f_v32_1", "threads_trend_v32_1.json", json.dumps(v32_posts).encode("utf-8"))
+        self.assertEqual(res_1["new_count"], 3)
+        self.assertEqual(res_1["new_qualified_count"], 2)  # V32_DISPLAY_ONLY lacks integer views & is unverified!
+        self.assertEqual(res_1["missing_views_count"], 1)
+
+        items_map = {it["post_id"] or it["canonical_url"]: it for it in self.store.query_items(limit=20)["items"]}
+        it_513 = items_map["V32_513K"]
+        self.assertEqual(it_513["views_count"], 513000)
+        self.assertEqual(it_513["views_display"], "513K")
+        self.assertEqual(it_513["views_precision"], "display_approx")
+        self.assertEqual(it_513["views_source"], "threads_web_browser")
+        self.assertEqual(it_513["views_measured_at"], "2026-11-27T09:00:00Z")
+        self.assertEqual(it_513["views_evidence_url"], "https://threads.net/@myqnam/post/V32_513K")
+        self.assertEqual(it_513["shares_count"], 88)
+        self.assertEqual(it_513["reposts_count"], 41)
+
+        it_disp = items_map["V32_DISPLAY_ONLY"]
+        self.assertIsNone(it_disp["views_count"])  # "513K" MUST NOT be truncated to 513
+        self.assertEqual(it_disp["views_display"], "513K")
+        self.assertEqual(it_disp["shares_count"], 7)
+        self.assertEqual(it_disp["reposts_count"], 2)
+
+        # 2) Two laptops syncing the EXACT SAME run_id & measurement timestamp MUST keep only 1 snapshot
+        self.store.ingest_raw_file("f_v32_laptop2", "threads_trend_v32_1_copy.json", json.dumps(v32_posts).encode("utf-8"), md5_checksum="md5_laptop2")
+        detail_513 = self.store.get_item_detail(it_513["id"])
+        self.assertEqual(len(detail_513["snapshots"]), 1)
+        self.assertEqual(detail_513["snapshots"][0]["measured_at"], "2026-11-27T09:00:00Z")
+
+        # 3) Later run discovers post_id for URL-first post MERGE77 -> merges into single item with 2 snapshots
+        later_id_payload = {
+            "run_id": "run-v32-views-02",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T11:30:00Z",
+            "records": [
+                {
+                    "post_id": "MERGE77",
+                    "post_url": "https://threads.net/@canonmerge/post/MERGE77",
+                    "views": 6400,
+                    "likes": 92,
+                    "shares": 5,
+                    "reposts": 12,
+                    "data_quality": "usable",
+                }
+            ],
+        }
+        res_2 = self.store.ingest_raw_file("f_v32_2", "threads_trend_v32_2.json", json.dumps(later_id_payload).encode("utf-8"))
+        self.assertEqual(res_2["new_count"], 0)
+        self.assertEqual(res_2["engagement_updated_count"], 1)
+        self.assertEqual(self.store.get_stats()["total_items"], 3)
+        merged_item = next(x for x in self.store.query_items(limit=20)["items"] if "MERGE77" in (x.get("canonical_url") or ""))
+        self.assertEqual(merged_item["post_id"], "MERGE77")
+        self.assertEqual(merged_item["snapshot_count"], 2)
+
+        # 4) post_identity_index.json is classified as 'identity_index' and never leaks into items or reports
+        raw_dir = os.path.join(ROOT_DIR, "data", "market_intelligence", "raw")
+        idx_candidates = [f for f in os.listdir(raw_dir) if "post_identity_index" in f] if os.path.isdir(raw_dir) else []
+        if idx_candidates:
+            with open(os.path.join(raw_dir, idx_candidates[0]), "rb") as f:
+                idx_res = self.store.ingest_raw_file("f_identity_idx", "post_identity_index.json", f.read())
+        else:
+            idx_mock = {"contract": "3.2", "primary_key": "post_id", "entries": [{"platform": "threads", "post_id": "IDX_1", "canonical_url": "https://threads.net/@x/post/IDX_1"}]}
+            idx_res = self.store.ingest_raw_file("f_identity_idx", "post_identity_index.json", json.dumps(idx_mock).encode("utf-8"))
+        self.assertEqual(idx_res["file_role"], "identity_index")
+        self.assertEqual(self.store.get_stats()["total_items"], 3)
+
+        # 5) V3.2 D1 migrations 0003 + 0004 (171 posts) execute cleanly & idempotently in SQLite
+        m0003_path = os.path.join(ROOT_DIR, "cloudflare-worker", "migrations", "0003_cross_run_dedup_registry.sql")
+        m0004_path = os.path.join(ROOT_DIR, "cloudflare-worker", "migrations", "0004_seed_post_identity_index_171.sql")
+        conn = sqlite3.connect(":memory:")
+        try:
+            with open(m0003_path, "r", encoding="utf-8") as f3:
+                conn.executescript(f3.read())
+            with open(m0004_path, "r", encoding="utf-8") as f4:
+                sql4 = f4.read()
+            conn.executescript(sql4)
+            conn.executescript(sql4)  # Re-apply must stay 171/171 idempotent
+            reg_cnt = conn.execute("SELECT COUNT(*) FROM market_post_registry").fetchone()[0]
+            snap_cnt = conn.execute("SELECT COUNT(*) FROM market_post_snapshots").fetchone()[0]
+            self.assertEqual(reg_cnt, 171)
+            self.assertEqual(snap_cnt, 171)
+        finally:
+            conn.close()
+
+        # 6) V3.2 report counters reconciliation & sections mapping
+        v32_report = {
+            "report": "Báo cáo V3.2 Test",
+            "run_id": "run-v32-rpt-35of50",
+            "run_status": "partial",
+            "generated_at": "2026-11-27T12:00:00Z",
+            "counters": {
+                "requested_count": 50,
+                "scanned_count": 150,
+                "unique_candidate_count": 120,
+                "new_count": 40,
+                "new_qualified_count": 35,
+                "unverified_count": 15,
+                "missing_views_count": 8,
+                "duplicate_history_count": 50,
+                "updated_metrics_count": 10,
+                "rejected_count": 10,
+                "similar_content_count": 6,
+                "target_achieved": False,
+                "stop_reason": "sources_exhausted",
+            },
+            "sections": {
+                "3_trends": [{"theme": "Son dưỡng", "lifecycle_state": "growing", "why_hot": "Cao điểm mùa lạnh"}],
+                "4_top_viral": [{"post": "@myqnam", "views": 513000, "views_display": "513K", "views_precision": "display_approx"}],
+                "9_growth_tracking": [{"post": "@sandeal.shopee", "change_summary": "5K → 18K views"}],
+                "10_priority_actions": [{"action": "Test son dưỡng 8h"}],
+            },
+        }
+        extracted = extract_v32_counters(v32_report)
+        self.assertEqual(extracted["new_qualified_count"], 35)
+        self.assertEqual(extracted["new_count"], 40)
+        self.assertTrue(extracted["counters_reconciled"])
+        self.assertEqual(extracted["reconciliation_diff"], 0)
+        self.assertFalse(extracted["target_achieved"])
+        self.assertEqual(extracted["stop_reason"], "sources_exhausted")
+
+        norm_rpt = normalize_muse_report(v32_report, file_name="trend_report_20261127_1200.json")
+        self.assertEqual(norm_rpt["schema_version"], "v3.2")
+        self.assertEqual(norm_rpt["counters"]["new_qualified_count"], 35)
+        self.assertTrue(norm_rpt["counters"]["counters_reconciled"])
+        self.assertEqual(norm_rpt["growth_tracking"][0]["post"], "@sandeal.shopee")
+        self.assertEqual(norm_rpt["priority_actions"][0], "Test son dưỡng 8h")
+
+        # 7) Point 2: Numeric views alone WITHOUT valid 5-field V3.2 provenance MUST NOT count in new_qualified_count
+        incomplete_views_run = {
+            "run_id": "run-v32-strict-qual",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T12:15:00Z",
+            "records": [
+                {
+                    "post_id": "STRICT_NUMERIC_ONLY",
+                    "post_url": "https://threads.net/@s/post/STRICT_NUMERIC_ONLY",
+                    "views": 45000,
+                    "likes": 300,
+                },
+                {
+                    "post_id": "STRICT_BAD_SRC",
+                    "post_url": "https://threads.net/@s/post/STRICT_BAD_SRC",
+                    "views": 45000,
+                    "views_display": "45K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_cli_search",
+                    "views_measured_at": "2026-11-27T12:15:00Z",
+                    "views_evidence_url": "https://threads.net/@s/post/STRICT_BAD_SRC",
+                },
+                {
+                    "post_id": "STRICT_FULL_PASS",
+                    "post_url": "https://threads.net/@s/post/STRICT_FULL_PASS",
+                    "views": 45000,
+                    "views_display": "45K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T12:15:00Z",
+                    "views_evidence_url": "https://threads.net/@s/post/STRICT_FULL_PASS",
+                },
+            ],
+        }
+        r_strict = self.store.ingest_raw_file("f_strict", "threads_trend_strict.json", json.dumps(incomplete_views_run).encode("utf-8"))
+        self.assertEqual(r_strict["new_count"], 3)
+        self.assertEqual(r_strict["new_qualified_count"], 1)  # Only STRICT_FULL_PASS satisfies all 5 views fields
+
+        # 8) Point 3: Late-arriving older snapshot preserves chronological history without overwriting newer metrics/last_seen_at
+        later_first = {
+            "run_id": "run-t2-latest",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T15:00:00Z",
+            "records": [
+                {
+                    "post_id": "SQLITE_LATE_GUARD",
+                    "post_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "views": 99000,
+                    "views_display": "99K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T15:00:00Z",
+                    "views_evidence_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "likes": 2500,
+                }
+            ],
+        }
+        older_late = {
+            "run_id": "run-t1-backfill",
+            "platform": "threads",
+            "crawled_at": "2026-11-25T07:00:00Z",
+            "records": [
+                {
+                    "post_id": "SQLITE_LATE_GUARD",
+                    "post_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "views": 1100,
+                    "views_display": "1.1K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-25T07:00:00Z",
+                    "views_evidence_url": "https://threads.net/@lg/post/SQLITE_LATE_GUARD",
+                    "likes": 20,
+                }
+            ],
+        }
+        self.store.ingest_raw_file("f_lg_t2", "threads_trend_lgt2.json", json.dumps(later_first).encode("utf-8"))
+        self.store.ingest_raw_file("f_lg_t1", "threads_trend_lgt1.json", json.dumps(older_late).encode("utf-8"))
+        lg_item = next(x for x in self.store.query_items(limit=50)["items"] if x.get("post_id") == "SQLITE_LATE_GUARD")
+        lg_detail = self.store.get_item_detail(lg_item["id"])
+        self.assertEqual(lg_detail["views_count"], 99000)
+        self.assertEqual(lg_detail["likes_count"], 2500)
+        self.assertEqual(lg_detail["last_seen_at"], "2026-11-27T15:00:00Z")
+        self.assertEqual(lg_detail["first_seen_at"], "2026-11-25T07:00:00Z")
+        self.assertEqual(lg_detail["snapshot_count"], 2)
+        self.assertEqual(len(lg_detail["snapshots"]), 2)
+
+        # 9) Point 3: URL->post_id re-sync of old run does NOT duplicate snapshot in SQLite
+        resync_u1 = {
+            "run_id": "run-v32-views-01",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T09:00:00Z",
+            "records": [{"post_id": "MERGE77", "post_url": "https://www.threads.net/@canonmerge/post/MERGE77?x=1", "views": 3600, "likes": 40}],
+        }
+        self.store.ingest_raw_file("f_resync_u1", "threads_trend_resync_u1.json", json.dumps(resync_u1).encode("utf-8"))
+        merged_after = next(x for x in self.store.query_items(limit=50)["items"] if x.get("post_id") == "MERGE77")
+        self.assertEqual(merged_after["snapshot_count"], 2)
+        self.assertEqual(len(self.store.get_item_detail(merged_after["id"])["snapshots"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

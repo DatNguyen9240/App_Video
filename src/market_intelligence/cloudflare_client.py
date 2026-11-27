@@ -58,64 +58,82 @@ class CloudflareBridgeClient:
         client_id: Optional[str] = None,
         env_path: Optional[str] = None,
         timeout_sec: Any = (10.0, 45.0),
+        heartbeat_timeout_sec: Any = (5.0, 10.0),
         session: Optional[requests.Session] = None,
+        heartbeat_session: Optional[requests.Session] = None,
     ):
         if env_path is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             env_path = os.path.join(base_dir, ".env")
         self.env_path = env_path
         self.timeout_sec = timeout_sec
+        self.heartbeat_timeout_sec = heartbeat_timeout_sec
         self._session = session or requests.Session()
+        self._heartbeat_session = heartbeat_session or requests.Session()
         self._http_lock = threading.RLock()
+        self._heartbeat_lock = threading.RLock()
+        self._cfg_lock = threading.RLock()
         self._explicit_url = worker_url
         self._explicit_token = api_token
         self._explicit_client_id = client_id
         self.reload_config()
 
+    def close(self):
+        for sess in (getattr(self, "_session", None), getattr(self, "_heartbeat_session", None)):
+            if sess is not None:
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+
     def reload_config(self):
-        env_vars = _read_env_file_vars(self.env_path)
-        self.worker_url = (
-            self._explicit_url
-            or os.environ.get("CLOUDFLARE_WORKER_URL")
-            or env_vars.get("CLOUDFLARE_WORKER_URL")
-            or DEFAULT_WORKER_URL
-        ).rstrip("/")
-        self.api_token = (
-            self._explicit_token
-            if self._explicit_token is not None
-            else (
-                os.environ.get("CLOUDFLARE_APP_TOKEN")
-                or env_vars.get("CLOUDFLARE_APP_TOKEN")
-                or os.environ.get("APP_VIDEO_API_TOKEN")
-                or env_vars.get("APP_VIDEO_API_TOKEN")
-                or ""
-            )
-        ).strip()
-        self.client_id = (
-            self._explicit_client_id
-            or os.environ.get("CLOUDFLARE_CLIENT_ID")
-            or env_vars.get("CLOUDFLARE_CLIENT_ID")
-            or DEFAULT_CLIENT_ID
-        ).strip()
+        with self._cfg_lock:
+            env_vars = _read_env_file_vars(self.env_path)
+            self.worker_url = (
+                self._explicit_url
+                or os.environ.get("CLOUDFLARE_WORKER_URL")
+                or env_vars.get("CLOUDFLARE_WORKER_URL")
+                or DEFAULT_WORKER_URL
+            ).rstrip("/")
+            self.api_token = (
+                self._explicit_token
+                if self._explicit_token is not None
+                else (
+                    os.environ.get("CLOUDFLARE_APP_TOKEN")
+                    or env_vars.get("CLOUDFLARE_APP_TOKEN")
+                    or os.environ.get("APP_VIDEO_API_TOKEN")
+                    or env_vars.get("APP_VIDEO_API_TOKEN")
+                    or ""
+                )
+            ).strip()
+            self.client_id = (
+                self._explicit_client_id
+                or os.environ.get("CLOUDFLARE_CLIENT_ID")
+                or env_vars.get("CLOUDFLARE_CLIENT_ID")
+                or DEFAULT_CLIENT_ID
+            ).strip()
 
     def is_configured(self) -> bool:
-        return bool(self.worker_url and self.api_token)
+        with self._cfg_lock:
+            return bool(self.worker_url and self.api_token)
 
     def get_public_config_summary(self) -> Dict[str, Any]:
-        return {
-            "worker_url": self.worker_url,
-            "client_id": self.client_id,
-            "token_configured": bool(self.api_token),
-            "token_masked": mask_secret(self.api_token),
-        }
+        with self._cfg_lock:
+            return {
+                "worker_url": self.worker_url,
+                "client_id": self.client_id,
+                "token_configured": bool(self.api_token),
+                "token_masked": mask_secret(self.api_token),
+            }
 
     def _headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_token}",
-            "X-App-Client-Id": self.client_id,
-            "Accept": "application/json",
-            "User-Agent": "AppVideo-BridgeClient/2.3",
-        }
+        with self._cfg_lock:
+            return {
+                "Authorization": f"Bearer {self.api_token}",
+                "X-App-Client-Id": self.client_id,
+                "Accept": "application/json",
+                "User-Agent": "AppVideo-BridgeClient/2.4",
+            }
 
     def _request_with_retry(
         self,
@@ -125,23 +143,35 @@ class CloudflareBridgeClient:
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
         max_attempts: int = 3,
+        use_heartbeat_session: bool = False,
+        timeout_override: Any = None,
     ) -> requests.Response:
-        if not self.is_configured():
-            raise RuntimeError("Missing CLOUDFLARE_APP_TOKEN (unconfigured)")
+        with self._cfg_lock:
+            if not (self.worker_url and self.api_token):
+                raise RuntimeError("Missing CLOUDFLARE_APP_TOKEN (unconfigured)")
+            url = f"{self.worker_url}{path}"
+            headers = {
+                "Authorization": f"Bearer {self.api_token}",
+                "X-App-Client-Id": self.client_id,
+                "Accept": "application/json",
+                "User-Agent": "AppVideo-BridgeClient/2.4",
+            }
 
-        url = f"{self.worker_url}{path}"
+        target_session = self._heartbeat_session if use_heartbeat_session else self._session
+        target_lock = self._heartbeat_lock if use_heartbeat_session else self._http_lock
+        req_timeout = timeout_override if timeout_override is not None else self.timeout_sec
         last_exc: Optional[Exception] = None
 
         for attempt in range(1, max_attempts + 1):
             try:
-                with self._http_lock:
-                    resp = self._session.request(
+                with target_lock:
+                    resp = target_session.request(
                         method=method,
                         url=url,
-                        headers=self._headers(),
+                        headers=headers,
                         params=params,
                         json=json_body,
-                        timeout=self.timeout_sec,
+                        timeout=req_timeout,
                     )
                 if resp.status_code in (502, 503, 504) and attempt < max_attempts:
                     time.sleep(0.4 * attempt)
@@ -232,7 +262,14 @@ class CloudflareBridgeClient:
         return resp.content, headers_meta
 
     def send_heartbeat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        resp = self._request_with_retry("POST", "/api/app/heartbeat", json_body=payload, max_attempts=1)
+        resp = self._request_with_retry(
+            "POST",
+            "/api/app/heartbeat",
+            json_body=payload,
+            max_attempts=1,
+            use_heartbeat_session=True,
+            timeout_override=self.heartbeat_timeout_sec,
+        )
         if not resp.ok:
             raise RuntimeError(f"heartbeat failed: HTTP {resp.status_code}")
         return resp.json()
@@ -336,3 +373,87 @@ class CloudflareBridgeClient:
         if not resp.ok:
             raise RuntimeError(f"set_crawl_schedule failed: HTTP {resp.status_code}")
         return resp.json()
+
+    def check_cross_run_dedup(self, items: list, batch_size: int = 100) -> Dict[str, Any]:
+        """
+        Check historical post registry on Worker V2/D1 in full lossless batches.
+        Fail-closed: raises RuntimeError if registry is unavailable (never treat lookup failure as empty history).
+        """
+        all_items = list(items or [])
+        if not all_items:
+            return {"ok": True, "existing": {}, "existing_keys": [], "existing_count": 0, "new_count": 0}
+        step = max(1, min(int(batch_size or 100), 250))
+        merged_existing: Dict[str, Any] = {}
+        merged_keys: list = []
+        seen_keys = set()
+        for i in range(0, len(all_items), step):
+            chunk = all_items[i : i + step]
+            resp = self._request_with_retry(
+                "POST",
+                "/api/app/market/dedup/check",
+                json_body={"items": chunk},
+                max_attempts=2,
+            )
+            if not resp.ok:
+                raise RuntimeError(f"RegistryUnavailable: check_cross_run_dedup failed HTTP {resp.status_code}")
+            data = resp.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"RegistryUnavailable: {data.get('error') or 'unknown error'}")
+            for k, v in (data.get("existing") or {}).items():
+                merged_existing[k] = v
+            for k in (data.get("existing_keys") or []):
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    merged_keys.append(k)
+        return {
+            "ok": True,
+            "existing": merged_existing,
+            "existing_keys": merged_keys,
+            "existing_count": len(merged_keys),
+            "new_count": max(0, len(all_items) - len(merged_keys)),
+        }
+
+    def record_cross_run_dedup(
+        self,
+        items: list,
+        run_id: Optional[str] = None,
+        *,
+        request_id: Optional[str] = None,
+        claimed_by: Optional[str] = None,
+        attempt: Optional[int] = None,
+        batch_size: int = 100,
+    ) -> Dict[str, Any]:
+        """Atomically record ingested post keys/snapshots into shared Worker V2 D1 registry without truncating batches."""
+        all_items = list(items or [])
+        if not all_items:
+            return {"ok": True, "new_count": 0, "duplicate_count": 0, "updated_count": 0, "missing_views_count": 0, "total_processed": 0}
+        step = max(1, min(int(batch_size or 100), 250))
+        totals = {"ok": True, "new_count": 0, "duplicate_count": 0, "updated_count": 0, "missing_views_count": 0, "total_processed": 0}
+        for i in range(0, len(all_items), step):
+            chunk = all_items[i : i + step]
+            body: Dict[str, Any] = {"run_id": run_id, "items": chunk}
+            if request_id is not None:
+                body["request_id"] = request_id
+            if claimed_by is not None:
+                body["claimed_by"] = claimed_by
+            if attempt is not None:
+                body["attempt"] = int(attempt)
+            resp = self._request_with_retry(
+                "POST",
+                "/api/app/market/dedup/record",
+                json_body=body,
+                max_attempts=2,
+            )
+            if resp.status_code == 409:
+                raise StaleClaimConflictError(f"record_cross_run_dedup rejected (HTTP 409): {resp.text[:200]}")
+            if not resp.ok:
+                raise RuntimeError(f"RegistryUnavailable: record_cross_run_dedup failed HTTP {resp.status_code}")
+            data = resp.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"RegistryUnavailable: {data.get('error') or 'unknown error'}")
+            totals["new_count"] += int(data.get("new_count") or 0)
+            totals["duplicate_count"] += int(data.get("duplicate_count") or 0)
+            totals["updated_count"] += int(data.get("updated_count") or 0)
+            totals["missing_views_count"] += int(data.get("missing_views_count") or 0)
+            totals["total_processed"] += int(data.get("total_processed") or len(chunk))
+        return totals

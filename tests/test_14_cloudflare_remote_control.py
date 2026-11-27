@@ -36,6 +36,7 @@ from market_intelligence import (
     RemoteCommandPoller,
     mask_secret,
 )
+from market_intelligence.normalizer import is_archive_path
 
 
 class MockCloudflareTransportClient(CloudflareBridgeClient):
@@ -125,13 +126,21 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
         has_more = len(filtered) > eff_lim
         next_tok = f"{page[-1]['modified_time']}|{page[-1]['file_id']}" if (has_more and page) else None
         next_cur = page[-1]["modified_time"] if page else cursor
-        return {
+        all_active_ids = [
+            str(f["file_id"])
+            for f in ordered
+            if not is_archive_path(f.get("folder_path")) and not is_archive_path(f.get("name"))
+        ]
+        res = {
             "ok": True,
             "files": page,
             "has_more": has_more,
             "next_page_token": next_tok,
             "next_cursor": next_cur,
         }
+        if not page_token:
+            res["active_file_ids"] = all_active_ids
+        return res
 
     def download_market_file(self, file_id: str):
         if self.slow_download_delay > 0:
@@ -210,6 +219,34 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
     def set_crawl_schedule(self, poll_profile: str):
         self.poll_profile = "test_5m" if poll_profile == "test_5m" else "production_6h"
         return {"ok": True, "poll_profile": self.poll_profile, "expected_pickup_at": "2026-11-26T15:05:00Z"}
+
+    def check_cross_run_dedup(self, items: list, **kwargs):
+        reg = getattr(self, "mock_registry", {})
+        existing = {it.get("dedup_key"): reg[it.get("dedup_key")] for it in (items or []) if it.get("dedup_key") in reg}
+        return {"ok": True, "existing": existing, "existing_keys": list(existing.keys()), "existing_count": len(existing)}
+
+    def record_cross_run_dedup(self, items: list, run_id: str = None, **kwargs):
+        if not hasattr(self, "mock_registry"):
+            self.mock_registry = {}
+        new_c = 0
+        dup_c = 0
+        upd_c = 0
+        for it in (items or []):
+            k = it.get("dedup_key")
+            if not k:
+                continue
+            prev = self.mock_registry.get(k)
+            if not prev:
+                self.mock_registry[k] = {"metrics": it.get("metrics") or {}, "run_id": run_id, "snapshot_count": 1}
+                new_c += 1
+            elif prev["metrics"] != (it.get("metrics") or {}):
+                prev["metrics"] = it.get("metrics") or {}
+                prev["snapshot_count"] += 1
+                upd_c += 1
+            else:
+                prev["snapshot_count"] += 1
+                dup_c += 1
+        return {"ok": True, "new_count": new_c, "duplicate_count": dup_c, "updated_count": upd_c}
 
 
 class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
@@ -738,6 +775,663 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
             rt["store"].close()
             app_ui._market_runtime = None
             flask_tmp.cleanup()
+
+    def test_real_http_client_heartbeat_independent_from_slow_download(self):
+        """Regression (Issue #5): Real CloudflareBridgeClient + real ThreadingHTTPServer slow download never blocks independent heartbeat session."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        slow_payload = {
+            "run_id": "real-http-slow-run",
+            "platform": "threads",
+            "posts": [{
+                "post_id": "REAL_HTTP_1",
+                "post_url": "https://www.threads.com/@real/post/REAL_HTTP_1",
+                "author_handle": "@real",
+                "content_summary_vi": "Test HTTP client that cham.",
+                "likes": 42,
+            }],
+        }
+        download_started = threading.Event()
+        download_finished_ts = []
+        heartbeat_received_ts = []
+
+        class SlowWorkerHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                if self.path.startswith("/api/app/market/files?"):
+                    body = json.dumps({
+                        "status": "ok",
+                        "files": [{
+                            "file_id": "f_real_slow",
+                            "name": "threads_real_slow.json",
+                            "folder_path": "Threads",
+                            "modified_time": "2026-11-26T20:00:00Z",
+                            "md5_checksum": "md5_real_slow",
+                            "platform_hint": "threads",
+                        }],
+                        "has_more": False,
+                        "next_page_token": None,
+                    }).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if self.path == "/api/app/market/files/f_real_slow":
+                    download_started.set()
+                    time.sleep(0.9)
+                    body = json.dumps(slow_payload).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("X-Drive-File-Id", "f_real_slow")
+                    self.send_header("X-Drive-File-Name", "threads_real_slow.json")
+                    self.send_header("X-Drive-Modified-Time", "2026-11-26T20:00:00Z")
+                    self.send_header("X-Drive-Md5", "md5_real_slow")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    download_finished_ts.append(time.monotonic())
+                    return
+
+                self.send_response(404)
+                self.end_headers()
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length:
+                    self.rfile.read(length)
+                if self.path == "/api/app/heartbeat":
+                    heartbeat_received_ts.append(time.monotonic())
+                    body = json.dumps({"ok": True}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), SlowWorkerHandler)
+        srv_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        srv_thread.start()
+        host, port = srv.server_address
+        real_client = CloudflareBridgeClient(
+            worker_url=f"http://{host}:{port}",
+            api_token="real-http-token-xyz",
+            client_id="real-test-desktop",
+            timeout_sec=(2.0, 5.0),
+            heartbeat_timeout_sec=(1.0, 2.0),
+        )
+        self.assertIsNot(real_client._session, real_client._heartbeat_session)
+        self.assertIsNot(real_client._http_lock, real_client._heartbeat_lock)
+
+        real_sync = MarketSyncService(self.store, real_client, default_interval_sec=300)
+        real_poller = RemoteCommandPoller(self.store, real_client, real_sync, poll_interval_sec=10, heartbeat_interval_sec=10)
+        sync_results = []
+        sync_thread = threading.Thread(target=lambda: sync_results.append(real_sync.sync_now(trigger_source="slow_http_test")), daemon=True)
+        try:
+            sync_thread.start()
+            self.assertTrue(download_started.wait(timeout=3.0))
+
+            # Fire two real HTTP heartbeats while download_market_file is actively sleeping 0.9s on _session/_http_lock
+            hb_latencies = []
+            for _ in range(2):
+                t0 = time.monotonic()
+                ok = real_poller.send_heartbeat_once()
+                hb_latencies.append(time.monotonic() - t0)
+                self.assertTrue(ok)
+                time.sleep(0.05)
+
+            sync_thread.join(timeout=5.0)
+            self.assertEqual(len(sync_results), 1)
+            self.assertEqual(sync_results[0]["status"], "completed")
+            self.assertEqual(len(download_finished_ts), 1)
+            self.assertEqual(len(heartbeat_received_ts), 2)
+            # Both real HTTP heartbeats finished BEFORE the slow 0.9s download completed!
+            self.assertTrue(all(hb_t < download_finished_ts[0] for hb_t in heartbeat_received_ts))
+            self.assertTrue(all(lat < 0.4 for lat in hb_latencies))
+        finally:
+            real_client.close()
+            srv.shutdown()
+            srv.server_close()
+
+    def test_pagination_partial_error_guards_never_commit_cursor(self):
+        """Regression (Issue #6): Repeated token, missing token when has_more=true, or page limit overflow reports partial_error and never commits cursor."""
+        self.store.set_state("drive_cursor", "2026-11-25T00:00:00Z")
+
+        # 1. Repeated next_page_token
+        orig_list = self.client.list_market_files
+        try:
+            def rep_tok(cursor=None, limit=50, page_token=None):
+                return {
+                    "ok": True,
+                    "status": "ok",
+                    "files": [{"file_id": "f1", "name": "t1.json", "modified_time": "2026-11-26T10:00:00Z"}],
+                    "has_more": True,
+                    "next_page_token": "tok_same",
+                }
+            self.client.list_market_files = rep_tok
+            self.client.add_drive_file(
+                "f1",
+                "t1.json",
+                json.dumps({"run_id": "r1", "posts": []}).encode("utf-8"),
+                "2026-11-26T10:00:00Z",
+                "m1",
+            )
+            res_rep = self.sync_service.sync_now(trigger_source="test_rep_tok")
+            self.assertEqual(res_rep["status"], "partial_error")
+            self.assertFalse(res_rep["cursor_committed"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+            self.assertEqual(self.store.get_state("last_sync_status"), "partial_error")
+
+            # 2. Missing next_page_token while has_more=True
+            self.client.list_market_files = lambda cursor=None, limit=50, page_token=None: {
+                "ok": True,
+                "files": [],
+                "has_more": True,
+                "next_page_token": None,
+            }
+            res_miss = self.sync_service.sync_now(trigger_source="test_miss_tok")
+            self.assertEqual(res_miss["status"], "partial_error")
+            self.assertIn("thiếu next_page_token", res_miss["pagination_error"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+
+            # 3. Exceeds max_list_pages while has_more=True
+            bounded_sync = MarketSyncService(self.store, self.client, max_list_pages=2)
+            page_counter = {"n": 0}
+            def many_pages(cursor=None, limit=50, page_token=None):
+                page_counter["n"] += 1
+                return {
+                    "ok": True,
+                    "files": [],
+                    "has_more": True,
+                    "next_page_token": f"tok_{page_counter['n']}",
+                }
+            self.client.list_market_files = many_pages
+            res_lim = bounded_sync.sync_now(trigger_source="test_page_lim")
+            self.assertEqual(res_lim["status"], "partial_error")
+            self.assertIn("vượt giới hạn 2 trang", res_lim["pagination_error"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+
+            # 4. Worker explicitly signals status='partial_error' -> Sync must abort cursor commit cleanly
+            self.client.list_market_files = lambda cursor=None, limit=50, page_token=None: {
+                "ok": True,
+                "status": "partial_error",
+                "partial_error": "repeated_page_token",
+                "files": [{"file_id": "f1", "name": "t1.json", "modified_time": "2026-11-26T10:00:00Z"}],
+                "has_more": False,
+                "next_page_token": None,
+            }
+            res_wrk = self.sync_service.sync_now(trigger_source="test_worker_partial")
+            self.assertEqual(res_wrk["status"], "partial_error")
+            self.assertFalse(res_wrk["cursor_committed"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+        finally:
+            self.client.list_market_files = orig_list
+
+    def test_moved_to_archive_after_sqlite_sync_preserves_history_excludes_active(self):
+        """Scenario #3: Files already synced to SQLite and later moved into Archive/ on Drive exit active reporting while preserving full DB + disk history."""
+        with open(os.path.join(FIXTURES_DIR, "threads_crawl_poc_002.json"), "rb") as f:
+            v2_bytes = f.read()
+        with open(os.path.join(FIXTURES_DIR, "threads_trend_20261126.json"), "rb") as f:
+            v3_posts_bytes = f.read()
+        with open(os.path.join(FIXTURES_DIR, "trend_report_v3_20261126.json"), "rb") as f:
+            v3_report_bytes = f.read()
+
+        # Sync historical V2 + active V3.1 crawl & report into SQLite
+        self.client.add_drive_file(
+            "f_hist_v2",
+            "threads_crawl_poc_002.json",
+            v2_bytes,
+            "2026-11-25T08:00:00Z",
+            "md5_hist_v2",
+            platform_hint="threads",
+            folder_path="Threads",
+        )
+        self.client.add_drive_file(
+            "f_v3_posts",
+            "threads_trend_20261126.json",
+            v3_posts_bytes,
+            "2026-11-26T09:00:00Z",
+            "md5_v3_posts",
+            platform_hint="threads",
+            folder_path="Threads",
+        )
+        self.client.add_drive_file(
+            "f_v3_report",
+            "trend_report_v3_20261126.json",
+            v3_report_bytes,
+            "2026-11-26T09:05:00Z",
+            "md5_v3_report",
+            platform_hint="threads",
+            folder_path="Reports",
+        )
+
+        res1 = self.sync_service.sync_now(trigger_source="initial_sync")
+        self.assertEqual(res1["status"], "completed")
+
+        stats_before = self.store.get_stats()
+        total_before = stats_before["total_items"]
+        self.assertGreater(total_before, 3)
+        self.assertIsNotNone(stats_before.get("trends_snapshot"))
+        self.assertIsNotNone(stats_before.get("latest_v3_screening"))
+        rep_before = self.store.build_evidence_report("all")
+        self.assertEqual(rep_before.get("schema_version"), "v3.1")
+        self.assertTrue(len(self.store.list_reports()) >= 1)
+
+        with self.store._lock:
+            raw_files_total_before = self.store._conn.execute("SELECT COUNT(*) FROM raw_drive_files").fetchone()[0]
+            items_total_before = self.store._conn.execute("SELECT COUNT(*) FROM market_items").fetchone()[0]
+            reports_total_before = self.store._conn.execute("SELECT COUNT(*) FROM market_reports").fetchone()[0]
+            raw_paths_before = [
+                r["raw_path"]
+                for r in self.store._conn.execute("SELECT raw_path FROM raw_drive_files").fetchall()
+            ]
+        for p in raw_paths_before:
+            self.assertTrue(p and os.path.exists(p), f"Expected raw file on disk: {p}")
+
+        # Now move both V3.1 files into Archive/ on Drive (even WITHOUT bumping modified_time)
+        self.client.mock_files["f_v3_posts"]["folder_path"] = "Threads/Archive"
+        self.client.mock_files["f_v3_report"]["folder_path"] = "Reports/Archive"
+
+        res2 = self.sync_service.sync_now(trigger_source="after_move_to_archive")
+        self.assertEqual(res2["status"], "completed")
+
+        # 1) Moved files no longer participate in active/current stats, items, trends_snapshot, screening, or reports
+        stats_after = self.store.get_stats()
+        self.assertLess(stats_after["total_items"], total_before)
+        self.assertIsNone(stats_after.get("trends_snapshot"))
+        self.assertIsNone(stats_after.get("latest_v3_screening"))
+        self.assertEqual(len(self.store.list_reports()), 0)
+
+        active_items = self.store.query_items(limit=200)["items"]
+        active_file_ids = {it["raw_file_id"] for it in active_items}
+        self.assertNotIn("f_v3_posts", active_file_ids)
+        self.assertIn("f_hist_v2", active_file_ids)
+
+        rep_after = self.store.build_evidence_report("all")
+        self.assertIsNone(rep_after.get("latest_muse_report"))
+        self.assertIsNone(rep_after.get("trends_snapshot"))
+
+        # 2) Historical SQLite records & raw JSON files on disk MUST remain 100% intact (never deleted)
+        with self.store._lock:
+            raw_files_total_after = self.store._conn.execute("SELECT COUNT(*) FROM raw_drive_files").fetchone()[0]
+            items_total_after = self.store._conn.execute("SELECT COUNT(*) FROM market_items").fetchone()[0]
+            reports_total_after = self.store._conn.execute("SELECT COUNT(*) FROM market_reports").fetchone()[0]
+            archived_flags = {
+                r["file_id"]: int(r["is_archived"] or 0)
+                for r in self.store._conn.execute("SELECT file_id, is_archived FROM raw_drive_files").fetchall()
+            }
+        self.assertEqual(raw_files_total_after, raw_files_total_before)
+        self.assertEqual(items_total_after, items_total_before)
+        self.assertEqual(reports_total_after, reports_total_before)
+        self.assertEqual(archived_flags.get("f_v3_posts"), 1)
+        self.assertEqual(archived_flags.get("f_v3_report"), 1)
+        self.assertEqual(archived_flags.get("f_hist_v2"), 0)
+        for p in raw_paths_before:
+            self.assertTrue(os.path.exists(p), f"Historical raw file was deleted: {p}")
+
+        # Explicit include_archived=True still sees full historical data
+        self.assertEqual(len(self.store.list_reports(include_archived=True)), 1)
+        self.assertEqual(self.store.query_items(limit=200, include_archived=True)["total"], items_total_before)
+
+    def test_crawl_center_custom_count_polling_and_cross_run_filters(self):
+        """Crawl Center supports exact custom requested_count, progress metrics, single 10s tab-scoped polling, activity filters, and pushes dedup registry on sync."""
+        orig_runtime = app_ui.get_market_runtime
+        app_ui.get_market_runtime = lambda: {
+            "store": self.store,
+            "client": self.client,
+            "sync_service": self.sync_service,
+            "remote_poller": self.poller,
+        }
+        try:
+            client = app_ui.app.test_client()
+
+            # 1) Exact custom requested_count passes through cleanly (e.g. 37) and rejects out-of-range
+            post_ok = client.post(
+                "/api/remote/crawl_requests",
+                json={"platform": "threads", "requested_count": 37, "keywords": "kem chong nang"},
+            )
+            self.assertEqual(post_ok.status_code, 200)
+            ok_json = post_ok.get_json()
+            self.assertTrue(ok_json["ok"])
+            self.assertEqual(ok_json["request"]["requested_count"], 37)
+
+            post_bad = client.post(
+                "/api/remote/crawl_requests",
+                json={"platform": "threads", "requested_count": 0, "keywords": "bad"},
+            )
+            self.assertEqual(post_bad.status_code, 400)
+
+            # 2) Ingest multi-run items & test /api/market/items?activity_filter=...
+            run_a = {
+                "run_id": "ui-run-1",
+                "platform": "threads",
+                "crawled_at": "2026-11-27T08:00:00Z",
+                "records": [{"post_id": "UI_P1", "post_url": "https://threads.net/@a/post/UI_P1", "views": 100, "likes": 10}],
+            }
+            run_b = {
+                "run_id": "ui-run-2",
+                "platform": "threads",
+                "crawled_at": "2026-11-27T12:00:00Z",
+                "records": [
+                    {"post_id": "UI_P1", "post_url": "https://threads.net/@a/post/UI_P1", "views": 800, "likes": 45},
+                    {"post_id": "UI_P2", "post_url": "https://threads.net/@b/post/UI_P2", "views": None, "likes": 5},
+                ],
+            }
+            self.client.add_drive_file("f_ui_1", "threads_trend_ui1.json", json.dumps(run_a).encode("utf-8"), "2026-11-27T08:00:00Z", "md5_ui1")
+            s1 = self.sync_service.sync_now(trigger_source="test_ui_1")
+            self.assertEqual(s1["new_count"], 1)
+            self.client.add_drive_file("f_ui_2", "threads_trend_ui2.json", json.dumps(run_b).encode("utf-8"), "2026-11-27T12:00:00Z", "md5_ui2")
+            s2 = self.sync_service.sync_now(trigger_source="test_ui_2")
+            self.assertEqual(s2["new_count"], 1)
+            self.assertEqual(s2["engagement_updated_count"], 1)
+            self.assertEqual(s2["missing_views_count"], 1)
+            self.assertGreaterEqual(len(self.client.mock_registry), 2)
+
+            r_new = client.get("/api/market/items?activity_filter=new").get_json()
+            self.assertEqual(r_new["total"], 1)
+            self.assertEqual(r_new["items"][0]["post_id"], "UI_P2")
+
+            r_growth = client.get("/api/market/items?activity_filter=growth").get_json()
+            self.assertEqual(r_growth["total"], 1)
+            self.assertEqual(r_growth["items"][0]["post_id"], "UI_P1")
+            self.assertEqual(r_growth["items"][0]["last_views_delta"], 700)
+
+            r_all = client.get("/api/market/items?activity_filter=all").get_json()
+            self.assertEqual(r_all["total"], 2)
+
+            # 3) Verify UI HTML/JS structure enforces Crawl Center single 10s tab-scoped timer, manual Làm mới, custom input, progress indicator, and zero form reset on poll
+            html = client.get("/").get_data(as_text=True)
+            self.assertIn('type="number"', html)
+            self.assertIn("crawlRequestForm.requested_count", html)
+            self.assertIn("refreshCrawlCenter(true)", html)
+            self.assertIn("startCrawlCenterPolling()", html)
+            self.assertIn("stopCrawlCenterPolling()", html)
+            self.assertIn("}, 10000);", html)
+            self.assertIn("if (this.isCrawlCenterRefreshing) return;", html)
+            self.assertIn("Chưa đạt mục tiêu", html)
+            self.assertIn("Bài mới", html)
+            self.assertIn("Tăng trưởng", html)
+            self.assertIn("Toàn bộ lịch sử", html)
+            self.assertIn("Lịch sử Engagement Snapshots", html)
+            self.assertIn("formatViewsDisplay(item)", html)
+            self.assertIn("display_approx", html)
+            self.assertIn("📤 Shares:", html)
+            self.assertIn("🔁 Reposts:", html)
+        finally:
+            app_ui.get_market_runtime = orig_runtime
+
+    def test_v32_fail_closed_outbox_recovery_and_batching_over_500(self):
+        """V3.2: Client chunks >500 items without truncation, fails closed on registry outage, raises StaleClaimConflictError on 409, and recovers SQLite registry_sync_outbox on reconnect."""
+        from unittest.mock import MagicMock
+        from market_intelligence.cloudflare_client import StaleClaimConflictError
+
+        # 1) Real CloudflareBridgeClient batching over 550 items & fail-closed / 409 handling
+        real_client = CloudflareBridgeClient(
+            worker_url="https://example.workers.dev",
+            api_token="test-token-v32-real",
+            client_id="laptop-a",
+        )
+        batch_sizes_seen = []
+
+        def fake_req_ok(method, path, json_body=None, **kwargs):
+            chunk = (json_body or {}).get("items") or []
+            batch_sizes_seen.append((path, len(chunk)))
+            resp = MagicMock()
+            resp.ok = True
+            resp.status_code = 200
+            if path.endswith("/check"):
+                resp.json.return_value = {"ok": True, "existing": {}, "existing_keys": []}
+            else:
+                resp.json.return_value = {
+                    "ok": True,
+                    "new_count": len(chunk),
+                    "duplicate_count": 0,
+                    "updated_count": 0,
+                    "missing_views_count": 0,
+                    "total_processed": len(chunk),
+                }
+            return resp
+
+        real_client._request_with_retry = fake_req_ok
+        large_items = [{"platform": "threads", "dedup_key": f"threads:post:P{i}", "post_id": f"P{i}"} for i in range(550)]
+        chk = real_client.check_cross_run_dedup(large_items, batch_size=100)
+        rec = real_client.record_cross_run_dedup(large_items, run_id="run_550", batch_size=100)
+        self.assertEqual(len([b for b in batch_sizes_seen if b[0].endswith("/check")]), 6)
+        self.assertEqual(sum(b[1] for b in batch_sizes_seen if b[0].endswith("/check")), 550)
+        self.assertEqual(rec["total_processed"], 550)
+
+        # Fail-closed 503 check
+        def fake_req_503(method, path, json_body=None, **kwargs):
+            resp = MagicMock()
+            resp.ok = False
+            resp.status_code = 503
+            resp.text = '{"ok":false,"registry_unavailable":true}'
+            return resp
+
+        real_client._request_with_retry = fake_req_503
+        with self.assertRaises(RuntimeError) as ctx_503:
+            real_client.check_cross_run_dedup(large_items[:5])
+        self.assertIn("RegistryUnavailable", str(ctx_503.exception))
+
+        # Lease expired / conflict 409 check
+        def fake_req_409(method, path, json_body=None, **kwargs):
+            resp = MagicMock()
+            resp.ok = False
+            resp.status_code = 409
+            resp.text = '{"ok":false,"conflict":true}'
+            return resp
+
+        real_client._request_with_retry = fake_req_409
+        with self.assertRaises(StaleClaimConflictError):
+            real_client.record_cross_run_dedup(large_items[:2], request_id="crw_1", claimed_by="w1", attempt=1)
+
+        # 2) SyncService SQLite registry_sync_outbox crash/outage recovery across 250 items (3 chunks of 100, 100, 50)
+        big_payload = {
+            "run_id": "run_outbox_250",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T13:00:00Z",
+            "records": [
+                {
+                    "post_id": f"OB_{i}",
+                    "post_url": f"https://threads.net/@ob/post/OB_{i}",
+                    "views": 1000 + i,
+                    "likes": 10,
+                    "shares": 2,
+                    "reposts": 1,
+                }
+                for i in range(250)
+            ],
+        }
+        self.client.add_drive_file("f_ob_250", "threads_trend_ob250.json", json.dumps(big_payload).encode("utf-8"), "2026-11-27T13:00:00Z", "md5_ob250")
+
+        rec_calls = {"count": 0}
+        orig_rec = self.client.record_cross_run_dedup
+
+        def flaky_record(items, run_id=None, **kwargs):
+            rec_calls["count"] += 1
+            if rec_calls["count"] == 2:
+                raise RuntimeError("RegistryUnavailable: simulated mid-batch outage")
+            return orig_rec(items, run_id=run_id)
+
+        self.client.record_cross_run_dedup = flaky_record
+        res_outage = self.sync_service.sync_now(trigger_source="test_outbox_1")
+        self.assertEqual(res_outage["registry_sync_status"], "error")
+        pending_after_fail = self.store.list_pending_registry_batches()
+        self.assertEqual(len(pending_after_fail), 2)  # Chunk 1 succeeded & was acked; chunks 2 & 3 stay queued!
+
+        # Recover registry and replay pending outbox batches on next sync
+        self.client.record_cross_run_dedup = orig_rec
+        res_recover = self.sync_service.sync_now(trigger_source="test_outbox_2")
+        self.assertEqual(res_recover["registry_sync_status"], "ok")
+        self.assertEqual(len(self.store.list_pending_registry_batches()), 0)
+        self.assertEqual(len(self.client.mock_registry), 250)
+
+    def test_worker_v2_crawl_queue_signal_sql_real_sqlite(self):
+        """Real SQLite (D1 engine) validation of CRAWL_QUEUE_SIGNAL_SQL index plan & all queue/lease/registry states."""
+        import sqlite3
+        import re as _re
+        from pathlib import Path as _Path
+
+        root_p = _Path(ROOT_DIR)
+        worker_src = (root_p / "cloudflare-worker" / "worker.v2.js").read_text(encoding="utf-8")
+        m = _re.search(r"const\s+CRAWL_QUEUE_SIGNAL_SQL\s*=\s*`([^`]+)`", worker_src)
+        self.assertIsNotNone(m, "CRAWL_QUEUE_SIGNAL_SQL must exist in worker.v2.js")
+        sql = m.group(1)
+
+        conn = sqlite3.connect(":memory:")
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0001_v2_market_and_commands.sql").read_text(encoding="utf-8"))
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0003_cross_run_dedup_registry.sql").read_text(encoding="utf-8"))
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0004_seed_post_identity_index_171.sql").read_text(encoding="utf-8"))
+
+        now_iso = "2026-11-27T12:10:00.000Z"
+        past_iso = "2026-11-27T11:00:00.000Z"
+        future_iso = "2026-11-27T13:00:00.000Z"
+
+        # Verify zero unindexed table scans in SQLite query plan
+        plan_text = "\n".join(str(r) for r in conn.execute("EXPLAIN QUERY PLAN " + sql, (now_iso,)).fetchall())
+        self.assertIn("USING", plan_text)
+        self.assertNotIn("SCAN crawl_requests", plan_text)
+
+        def eval_sig():
+            return conn.execute(sql, (now_iso,)).fetchone()[0]
+
+        # 1. Empty queue
+        self.assertEqual(eval_sig(), 0)
+
+        # 2. Only ALL / TikTok / Shopee queued -> 0
+        for pid, plat in [("q_all", "all"), ("q_tk", "tiktok"), ("q_sh", "shopee")]:
+            conn.execute(
+                "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES (?, ?, 'kw', 20, 'queued', 0, 3, ?, ?)",
+                (pid, plat, now_iso, now_iso),
+            )
+        self.assertEqual(eval_sig(), 0)
+
+        # 3. Threads queued added -> 1
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('q_th1', 'threads', 'skincare', 50, 'queued', 0, 3, ?, ?)",
+            (now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 1)
+
+        # 4. Active running task (valid future lease) blocks -> 0
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, lease_expires_at, attempts, max_attempts, created_at, updated_at) VALUES ('r_act', 'threads', 'x', 10, 'running', ?, 1, 3, ?, ?)",
+            (future_iso, now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 0)
+
+        # 5. Lease expired on running task no longer blocks q_th1 -> 1
+        conn.execute("UPDATE crawl_requests SET lease_expires_at = ? WHERE id = 'r_act'", (past_iso,))
+        self.assertEqual(eval_sig(), 1)
+
+        # 6. Pending/errored registry_sync_outbox blocks -> 0; drained -> 1
+        conn.execute(
+            "INSERT INTO registry_sync_outbox (id, request_id, run_id, payload_json, status, attempts, created_at, updated_at) VALUES ('out_1', 'prev', 'run_prev', '[]', 'error', 1, ?, ?)",
+            (now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 0)
+        conn.execute("DELETE FROM registry_sync_outbox")
+        self.assertEqual(eval_sig(), 1)
+
+        # 7. Completed request with registry_sync_status=error/pending blocks -> 0; ok -> 1
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, result_summary_json, attempts, max_attempts, created_at, updated_at) VALUES ('c_err', 'threads', 'x', 10, 'completed', '{\"registry_sync_status\":\"error\"}', 1, 3, ?, ?)",
+            (now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 0)
+        conn.execute("UPDATE crawl_requests SET result_summary_json = '{\"registry_sync_status\":\"ok\"}' WHERE id = 'c_err'")
+        self.assertEqual(eval_sig(), 1)
+
+        # 8. Consecutive Threads requests transition: running -> 0, completed -> 1 for second, completed -> 0
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('q_th2', 'threads', 'makeup', 30, 'queued', 0, 3, '2026-11-27T12:10:05.000Z', '2026-11-27T12:10:05.000Z')"
+        )
+        conn.execute("UPDATE crawl_requests SET status = 'running', lease_expires_at = ?, attempts = 1 WHERE id = 'q_th1'", (future_iso,))
+        self.assertEqual(eval_sig(), 0)
+        conn.execute("UPDATE crawl_requests SET status = 'completed', result_summary_json = '{\"registry_sync_status\":\"ok\"}' WHERE id = 'q_th1'")
+        self.assertEqual(eval_sig(), 1)
+        conn.execute("UPDATE crawl_requests SET status = 'completed', result_summary_json = '{\"registry_sync_status\":\"ok\"}' WHERE id = 'q_th2'")
+        self.assertEqual(eval_sig(), 0)
+        conn.close()
+
+    def test_worker_v2_phase2_single_flight_and_guarded_sql_real_sqlite(self):
+        """Real SQLite validation of Phase 2 claim single-flight SQL, progress guard SQL, and fail-retry SQL."""
+        import sqlite3
+        from pathlib import Path as _Path
+
+        root_p = _Path(ROOT_DIR)
+        conn = sqlite3.connect(":memory:")
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0001_v2_market_and_commands.sql").read_text(encoding="utf-8"))
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0003_cross_run_dedup_registry.sql").read_text(encoding="utf-8"))
+
+        t0 = "2026-11-27T14:20:00.000Z"
+        lease_future = "2026-11-27T14:50:00.000Z"
+        lease_past = "2026-11-27T13:50:00.000Z"
+
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('crw_all_p2', 'all', 'k', 10, 'queued', 0, 3, '2026-11-27T14:00:00.000Z', ?)",
+            (t0,),
+        )
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('crw_th1_p2', 'threads', 'beauty', 20, 'queued', 0, 3, '2026-11-27T14:01:00.000Z', ?)",
+            (t0,),
+        )
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('crw_th2_p2', 'threads', 'fashion', 20, 'queued', 0, 3, '2026-11-27T14:02:00.000Z', ?)",
+            (t0,),
+        )
+
+        claim_sql = """
+            UPDATE crawl_requests
+            SET status = 'running', claimed_by = ?, claimed_at = ?, lease_expires_at = ?, attempts = attempts + 1, updated_at = ?
+            WHERE id = ?
+              AND status = 'queued'
+              AND lower(trim(platform)) = 'threads'
+              AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+              AND NOT EXISTS (
+                  SELECT 1 FROM crawl_requests r_run
+                  WHERE r_run.status = 'running'
+                    AND (r_run.lease_expires_at IS NULL OR r_run.lease_expires_at >= ?)
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM registry_sync_outbox
+                  WHERE status IN ('pending', 'error', 'processing', 'done')
+              )
+        """
+        # Attempting to claim 'all' fails even when queued
+        cur = conn.execute(claim_sql, ("muse-ai", t0, lease_future, t0, "crw_all_p2", t0))
+        self.assertEqual(cur.rowcount, 0)
+
+        # Claiming oldest Threads wins once
+        cur = conn.execute(claim_sql, ("muse-ai", t0, lease_future, t0, "crw_th1_p2", t0))
+        self.assertEqual(cur.rowcount, 1)
+
+        # Single-flight blocks second Threads claim while crw_th1_p2 runs with valid lease
+        cur = conn.execute(claim_sql, ("muse-ai", t0, lease_future, t0, "crw_th2_p2", t0))
+        self.assertEqual(cur.rowcount, 0)
+
+        # Progress guard SQL enforces owner, attempt, running status, and unexpired lease
+        prog_sql = """
+            UPDATE crawl_requests
+            SET result_summary_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+        """
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":10}", t0, "crw_th1_p2", "wrong", 1, t0)).rowcount, 0)
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":10}", t0, "crw_th1_p2", "muse-ai", 2, t0)).rowcount, 0)
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":10}", t0, "crw_th1_p2", "muse-ai", 1, t0)).rowcount, 1)
+
+        # Expire lease -> progress update fails
+        conn.execute("UPDATE crawl_requests SET lease_expires_at = ? WHERE id = 'crw_th1_p2'", (lease_past,))
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":20}", t0, "crw_th1_p2", "muse-ai", 1, t0)).rowcount, 0)
+        conn.close()
 
 
 if __name__ == "__main__":

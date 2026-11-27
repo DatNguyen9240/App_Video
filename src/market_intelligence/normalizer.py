@@ -11,6 +11,7 @@ and ignores Archive/ folders cleanly.
 import hashlib
 import json
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -23,6 +24,7 @@ NON_CRAWL_ROLES = {
     "market_report",
     "research_doc",
     "capability_test",
+    "identity_index",
 }
 
 
@@ -51,7 +53,11 @@ def _clean_int(val: Any) -> Optional[int]:
     if isinstance(val, float):
         return int(val)
     if isinstance(val, str):
-        digits = re.sub(r"[^\d-]", "", val.strip())
+        s = val.strip()
+        # Never corrupt rounded display strings like "513K" or "1.2M" into "513" or "12"
+        if re.search(r"[a-zA-Z]", s):
+            return None
+        digits = re.sub(r"[^\d-]", "", s)
         if digits and digits != "-":
             try:
                 return int(digits)
@@ -110,6 +116,15 @@ def classify_json_file(
     """
     fname = (file_name or "").lower()
     if isinstance(raw_obj, dict):
+        if "post_identity_index" in fname or (
+            isinstance(raw_obj.get("entries"), list)
+            and ("completeness_audit" in raw_obj or "index" in raw_obj or "primary_key" in raw_obj)
+        ):
+            return "identity_index"
+        if "contract_amendment" in fname or (
+            "document" in raw_obj and "proposed_version" in raw_obj
+        ):
+            return "data_contract"
         if "data_contract" in fname or (
             "contract" in raw_obj
             and ("global_rules" in raw_obj or "update_rules_for_app_video" in raw_obj or "threads_trend_record" in raw_obj)
@@ -216,14 +231,20 @@ def detect_platform(
 
 
 def detect_schema_version(raw_obj: Any, file_role: str = "crawl_data", file_name: Optional[str] = None) -> str:
-    """Identify the JSON schema variant for auditability."""
+    """Identify the JSON schema variant (V1, V2, V3.1, V3.2) for auditability."""
     fname = (file_name or "").lower()
     if file_role != "crawl_data":
         if isinstance(raw_obj, dict):
+            has_v32 = bool(
+                str(raw_obj.get("version") or "").startswith("3.2")
+                or "counters" in raw_obj
+                or isinstance((raw_obj.get("sections") or {}).get("9_growth_tracking"), list)
+                or "10_priority_actions" in (raw_obj.get("sections") or {})
+            )
             if file_role == "market_report" and (
                 fname.startswith("trend_report") or isinstance(raw_obj.get("sections"), dict) or "run_status" in raw_obj
             ):
-                return f"{file_role}:v3.1"
+                return f"{file_role}:{'v3.2' if has_v32 else 'v3.1'}"
             if raw_obj.get("version") or raw_obj.get("schema_version"):
                 return f"{file_role}:{raw_obj.get('schema_version') or raw_obj.get('version')}"
         return file_role
@@ -231,11 +252,18 @@ def detect_schema_version(raw_obj: Any, file_role: str = "crawl_data", file_name
         explicit = _clean_str(raw_obj.get("schema_version") or raw_obj.get("version"))
         if explicit:
             return explicit
+        records = raw_obj.get("records")
+        if "counters" in raw_obj or (
+            isinstance(records, list)
+            and records
+            and isinstance(records[0], dict)
+            and any(k in records[0] for k in ("views_display", "views_precision", "classification", "similar_content"))
+        ):
+            return "data_contract_v3_2"
         if fname.startswith("threads_trend") or any(
             k in raw_obj for k in ("tier_counts", "group_counts", "trends_snapshot", "screening")
         ):
             return "data_contract_v3_1"
-        records = raw_obj.get("records")
         if isinstance(records, list) and records and isinstance(records[0], dict):
             if any(k in records[0] for k in ("trend_tier", "verification_status", "viral_analysis", "post_pk")):
                 return "data_contract_v3_1"
@@ -298,9 +326,20 @@ def _canonical_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
     try:
-        parsed = urlparse(url)
+        raw = url.strip()
+        if not raw:
+            return None
+        parsed = urlparse(raw)
+        if not parsed.scheme and not parsed.netloc:
+            return raw
+        scheme = (parsed.scheme or "https").lower()
+        netloc = (parsed.netloc or "").lower()
+        if netloc in ("threads.com", "www.threads.com", "www.threads.net", "threads.net"):
+            netloc = "threads.net"
+        elif netloc in ("tiktok.com", "m.tiktok.com", "www.tiktok.com"):
+            netloc = "www.tiktok.com"
         clean_path = parsed.path.rstrip("/")
-        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{clean_path}"
+        return f"{scheme}://{netloc}{clean_path}"
     except Exception:
         return url.strip()
 
@@ -321,30 +360,39 @@ def build_dedup_key(
     frame_start_at: Optional[str] = None,
 ) -> str:
     """
-    Build deterministic deduplication / upsert key per Data Contract V2:
-      - Threads: post_id
-      - TikTok: video_id (or author_handle + rank + run_id)
-      - Shopee: shop_id+item_id or item_id or normalized product_name (+ run_id/frame)
+    Build deterministic cross-run deduplication key:
+      1. Primary: platform + post_id / platform-native item ID (Shopee shop_id+item_id or item_id, TikTok video_id/post_id, Threads post_id)
+      2. Secondary fallback: canonical_url across crawl runs
+      3. Tertiary fallback: external_id / platform-specific legacy composite or content hash
     """
     plat = platform or "unknown"
+    c_url = _canonical_url(url)
 
     if plat == "shopee":
         if shop_id and item_id:
             return f"shopee:item:{shop_id}:{item_id}"
         if item_id:
             return f"shopee:item:{item_id}"
+        if post_id:
+            return f"shopee:post:{post_id}"
+        if c_url:
+            return f"shopee:url:{c_url}"
+        if external_id:
+            return f"shopee:ext:{external_id}"
         if title:
             clean_name = re.sub(r"\s+", " ", title.strip().lower())
             name_hash = hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:16]
             scope = run_id or frame_start_at or "global"
             return f"shopee:name:{scope}:{name_hash}"
-        if post_id:
-            return f"shopee:post:{post_id}"
     elif plat == "tiktok":
         if item_id:
             return f"tiktok:item:{item_id}"
         if post_id:
             return f"tiktok:post:{post_id}"
+        if c_url:
+            return f"tiktok:url:{c_url}"
+        if external_id:
+            return f"tiktok:ext:{external_id}"
         if author_handle and run_id:
             rank_part = str(rank) if rank is not None else "na"
             return f"tiktok:handle_run:{run_id}:{author_handle.strip().lower()}:{rank_part}"
@@ -353,18 +401,18 @@ def build_dedup_key(
             return f"threads:post:{post_id}"
         if item_id:
             return f"threads:item:{item_id}"
+        if c_url:
+            return f"threads:url:{c_url}"
     else:
         if post_id:
             return f"{plat}:post:{post_id}"
         if item_id:
             return f"{plat}:item:{item_id}"
+        if c_url:
+            return f"{plat}:url:{c_url}"
 
     if external_id:
         return f"{plat}:ext:{external_id}"
-
-    c_url = _canonical_url(url)
-    if c_url:
-        return f"{plat}:url:{c_url}"
 
     fingerprint_src = json.dumps(
         [plat, author_handle or "", published_at or "", title or "", text_content or ""],
@@ -453,10 +501,15 @@ def normalize_record(
         or item.get("frame_start_at")
     )
     crawled_at = _clean_str(
-        item.get("collected_at")
+        item.get("crawled_at")
+        or item.get("crawl_time")
+        or envelope.get("crawled_at")
+        or envelope.get("crawl_time")
+        or item.get("collected_at")
         or envelope.get("ended_at")
         or envelope.get("collected_at")
         or envelope.get("started_at")
+        or item.get("views_measured_at")
     )
     language = _clean_str(item.get("language"))
 
@@ -477,6 +530,28 @@ def normalize_record(
         else (item.get("sold") if "sold" in item else item.get("historical_sold"))
     )
     rating = _clean_float(item.get("rating") if "rating" in item else item.get("rating_star"))
+
+    # Data Contract V3.2 views, identity, shares/reposts & classification metadata
+    raw_views_val = item.get("views") if "views" in item else (item.get("play_count") if "play_count" in item else item.get("views_count"))
+    views_display = _clean_str(item.get("views_display"))
+    if not views_display and isinstance(raw_views_val, str) and re.search(r"[kKmMbB]", raw_views_val):
+        views_display = raw_views_val.strip()
+    views_precision = _clean_str(item.get("views_precision"))
+    if views_precision:
+        views_precision = views_precision.lower()
+    elif views_display and views_count is None:
+        views_precision = "rounded_display"
+    views_source = _clean_str(item.get("views_source"))
+    views_measured_at = _clean_str(item.get("views_measured_at"))
+    views_evidence_url = _clean_str(item.get("views_evidence_url"))
+    classification = _clean_str(item.get("classification"))
+    if classification:
+        classification = classification.upper()
+    content_hash = _clean_str(item.get("content_hash"))
+    similar_content = bool(item.get("similar_content")) if item.get("similar_content") is not None else None
+    similar_to_post_id = _clean_str(item.get("similar_to_post_id"))
+    engagement_rate_on_views = _clean_float(item.get("engagement_rate_on_views"))
+    engagement_rate_approx = bool(item.get("engagement_rate_approx")) if item.get("engagement_rate_approx") is not None else None
 
     # Data Contract V3.1 first-class fields (kept None on V1/V2 if absent)
     post_pk = _clean_str(item.get("post_pk") or item.get("pk"))
@@ -585,6 +660,20 @@ def normalize_record(
         "data_quality_status",
         "upcoming_vouchers",
         "trending_context",
+        "views_display",
+        "views_precision",
+        "views_source",
+        "views_measured_at",
+        "views_evidence_url",
+        "classification",
+        "content_hash",
+        "similar_content",
+        "similar_to_post_id",
+        "engagement_rate_on_views",
+        "engagement_rate_approx",
+        "first_seen_at",
+        "last_seen_at",
+        "observation_count",
     ):
         if meta_key in item:
             val = item.get(meta_key)
@@ -637,6 +726,7 @@ def normalize_record(
         "text_content": text_content,
         "summary_vi": summary_vi or text_content,
         "url": url,
+        "canonical_url": _canonical_url(url),
         "evidence_url": evidence_url,
         "content_group": content_group,
         "purchase_intent": purchase_intent,
@@ -649,6 +739,20 @@ def normalize_record(
         "reposts_count": reposts_count,
         "quotes_count": quotes_count,
         "views_count": views_count,
+        "views_display": views_display,
+        "views_precision": views_precision,
+        "views_source": views_source,
+        "views_measured_at": views_measured_at,
+        "views_evidence_url": views_evidence_url,
+        "classification": classification,
+        "content_hash": content_hash,
+        "similar_content": similar_content,
+        "similar_to_post_id": similar_to_post_id,
+        "engagement_rate_on_views": engagement_rate_on_views,
+        "engagement_rate_approx": engagement_rate_approx,
+        "record_first_seen_at": _clean_str(item.get("first_seen_at")),
+        "record_last_seen_at": _clean_str(item.get("last_seen_at")),
+        "record_observation_count": _clean_int(item.get("observation_count")),
         "price": price,
         "sold_count": sold_count,
         "rating": rating,
@@ -667,6 +771,180 @@ def normalize_record(
         "raw_item_index": item_index,
         "raw_payload_json": json.dumps(item, ensure_ascii=False),
     }
+
+
+def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) -> Dict[str, Any]:
+    """
+    Extract canonical Data Contract V3.2 root/screening counters strictly without fabricating absent operands.
+    Verifies reconciliation:
+      unique_candidate_count == new_qualified_count + unverified_count + duplicate_history_count + updated_metrics_count + rejected_count
+    (`similar_content_count` is tracked outside the reconciliation sum).
+    """
+    if not isinstance(raw_obj, dict):
+        return {}
+    sections = raw_obj.get("sections") if isinstance(raw_obj.get("sections"), dict) else {}
+    c = raw_obj.get("counters") if isinstance(raw_obj.get("counters"), dict) else {}
+    s1 = (
+        sections.get("1_screening")
+        or raw_obj.get("section_1_screening")
+        or raw_obj.get("screening")
+        or {}
+    )
+    if not isinstance(s1, dict):
+        s1 = {}
+    req_ctx = raw_obj.get("request_context") if isinstance(raw_obj.get("request_context"), dict) else {}
+
+    def pick_int(*vals: Any) -> Optional[int]:
+        for v in vals:
+            res = _clean_int(v)
+            if res is not None:
+                return res
+        return None
+
+    requested_count = pick_int(c.get("requested_count"), req_ctx.get("requested_count"), raw_obj.get("requested_count"), s1.get("requested_count"))
+    scanned_count = pick_int(c.get("scanned_count"), c.get("scanned_posts"), s1.get("scanned_count"), s1.get("scanned_posts"))
+    unique_candidate_count = pick_int(c.get("unique_candidate_count"), s1.get("unique_candidate_count"))
+    new_count = pick_int(c.get("new_count"), s1.get("new_count"))
+    new_qualified_count = pick_int(
+        c.get("new_qualified_count"),
+        s1.get("new_qualified_count"),
+        s1.get("qualified_count") if legacy_fallback_qualified else None,
+        s1.get("qualified_posts") if legacy_fallback_qualified else None,
+    )
+    duplicate_current_run_count = pick_int(c.get("duplicate_current_run_count"), s1.get("duplicate_current_run_count"))
+    if duplicate_current_run_count is None and scanned_count is not None and unique_candidate_count is not None:
+        duplicate_current_run_count = max(0, scanned_count - unique_candidate_count)
+    duplicate_history_count = pick_int(
+        c.get("duplicate_history_count"),
+        s1.get("duplicate_history_count"),
+        s1.get("duplicate_count"),
+        s1.get("duplicates"),
+    )
+    updated_metrics_count = pick_int(
+        c.get("updated_metrics_count"),
+        s1.get("updated_metrics_count"),
+        s1.get("updated_count"),
+    )
+    similar_content_count = pick_int(c.get("similar_content_count"), s1.get("similar_content_count"))
+    missing_views_count = pick_int(c.get("missing_views_count"), s1.get("missing_views_count"))
+    unverified_count = pick_int(c.get("unverified_count"), s1.get("unverified_count"))
+    rejected_count = pick_int(
+        c.get("rejected_count"),
+        c.get("rejected"),
+        s1.get("rejected_count"),
+        s1.get("rejected_posts"),
+        s1.get("rejected"),
+    )
+
+    if "target_achieved" in c and isinstance(c.get("target_achieved"), bool):
+        target_achieved: Optional[bool] = bool(c["target_achieved"])
+    elif new_qualified_count is not None and requested_count is not None:
+        target_achieved = bool(new_qualified_count >= requested_count)
+    else:
+        target_achieved = None
+
+    stop_reason = _clean_str(c.get("stop_reason") or s1.get("stop_reason") or raw_obj.get("stop_reason"))
+
+    reconcile_terms = (
+        unique_candidate_count,
+        new_qualified_count,
+        unverified_count,
+        duplicate_history_count,
+        updated_metrics_count,
+        rejected_count,
+    )
+    if all(v is not None for v in reconcile_terms):
+        expected_sum = (
+            new_qualified_count
+            + unverified_count
+            + duplicate_history_count
+            + updated_metrics_count
+            + rejected_count
+        )
+        counters_reconciled: Optional[bool] = (unique_candidate_count == expected_sum)
+        reconciliation_diff: Optional[int] = unique_candidate_count - expected_sum
+    else:
+        counters_reconciled = None
+        reconciliation_diff = None
+
+    return {
+        "requested_count": requested_count,
+        "scanned_count": scanned_count,
+        "unique_candidate_count": unique_candidate_count,
+        "new_count": new_count,
+        "new_qualified_count": new_qualified_count,
+        "duplicate_current_run_count": duplicate_current_run_count,
+        "duplicate_history_count": duplicate_history_count,
+        "updated_metrics_count": updated_metrics_count,
+        "similar_content_count": similar_content_count,
+        "missing_views_count": missing_views_count,
+        "unverified_count": unverified_count,
+        "rejected_count": rejected_count,
+        "target_achieved": target_achieved,
+        "stop_reason": stop_reason,
+        "counters_reconciled": counters_reconciled,
+        "reconciliation_diff": reconciliation_diff,
+    }
+
+
+def is_valid_v32_views_provenance(item: Dict[str, Any]) -> bool:
+    """
+    Validate full Data Contract V3.2 views provenance criteria:
+      - Non-negative integer views_count
+      - Non-empty views_display (e.g. '513K', '3.6K', '850')
+      - Allowed views_precision ('rounded_display', 'display_approx', 'exact')
+      - Valid views_source ('threads_web_browser' for Threads)
+      - Valid ISO timestamp/date views_measured_at
+      - Valid HTTP/HTTPS views_evidence_url (Threads host when platform == 'threads')
+    Having only numeric views without provenance MUST NOT qualify.
+    """
+    if not isinstance(item, dict):
+        return False
+    views_cnt = item.get("views_count")
+    if views_cnt is None:
+        views_cnt = _clean_int(item.get("views"))
+    if views_cnt is None or isinstance(views_cnt, bool) or int(views_cnt) < 0:
+        return False
+
+    plat = str(item.get("platform") or "threads").strip().lower() or "threads"
+    v_disp = _clean_str(item.get("views_display"))
+    if not v_disp or not re.match(r"^\d+(?:[.,]\d+)?\s*[KMBkmb]?$", v_disp):
+        return False
+
+    v_prec = (_clean_str(item.get("views_precision")) or "").lower()
+    if v_prec not in {"rounded_display", "display_approx", "exact"}:
+        return False
+
+    v_src = (_clean_str(item.get("views_source")) or "").lower()
+    if plat == "threads":
+        if v_src != "threads_web_browser":
+            return False
+    elif not v_src:
+        return False
+
+    v_meas = _clean_str(item.get("views_measured_at"))
+    if not v_meas:
+        return False
+    try:
+        iso_norm = v_meas[:-1] + "+00:00" if v_meas.endswith("Z") else v_meas
+        datetime.fromisoformat(iso_norm)
+    except Exception:
+        return False
+
+    v_ev = _clean_str(item.get("views_evidence_url"))
+    if not v_ev:
+        return False
+    try:
+        parsed_ev = urlparse(v_ev)
+    except Exception:
+        return False
+    if parsed_ev.scheme.lower() not in {"http", "https"} or not parsed_ev.netloc:
+        return False
+    if plat == "threads":
+        host = parsed_ev.netloc.lower()
+        if "threads.net" not in host and "threads.com" not in host:
+            return False
+    return True
 
 
 def normalize_payload(
