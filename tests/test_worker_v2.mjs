@@ -104,9 +104,20 @@ class MockD1Database {
         if (norm.startsWith("SELECT COUNT(*) AS cnt FROM crawl_notifications")) {
           return { cnt: db.notifications.filter((n) => n.status === "delivery_uncertain").length };
         }
-        if (norm.startsWith("SELECT status, notified_at FROM crawl_requests WHERE id = ?")) {
+        if (
+          norm.startsWith("SELECT status, notified_at FROM crawl_requests WHERE id = ?") ||
+          norm.startsWith("SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?") ||
+          norm.startsWith("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
+        ) {
           const row = db.crawlRequests.find((c) => c.id === this.args[0]);
-          return row ? { status: row.status, notified_at: row.notified_at } : null;
+          return row
+            ? {
+                id: row.id,
+                status: row.status,
+                notified_at: row.notified_at,
+                result_summary_json: row.result_summary_json,
+              }
+            : null;
         }
         if (norm.startsWith("SELECT value FROM worker_runtime_state WHERE key = ?")) {
           const v = db.runtimeState.get(this.args[0]);
@@ -200,8 +211,11 @@ class MockD1Database {
         }
         if (norm.startsWith("SELECT COUNT(*) AS cnt FROM registry_sync_outbox")) {
           const [reqId] = this.args;
+          const matchesStatus = norm.includes("status IN ('pending', 'error')")
+            ? (o) => ["pending", "error"].includes(o.status)
+            : () => true;
           return {
-            cnt: db.registryOutbox.filter((o) => o.request_id === reqId && ["pending", "error"].includes(o.status)).length,
+            cnt: db.registryOutbox.filter((o) => o.request_id === reqId && matchesStatus(o)).length,
           };
         }
         return null;
@@ -215,10 +229,28 @@ class MockD1Database {
           };
         }
         if (norm.startsWith("SELECT * FROM registry_sync_outbox WHERE request_id = ?")) {
+          const reqId = this.args[0];
+          const staleCutoff = this.args.length > 1 ? String(this.args[1] || "") : null;
+          return {
+            results: db.registryOutbox
+              .filter(
+                (o) =>
+                  o.request_id === reqId &&
+                  (["pending", "error"].includes(o.status) ||
+                    (staleCutoff !== null && o.status === "processing" && String(o.updated_at || "") <= staleCutoff))
+              )
+              .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+              .map((o) => ({ ...o })),
+          };
+        }
+        if (
+          norm.startsWith("SELECT id, status, last_error, updated_at FROM registry_sync_outbox WHERE request_id = ?") ||
+          norm.startsWith("SELECT status FROM registry_sync_outbox WHERE request_id = ?")
+        ) {
           const [reqId] = this.args;
           return {
             results: db.registryOutbox
-              .filter((o) => o.request_id === reqId && ["pending", "error"].includes(o.status))
+              .filter((o) => o.request_id === reqId)
               .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
               .map((o) => ({ ...o })),
           };
@@ -226,8 +258,16 @@ class MockD1Database {
         if (norm.startsWith("SELECT DISTINCT request_id FROM registry_sync_outbox")) {
           const seenReqs = [];
           const set = new Set();
+          const hasStaleParam = norm.includes("status = 'processing'");
+          const staleCutoff = hasStaleParam ? String(this.args[0] || "") : null;
+          const limit = Number((hasStaleParam ? this.args[1] : this.args[0]) || 10);
           const ordered = db.registryOutbox
-            .filter((o) => ["pending", "error"].includes(o.status) && o.request_id)
+            .filter(
+              (o) =>
+                o.request_id &&
+                (["pending", "error", "done"].includes(o.status) ||
+                  (staleCutoff !== null && o.status === "processing" && String(o.updated_at || "") <= staleCutoff))
+            )
             .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
           for (const o of ordered) {
             if (!set.has(o.request_id)) {
@@ -235,7 +275,7 @@ class MockD1Database {
               seenReqs.push({ request_id: o.request_id });
             }
           }
-          return { results: seenReqs.slice(0, Number(this.args[0] || 10)) };
+          return { results: seenReqs.slice(0, limit) };
         }
         if (norm.includes("FROM app_commands")) {
           return { results: [...db.commands].reverse().slice(0, 8) };
@@ -595,14 +635,42 @@ class MockD1Database {
           });
           return { meta: { changes: 1 } };
         }
+        if (norm.startsWith("DELETE FROM registry_sync_outbox WHERE request_id = ? AND status = 'done'")) {
+          const before = db.registryOutbox.length;
+          const [reqId] = this.args;
+          db.registryOutbox = db.registryOutbox.filter((o) => !(o.request_id === reqId && o.status === "done"));
+          return { meta: { changes: before - db.registryOutbox.length } };
+        }
         if (norm.startsWith("DELETE FROM registry_sync_outbox WHERE id = ?")) {
           const before = db.registryOutbox.length;
           db.registryOutbox = db.registryOutbox.filter((o) => o.id !== this.args[0]);
           return { meta: { changes: before - db.registryOutbox.length } };
         }
+        if (norm.startsWith("UPDATE registry_sync_outbox SET status = 'processing'")) {
+          const [updated_at, id, staleCutoff] = this.args;
+          const row = db.registryOutbox.find(
+            (o) =>
+              o.id === id &&
+              (["pending", "error"].includes(o.status) ||
+                (o.status === "processing" && String(o.updated_at || "") <= String(staleCutoff || "")))
+          );
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "processing";
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE registry_sync_outbox SET status = 'done'")) {
+          const [last_error, updated_at, id] = this.args;
+          const row = db.registryOutbox.find((o) => o.id === id && (!norm.includes("AND status = 'processing'") || o.status === "processing"));
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "done";
+          row.last_error = last_error;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
         if (norm.startsWith("UPDATE registry_sync_outbox SET status = 'error'")) {
           const [last_error, updated_at, id] = this.args;
-          const row = db.registryOutbox.find((o) => o.id === id);
+          const row = db.registryOutbox.find((o) => o.id === id && (!norm.includes("AND status = 'processing'") || o.status === "processing"));
           if (!row) return { meta: { changes: 0 } };
           row.status = "error";
           row.attempts = Number(row.attempts || 0) + 1;
@@ -3686,8 +3754,11 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(failComp.status, 503);
     const failJson = await failComp.json();
     assert.equal(failJson.recovery_pending, true);
-    assert.equal(env17.DB.registryOutbox.length, 1, "Chunk #2 (50 items) must remain durable in registry_sync_outbox");
-    assert.equal(env17.DB.registryOutbox[0].status, "error");
+    const unfinishedOutbox17 = env17.DB.registryOutbox.filter((o) => o.status !== "done");
+    const doneOutbox17 = env17.DB.registryOutbox.filter((o) => o.status === "done");
+    assert.equal(unfinishedOutbox17.length, 1, "Chunk #2 (50 items) must remain durable in registry_sync_outbox");
+    assert.equal(unfinishedOutbox17[0].status, "error");
+    assert.equal(doneOutbox17.length, 1, "Chunk #1 stays marked done until all chunks finalize");
     const refreshedErrRow = env17.DB.crawlRequests.find((c) => c.id === crw17.id);
     const savedErrSummary = JSON.parse(refreshedErrRow.result_summary_json);
     assert.equal(savedErrSummary.registry_sync_status, "error");
@@ -3899,6 +3970,354 @@ assert.equal(v3StartBtns.length, 6);
     assert.ok(m0004Sql17.includes("threads:post:DgC-8Jun454|threads-poc-001-20261125|2026-11-25|:140::::"));
   } finally {
     globalThis.fetch = prevFetch17;
+  }
+}
+
+
+// 18. Pre-deploy Regression: Concurrent Cron vs /complete Retry Outbox Race & Telegram Pending/Error Suppression
+{
+  const tgCalls18 = [];
+  const env18 = {
+    APP_VIDEO_API_TOKEN: "secret18",
+    TELEGRAM_OWNER_ID: "999018",
+    TELEGRAM_BOT_TOKEN_VIDEO: "bot18-token",
+    TELEGRAM_WEBHOOK_SECRET: "whsec18",
+    GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: "sa@test.iam.gserviceaccount.com", private_key: privateKey }),
+    GOOGLE_DRIVE_FOLDER_ID: "drive-root-18",
+    DB: new MockD1Database(),
+  };
+  const h18 = {
+    Authorization: "Bearer secret18",
+    "Content-Type": "application/json",
+    "X-App-Client-Id": "laptop-18",
+  };
+
+  let mockDriveReports18 = [];
+  const prevFetch18 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes("oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "ya29.mock18", expires_in: 3600 }), { status: 200 });
+    }
+    if (u.includes("www.googleapis.com/drive/v3/files") && !u.includes("alt=media")) {
+      const urlObj = new URL(u);
+      const q = urlObj.searchParams.get("q") || "";
+      if (q.includes("'01_Market_Data'")) {
+        return new Response(JSON.stringify({ files: [{ id: "market-18", name: "01_Market_Data" }] }), { status: 200 });
+      }
+      if (q.includes("'Reports'")) {
+        return new Response(JSON.stringify({ files: [{ id: "reports-18", name: "Reports" }] }), { status: 200 });
+      }
+      if (q.includes("'reports-18' in parents")) {
+        if (q.includes("vnd.google-apps.document")) {
+          return new Response(JSON.stringify({ files: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ files: mockDriveReports18.map((r) => r.file) }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ files: [] }), { status: 200 });
+    }
+    if (u.includes("www.googleapis.com/drive/v3/files/") && u.includes("alt=media")) {
+      const m = mockDriveReports18.find((r) => u.includes(encodeURIComponent(r.file.id)));
+      return new Response(JSON.stringify(m ? m.data : {}), { status: m ? 200 : 404 });
+    }
+    if (u.startsWith("https://api.telegram.org/")) {
+      const body = init.body ? JSON.parse(init.body) : {};
+      tgCalls18.push({ url: u, body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 18000 + tgCalls18.length } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test 18: ${u}`);
+  };
+
+  try {
+    // 18a-1: Concurrent Promise.all between /complete retry and scheduled() Cron on a failed 2-chunk outbox (150 items)
+    const crw18a = (await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", {
+        method: "POST",
+        headers: h18,
+        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "concurrent_outbox_18a" }),
+      }),
+      env18
+    )).json()).request;
+    const row18a = env18.DB.crawlRequests.find((c) => c.id === crw18a.id);
+    row18a.status = "running";
+    row18a.claimed_by = "muse-18a";
+    row18a.attempts = 1;
+    row18a.requested_by_chat_id = "999018";
+
+    const items18a = Array.from({ length: 150 }, (_, i) => ({
+      platform: "threads",
+      post_id: `CONC18A_${i}`,
+      canonical_url: `https://threads.net/@c18/post/CONC18A_${i}`,
+      views: 9000 + i,
+      views_display: "9K",
+      views_precision: "rounded_display",
+      views_source: "threads_web_browser",
+      views_measured_at: "2026-11-27T11:45:00Z",
+      views_evidence_url: `https://threads.net/@c18/post/CONC18A_${i}`,
+      likes: 150 + i,
+    }));
+
+    env18.DB.failRegistryOnSnapshotCallsRemaining = 101;
+    const compBody18a = {
+      claimed_by: "muse-18a",
+      attempt: 1,
+      status: "completed",
+      result_summary: {
+        run_id: "run_conc_18a",
+        crawled_at: "2026-11-27T11:45:00Z",
+        new_qualified_count: 999, // Deliberately stale client count; D1 authoritative count (150) must override
+        items: items18a,
+      },
+    };
+    const firstFail = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crw18a.id}/complete`, {
+        method: "POST",
+        headers: h18,
+        body: JSON.stringify(compBody18a),
+      }),
+      env18
+    );
+    assert.equal(firstFail.status, 503);
+    assert.equal(tgCalls18.length, 0, "Failed completion must NOT send Telegram while registry_sync_status=error");
+
+    // Yield mid-batch inside chunk #2 so scheduled() and /complete retry truly race concurrently
+    let releasePause;
+    let enteredPause = false;
+    const pauseGate = new Promise((r) => { releasePause = r; });
+    env18.DB.snapshotInsertAttempts = 0;
+    env18.DB.onBatchStep = async (stepIdx, stmt) => {
+      if (!enteredPause && stepIdx === 0) {
+        enteredPause = true;
+        await pauseGate;
+      }
+    };
+
+    const tgBefore18a = tgCalls18.length;
+    const retryPromise = worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crw18a.id}/complete`, {
+        method: "POST",
+        headers: h18,
+        body: JSON.stringify(compBody18a),
+      }),
+      env18
+    );
+    // Let retryPromise claim chunk #2 ('processing') and enter pauseGate
+    await new Promise((r) => setTimeout(r, 20));
+    const cronPromise = worker.scheduled({}, env18, {});
+    // Let cron inspect chunk #2 while it's 'processing', then release retryPromise
+    await new Promise((r) => setTimeout(r, 20));
+    releasePause();
+    const [retryResp18a] = await Promise.all([retryPromise, cronPromise]);
+    env18.DB.onBatchStep = null;
+
+    assert.equal(retryResp18a.status, 200);
+    const retryJson18a = await retryResp18a.json();
+    assert.equal(retryJson18a.dedup_stats.new_qualified_count, 150);
+    assert.equal(retryJson18a.dedup_stats.total_processed, 150);
+    assert.equal(env18.DB.snapshotInsertAttempts, 50, "Chunk #2 (50 items) must execute ONCE even under concurrent Cron + retry");
+    assert.equal(env18.DB.registryOutbox.length, 0, "All outbox rows must be drained & cleaned");
+    const savedRow18a = env18.DB.crawlRequests.find((c) => c.id === crw18a.id);
+    const savedSum18a = JSON.parse(savedRow18a.result_summary_json);
+    assert.equal(savedSum18a.registry_sync_status, "ok");
+    assert.equal(savedSum18a.new_qualified_count, 150, "Authoritative D1 new_qualified_count must be 150, not stale 999");
+    assert.equal(savedSum18a.dedup_stats.total_processed, 150);
+    const tgSent18a = tgCalls18.slice(tgBefore18a).filter((c) => c.url.includes("/sendMessage"));
+    assert.equal(tgSent18a.length, 1, "Concurrent Cron + retry must deliver ONLY ONE Telegram report");
+
+    // 18a-2: Two fresh chunks processed concurrently by /complete retry and scheduled() Cron -> NO lost partial chunk totals!
+    const crw18Split = (await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", {
+        method: "POST",
+        headers: h18,
+        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "split_race_18" }),
+      }),
+      env18
+    )).json()).request;
+    const rowSplit = env18.DB.crawlRequests.find((c) => c.id === crw18Split.id);
+    rowSplit.status = "completed";
+    rowSplit.claimed_by = "muse-split";
+    rowSplit.attempts = 1;
+    rowSplit.requested_by_chat_id = "999018";
+    rowSplit.updated_at = new Date().toISOString();
+    rowSplit.result_summary_json = JSON.stringify({ run_id: "run_split_18", registry_sync_status: "error" });
+    env18.DB.registryOutbox.push(
+      {
+        id: "rout_split_1",
+        request_id: crw18Split.id,
+        run_id: "run_split_18",
+        crawled_at: "2026-11-27T11:50:00Z",
+        payload_json: JSON.stringify(Array.from({ length: 100 }, (_, i) => ({
+          platform: "threads",
+          post_id: `SPL1_${i}`,
+          views: 6000,
+          views_display: "6K",
+          views_precision: "rounded_display",
+          views_source: "threads_web_browser",
+          views_measured_at: "2026-11-27T11:50:00Z",
+          views_evidence_url: `https://threads.net/@s/post/SPL1_${i}`,
+        }))),
+        status: "pending",
+        attempts: 0,
+        last_error: null,
+        created_at: "2026-11-27T11:50:00.000Z",
+        updated_at: "2026-11-27T11:50:00.000Z",
+      },
+      {
+        id: "rout_split_2",
+        request_id: crw18Split.id,
+        run_id: "run_split_18",
+        crawled_at: "2026-11-27T11:50:00Z",
+        payload_json: JSON.stringify(Array.from({ length: 50 }, (_, i) => ({
+          platform: "threads",
+          post_id: `SPL2_${i}`,
+          views: 7000,
+          views_display: "7K",
+          views_precision: "rounded_display",
+          views_source: "threads_web_browser",
+          views_measured_at: "2026-11-27T11:50:00Z",
+          views_evidence_url: `https://threads.net/@s/post/SPL2_${i}`,
+        }))),
+        status: "pending",
+        attempts: 0,
+        last_error: null,
+        created_at: "2026-11-27T11:50:01.000Z",
+        updated_at: "2026-11-27T11:50:01.000Z",
+      }
+    );
+
+    let releaseSplitPause;
+    let pausedSplit = false;
+    const splitGate = new Promise((r) => { releaseSplitPause = r; });
+    env18.DB.onBatchStep = async (stepIdx) => {
+      if (!pausedSplit && stepIdx === 0) {
+        pausedSplit = true;
+        await splitGate;
+      }
+    };
+    const tgBeforeSplit = tgCalls18.length;
+    const pSplitRetry = worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crw18Split.id}/complete`, {
+        method: "POST",
+        headers: h18,
+        body: JSON.stringify({ claimed_by: "muse-split", attempt: 1, status: "completed", result_summary: { run_id: "run_split_18" } }),
+      }),
+      env18
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    // Cron claims chunk #2 while retry holds chunk #1; cron finishes chunk #2 first and MUST see inProgress (not finalize 50/150!)
+    const pSplitCron = worker.scheduled({}, env18, {});
+    await new Promise((r) => setTimeout(r, 20));
+    releaseSplitPause();
+    const [resSplitRetry] = await Promise.all([pSplitRetry, pSplitCron]);
+    env18.DB.onBatchStep = null;
+
+    assert.equal(resSplitRetry.status, 200);
+    const savedSplitRow = env18.DB.crawlRequests.find((c) => c.id === crw18Split.id);
+    const savedSplitSum = JSON.parse(savedSplitRow.result_summary_json);
+    assert.equal(savedSplitSum.registry_sync_status, "ok");
+    assert.equal(savedSplitSum.dedup_stats.new_qualified_count, 150, "Worker picking up final done chunk MUST sum BOTH chunk #1 (100) + chunk #2 (50)");
+    assert.equal(savedSplitSum.dedup_stats.total_processed, 150);
+    assert.equal(env18.DB.registryOutbox.length, 0);
+    assert.equal(tgCalls18.slice(tgBeforeSplit).filter((c) => c.url.includes("/sendMessage") || c.url.includes("/editMessageText")).length, 1);
+
+    // 18b: Telegram MUST NOT send notification via notifyNewCrawl (Direct-D1 OR Drive report) while registry_sync_status is pending/error
+    const crwPendingErr = {
+      id: "crw_gate_err",
+      platform: "threads",
+      keywords: "gate_err_kw",
+      requested_count: 10,
+      status: "completed",
+      notified_at: null,
+      requested_by_chat_id: "999018",
+      updated_at: "2026-11-27T11:51:00.000Z",
+      result_summary_json: JSON.stringify({
+        run_id: "run_gate_err",
+        new_qualified_count: 0,
+        registry_sync_status: "error",
+      }),
+    };
+    const crwPendingOnly = {
+      id: "crw_gate_pend",
+      platform: "threads",
+      keywords: "gate_pend_kw",
+      requested_count: 10,
+      status: "completed",
+      notified_at: null,
+      requested_by_chat_id: "999018",
+      updated_at: "2026-11-27T11:51:10.000Z",
+      result_summary_json: JSON.stringify({
+        run_id: "run_gate_pend",
+        new_qualified_count: 0,
+        registry_sync_status: "pending",
+      }),
+    };
+    const crwReadyAfter = {
+      id: "crw_gate_ready",
+      platform: "threads",
+      keywords: "gate_ready_kw",
+      requested_count: 10,
+      status: "completed",
+      notified_at: null,
+      requested_by_chat_id: "999018",
+      updated_at: "2026-11-27T11:51:20.000Z",
+      result_summary_json: JSON.stringify({
+        run_id: "run_gate_ready",
+        new_qualified_count: 10,
+        registry_sync_status: "ok",
+      }),
+    };
+    env18.DB.crawlRequests.push(crwPendingErr, crwPendingOnly, crwReadyAfter);
+    mockDriveReports18 = [
+      {
+        file: { id: "drv_gate_err", name: "threads_report_gate_err.json", mimeType: "application/json", size: "1024", modifiedTime: new Date().toISOString() },
+        data: {
+          request_id: "crw_gate_err",
+          run_id: "run_gate_err",
+          crawled_at: new Date().toISOString(),
+          run_status: "completed",
+          counters: { new_qualified_count: 10, requested_count: 10 },
+        },
+      },
+    ];
+
+    const tgBeforeGate = tgCalls18.length;
+    await worker.scheduled({}, env18, {});
+    const tgSentGate = tgCalls18.slice(tgBeforeGate).filter((c) => c.url.includes("/sendMessage") || c.url.includes("/editMessageText"));
+    assert.equal(tgSentGate.length, 1, "Only crw_gate_ready should notify; crw_gate_err & crw_gate_pend must stay blocked");
+    assert.ok(tgSentGate[0].body.text.includes("crw_gate_ready"));
+    assert.equal(env18.DB.crawlRequests.find((c) => c.id === "crw_gate_err").notified_at, null);
+    assert.equal(env18.DB.crawlRequests.find((c) => c.id === "crw_gate_pend").notified_at, null);
+    const d1CursorAfterGate = env18.DB.runtimeState.get("notify_d1_cursor");
+    assert.notEqual(
+      d1CursorAfterGate,
+      "2026-11-27T11:51:20.000Z|crw_gate_ready",
+      "notify_d1_cursor MUST NOT advance past blocked crw_gate_err/crw_gate_pend rows"
+    );
+
+    // Once crw_gate_err & crw_gate_pend recover to registry_sync_status=ok, next scheduled() delivers them ONCE cleanly
+    env18.DB.crawlRequests.find((c) => c.id === "crw_gate_err").result_summary_json = JSON.stringify({
+      run_id: "run_gate_err",
+      new_qualified_count: 10,
+      registry_sync_status: "ok",
+    });
+    env18.DB.crawlRequests.find((c) => c.id === "crw_gate_pend").result_summary_json = JSON.stringify({
+      run_id: "run_gate_pend",
+      new_qualified_count: 8,
+      registry_sync_status: "ok",
+    });
+    const tgBeforeRecovery = tgCalls18.length;
+    await worker.scheduled({}, env18, {});
+    const tgSentRec = tgCalls18.slice(tgBeforeRecovery).filter((c) => c.url.includes("/sendMessage") || c.url.includes("/editMessageText"));
+    assert.equal(tgSentRec.length, 2, "Both recovered requests must now notify cleanly without skipping");
+    assert.ok(env18.DB.crawlRequests.find((c) => c.id === "crw_gate_err").notified_at);
+    assert.ok(env18.DB.crawlRequests.find((c) => c.id === "crw_gate_pend").notified_at);
+
+    // 18c: Verify wrangler.toml points to worker.v2.js (never legacy worker.js)
+    const wranglerToml = fs.readFileSync(path.join(__dirname, "../cloudflare-worker/wrangler.toml"), "utf8");
+    assert.ok(/^main\s*=\s*"worker\.v2\.js"/m.test(wranglerToml), "wrangler.toml main must point to worker.v2.js");
+    assert.ok(/database_name\s*=\s*"app-video-db"/m.test(wranglerToml), "wrangler.toml must bind app-video-db");
+  } finally {
+    globalThis.fetch = prevFetch18;
   }
 }
 

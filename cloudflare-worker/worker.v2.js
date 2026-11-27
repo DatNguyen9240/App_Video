@@ -1328,40 +1328,123 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
     };
 }
 
+const DONE_STATS_PREFIX = "__DONE_STATS__:";
+const REGISTRY_OUTBOX_PROCESSING_TTL_MS = 120000;
+
+function createEmptyDedupStats() {
+    return {
+        new_count: 0,
+        new_qualified_count: 0,
+        duplicate_count: 0,
+        duplicate_history_count: 0,
+        updated_count: 0,
+        updated_metrics_count: 0,
+        missing_views_count: 0,
+        unverified_count: 0,
+        rejected_count: 0,
+        snapshots_created: 0,
+        snapshots_deduped: 0,
+        total_processed: 0,
+    };
+}
+
+function normalizeDedupStats(raw) {
+    const base = createEmptyDedupStats();
+    if (!raw || typeof raw !== "object") return base;
+    for (const k of Object.keys(base)) {
+        base[k] = Number(raw[k] || 0);
+    }
+    return base;
+}
+
+function addDedupStatsInto(target, delta) {
+    if (!delta || typeof delta !== "object") return target;
+    for (const k of Object.keys(target)) {
+        target[k] = Number(target[k] || 0) + Number(delta[k] || 0);
+    }
+    return target;
+}
+
+function parseDoneChunkStats(rawLastError) {
+    if (typeof rawLastError !== "string" || !rawLastError.startsWith(DONE_STATS_PREFIX)) {
+        return null;
+    }
+    try {
+        return normalizeDedupStats(JSON.parse(rawLastError.slice(DONE_STATS_PREFIX.length)));
+    } catch {
+        return null;
+    }
+}
+
+function resolveAuthoritativeSummaryRecCount(summary) {
+    if (!summary || typeof summary !== "object") return 0;
+    return Number(
+        summary.dedup_stats?.new_qualified_count
+        ?? summary.new_qualified_count
+        ?? summary.qualified_count
+        ?? summary.record_count
+        ?? 0
+    );
+}
+
+async function isRequestBlockedByPendingRegistrySync(env, reqRow) {
+    if (!reqRow) return false;
+    let summary = {};
+    if (typeof reqRow.result_summary_json === "string" && reqRow.result_summary_json.trim()) {
+        try { summary = JSON.parse(reqRow.result_summary_json); } catch {}
+    } else if (reqRow.result_summary && typeof reqRow.result_summary === "object") {
+        summary = reqRow.result_summary;
+    }
+    const regState = String(summary?.registry_sync_status || "").toLowerCase();
+    if (regState === "pending" || regState === "error") {
+        return true;
+    }
+    if (reqRow.id && env?.DB) {
+        try {
+            const row = await env.DB.prepare(
+                "SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?"
+            ).bind(reqRow.id).first();
+            if (Number(row?.cnt || 0) > 0) {
+                return true;
+            }
+        } catch {}
+    }
+    return false;
+}
+
 function mergeDedupStatsIntoSummary(summaryObj, dRes) {
     const prev = (summaryObj._partial_dedup_stats && typeof summaryObj._partial_dedup_stats === "object")
         ? summaryObj._partial_dedup_stats
         : null;
     const agg = prev
-        ? {
-            new_count: Number(prev.new_count || 0) + Number(dRes.new_count || 0),
-            new_qualified_count: Number(prev.new_qualified_count || 0) + Number(dRes.new_qualified_count || 0),
-            duplicate_count: Number(prev.duplicate_count || 0) + Number(dRes.duplicate_count || 0),
-            duplicate_history_count: Number(prev.duplicate_history_count || 0) + Number(dRes.duplicate_history_count || 0),
-            updated_count: Number(prev.updated_count || 0) + Number(dRes.updated_count || 0),
-            updated_metrics_count: Number(prev.updated_metrics_count || 0) + Number(dRes.updated_metrics_count || 0),
-            missing_views_count: Number(prev.missing_views_count || 0) + Number(dRes.missing_views_count || 0),
-            unverified_count: Number(prev.unverified_count || 0) + Number(dRes.unverified_count || 0),
-            rejected_count: Number(prev.rejected_count || 0) + Number(dRes.rejected_count || 0),
-            snapshots_created: Number(prev.snapshots_created || 0) + Number(dRes.snapshots_created || 0),
-            snapshots_deduped: Number(prev.snapshots_deduped || 0) + Number(dRes.snapshots_deduped || 0),
-            total_processed: Number(prev.total_processed || 0) + Number(dRes.total_processed || 0),
-        }
-        : dRes;
+        ? addDedupStatsInto(normalizeDedupStats(prev), dRes)
+        : normalizeDedupStats(dRes);
 
     delete summaryObj._partial_dedup_stats;
-    summaryObj.new_count = summaryObj.new_count !== undefined ? summaryObj.new_count : agg.new_count;
-    summaryObj.new_qualified_count = summaryObj.new_qualified_count !== undefined ? summaryObj.new_qualified_count : agg.new_qualified_count;
-    if (summaryObj.duplicate_history_count === undefined && summaryObj.duplicate_count === undefined) {
+    if (agg.total_processed > 0) {
+        // Authoritative D1 registry dedup counts always override client-supplied guesses
+        summaryObj.new_count = agg.new_count;
+        summaryObj.new_qualified_count = agg.new_qualified_count;
         summaryObj.duplicate_history_count = agg.duplicate_history_count;
         summaryObj.duplicate_count = agg.duplicate_count;
-    }
-    if (summaryObj.updated_metrics_count === undefined && summaryObj.updated_count === undefined) {
         summaryObj.updated_metrics_count = agg.updated_metrics_count;
         summaryObj.updated_count = agg.updated_count;
-    }
-    if (summaryObj.missing_views_count === undefined) {
         summaryObj.missing_views_count = agg.missing_views_count;
+        summaryObj.unverified_count = agg.unverified_count;
+    } else {
+        summaryObj.new_count = summaryObj.new_count !== undefined ? summaryObj.new_count : agg.new_count;
+        summaryObj.new_qualified_count = summaryObj.new_qualified_count !== undefined ? summaryObj.new_qualified_count : agg.new_qualified_count;
+        if (summaryObj.duplicate_history_count === undefined && summaryObj.duplicate_count === undefined) {
+            summaryObj.duplicate_history_count = agg.duplicate_history_count;
+            summaryObj.duplicate_count = agg.duplicate_count;
+        }
+        if (summaryObj.updated_metrics_count === undefined && summaryObj.updated_count === undefined) {
+            summaryObj.updated_metrics_count = agg.updated_metrics_count;
+            summaryObj.updated_count = agg.updated_count;
+        }
+        if (summaryObj.missing_views_count === undefined) {
+            summaryObj.missing_views_count = agg.missing_views_count;
+        }
     }
     summaryObj.dedup_stats = agg;
     return agg;
@@ -1414,82 +1497,158 @@ async function enqueueRecoveryOutboxForFinalizedRequest(env, requestId, runId, c
     }
 }
 
+async function persistRegistryErrorState(env, crawlId, summaryObj, errMsg, nowIso) {
+    let baseSummary = summaryObj;
+    try {
+        const fresh = await env.DB.prepare("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
+            .bind(crawlId).first();
+        if (fresh?.result_summary_json) {
+            const parsed = JSON.parse(fresh.result_summary_json);
+            if (String(parsed?.registry_sync_status || "").toLowerCase() === "ok") {
+                Object.assign(summaryObj, parsed);
+                return;
+            }
+            baseSummary = parsed;
+        }
+    } catch {}
+    baseSummary.registry_sync_status = "error";
+    baseSummary.registry_sync_error = errMsg;
+    Object.assign(summaryObj, baseSummary);
+    await env.DB.prepare("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?")
+        .bind(JSON.stringify(baseSummary), nowIso, crawlId).run();
+}
+
 async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCrawledAt = null) {
+    const staleProcCutoffIso = new Date(Date.now() - REGISTRY_OUTBOX_PROCESSING_TTL_MS).toISOString();
     const outboxRes = await env.DB.prepare(`
         SELECT * FROM registry_sync_outbox
-        WHERE request_id = ? AND status IN ('pending', 'error')
+        WHERE request_id = ?
+          AND (status IN ('pending', 'error') OR (status = 'processing' AND updated_at <= ?))
         ORDER BY created_at ASC
-    `).bind(crawlId).all();
-    const pendingRows = outboxRes?.results || [];
-    const nowIso = new Date().toISOString();
-    const totalAgg = {
-        new_count: 0,
-        new_qualified_count: 0,
-        duplicate_count: 0,
-        duplicate_history_count: 0,
-        updated_count: 0,
-        updated_metrics_count: 0,
-        missing_views_count: 0,
-        unverified_count: 0,
-        rejected_count: 0,
-        snapshots_created: 0,
-        snapshots_deduped: 0,
-        total_processed: 0,
-    };
+    `).bind(crawlId, staleProcCutoffIso).all();
+    const candidateRows = outboxRes?.results || [];
+    let firstChunkError = null;
 
-    for (const row of pendingRows) {
+    for (const row of candidateRows) {
+        const stepIso = new Date().toISOString();
+        const stepStaleCutoffIso = new Date(Date.now() - REGISTRY_OUTBOX_PROCESSING_TTL_MS).toISOString();
+        const claimRes = await env.DB.prepare(`
+            UPDATE registry_sync_outbox
+            SET status = 'processing', updated_at = ?
+            WHERE id = ?
+              AND (status IN ('pending', 'error') OR (status = 'processing' AND updated_at <= ?))
+        `).bind(stepIso, row.id, stepStaleCutoffIso).run();
+        if (Number(claimRes?.meta?.changes || 0) !== 1) {
+            continue;
+        }
+
         let chunkItems = [];
         try { chunkItems = JSON.parse(row.payload_json || "[]"); } catch {}
         try {
             const cRes = await recordCrossRunDedupInD1(env, chunkItems, row.run_id || summaryObj.run_id || crawlId, {
                 crawledAt: row.crawled_at || defaultCrawledAt || null,
             });
-            for (const k of Object.keys(totalAgg)) {
-                totalAgg[k] += Number(cRes[k] || 0);
-            }
-            await env.DB.prepare("DELETE FROM registry_sync_outbox WHERE id = ?").bind(row.id).run();
+            const donePayload = `${DONE_STATS_PREFIX}${JSON.stringify(normalizeDedupStats(cRes))}`;
+            await env.DB.prepare(`
+                UPDATE registry_sync_outbox
+                SET status = 'done', last_error = ?, updated_at = ?
+                WHERE id = ? AND status = 'processing'
+            `).bind(donePayload, new Date().toISOString(), row.id).run();
         } catch (err) {
             const errMsg = String(err?.message || "D1 registry unavailable");
+            if (!firstChunkError) firstChunkError = err;
             try {
                 await env.DB.prepare(`
                     UPDATE registry_sync_outbox
                     SET status = 'error', attempts = attempts + 1, last_error = ?, updated_at = ?
-                    WHERE id = ?
-                `).bind(errMsg.slice(0, 400), nowIso, row.id).run();
+                    WHERE id = ? AND status = 'processing'
+                `).bind(errMsg.slice(0, 400), new Date().toISOString(), row.id).run();
             } catch {}
-            const prevPart = (summaryObj._partial_dedup_stats && typeof summaryObj._partial_dedup_stats === "object")
-                ? summaryObj._partial_dedup_stats
-                : null;
-            if (prevPart) {
-                for (const k of Object.keys(totalAgg)) {
-                    totalAgg[k] += Number(prevPart[k] || 0);
-                }
-            }
-            summaryObj._partial_dedup_stats = totalAgg;
-            summaryObj.registry_sync_status = "error";
-            summaryObj.registry_sync_error = errMsg;
-            await env.DB.prepare("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?")
-                .bind(JSON.stringify(summaryObj), nowIso, crawlId).run();
+            await persistRegistryErrorState(env, crawlId, summaryObj, errMsg, new Date().toISOString());
             throw err;
         }
     }
 
-    summaryObj.registry_sync_status = "ok";
-    delete summaryObj.registry_sync_error;
-    mergeDedupStatsIntoSummary(summaryObj, totalAgg);
-    await env.DB.prepare("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?")
-        .bind(JSON.stringify(summaryObj), nowIso, crawlId).run();
-    return summaryObj.dedup_stats;
+    // Re-read ALL outbox rows for this request before finalizing or reporting totals
+    const allRes = await env.DB.prepare(`
+        SELECT id, status, last_error, updated_at FROM registry_sync_outbox
+        WHERE request_id = ?
+        ORDER BY created_at ASC
+    `).bind(crawlId).all();
+    const allRows = allRes?.results || [];
+    const errRows = allRows.filter((r) => r.status === "error");
+    const activeRows = allRows.filter((r) => r.status === "pending" || r.status === "processing");
+    const doneRows = allRows.filter((r) => r.status === "done");
+
+    if (errRows.length > 0 || firstChunkError) {
+        const errMsg = String(firstChunkError?.message || errRows[0]?.last_error || "D1 registry unavailable");
+        await persistRegistryErrorState(env, crawlId, summaryObj, errMsg, new Date().toISOString());
+        throw (firstChunkError || new Error(errMsg));
+    }
+
+    if (activeRows.length > 0) {
+        return { completed: false, inProgress: true, dedup_stats: null };
+    }
+
+    let latestSummary = { ...summaryObj };
+    try {
+        const freshReq = await env.DB.prepare("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
+            .bind(crawlId).first();
+        if (freshReq?.result_summary_json) {
+            const parsedFresh = JSON.parse(freshReq.result_summary_json);
+            if (String(parsedFresh?.registry_sync_status || "").toLowerCase() === "ok") {
+                Object.assign(summaryObj, parsedFresh);
+                if (doneRows.length > 0) {
+                    await env.DB.prepare("DELETE FROM registry_sync_outbox WHERE request_id = ? AND status = 'done'")
+                        .bind(crawlId).run();
+                }
+                return {
+                    completed: true,
+                    inProgress: false,
+                    dedup_stats: parsedFresh.dedup_stats || summaryObj.dedup_stats || createEmptyDedupStats(),
+                };
+            }
+            latestSummary = { ...summaryObj, ...parsedFresh };
+        }
+    } catch {}
+
+    const totalAgg = createEmptyDedupStats();
+    for (const dr of doneRows) {
+        const chunkStats = parseDoneChunkStats(dr.last_error);
+        if (chunkStats) addDedupStatsInto(totalAgg, chunkStats);
+    }
+
+    const finIso = new Date().toISOString();
+    latestSummary.registry_sync_status = "ok";
+    delete latestSummary.registry_sync_error;
+    mergeDedupStatsIntoSummary(latestSummary, totalAgg);
+    Object.assign(summaryObj, latestSummary);
+
+    const updReqStmt = env.DB.prepare("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?")
+        .bind(JSON.stringify(latestSummary), finIso, crawlId);
+    const delDoneStmt = env.DB.prepare("DELETE FROM registry_sync_outbox WHERE request_id = ? AND status = 'done'")
+        .bind(crawlId);
+
+    if (typeof env.DB.batch === "function") {
+        await env.DB.batch([updReqStmt, delDoneStmt]);
+    } else {
+        await updReqStmt.run();
+        await delDoneStmt.run();
+    }
+
+    return { completed: true, inProgress: false, dedup_stats: latestSummary.dedup_stats };
 }
 
 async function drainPendingRegistryOutboxInD1(env, limit = 10) {
+    const staleProcCutoffIso = new Date(Date.now() - REGISTRY_OUTBOX_PROCESSING_TTL_MS).toISOString();
     let pendingReqs = [];
     try {
         const rows = await env.DB.prepare(`
             SELECT DISTINCT request_id FROM registry_sync_outbox
-            WHERE status IN ('pending', 'error') AND request_id IS NOT NULL
+            WHERE request_id IS NOT NULL
+              AND (status IN ('pending', 'error', 'done') OR (status = 'processing' AND updated_at <= ?))
             ORDER BY created_at ASC LIMIT ?
-        `).bind(limit).all();
+        `).bind(staleProcCutoffIso, limit).all();
         pendingReqs = rows?.results || [];
     } catch {
         return;
@@ -1502,29 +1661,39 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
         let summaryObj = {};
         try { summaryObj = JSON.parse(reqRow.result_summary_json || "{}"); } catch {}
         try {
-            await drainRegistryOutboxForRequest(
+            const drainRes = await drainRegistryOutboxForRequest(
                 env,
                 reqId,
                 summaryObj,
                 summaryObj.crawled_at || summaryObj.generated_at || null
             );
-            if (reqRow.requested_by_chat_id && !reqRow.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+            if (!drainRes?.completed || drainRes?.inProgress) continue;
+            const freshReq = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(reqId).first();
+            if (
+                freshReq &&
+                freshReq.requested_by_chat_id &&
+                !freshReq.notified_at &&
+                env.TELEGRAM_BOT_TOKEN_VIDEO &&
+                !(await isRequestBlockedByPendingRegistrySync(env, freshReq))
+            ) {
+                let latestSum = summaryObj;
+                try { latestSum = JSON.parse(freshReq.result_summary_json || "{}"); } catch {}
                 const notifKey = resolveCanonicalNotificationKey({
                     requestId: reqId,
-                    runId: summaryObj.run_id || null,
-                    status: reqRow.status,
+                    runId: latestSum.run_id || null,
+                    status: freshReq.status,
                 });
                 const aliasKeys = [
-                    resolveCanonicalNotificationKey({ requestId: reqId, status: reqRow.status }),
-                    summaryObj.run_id ? resolveCanonicalNotificationKey({ runId: summaryObj.run_id, isCorrected: true }) : null,
+                    resolveCanonicalNotificationKey({ requestId: reqId, status: freshReq.status }),
+                    latestSum.run_id ? resolveCanonicalNotificationKey({ runId: latestSum.run_id, isCorrected: true }) : null,
                 ].filter(Boolean);
-                const text = buildDirectD1CrawlNotificationText(reqRow, summaryObj);
-                const recCount = Number(summaryObj.new_qualified_count ?? summaryObj.qualified_count ?? summaryObj.record_count ?? 0);
+                const text = buildDirectD1CrawlNotificationText(freshReq, latestSum);
+                const recCount = resolveAuthoritativeSummaryRecCount(latestSum);
                 const delivery = await deliverWithUncertaintyGuard(
                     env,
                     notifKey,
                     recCount,
-                    reqRow.requested_by_chat_id,
+                    freshReq.requested_by_chat_id,
                     text,
                     { usePrimaryMessage: true, aliasKeys, requestId: reqId, replyMarkup: reportActionsInlineKeyboard(false) }
                 );
@@ -2876,6 +3045,7 @@ async function notifyNewCrawl(env) {
                 const winningReports = Array.from(byGroup.values()).sort((a, b) => a.groupCrawlTs - b.groupCrawlTs);
 
                 let transientDeliveryHalted = false;
+                let blockedDriveEncountered = false;
                 for (const item of winningReports) {
                     const d = item.data || {};
                     if (item.groupCrawlTs && item.groupCrawlTs < cutoffMs) continue;
@@ -2886,21 +3056,27 @@ async function notifyNewCrawl(env) {
                     const notifKey = resolveCanonicalNotificationKey({ runId: rawRunId, isCorrected: item.isCorr });
                     const reqId = d.request_id ? String(d.request_id) : null;
 
-                    // Cross-check if request_id was already notified (e.g. via /complete or direct D1) for non-corrected report
+                    // Cross-check if request_id was already notified (e.g. via /complete or direct D1) or blocked by pending/error registry sync
                     const aliasKeys = [];
+                    let linkedReqRow = null;
                     if (reqId) {
                         aliasKeys.push(
                             resolveCanonicalNotificationKey({ requestId: reqId, status: "completed" }),
                             resolveCanonicalNotificationKey({ requestId: reqId, status: "failed" })
                         );
                         try {
-                            const reqRow = await env.DB.prepare("SELECT status, notified_at FROM crawl_requests WHERE id = ?")
-                                .bind(reqId).first();
-                            if (reqRow && reqRow.notified_at && !item.isCorr) {
+                            linkedReqRow = await env.DB.prepare(
+                                "SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
+                            ).bind(reqId).first();
+                            if (linkedReqRow && linkedReqRow.notified_at && !item.isCorr) {
                                 notifiedRequestIds.add(reqId);
                                 continue;
                             }
                         } catch {}
+                    }
+                    if (await isRequestBlockedByPendingRegistrySync(env, linkedReqRow || { id: reqId, result_summary: d })) {
+                        blockedDriveEncountered = true;
+                        continue;
                     }
 
                     const stats = extractMuseReportStats(d) || {};
@@ -2927,8 +3103,8 @@ async function notifyNewCrawl(env) {
                     }
                 }
 
-                // Never commit durable cursor if Drive pagination hit partialError or fetch/rate-limit failed
-                if (!partialError && fetchErrorCount === 0 && !transientDeliveryHalted) {
+                // Never commit durable cursor if Drive pagination hit partialError, blocked item, or fetch/rate-limit failed
+                if (!partialError && fetchErrorCount === 0 && !transientDeliveryHalted && !blockedDriveEncountered) {
                     const lastEntry = batchEntries[batchEntries.length - 1];
                     const lastKey = `${lastEntry.mtimeStr}|${lastEntry.file.id}`;
                     if (!usedRoundRobin) {
@@ -2967,10 +3143,15 @@ async function notifyNewCrawl(env) {
         }
         const batchD1 = candidatesD1.slice(0, batchSize);
         let lastCleanD1 = null;
+        let blockedD1Encountered = false;
 
         for (const req of batchD1) {
             if (notifiedRequestIds.has(req.id)) {
-                lastCleanD1 = req;
+                if (!blockedD1Encountered) lastCleanD1 = req;
+                continue;
+            }
+            if (await isRequestBlockedByPendingRegistrySync(env, req)) {
+                blockedD1Encountered = true;
                 continue;
             }
             let summary = {};
@@ -2985,7 +3166,7 @@ async function notifyNewCrawl(env) {
                 summary.run_id ? resolveCanonicalNotificationKey({ runId: summary.run_id, isCorrected: true }) : null,
             ].filter(Boolean);
 
-            const recCount = Number(summary.qualified_count ?? summary.record_count ?? 0);
+            const recCount = resolveAuthoritativeSummaryRecCount(summary);
             const chatId = req.requested_by_chat_id || env.TELEGRAM_OWNER_ID;
             const text = buildDirectD1CrawlNotificationText(req, summary);
 
@@ -3003,7 +3184,7 @@ async function notifyNewCrawl(env) {
                         .bind(new Date().toISOString(), req.id).run();
                 } catch {}
             }
-            lastCleanD1 = req;
+            if (!blockedD1Encountered) lastCleanD1 = req;
         }
         if (lastCleanD1) {
             await setRuntimeState(env, "notify_d1_cursor", `${lastCleanD1.updated_at || new Date().toISOString()}|${lastCleanD1.id}`);
@@ -3084,11 +3265,12 @@ async function notifyNewCrawl(env) {
         }
         let lastCleanV1 = null;
         let v1FetchErr = false;
+        let blockedV1Encountered = false;
 
         for (const entry of v1Batch) {
             const file = entry.file;
             if (!file.size || Number(file.size) > MAX_MARKET_JSON_BYTES) {
-                lastCleanV1 = entry;
+                if (!blockedV1Encountered) lastCleanV1 = entry;
                 continue;
             }
             const dataRes = await fetch(
@@ -3101,22 +3283,37 @@ async function notifyNewCrawl(env) {
             }
             const data = await dataRes.json();
             if (!data || !["completed", "failed"].includes(data.status)) {
-                lastCleanV1 = entry;
+                if (!blockedV1Encountered) lastCleanV1 = entry;
                 continue;
             }
             const startedMs = Date.parse(data.started_at);
             if (!Number.isFinite(startedMs) || startedMs < cutoffMs) {
-                lastCleanV1 = entry;
+                if (!blockedV1Encountered) lastCleanV1 = entry;
                 continue;
             }
             if (typeof data.run_id !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.run_id)) {
-                lastCleanV1 = entry;
+                if (!blockedV1Encountered) lastCleanV1 = entry;
                 continue;
             }
             const postsLen = Array.isArray(data.posts) ? data.posts.length : 0;
             const endAt = data.ended_at;
             if (!Number.isFinite(Date.parse(endAt))) {
-                lastCleanV1 = entry;
+                if (!blockedV1Encountered) lastCleanV1 = entry;
+                continue;
+            }
+
+            if (data.request_id) {
+                try {
+                    const v1ReqRow = await env.DB.prepare(
+                        "SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
+                    ).bind(String(data.request_id)).first();
+                    if (await isRequestBlockedByPendingRegistrySync(env, v1ReqRow || { id: String(data.request_id), result_summary: data })) {
+                        blockedV1Encountered = true;
+                        continue;
+                    }
+                } catch {}
+            } else if (await isRequestBlockedByPendingRegistrySync(env, { result_summary: data })) {
+                blockedV1Encountered = true;
                 continue;
             }
 
@@ -3148,7 +3345,7 @@ async function notifyNewCrawl(env) {
                 bypassAliasPrecheck: isCorr,
             });
             if (delivery.retryableExhausted) break;
-            lastCleanV1 = entry;
+            if (!blockedV1Encountered) lastCleanV1 = entry;
         }
 
         if (!v1PartialError && !v1FetchErr && lastCleanV1) {
@@ -3925,61 +4122,106 @@ async function handleAppApi(request, env, url) {
             }
             let existingSummary = {};
             try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
-            let pendingOutboxCount = 0;
+            let totalOutboxCount = 0;
             try {
                 const cntRow = await env.DB.prepare(`
                     SELECT COUNT(*) AS cnt FROM registry_sync_outbox
-                    WHERE request_id = ? AND status IN ('pending', 'error')
+                    WHERE request_id = ?
                 `).bind(crawlId).first();
-                pendingOutboxCount = Number(cntRow?.cnt || 0);
+                totalOutboxCount = Number(cntRow?.cnt || 0);
             } catch {}
 
             const needsRecovery =
                 existingSummary.registry_sync_status === "error" ||
                 existingSummary.registry_sync_status === "pending" ||
-                pendingOutboxCount > 0;
+                totalOutboxCount > 0;
 
             if (needsRecovery) {
-                if (pendingOutboxCount === 0) {
-                    const fallbackItems = bodyDedupItems && bodyDedupItems.length > 0
-                        ? bodyDedupItems
-                        : (Array.isArray(existingSummary.items) ? existingSummary.items : []);
-                    if (fallbackItems.length > 0) {
-                        await enqueueRecoveryOutboxForFinalizedRequest(
-                            env,
-                            crawlId,
-                            existingSummary.run_id || bodySummaryObj.run_id || crawlId,
-                            existingSummary.crawled_at || bodySummaryObj.crawled_at || existingSummary.generated_at || null,
-                            fallbackItems,
-                            nowIso
-                        );
+                if (totalOutboxCount === 0) {
+                    // Re-read D1 fresh so a concurrent cron that finished & deleted outbox isn't double-enqueued
+                    const freshReq = await env.DB.prepare("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
+                        .bind(crawlId).first();
+                    let freshSum = existingSummary;
+                    try { freshSum = JSON.parse(freshReq?.result_summary_json || "{}"); } catch {}
+                    const freshCntRow = await env.DB.prepare(
+                        "SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?"
+                    ).bind(crawlId).first();
+                    const freshOutboxCount = Number(freshCntRow?.cnt || 0);
+                    if (
+                        freshOutboxCount === 0 &&
+                        freshSum.registry_sync_status !== "error" &&
+                        freshSum.registry_sync_status !== "pending"
+                    ) {
+                        return jsonResponse({
+                            ok: true,
+                            already_finalized: true,
+                            status: freshReq?.status || existing.status,
+                            dedup_stats: freshSum.dedup_stats || undefined,
+                        });
+                    }
+                    if (freshOutboxCount === 0) {
+                        const fallbackItems = bodyDedupItems && bodyDedupItems.length > 0
+                            ? bodyDedupItems
+                            : (Array.isArray(freshSum.items) ? freshSum.items : []);
+                        if (fallbackItems.length > 0) {
+                            await enqueueRecoveryOutboxForFinalizedRequest(
+                                env,
+                                crawlId,
+                                freshSum.run_id || bodySummaryObj.run_id || crawlId,
+                                freshSum.crawled_at || bodySummaryObj.crawled_at || freshSum.generated_at || null,
+                                fallbackItems,
+                                nowIso
+                            );
+                        }
                     }
                 }
                 try {
-                    const recoveredStats = await drainRegistryOutboxForRequest(
+                    const drainRes = await drainRegistryOutboxForRequest(
                         env,
                         crawlId,
                         existingSummary,
                         existingSummary.crawled_at || existingSummary.generated_at || null
                     );
-                    if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+                    if (drainRes?.inProgress || !drainRes?.completed) {
+                        return jsonResponse(
+                            {
+                                ok: false,
+                                registry_sync_in_progress: true,
+                                completed_status: existing.status,
+                                recovery_pending: true,
+                                error: "Registry sync recovery is currently in progress by another worker",
+                            },
+                            503
+                        );
+                    }
+                    const recoveredStats = drainRes.dedup_stats || existingSummary.dedup_stats;
+                    const freshAfter = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+                    if (
+                        freshAfter &&
+                        freshAfter.requested_by_chat_id &&
+                        !freshAfter.notified_at &&
+                        env.TELEGRAM_BOT_TOKEN_VIDEO &&
+                        !(await isRequestBlockedByPendingRegistrySync(env, freshAfter))
+                    ) {
+                        let notifySummary = existingSummary;
+                        try { notifySummary = JSON.parse(freshAfter.result_summary_json || "{}"); } catch {}
                         const notifKey = resolveCanonicalNotificationKey({
                             requestId: crawlId,
-                            runId: existingSummary.run_id || null,
-                            status: existing.status,
+                            runId: notifySummary.run_id || null,
+                            status: freshAfter.status,
                         });
                         const aliasKeys = [
-                            resolveCanonicalNotificationKey({ requestId: crawlId, status: existing.status }),
-                            existingSummary.run_id ? resolveCanonicalNotificationKey({ runId: existingSummary.run_id, isCorrected: true }) : null,
+                            resolveCanonicalNotificationKey({ requestId: crawlId, status: freshAfter.status }),
+                            notifySummary.run_id ? resolveCanonicalNotificationKey({ runId: notifySummary.run_id, isCorrected: true }) : null,
                         ].filter(Boolean);
-                        const pseudoReq = { ...existing, updated_at: nowIso };
-                        const text = buildDirectD1CrawlNotificationText(pseudoReq, existingSummary);
-                        const recCount = Number(existingSummary.new_qualified_count ?? existingSummary.qualified_count ?? existingSummary.record_count ?? 0);
+                        const pseudoReq = { ...freshAfter, updated_at: nowIso };
+                        const text = buildDirectD1CrawlNotificationText(pseudoReq, notifySummary);
+                        const recCount = resolveAuthoritativeSummaryRecCount(notifySummary);
                         const delivery = await deliverWithUncertaintyGuard(
                             env,
                             notifKey,
                             recCount,
-                            existing.requested_by_chat_id,
+                            freshAfter.requested_by_chat_id,
                             text,
                             { usePrimaryMessage: true, aliasKeys, requestId: crawlId, replyMarkup: reportActionsInlineKeyboard(false) }
                         );
@@ -4077,12 +4319,24 @@ async function handleAppApi(request, env, url) {
 
         if (dedupSourceItems && dedupSourceItems.length > 0) {
             try {
-                await drainRegistryOutboxForRequest(
+                const drainRes = await drainRegistryOutboxForRequest(
                     env,
                     crawlId,
                     summaryObj,
                     summaryObj.crawled_at || summaryObj.generated_at || null
                 );
+                if (drainRes?.inProgress || !drainRes?.completed) {
+                    return jsonResponse(
+                        {
+                            ok: false,
+                            registry_sync_in_progress: true,
+                            completed_status: nextStatus,
+                            recovery_pending: true,
+                            error: "Registry sync is currently in progress by another worker",
+                        },
+                        503
+                    );
+                }
             } catch (err) {
                 return jsonResponse(
                     {
@@ -4097,7 +4351,12 @@ async function handleAppApi(request, env, url) {
             }
         }
 
-        if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+        if (
+            existing.requested_by_chat_id &&
+            !existing.notified_at &&
+            env.TELEGRAM_BOT_TOKEN_VIDEO &&
+            !(await isRequestBlockedByPendingRegistrySync(env, { id: crawlId, result_summary_json: JSON.stringify(summaryObj) }))
+        ) {
             const summary = summaryObj;
             const notifKey = resolveCanonicalNotificationKey({
                 requestId: crawlId,
@@ -4115,7 +4374,7 @@ async function handleAppApi(request, env, url) {
                 updated_at: nowIso,
             };
             const text = buildDirectD1CrawlNotificationText(pseudoReq, summary);
-            const recCount = Number(summary.new_qualified_count ?? summary.qualified_count ?? summary.record_count ?? 0);
+            const recCount = resolveAuthoritativeSummaryRecCount(summary);
             const delivery = await deliverWithUncertaintyGuard(
                 env,
                 notifKey,
@@ -4913,6 +5172,11 @@ export default {
         let notifyErr = null;
         let leaseErr = null;
         try {
+            await drainPendingRegistryOutboxInD1(env);
+        } catch (err) {
+            console.error("Scheduled drainPendingRegistryOutboxInD1 failed:", err?.message || err);
+        }
+        try {
             await notifyNewCrawl(env);
         } catch (err) {
             notifyErr = err;
@@ -4923,11 +5187,6 @@ export default {
         } catch (err) {
             leaseErr = err;
             console.error("Scheduled expireStaleLeases failed:", err?.message || err);
-        }
-        try {
-            await drainPendingRegistryOutboxInD1(env);
-        } catch (err) {
-            console.error("Scheduled drainPendingRegistryOutboxInD1 failed:", err?.message || err);
         }
         if (notifyErr || leaseErr) {
             throw new Error(`Scheduled check failed (${notifyErr ? "notify" : ""}${leaseErr ? " lease" : ""})`.trim());
