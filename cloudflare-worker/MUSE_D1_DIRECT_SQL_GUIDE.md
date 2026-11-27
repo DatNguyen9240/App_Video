@@ -267,3 +267,51 @@ Khi chốt lượt crawl trực tiếp trên D1, Muse **không** tự đánh d�
    ORDER BY created_at ASC;
    ```
    *(Nếu `crawl_requests` đã `completed` nhưng `registry_sync_status = 'error'`, **tuyệt đối không** bỏ qua như `already_finalized` trước khi drain hết `registry_sync_outbox`.)*
+
+---
+
+## 6. Phối hợp Hook Signal (`GET /api/crawl-queue/signal`) & Cooldown Không Làm Chậm Request Kế Tiếp
+
+Để đồng bộ giữa Worker (`app-video-scheduler`) và Muse Hook (`crawl-queue-signal`), áp dụng chính xác 4 quy ước sau:
+
+1. **Phạm vi Signal & Claim chỉ dành cho Threads:**
+   - Worker endpoint `GET /api/crawl-queue/signal` chỉ trả `{"queued": true}` cho request `lower(trim(platform)) = 'threads'` có `status = 'queued'` và `attempts < max_attempts` (**không** xét `all`, `tiktok`, `shopee`).
+   - Khi agent Muse được đánh thức bởi hook `crawl-queue-signal`, câu SQL claim trực tiếp trên D1 phải khớp bộ lọc `lower(trim(platform)) = 'threads'` (và kiểm tra không có task `running` còn lease hay `registry_sync_outbox` còn tồn) để tránh đánh thức nhầm hoặc lấy nhầm request nền tảng khác:
+   ```sql
+   UPDATE crawl_requests
+   SET status = 'running',
+       claimed_by = 'muse-ai',
+       claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+       lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+30 minutes'),
+       attempts = attempts + 1,
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+   WHERE id = (
+     SELECT id FROM crawl_requests
+     WHERE status = 'queued'
+       AND lower(trim(platform)) = 'threads'
+       AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+       AND NOT EXISTS (
+         SELECT 1 FROM crawl_requests r_run
+         WHERE r_run.status = 'running'
+           AND (r_run.lease_expires_at IS NULL OR r_run.lease_expires_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM registry_sync_outbox
+         WHERE status IN ('pending', 'error', 'processing', 'done')
+       )
+     ORDER BY created_at ASC
+     LIMIT 1
+   )
+     AND status = 'queued'
+   RETURNING *;
+   ```
+2. **Tín hiệu tự hạ về `false` khi đang chạy hoặc registry chưa hoàn tất:**
+   - Ngay khi request #1 chuyển `running` (lease còn hạn) hoặc khi hoàn tất nhưng `registry_sync_outbox` / `registry_sync_status` vẫn ở `pending`/`error`, `GET /api/crawl-queue/signal` trả `{"queued": false}` **kể cả khi request #2 đang đợi trong hàng đợi**.
+3. **Cơ chế Cooldown 2 tầng phía Muse Hook (tránh wake trùng nhưng không làm chậm request tiếp theo):**
+   - **Cạnh lên (`prev_queued = false` → `curr_queued = true`):** **`wake` ngay lập tức**, **không** bị chặn bởi cooldown 600 giây của lần wake trước (do tín hiệu chỉ xuống `false` khi tác vụ trước đã được claim/xử lý và registry đã xong `ok`, nên cạnh lên mới đồng nghĩa request kế tiếp sẵn sàng chạy).
+   - **Trạng thái giữ nguyên `true` (`prev_queued = true` → `curr_queued = true`):** Áp dụng `COOLDOWN_SECS = 600` (`now - last_wake_ts < 600` → `silent`) để chặn wake trùng trong cửa sổ ~10–30 giây trước khi agent kịp claim request #1 và giới hạn tối đa 6 wake/giờ nếu agent sập trước khi claim.
+   - Nhờ (2) + (3), hai request Threads liên tiếp chạy theo chu kỳ `false → true (wake #1) → false (running/registry) → true (wake #2)` giúp request #2 được xử lý ngay sau ~30–60 giây thay vì chờ 600 giây.
+4. **Chuẩn gọi HTTP & Xử lý lỗi phía Script Bash:**
+   - Gọi với `Cache-Control: no-store` trên kết nối TLS, chỉ wake khi HTTP status là `200` và JSON khớp `{"queued":true}` (`jq -e '.queued == true'`).
+   - Khi HTTP `503` (D1 lỗi), `429` (rate limit), timeout hoặc JSON lỗi: **luôn coi là `fetch_failed` → `silent`** (không ghi đè `prev_queued` thành `false` nếu muốn giữ nguyên cooldown chống bão, hoặc giữ nguyên trạng thái trước đó).
+   - Nếu Edge WAF bật Bot Fight, truyền `User-Agent` rõ ràng (ví dụ `Muse-Crawl-Hook/1.0`, tránh UA mặc định bị chặn bởi Cloudflare error `1010`).

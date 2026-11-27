@@ -40,6 +40,8 @@ class MockD1Database {
     this.snapshotInsertAttempts = 0;
     this.onBeforeRegistryInsert = null;
     this.onBatchStep = null;
+    this.failSignalQuery = false;
+    this.writeOps = 0;
   }
   _countSnaps(dedupKey) {
     let c = 0;
@@ -92,6 +94,48 @@ class MockD1Database {
         return this;
       },
       async first() {
+        if (norm.includes("WHEN EXISTS ( SELECT 1 FROM crawl_requests WHERE status = 'running'") && norm.endsWith("AS queued")) {
+          if (db.failSignalQuery) {
+            throw new Error("Simulated D1 signal outage");
+          }
+          const [nowIso] = this.args;
+          const hasActiveRunning = db.crawlRequests.some(
+            (r) => r.status === "running" && (!r.lease_expires_at || String(r.lease_expires_at) >= String(nowIso))
+          );
+          if (hasActiveRunning) return { queued: 0 };
+
+          const hasPendingOutbox = db.registryOutbox.some((o) =>
+            ["pending", "error", "processing", "done"].includes(o.status)
+          );
+          if (hasPendingOutbox) return { queued: 0 };
+
+          const hasUnfinishedRegistryStatus = (statusVal) =>
+            db.crawlRequests
+              .filter((r) => r.status === statusVal)
+              .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+              .slice(0, 50)
+              .some((r) => {
+                if (!r.result_summary_json) return false;
+                try {
+                  const parsed = JSON.parse(r.result_summary_json);
+                  const rs = String(parsed?.registry_sync_status || "").toLowerCase();
+                  return rs === "pending" || rs === "error";
+                } catch {
+                  return false;
+                }
+              });
+          if (hasUnfinishedRegistryStatus("completed") || hasUnfinishedRegistryStatus("failed")) {
+            return { queued: 0 };
+          }
+
+          const hasEligibleThreadsQueued = db.crawlRequests.some(
+            (r) =>
+              r.status === "queued" &&
+              String(r.platform || "").trim().toLowerCase() === "threads" &&
+              Number(r.attempts ?? 0) < Number(r.max_attempts ?? 3)
+          );
+          return { queued: hasEligibleThreadsQueued ? 1 : 0 };
+        }
         if (norm.startsWith("SELECT 1 AS ok")) return { ok: 1 };
         if (
           norm.startsWith("SELECT run_id, status, created_at") ||
@@ -320,6 +364,7 @@ class MockD1Database {
         return { results: [] };
       },
       async run() {
+        db.writeOps += 1;
         if (norm.startsWith("INSERT INTO worker_runtime_state")) {
           db.runtimeState.set(this.args[0], this.args[1]);
           return { meta: { changes: 1 } };
@@ -720,6 +765,19 @@ class MockD1Database {
               row.claimed_by = null;
               row.claimed_at = null;
               row.lease_expires_at = null;
+              row.updated_at = updated_at;
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'failed', error_message = 'Execution lease expired before completion'")) {
+          const [updated_at, nowIso] = this.args;
+          let changes = 0;
+          for (const row of db.crawlRequests) {
+            if (row.status === "running" && row.lease_expires_at && row.lease_expires_at < nowIso && row.attempts >= row.max_attempts) {
+              row.status = "failed";
+              row.error_message = "Execution lease expired before completion";
               row.updated_at = updated_at;
               changes++;
             }
@@ -4319,6 +4377,236 @@ assert.equal(v3StartBtns.length, 6);
   } finally {
     globalThis.fetch = prevFetch18;
   }
+}
+
+
+// 19. Muse Hook Signal (GET /api/crawl-queue/signal)
+{
+  const env19 = {
+    APP_VIDEO_API_TOKEN: "app-secret-19",
+    DB: new MockD1Database(),
+  };
+
+  const callSignal = async (headers = {}, method = "GET") => {
+    const writesBefore = env19.DB.writeOps;
+    const res = await worker.fetch(
+      new Request("https://example.workers.dev/api/crawl-queue/signal", { method, headers }),
+      env19
+    );
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    return {
+      status: res.status,
+      headers: res.headers,
+      text,
+      json,
+      writesDelta: env19.DB.writeOps - writesBefore,
+    };
+  };
+
+  // 19a: Empty queue -> 200 {"queued":false}, Cache-Control: no-store, strictly boolean key, 0 D1 writes, no CORS *
+  const emptyRes = await callSignal();
+  assert.equal(emptyRes.status, 200);
+  assert.equal(emptyRes.headers.get("Cache-Control"), "no-store");
+  assert.equal(emptyRes.headers.get("Access-Control-Allow-Origin"), null);
+  assert.deepEqual(emptyRes.json, { queued: false });
+  assert.deepEqual(Object.keys(emptyRes.json), ["queued"]);
+  assert.equal(emptyRes.writesDelta, 0, "Signal endpoint must never write to D1");
+
+  // 19b: Non-Threads queued requests (all, tiktok, shopee) MUST NOT trigger queued=true
+  const now19 = new Date().toISOString();
+  env19.DB.crawlRequests.push(
+    { id: "crw_all_19", platform: "all", keywords: "secret_kw_all", requested_count: 50, status: "queued", attempts: 0, max_attempts: 3, created_at: now19, updated_at: now19 },
+    { id: "crw_tk_19", platform: "tiktok", keywords: "secret_kw_tk", requested_count: 30, status: "queued", attempts: 0, max_attempts: 3, created_at: now19, updated_at: now19 },
+    { id: "crw_sh_19", platform: "shopee", keywords: "secret_kw_sh", requested_count: 20, status: "queued", attempts: 0, max_attempts: 3, created_at: now19, updated_at: now19 }
+  );
+  const nonThreadsRes = await callSignal();
+  assert.equal(nonThreadsRes.status, 200);
+  assert.deepEqual(nonThreadsRes.json, { queued: false });
+  assert.equal(nonThreadsRes.writesDelta, 0);
+
+  // 19c: Eligible Threads queued request -> {"queued":true}, leaves status='queued' intact, leaks ZERO sensitive fields
+  env19.DB.crawlRequests.push({
+    id: "crw_threads_19_a",
+    platform: "threads",
+    keywords: "sensitive_brand_kw",
+    requested_count: 88,
+    requested_by_chat_id: "999999",
+    status: "queued",
+    attempts: 0,
+    max_attempts: 3,
+    created_at: "2026-11-27T12:00:00.000Z",
+    updated_at: "2026-11-27T12:00:00.000Z",
+  });
+  const threadsRes = await callSignal();
+  assert.equal(threadsRes.status, 200);
+  assert.equal(threadsRes.headers.get("Cache-Control"), "no-store");
+  assert.deepEqual(threadsRes.json, { queued: true });
+  assert.ok(!threadsRes.text.includes("crw_threads_19_a"));
+  assert.ok(!threadsRes.text.includes("sensitive_brand_kw"));
+  assert.ok(!threadsRes.text.includes("999999"));
+  assert.ok(!threadsRes.text.includes("88"));
+  assert.equal(threadsRes.writesDelta, 0);
+  assert.equal(env19.DB.crawlRequests.find((c) => c.id === "crw_threads_19_a").status, "queued", "Must NOT claim request");
+
+  // 19d: Active running crawl (valid future lease, even non-Threads) -> MUST return {"queued":false}
+  const futureLease = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+  const runningRow19 = {
+    id: "crw_running_19",
+    platform: "all",
+    keywords: "active_run",
+    requested_count: 10,
+    status: "running",
+    claimed_by: "muse-vm",
+    attempts: 1,
+    max_attempts: 3,
+    lease_expires_at: futureLease,
+    created_at: "2026-11-27T12:00:01.000Z",
+    updated_at: "2026-11-27T12:00:01.000Z",
+  };
+  env19.DB.crawlRequests.push(runningRow19);
+  const whileRunning = await callSignal();
+  assert.equal(whileRunning.status, 200);
+  assert.deepEqual(whileRunning.json, { queued: false }, "Active running task must suppress new wake signal");
+  assert.equal(whileRunning.writesDelta, 0);
+
+  // 19e: Expired lease on running task MUST stop blocking queued Threads request (read-only),
+  //      and after expireStaleLeases requeues an expired Threads task it becomes signal=true (or false if max_attempts exhausted)
+  runningRow19.lease_expires_at = new Date(Date.now() - 60 * 1000).toISOString();
+  const expiredBlockRes = await callSignal();
+  assert.equal(expiredBlockRes.status, 200);
+  assert.deepEqual(expiredBlockRes.json, { queued: true }, "Expired running lease must not wedge queued Threads requests");
+  assert.equal(expiredBlockRes.writesDelta, 0);
+  // Clean up runningRow19 before testing standalone expired Threads reclaim
+  env19.DB.crawlRequests = env19.DB.crawlRequests.filter((c) => c.id !== "crw_running_19");
+
+  // Unfinished registry work (registry_sync_outbox OR registry_sync_status pending/error) MUST block signal -> false
+  env19.DB.registryOutbox.push({
+    id: "rout_block_19",
+    request_id: "crw_prev_19",
+    status: "error",
+    payload_json: "[]",
+    created_at: now19,
+    updated_at: now19,
+  });
+  assert.deepEqual((await callSignal()).json, { queued: false }, "Pending/errored outbox must block next crawl signal");
+  env19.DB.registryOutbox = [];
+
+  const regBlockedReq = {
+    id: "crw_reg_err_19",
+    platform: "threads",
+    keywords: "done_needs_reg",
+    requested_count: 10,
+    status: "completed",
+    attempts: 1,
+    max_attempts: 3,
+    result_summary_json: JSON.stringify({ registry_sync_status: "error" }),
+    created_at: "2026-11-27T12:00:02.000Z",
+    updated_at: "2026-11-27T12:00:02.000Z",
+  };
+  env19.DB.crawlRequests.push(regBlockedReq);
+  assert.deepEqual((await callSignal()).json, { queued: false }, "registry_sync_status=error in completed request must block signal");
+  regBlockedReq.result_summary_json = JSON.stringify({ registry_sync_status: "ok" });
+  assert.deepEqual((await callSignal()).json, { queued: true }, "Signal resumes true once registry_sync_status=ok");
+
+  // 19f: Consecutive requests (nhieu request lien tiep):
+  //      req1 + req2 queued -> true -> req1 running -> false -> req1 completed -> immediately true for req2 -> req2 completed -> false
+  env19.DB.crawlRequests.push({
+    id: "crw_threads_19_b",
+    platform: "threads",
+    keywords: "second_threads_req",
+    requested_count: 50,
+    status: "queued",
+    attempts: 0,
+    max_attempts: 3,
+    created_at: "2026-11-27T12:00:03.000Z",
+    updated_at: "2026-11-27T12:00:03.000Z",
+  });
+  assert.deepEqual((await callSignal()).json, { queued: true });
+  const reqA19 = env19.DB.crawlRequests.find((c) => c.id === "crw_threads_19_a");
+  reqA19.status = "running";
+  reqA19.lease_expires_at = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  reqA19.attempts = 1;
+  assert.deepEqual((await callSignal()).json, { queued: false }, "Drops to false during req1 execution even with req2 queued");
+  reqA19.status = "completed";
+  reqA19.result_summary_json = JSON.stringify({ registry_sync_status: "ok" });
+  assert.deepEqual((await callSignal()).json, { queued: true }, "Immediately flips false->true for req2 without waiting 600s");
+  const reqB19 = env19.DB.crawlRequests.find((c) => c.id === "crw_threads_19_b");
+  reqB19.status = "running";
+  reqB19.lease_expires_at = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  reqB19.attempts = 1;
+  assert.deepEqual((await callSignal()).json, { queued: false });
+  reqB19.status = "completed";
+  reqB19.result_summary_json = JSON.stringify({ registry_sync_status: "ok" });
+  assert.deepEqual((await callSignal()).json, { queued: false });
+
+  // Expired standalone Threads request reclaimed by scheduled() expireStaleLeases
+  const reclaimTarget = {
+    id: "crw_reclaim_19",
+    platform: "threads",
+    keywords: "reclaim_me",
+    requested_count: 25,
+    status: "running",
+    claimed_by: "dead-worker",
+    attempts: 1,
+    max_attempts: 3,
+    lease_expires_at: new Date(Date.now() - 120 * 1000).toISOString(),
+    created_at: "2026-11-27T12:00:04.000Z",
+    updated_at: "2026-11-27T12:00:04.000Z",
+  };
+  env19.DB.crawlRequests.push(reclaimTarget);
+  await worker.scheduled({}, env19, {});
+  assert.equal(reclaimTarget.status, "queued");
+  assert.deepEqual((await callSignal()).json, { queued: true });
+  // Exhausted attempts -> failed -> signal false
+  reclaimTarget.status = "running";
+  reclaimTarget.attempts = 3;
+  reclaimTarget.lease_expires_at = new Date(Date.now() - 120 * 1000).toISOString();
+  await worker.scheduled({}, env19, {});
+  assert.equal(reclaimTarget.status, "failed");
+  assert.deepEqual((await callSignal()).json, { queued: false });
+
+  // 19g: D1 outage MUST return HTTP 503 (NEVER {"queued":false}) with Cache-Control: no-store
+  env19.DB.failSignalQuery = true;
+  const errRes19 = await callSignal();
+  assert.equal(errRes19.status, 503);
+  assert.equal(errRes19.headers.get("Cache-Control"), "no-store");
+  assert.equal(errRes19.json?.queued, undefined, "503 must NOT contain queued field");
+  assert.ok(!errRes19.text.includes("Simulated D1"), "503 must NOT leak raw D1 internals");
+  env19.DB.failSignalQuery = false;
+
+  // 19h: HTTP method restriction, optional secret guard, and per-IP burst rate limiting
+  const postRes19 = await callSignal({}, "POST");
+  assert.equal(postRes19.status, 405);
+  assert.equal(postRes19.headers.get("Allow"), "GET");
+  assert.equal(postRes19.headers.get("Cache-Control"), "no-store");
+
+  const env19Tok = { ...env19, MUSE_SIGNAL_TOKEN: "sig-secret-19" };
+  const rUnauthSig = await worker.fetch(new Request("https://example.workers.dev/api/crawl-queue/signal"), env19Tok);
+  assert.equal(rUnauthSig.status, 401);
+  assert.equal(rUnauthSig.headers.get("Cache-Control"), "no-store");
+  const rAuthSig = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl-queue/signal", { headers: { "X-Signal-Token": "sig-secret-19" } }),
+    env19Tok
+  );
+  assert.equal(rAuthSig.status, 200);
+
+  const env19Rate = { ...env19, SIGNAL_RATE_LIMIT_PER_MIN: "5" };
+  for (let i = 0; i < 5; i++) {
+    const okRl = await worker.fetch(
+      new Request("https://example.workers.dev/api/crawl-queue/signal", { headers: { "CF-Connecting-IP": "198.51.100.77" } }),
+      env19Rate
+    );
+    assert.equal(okRl.status, 200);
+  }
+  const blockedRl = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl-queue/signal", { headers: { "CF-Connecting-IP": "198.51.100.77" } }),
+    env19Rate
+  );
+  assert.equal(blockedRl.status, 429);
+  assert.equal(blockedRl.headers.get("Retry-After") !== null, true);
+  assert.equal(blockedRl.headers.get("Cache-Control"), "no-store");
 }
 
 console.log("WORKER_V2_CONTRACT_TESTS_OK");

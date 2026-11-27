@@ -1273,6 +1273,94 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         self.assertEqual(len(self.store.list_pending_registry_batches()), 0)
         self.assertEqual(len(self.client.mock_registry), 250)
 
+    def test_worker_v2_crawl_queue_signal_sql_real_sqlite(self):
+        """Real SQLite (D1 engine) validation of CRAWL_QUEUE_SIGNAL_SQL index plan & all queue/lease/registry states."""
+        import sqlite3
+        import re as _re
+        from pathlib import Path as _Path
+
+        root_p = _Path(ROOT_DIR)
+        worker_src = (root_p / "cloudflare-worker" / "worker.v2.js").read_text(encoding="utf-8")
+        m = _re.search(r"const\s+CRAWL_QUEUE_SIGNAL_SQL\s*=\s*`([^`]+)`", worker_src)
+        self.assertIsNotNone(m, "CRAWL_QUEUE_SIGNAL_SQL must exist in worker.v2.js")
+        sql = m.group(1)
+
+        conn = sqlite3.connect(":memory:")
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0001_v2_market_and_commands.sql").read_text(encoding="utf-8"))
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0003_cross_run_dedup_registry.sql").read_text(encoding="utf-8"))
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0004_seed_post_identity_index_171.sql").read_text(encoding="utf-8"))
+
+        now_iso = "2026-11-27T12:10:00.000Z"
+        past_iso = "2026-11-27T11:00:00.000Z"
+        future_iso = "2026-11-27T13:00:00.000Z"
+
+        # Verify zero unindexed table scans in SQLite query plan
+        plan_text = "\n".join(str(r) for r in conn.execute("EXPLAIN QUERY PLAN " + sql, (now_iso,)).fetchall())
+        self.assertIn("USING", plan_text)
+        self.assertNotIn("SCAN crawl_requests", plan_text)
+
+        def eval_sig():
+            return conn.execute(sql, (now_iso,)).fetchone()[0]
+
+        # 1. Empty queue
+        self.assertEqual(eval_sig(), 0)
+
+        # 2. Only ALL / TikTok / Shopee queued -> 0
+        for pid, plat in [("q_all", "all"), ("q_tk", "tiktok"), ("q_sh", "shopee")]:
+            conn.execute(
+                "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES (?, ?, 'kw', 20, 'queued', 0, 3, ?, ?)",
+                (pid, plat, now_iso, now_iso),
+            )
+        self.assertEqual(eval_sig(), 0)
+
+        # 3. Threads queued added -> 1
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('q_th1', 'threads', 'skincare', 50, 'queued', 0, 3, ?, ?)",
+            (now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 1)
+
+        # 4. Active running task (valid future lease) blocks -> 0
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, lease_expires_at, attempts, max_attempts, created_at, updated_at) VALUES ('r_act', 'threads', 'x', 10, 'running', ?, 1, 3, ?, ?)",
+            (future_iso, now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 0)
+
+        # 5. Lease expired on running task no longer blocks q_th1 -> 1
+        conn.execute("UPDATE crawl_requests SET lease_expires_at = ? WHERE id = 'r_act'", (past_iso,))
+        self.assertEqual(eval_sig(), 1)
+
+        # 6. Pending/errored registry_sync_outbox blocks -> 0; drained -> 1
+        conn.execute(
+            "INSERT INTO registry_sync_outbox (id, request_id, run_id, payload_json, status, attempts, created_at, updated_at) VALUES ('out_1', 'prev', 'run_prev', '[]', 'error', 1, ?, ?)",
+            (now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 0)
+        conn.execute("DELETE FROM registry_sync_outbox")
+        self.assertEqual(eval_sig(), 1)
+
+        # 7. Completed request with registry_sync_status=error/pending blocks -> 0; ok -> 1
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, result_summary_json, attempts, max_attempts, created_at, updated_at) VALUES ('c_err', 'threads', 'x', 10, 'completed', '{\"registry_sync_status\":\"error\"}', 1, 3, ?, ?)",
+            (now_iso, now_iso),
+        )
+        self.assertEqual(eval_sig(), 0)
+        conn.execute("UPDATE crawl_requests SET result_summary_json = '{\"registry_sync_status\":\"ok\"}' WHERE id = 'c_err'")
+        self.assertEqual(eval_sig(), 1)
+
+        # 8. Consecutive Threads requests transition: running -> 0, completed -> 1 for second, completed -> 0
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('q_th2', 'threads', 'makeup', 30, 'queued', 0, 3, '2026-11-27T12:10:05.000Z', '2026-11-27T12:10:05.000Z')"
+        )
+        conn.execute("UPDATE crawl_requests SET status = 'running', lease_expires_at = ?, attempts = 1 WHERE id = 'q_th1'", (future_iso,))
+        self.assertEqual(eval_sig(), 0)
+        conn.execute("UPDATE crawl_requests SET status = 'completed', result_summary_json = '{\"registry_sync_status\":\"ok\"}' WHERE id = 'q_th1'")
+        self.assertEqual(eval_sig(), 1)
+        conn.execute("UPDATE crawl_requests SET status = 'completed', result_summary_json = '{\"registry_sync_status\":\"ok\"}' WHERE id = 'q_th2'")
+        self.assertEqual(eval_sig(), 0)
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -5167,6 +5167,126 @@ async function handleTelegramUpdate(request, env) {
 
 // ─── Worker Entrypoint ───────────────────────────────────────────────────────
 
+
+// ─── Muse Hook Signal Endpoint (Read-Only D1 Boolean Signal) ──────────────────
+
+const SIGNAL_RATE_WINDOW_MS = 60 * 1000;
+const SIGNAL_RATE_DEFAULT_MAX_PER_MIN = 60;
+const signalIpHits = new Map();
+
+function checkSignalRateLimit(request, env) {
+    const clientIp = (request.headers.get("CF-Connecting-IP") || "").trim();
+    if (!clientIp) return { allowed: true, retryAfterSec: 0 };
+
+    const maxPerMin = Math.min(Math.max(Number(env?.SIGNAL_RATE_LIMIT_PER_MIN) || SIGNAL_RATE_DEFAULT_MAX_PER_MIN, 5), 600);
+    const nowMs = Date.now();
+    const cutoffMs = nowMs - SIGNAL_RATE_WINDOW_MS;
+
+    if (signalIpHits.size > 512) {
+        for (const [ip, hits] of signalIpHits.entries()) {
+            if (!hits.length || hits[hits.length - 1] < cutoffMs) {
+                signalIpHits.delete(ip);
+            }
+        }
+    }
+
+    const recent = (signalIpHits.get(clientIp) || []).filter((ts) => ts >= cutoffMs);
+    if (recent.length >= maxPerMin) {
+        const oldest = recent[0] || nowMs;
+        const retryAfterSec = Math.max(1, Math.ceil((oldest + SIGNAL_RATE_WINDOW_MS - nowMs) / 1000));
+        return { allowed: false, retryAfterSec };
+    }
+    recent.push(nowMs);
+    signalIpHits.set(clientIp, recent);
+    return { allowed: true, retryAfterSec: 0 };
+}
+
+function isAuthorizedSignalRequest(request, env) {
+    const configuredSecret = String(env?.MUSE_SIGNAL_TOKEN || "").trim();
+    if (!configuredSecret) return true;
+    const xToken = (request.headers.get("X-Signal-Token") || "").trim();
+    if (xToken && timingSafeEqualStr(xToken, configuredSecret)) return true;
+    const auth = (request.headers.get("Authorization") || "").trim();
+    if (auth.startsWith("Bearer ")) {
+        const bearer = auth.slice(7).trim();
+        if (bearer && timingSafeEqualStr(bearer, configuredSecret)) return true;
+    }
+    return false;
+}
+
+const CRAWL_QUEUE_SIGNAL_SQL = `
+    SELECT
+      CASE
+        WHEN EXISTS (
+          SELECT 1 FROM crawl_requests
+          WHERE status = 'running'
+            AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+        ) THEN 0
+        WHEN EXISTS (
+          SELECT 1 FROM registry_sync_outbox
+          WHERE status IN ('pending', 'error', 'processing', 'done')
+        ) THEN 0
+        WHEN EXISTS (
+          SELECT 1 FROM (
+            SELECT result_summary_json FROM crawl_requests
+            WHERE status = 'completed'
+            ORDER BY created_at DESC LIMIT 50
+          ) rc
+          WHERE rc.result_summary_json IS NOT NULL
+            AND json_valid(rc.result_summary_json) = 1
+            AND lower(COALESCE(json_extract(rc.result_summary_json, '$.registry_sync_status'), '')) IN ('pending', 'error')
+        ) THEN 0
+        WHEN EXISTS (
+          SELECT 1 FROM (
+            SELECT result_summary_json FROM crawl_requests
+            WHERE status = 'failed'
+            ORDER BY created_at DESC LIMIT 50
+          ) rf
+          WHERE rf.result_summary_json IS NOT NULL
+            AND json_valid(rf.result_summary_json) = 1
+            AND lower(COALESCE(json_extract(rf.result_summary_json, '$.registry_sync_status'), '')) IN ('pending', 'error')
+        ) THEN 0
+        WHEN EXISTS (
+          SELECT 1 FROM crawl_requests
+          WHERE status = 'queued'
+            AND lower(trim(platform)) = 'threads'
+            AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+        ) THEN 1
+        ELSE 0
+      END AS queued
+`;
+
+async function readThreadsCrawlQueueSignal(env) {
+    if (!env?.DB) {
+        throw new Error("D1 binding unavailable");
+    }
+    const nowIso = new Date().toISOString();
+    const row = await env.DB.prepare(CRAWL_QUEUE_SIGNAL_SQL).bind(nowIso).first();
+    if (!row || (row.queued !== 0 && row.queued !== 1 && typeof row.queued !== "boolean")) {
+        throw new Error("Invalid D1 signal query response");
+    }
+    return { queued: Boolean(row.queued === true || Number(row.queued) === 1) };
+}
+
+async function handleCrawlQueueSignal(request, env) {
+    if (request.method !== "GET") {
+        return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "GET" });
+    }
+    if (!isAuthorizedSignalRequest(request, env)) {
+        return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+    const rl = checkSignalRateLimit(request, env);
+    if (!rl.allowed) {
+        return jsonResponse({ error: "Too many requests" }, 429, { "Retry-After": String(rl.retryAfterSec) });
+    }
+    try {
+        const res = await readThreadsCrawlQueueSignal(env);
+        return jsonResponse({ queued: res.queued }, 200);
+    } catch {
+        return jsonResponse({ error: "Service unavailable" }, 503);
+    }
+}
+
 export default {
     async scheduled(controller, env, ctx) {
         let notifyErr = null;
@@ -5198,6 +5318,10 @@ export default {
 
         if (request.method === "GET" && url.pathname === "/") {
             return new Response("App Video Scheduler: ONLINE");
+        }
+
+        if (url.pathname === "/api/crawl-queue/signal") {
+            return handleCrawlQueueSignal(request, env);
         }
 
         if (url.pathname.startsWith("/api/app/")) {
