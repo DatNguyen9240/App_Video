@@ -12,6 +12,8 @@ import {
   Settings,
   Sparkles,
   ExternalLink,
+  LogIn,
+  LogOut,
 } from 'lucide-react';
 
 const navigation = [
@@ -28,6 +30,19 @@ const navigation = [
 
 export const Layout: React.FC = () => {
   const location = useLocation();
+  const storedUserRaw = typeof window !== 'undefined' ? localStorage.getItem('autopub_user') : null;
+  let currentUser: { email?: string; name?: string } | null = null;
+  try {
+    currentUser = storedUserRaw ? JSON.parse(storedUserRaw) : null;
+  } catch {
+    currentUser = null;
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('autopub_token');
+    localStorage.removeItem('autopub_user');
+    window.location.href = '/login';
+  };
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
@@ -66,21 +81,41 @@ export const Layout: React.FC = () => {
           })}
         </nav>
 
-        <div className="p-4 border-t border-slate-800 bg-slate-950/40">
+        <div className="p-4 border-t border-slate-800 bg-slate-950/40 space-y-3">
           <div className="bg-slate-800/60 rounded-lg p-3 text-xs text-slate-400 border border-slate-700/50">
             <div className="flex items-center justify-between text-slate-300 font-semibold mb-1">
-              <span>API Gateway</span>
+              <span>{currentUser ? (currentUser.name || currentUser.email) : 'Demo Workspace'}</span>
               <span className="w-2 h-2 rounded-full bg-emerald-400 ring-4 ring-emerald-400/20"></span>
             </div>
-            <p className="text-[11px] text-slate-500 mb-2">Meta Graph v21.0 & YouTube v3</p>
-            <a
-              href="http://localhost:3000/api/docs"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300 text-[11px] font-medium"
-            >
-              Swagger Docs <ExternalLink className="w-3 h-3" />
-            </a>
+            <p className="text-[11px] text-slate-500 mb-2">
+              {currentUser ? currentUser.email : 'Multi-user JWT + DB Config'}
+            </p>
+            <div className="flex items-center justify-between">
+              <a
+                href="http://localhost:3000/api/docs"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300 text-[11px] font-medium"
+              >
+                Swagger <ExternalLink className="w-3 h-3" />
+              </a>
+              {currentUser ? (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="inline-flex items-center gap-1 text-rose-400 hover:text-rose-300 text-[11px] font-medium"
+                >
+                  <LogOut className="w-3 h-3" /> Logout
+                </button>
+              ) : (
+                <NavLink
+                  to="/login"
+                  className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 text-[11px] font-medium"
+                >
+                  <LogIn className="w-3 h-3" /> Sign In
+                </NavLink>
+              )}
+            </div>
           </div>
         </div>
       </aside>

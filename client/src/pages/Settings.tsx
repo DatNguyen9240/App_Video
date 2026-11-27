@@ -1,14 +1,195 @@
-import React from 'react';
-import { Shield, Key, Database, Server, ExternalLink, CheckCircle2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Shield, Key, Database, Server, ExternalLink, CheckCircle2, Save, RotateCcw } from 'lucide-react';
+import { getPlatformConfigs, savePlatformConfig, deletePlatformConfig } from '../api/client';
+
+interface PlatformConfigItem {
+  platform: 'FACEBOOK' | 'YOUTUBE' | 'THREADS' | 'TIKTOK';
+  appId: string;
+  redirectUri: string;
+  hasSecret: boolean;
+  isActive: boolean;
+  source: 'DATABASE' | 'ENV' | 'UNCONFIGURED';
+}
 
 export const Settings: React.FC = () => {
+  const queryClient = useQueryClient();
+  const { data: configs, isLoading } = useQuery<PlatformConfigItem[]>({
+    queryKey: ['platform-configs'],
+    queryFn: getPlatformConfigs,
+  });
+
+  const [drafts, setDrafts] = useState<Record<string, { appId: string; appSecret: string; redirectUri: string }>>({});
+  const [savedPlatform, setSavedPlatform] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (configs) {
+      const next: Record<string, { appId: string; appSecret: string; redirectUri: string }> = {};
+      for (const c of configs) {
+        next[c.platform] = {
+          appId: c.appId || '',
+          appSecret: '',
+          redirectUri: c.redirectUri || '',
+        };
+      }
+      setDrafts(next);
+    }
+  }, [configs]);
+
+  const saveMutation = useMutation({
+    mutationFn: ({ platform, payload }: { platform: string; payload: any }) =>
+      savePlatformConfig(platform, payload),
+    onSuccess: (_data, vars) => {
+      setSavedPlatform(vars.platform);
+      setTimeout(() => setSavedPlatform(null), 2500);
+      queryClient.invalidateQueries({ queryKey: ['platform-configs'] });
+    },
+  });
+
+  const resetMutation = useMutation({
+    mutationFn: (platform: string) => deletePlatformConfig(platform),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['platform-configs'] });
+    },
+  });
+
   return (
     <div className="space-y-8 max-w-5xl mx-auto">
       <div>
         <h2 className="text-2xl font-bold text-slate-900 tracking-tight">System Settings & Developer Guides</h2>
         <p className="text-sm text-slate-500 mt-1">
-          OAuth credentials configuration, Meta App Review requirements, and Google Cloud settings.
+          Manage OAuth App credentials in PostgreSQL (encrypted at rest) or fallback to .env defaults.
         </p>
+      </div>
+
+      {/* ─── DATABASE OAUTH CREDENTIALS MANAGER ────────────────────────────── */}
+      <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+              <Key className="w-5 h-5 text-indigo-600" />
+              Platform OAuth App Credentials (Database)
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Stored per-workspace in PostgreSQL with AES-256-GCM encryption. Overrides .env when set.
+            </p>
+          </div>
+          <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 flex items-center gap-1">
+            <Database className="w-3.5 h-3.5" /> DB + .env Fallback
+          </span>
+        </div>
+
+        {isLoading ? (
+          <div className="text-xs text-slate-400 py-4">Loading platform configurations...</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {(configs || []).map((cfg) => {
+              const d = drafts[cfg.platform] || { appId: '', appSecret: '', redirectUri: '' };
+              return (
+                <div key={cfg.platform} className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-sm text-slate-900">{cfg.platform}</span>
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                        cfg.source === 'DATABASE'
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : cfg.source === 'ENV'
+                          ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                          : 'bg-slate-200 text-slate-600'
+                      }`}
+                    >
+                      {cfg.source === 'DATABASE' ? 'Database' : cfg.source === 'ENV' ? 'From .env' : 'Not Set'}
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      {cfg.platform === 'TIKTOK' ? 'Client Key' : cfg.platform === 'YOUTUBE' ? 'Client ID' : 'App ID'}
+                    </label>
+                    <input
+                      type="text"
+                      value={d.appId}
+                      onChange={(e) =>
+                        setDrafts((prev) => ({
+                          ...prev,
+                          [cfg.platform]: { ...d, appId: e.target.value },
+                        }))
+                      }
+                      placeholder="Enter App ID / Client Key"
+                      className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      App Secret {cfg.hasSecret && <span className="text-emerald-600 font-normal">(configured — leave blank to keep)</span>}
+                    </label>
+                    <input
+                      type="password"
+                      value={d.appSecret}
+                      onChange={(e) =>
+                        setDrafts((prev) => ({
+                          ...prev,
+                          [cfg.platform]: { ...d, appSecret: e.target.value },
+                        }))
+                      }
+                      placeholder={cfg.hasSecret ? '•••••••• (unchanged)' : 'Enter App Secret'}
+                      className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">OAuth Redirect URI</label>
+                    <input
+                      type="text"
+                      value={d.redirectUri}
+                      onChange={(e) =>
+                        setDrafts((prev) => ({
+                          ...prev,
+                          [cfg.platform]: { ...d, redirectUri: e.target.value },
+                        }))
+                      }
+                      placeholder="http://localhost:3000/api/social-accounts/..."
+                      className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      type="button"
+                      disabled={saveMutation.isPending}
+                      onClick={() =>
+                        saveMutation.mutate({
+                          platform: cfg.platform,
+                          payload: {
+                            appId: d.appId,
+                            appSecret: d.appSecret || undefined,
+                            redirectUri: d.redirectUri || undefined,
+                          },
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      {savedPlatform === cfg.platform ? 'Saved!' : 'Save to DB'}
+                    </button>
+
+                    {cfg.source === 'DATABASE' && (
+                      <button
+                        type="button"
+                        disabled={resetMutation.isPending}
+                        onClick={() => resetMutation.mutate(cfg.platform)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-600 text-xs font-medium"
+                      >
+                        <RotateCcw className="w-3 h-3" /> Revert to .env
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* ─── SYSTEM STATUS CARD ───────────────────────────────────────────── */}

@@ -305,13 +305,24 @@ def get_daily_trending_topics(target_date: str = None, mode: str = "social", for
             except Exception:
                 pass
 
-    # 2. Cần fetch mới qua Gemini AI
-    if not api_key:
-        api_key = ai_base.load_gemini_api_key()
+    # 2. Cần fetch mới qua Gemini AI (hỗ trợ xoay vòng nhiều key từ DB + fallback .env)
+    keys_to_try = []
+    if api_key:
+        keys_to_try = [api_key]
+    else:
+        try:
+            import db_store
+            keys_to_try = db_store.get_active_gemini_keys()
+        except Exception:
+            keys_to_try = []
+        if not keys_to_try:
+            fallback_k = ai_base.load_gemini_api_key()
+            if fallback_k:
+                keys_to_try = [fallback_k]
 
     cfg = config_mod.load_config()
 
-    if not api_key:
+    if not keys_to_try:
         # Fallback ngoại tuyến phong phú khi chưa có API key
         return _build_offline_daily_topics(target_date, date_display, day_month_display, safe_mode)
 
@@ -319,7 +330,6 @@ def get_daily_trending_topics(target_date: str = None, mode: str = "social", for
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
         model_name = cfg.get("ai_director", {}).get("model", "gemini-3.5-flash")
 
         if safe_mode == "true_story":
@@ -351,16 +361,36 @@ Yêu cầu:
 3. Trả về đúng 1 JSON array gồm các chuỗi chủ đề, không giải thích thêm.
 """
 
-        response = call_gemini_with_resilience(
-            client=client,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.85
-            ),
-            primary_model=model_name,
-            fallback_models=("gemini-3.5-flash-lite", "gemini-3.8-flash")
-        )
+        response = None
+        last_radar_err = None
+        for cur_key in keys_to_try:
+            try:
+                cur_client = genai.Client(api_key=cur_key, http_options={"api_version": "v1beta"})
+                response = call_gemini_with_resilience(
+                    client=cur_client,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.85
+                    ),
+                    primary_model=model_name,
+                    fallback_models=("gemini-3.5-flash-lite", "gemini-3.8-flash")
+                )
+                try:
+                    import db_store
+                    db_store.report_key_success(cur_key)
+                except Exception:
+                    pass
+                break
+            except Exception as key_err:
+                last_radar_err = key_err
+                try:
+                    import db_store
+                    db_store.report_key_error(cur_key, str(key_err))
+                except Exception:
+                    pass
+        if response is None and last_radar_err:
+            raise last_radar_err
         parsed = json.loads(response.text)
         if isinstance(parsed, list) and len(parsed) >= 3:
             topics = [str(t).strip() for t in parsed if str(t).strip()]

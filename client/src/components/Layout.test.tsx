@@ -2,7 +2,7 @@
  * Tests: components/Layout.tsx
  * Kiểm tra sidebar navigation, branding, Swagger link
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { Layout } from './Layout';
@@ -38,8 +38,14 @@ describe('Layout — Sidebar branding', () => {
 
   it('renders Swagger docs link pointing to localhost:3000', () => {
     renderLayout();
-    const link = screen.getByRole('link', { name: /swagger docs/i });
+    const link = screen.getByRole('link', { name: /swagger/i });
     expect(link).toHaveAttribute('href', 'http://localhost:3000/api/docs');
+  });
+
+  it('renders Sign In link when not logged in', () => {
+    renderLayout();
+    const link = screen.getByRole('link', { name: /sign in/i });
+    expect(link).toHaveAttribute('href', '/login');
   });
 
   it('renders "Live Official APIs" status badge', () => {

@@ -163,7 +163,15 @@ class PostSchema(BaseModel):
 # ─── QUẢN LÝ GEMINI API KEY ──────────────────────────────────────────────────
 
 def load_gemini_api_key() -> str:
-    """Đọc API Key từ môi trường hoặc file .env."""
+    """Đọc API Key từ DB (SQLite xoay vòng) hoặc fallback sang môi trường / file .env."""
+    try:
+        import db_store
+        keys = db_store.get_active_gemini_keys()
+        if keys:
+            return keys[0]
+    except Exception:
+        pass
+
     key = os.environ.get("GEMINI_API_KEY", "").strip()
     if key:
         return key
@@ -401,38 +409,68 @@ def generate_story_with_gemini(
     # Loại bỏ trùng lặp giữ nguyên thứ tự
     seen = set()
     models_to_try = [x for x in models_to_try if x and not (x in seen or seen.add(x))]
+
+    try:
+        import db_store
+        db_keys = db_store.get_active_gemini_keys()
+    except Exception:
+        db_keys = []
+    keys_to_try = [api_key] if (api_key and api_key not in db_keys) else (db_keys or [api_key])
+    if api_key and api_key in db_keys:
+        keys_to_try = [api_key] + [k for k in db_keys if k != api_key]
+
     data = None
     last_err = None
 
     import time
-    for m in models_to_try:
+    for key_idx, cur_key in enumerate(keys_to_try):
         if data:
             break
-        for attempt in range(1, 4):
-            try:
-                response = client.models.generate_content(
-                    model=m,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        response_schema=PostSchema,
-                        temperature=temperature,
-                    )
-                )
-                data = json.loads(response.text)
+        cur_client = client if (key_idx == 0 and cur_key == api_key) else genai.Client(api_key=cur_key, http_options={"api_version": "v1beta"})
+        key_failed_fatal = False
+        for m in models_to_try:
+            if data or key_failed_fatal:
                 break
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                is_transient = any(k in err_str for k in ["503", "429", "UNAVAILABLE", "high demand", "temporarily", "RESOURCE_EXHAUSTED", "overloaded"])
-                if is_transient and attempt < 3:
-                    wait_s = attempt * 2.0
-                    if progress_cb:
-                        progress_cb(f"Máy chủ AI ({m}) tải cao (503). Đang tự động thử lại sau {wait_s:.0f}s...", 35)
-                    time.sleep(wait_s)
-                else:
+            for attempt in range(1, 4):
+                try:
+                    response = cur_client.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            response_mime_type="application/json",
+                            response_schema=PostSchema,
+                            temperature=temperature,
+                        )
+                    )
+                    data = json.loads(response.text)
+                    try:
+                        import db_store
+                        db_store.report_key_success(cur_key)
+                    except Exception:
+                        pass
                     break
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e)
+                    is_key_or_quota = any(k in err_str for k in ["429", "RESOURCE_EXHAUSTED", "API_KEY_INVALID", "403", "PERMISSION_DENIED", "quota"])
+                    is_transient = any(k in err_str for k in ["503", "429", "UNAVAILABLE", "high demand", "temporarily", "RESOURCE_EXHAUSTED", "overloaded"])
+                    if is_key_or_quota:
+                        try:
+                            import db_store
+                            db_store.report_key_error(cur_key, err_str)
+                        except Exception:
+                            pass
+                        if len(keys_to_try) > 1:
+                            key_failed_fatal = True
+                            break
+                    if is_transient and attempt < 3:
+                        wait_s = attempt * 2.0
+                        if progress_cb:
+                            progress_cb(f"Máy chủ AI ({m}) tải cao (503). Đang tự động thử lại sau {wait_s:.0f}s...", 35)
+                        time.sleep(wait_s)
+                    else:
+                        break
 
     if not data:
         raise RuntimeError(f"Lỗi khi gọi Gemini API: {last_err}")

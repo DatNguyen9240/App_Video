@@ -1,8 +1,11 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 import { PrismaModule } from './prisma/prisma.module';
 import { StorageModule } from './storage/storage.module';
+import { AuthModule } from './auth/auth.module';
+import { AuthMiddleware } from './auth/auth.middleware';
+import { SettingsModule } from './settings/settings.module';
 import { SocialAccountModule } from './social-account/social-account.module';
 import { PublishingModule } from './publishing/publishing.module';
 import { ContentModule } from './content/content.module';
@@ -28,6 +31,8 @@ import { DashboardModule } from './dashboard/dashboard.module';
     }),
     PrismaModule,
     StorageModule,
+    AuthModule,
+    SettingsModule,
     SocialAccountModule,
     PublishingModule,
     ContentModule,
@@ -35,4 +40,8 @@ import { DashboardModule } from './dashboard/dashboard.module';
     DashboardModule,
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(AuthMiddleware).forRoutes('*');
+  }
+}

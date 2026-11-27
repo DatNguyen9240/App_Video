@@ -10,10 +10,12 @@ import { PublishingCalendar } from './pages/PublishingCalendar';
 import { PublishingQueue } from './pages/PublishingQueue';
 import { PublishingHistory } from './pages/PublishingHistory';
 import { Settings } from './pages/Settings';
+import { Login } from './pages/Login';
 
 export const App: React.FC = () => {
   return (
     <Routes>
+      <Route path="/login" element={<Login />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="accounts" element={<ConnectedAccounts />} />

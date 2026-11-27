@@ -4,10 +4,12 @@ import {
   NotFoundException,
   BadRequestException,
   UnauthorizedException,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { EncryptionService } from '../common/services/encryption.service';
+import { SettingsService } from '../settings/settings.service';
 import { Platform, AccountStatus, SocialAccount } from '@prisma/client';
 import axios from 'axios';
 import { google } from 'googleapis';
@@ -21,7 +23,41 @@ export class SocialAccountService {
     private readonly prisma: PrismaService,
     private readonly encryptionService: EncryptionService,
     private readonly configService: ConfigService,
+    @Optional() private readonly settingsService?: SettingsService,
   ) {}
+
+  private async resolveAppCredentials(userId: string, platform: Platform) {
+    if (this.settingsService) {
+      const resolved = await this.settingsService.resolveCredentials(userId, platform);
+      if (resolved) return resolved;
+    }
+    if (platform === Platform.FACEBOOK) {
+      return {
+        appId: this.configService.get<string>('META_APP_ID') || '',
+        appSecret: this.configService.get<string>('META_APP_SECRET') || '',
+        redirectUri: this.configService.get<string>('META_OAUTH_REDIRECT_URI') || '',
+      };
+    }
+    if (platform === Platform.YOUTUBE) {
+      return {
+        appId: this.configService.get<string>('GOOGLE_CLIENT_ID') || '',
+        appSecret: this.configService.get<string>('GOOGLE_CLIENT_SECRET') || '',
+        redirectUri: this.configService.get<string>('GOOGLE_OAUTH_REDIRECT_URI') || '',
+      };
+    }
+    if (platform === Platform.THREADS) {
+      return {
+        appId: this.configService.get<string>('THREADS_APP_ID') || this.configService.get<string>('META_APP_ID') || '',
+        appSecret: this.configService.get<string>('THREADS_APP_SECRET') || this.configService.get<string>('META_APP_SECRET') || '',
+        redirectUri: this.configService.get<string>('THREADS_OAUTH_REDIRECT_URI', 'http://localhost:3000/api/social-accounts/threads/callback'),
+      };
+    }
+    return {
+      appId: this.configService.get<string>('TIKTOK_CLIENT_KEY') || '',
+      appSecret: this.configService.get<string>('TIKTOK_CLIENT_SECRET') || '',
+      redirectUri: this.configService.get<string>('TIKTOK_OAUTH_REDIRECT_URI', 'http://localhost:3000/api/social-accounts/tiktok/callback'),
+    };
+  }
 
   /**
    * Retrieves all connected social accounts for a user.
@@ -77,9 +113,10 @@ export class SocialAccountService {
    * Generates secure OAuth authorization URL for Meta (Facebook Pages).
    */
   async generateFacebookAuthUrl(userId: string, redirectUriOverride?: string): Promise<{ url: string; state: string }> {
-    const appId = this.configService.get<string>('META_APP_ID');
+    const creds = await this.resolveAppCredentials(userId, Platform.FACEBOOK);
+    const appId = creds.appId;
     const apiVersion = this.configService.get<string>('META_API_VERSION', 'v21.0');
-    const redirectUri = redirectUriOverride || this.configService.get<string>('META_OAUTH_REDIRECT_URI');
+    const redirectUri = redirectUriOverride || creds.redirectUri;
 
     if (!appId) {
       throw new BadRequestException('META_APP_ID is not configured in server environment.');
@@ -117,10 +154,11 @@ export class SocialAccountService {
   async handleFacebookCallback(code: string, state: string) {
     const oauthState = await this.validateAndConsumeState(state, Platform.FACEBOOK);
 
-    const appId = this.configService.get<string>('META_APP_ID');
-    const appSecret = this.configService.get<string>('META_APP_SECRET');
+    const creds = await this.resolveAppCredentials(oauthState.userId, Platform.FACEBOOK);
+    const appId = creds.appId;
+    const appSecret = creds.appSecret;
     const apiVersion = this.configService.get<string>('META_API_VERSION', 'v21.0');
-    const redirectUri = oauthState.redirectUri || this.configService.get<string>('META_OAUTH_REDIRECT_URI');
+    const redirectUri = oauthState.redirectUri || creds.redirectUri;
 
     try {
       // 1. Exchange code for short-lived User Access Token
@@ -227,9 +265,10 @@ export class SocialAccountService {
    * Generates secure OAuth authorization URL for Google (YouTube Data API v3).
    */
   async generateYouTubeAuthUrl(userId: string, redirectUriOverride?: string): Promise<{ url: string; state: string }> {
-    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
-    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
-    const redirectUri = redirectUriOverride || this.configService.get<string>('GOOGLE_OAUTH_REDIRECT_URI');
+    const creds = await this.resolveAppCredentials(userId, Platform.YOUTUBE);
+    const clientId = creds.appId;
+    const clientSecret = creds.appSecret;
+    const redirectUri = redirectUriOverride || creds.redirectUri;
 
     if (!clientId || !clientSecret) {
       throw new BadRequestException('GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing in server environment.');
@@ -269,9 +308,10 @@ export class SocialAccountService {
   async handleYouTubeCallback(code: string, state: string) {
     const oauthState = await this.validateAndConsumeState(state, Platform.YOUTUBE);
 
-    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
-    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
-    const redirectUri = oauthState.redirectUri || this.configService.get<string>('GOOGLE_OAUTH_REDIRECT_URI');
+    const creds = await this.resolveAppCredentials(oauthState.userId, Platform.YOUTUBE);
+    const clientId = creds.appId;
+    const clientSecret = creds.appSecret;
+    const redirectUri = oauthState.redirectUri || creds.redirectUri;
 
     const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 
@@ -383,8 +423,9 @@ export class SocialAccountService {
    * Generates secure OAuth authorization URL for Threads (Threads API).
    */
   async generateThreadsAuthUrl(userId: string, redirectUriOverride?: string): Promise<{ url: string; state: string }> {
-    const appId = this.configService.get<string>('THREADS_APP_ID') || this.configService.get<string>('META_APP_ID');
-    const redirectUri = redirectUriOverride || this.configService.get<string>('THREADS_OAUTH_REDIRECT_URI', 'http://localhost:3000/api/social-accounts/threads/callback');
+    const creds = await this.resolveAppCredentials(userId, Platform.THREADS);
+    const appId = creds.appId;
+    const redirectUri = redirectUriOverride || creds.redirectUri;
 
     if (!appId) {
       throw new BadRequestException('THREADS_APP_ID or META_APP_ID is not configured in server environment.');
@@ -415,9 +456,10 @@ export class SocialAccountService {
   async handleThreadsCallback(code: string, state: string) {
     const oauthState = await this.validateAndConsumeState(state, Platform.THREADS);
 
-    const appId = this.configService.get<string>('THREADS_APP_ID') || this.configService.get<string>('META_APP_ID');
-    const appSecret = this.configService.get<string>('THREADS_APP_SECRET') || this.configService.get<string>('META_APP_SECRET');
-    const redirectUri = oauthState.redirectUri;
+    const creds = await this.resolveAppCredentials(oauthState.userId, Platform.THREADS);
+    const appId = creds.appId;
+    const appSecret = creds.appSecret;
+    const redirectUri = oauthState.redirectUri || creds.redirectUri;
 
     try {
       // 1. Exchange authorization code for short-lived Threads user token
@@ -533,8 +575,9 @@ export class SocialAccountService {
    * Generates secure OAuth authorization URL for TikTok Content Posting API.
    */
   async generateTikTokAuthUrl(userId: string, redirectUriOverride?: string): Promise<{ url: string; state: string }> {
-    const clientKey = this.configService.get<string>('TIKTOK_CLIENT_KEY');
-    const redirectUri = redirectUriOverride || this.configService.get<string>('TIKTOK_OAUTH_REDIRECT_URI');
+    const creds = await this.resolveAppCredentials(userId, Platform.TIKTOK);
+    const clientKey = creds.appId;
+    const redirectUri = redirectUriOverride || creds.redirectUri;
 
     if (!clientKey) {
       throw new BadRequestException('TIKTOK_CLIENT_KEY is not configured in server environment.');
@@ -573,9 +616,10 @@ export class SocialAccountService {
     }
 
     const oauthState = await this.validateAndConsumeState(state, Platform.TIKTOK);
-    const clientKey = this.configService.get<string>('TIKTOK_CLIENT_KEY');
-    const clientSecret = this.configService.get<string>('TIKTOK_CLIENT_SECRET');
-    const redirectUri = oauthState.redirectUri || this.configService.get<string>('TIKTOK_OAUTH_REDIRECT_URI');
+    const creds = await this.resolveAppCredentials(oauthState.userId, Platform.TIKTOK);
+    const clientKey = creds.appId;
+    const clientSecret = creds.appSecret;
+    const redirectUri = oauthState.redirectUri || creds.redirectUri;
 
     try {
       const tokenUrl = 'https://open.tiktokapis.com/v2/oauth/token/';
@@ -863,8 +907,9 @@ export class SocialAccountService {
       }
 
       const refreshToken = this.encryptionService.decrypt(account.refreshTokenEncrypted);
-      const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
-      const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+      const ytCreds = await this.resolveAppCredentials(account.userId, Platform.YOUTUBE);
+      const clientId = ytCreds.appId;
+      const clientSecret = ytCreds.appSecret;
 
       const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
       oauth2Client.setCredentials({ refresh_token: refreshToken });
@@ -898,8 +943,9 @@ export class SocialAccountService {
 
     if (account.platform === Platform.TIKTOK && account.refreshTokenEncrypted) {
       const refreshToken = this.encryptionService.decrypt(account.refreshTokenEncrypted);
-      const clientKey = this.configService.get<string>('TIKTOK_CLIENT_KEY');
-      const clientSecret = this.configService.get<string>('TIKTOK_CLIENT_SECRET');
+      const ttCreds = await this.resolveAppCredentials(account.userId, Platform.TIKTOK);
+      const clientKey = ttCreds.appId;
+      const clientSecret = ttCreds.appSecret;
 
       try {
         const tokenUrl = 'https://open.tiktokapis.com/v2/oauth/token/';

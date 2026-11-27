@@ -8,6 +8,30 @@ export const api = axios.create({
   },
 });
 
+if (api.interceptors?.request?.use) {
+  api.interceptors.request.use((config) => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('autopub_token') : null;
+    if (token && config.headers) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  });
+}
+
+export const loginUser = (data: { email: string; password: string }) =>
+  api.post('/auth/login', data).then((r) => r.data);
+export const registerUser = (data: { email: string; password: string; name?: string }) =>
+  api.post('/auth/register', data).then((r) => r.data);
+export const getCurrentUser = () => api.get('/auth/me').then((r) => r.data);
+
+export const getPlatformConfigs = () => api.get('/settings/platform-configs').then((r) => r.data);
+export const savePlatformConfig = (
+  platform: string,
+  data: { appId: string; appSecret?: string; redirectUri?: string; isActive?: boolean },
+) => api.put(`/settings/platform-configs/${platform}`, data).then((r) => r.data);
+export const deletePlatformConfig = (platform: string) =>
+  api.delete(`/settings/platform-configs/${platform}`).then((r) => r.data);
+
 export const getOverview = () => api.get('/dashboard/overview').then((r) => r.data);
 export const getRecentActivity = (limit = 10) =>
   api.get(`/dashboard/recent-activity?limit=${limit}`).then((r) => r.data);

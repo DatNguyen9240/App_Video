@@ -2271,6 +2271,58 @@ HTML_TEMPLATE = """
               class="w-full glass-input rounded-xl p-3 text-xs focus:outline-none font-mono text-slate-300"></textarea>
           </div>
 
+          <!-- Nhóm 8: Quản Lý Nhiều GEMINI_API_KEY (DB Xoay Vòng + Fallback .env) -->
+          <div class="space-y-3 pt-2 border-t border-slate-800/80">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                <i class="fa-solid fa-key"></i> 8. Quản Lý Gemini API Keys (SQLite DB + Xoay Vòng Tự Động)
+              </h3>
+              <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-300 border border-emerald-700/40">
+                Ưu tiên DB • Tự động fallback .env
+              </span>
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-2">
+              <input v-model="newGeminiLabel" type="text" placeholder="Nhãn (VD: Key phụ 1)"
+                class="sm:w-44 glass-input rounded-xl px-3 py-2 text-xs text-slate-200">
+              <input v-model="newGeminiKey" type="password" placeholder="Dán GEMINI_API_KEY (AIzaSy...)"
+                class="flex-1 glass-input rounded-xl px-3 py-2 text-xs text-slate-200 font-mono">
+              <button type="button" @click="addGeminiKey"
+                class="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer shrink-0">
+                <i class="fa-solid fa-plus mr-1"></i> Thêm Key vào DB
+              </button>
+            </div>
+
+            <div v-if="geminiKeys.length === 0" class="text-[11px] text-slate-400 bg-slate-900/50 rounded-xl p-3 border border-slate-800">
+              Chưa có key nào trong SQLite DB — hệ thống đang tự động dùng <code class="text-amber-300">GEMINI_API_KEY</code> từ file <code class="text-amber-300">.env</code>.
+            </div>
+
+            <div v-else class="space-y-1.5">
+              <div v-for="k in geminiKeys" :key="k.id"
+                class="flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+                <div class="flex items-center gap-2.5 min-w-0">
+                  <span class="w-2 h-2 rounded-full shrink-0" :class="k.is_active ? 'bg-emerald-400' : 'bg-slate-600'"></span>
+                  <span class="font-semibold text-slate-200 truncate">{{ k.label }}</span>
+                  <code class="text-[11px] text-slate-400 font-mono">{{ k.masked_key }}</code>
+                  <span v-if="k.error_count > 0" class="text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 text-rose-300 border border-rose-700/40">
+                    {{ k.error_count }} lỗi
+                  </span>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <button type="button" @click="toggleGeminiKey(k)"
+                    class="px-2.5 py-1 rounded-lg text-[11px] font-medium border cursor-pointer"
+                    :class="k.is_active ? 'border-emerald-700/50 text-emerald-300 bg-emerald-950/40' : 'border-slate-700 text-slate-400 bg-slate-800'">
+                    {{ k.is_active ? 'Đang bật' : 'Đang tắt' }}
+                  </button>
+                  <button type="button" @click="deleteGeminiKey(k.id)"
+                    class="px-2 py-1 rounded-lg text-[11px] text-rose-400 hover:bg-rose-950/40 cursor-pointer">
+                    <i class="fa-solid fa-trash"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </main>
@@ -3356,9 +3408,27 @@ HTML_TEMPLATE = """
             emotional_arc_data: [],
             logs: []
           },
-          directorConfig: null,
+          directorConfig: {
+            ai_director: {},
+            audio_mastering: {},
+            emotional_pacing: {},
+            voice_casting: {},
+            visual_layout: {
+              enable_center_satisfying_video: false,
+              center_satisfying_category: 'random',
+              fps: 60,
+              video_crf: 18,
+              enable_slide_up_animation: true,
+              enforce_min_duration_60s: false,
+              transition_style: 'dynamic_conversational',
+              enable_continuous_anchor_meme: false
+            }
+          },
           latestVideoUrl: '',
           latestCaption: '',
+          geminiKeys: [],
+          newGeminiKey: '',
+          newGeminiLabel: '',
           pollTimer: null,
           marketStatus: { is_syncing: false, stats: {}, cloudflare: {}, remote_poller: {}, filter_options: {}, recent_runs: [] },
           marketItems: [],
@@ -3464,6 +3534,7 @@ HTML_TEMPLATE = """
         this.loadLatestVideo();
         this.loadDailyTrendingTopics(false);
         this.loadDirectorConfig();
+        this.loadGeminiKeys();
         this.loadAvatarGallery();
         this.loadMarketDashboard();
         this.startStatusPolling();
@@ -3931,6 +4002,51 @@ HTML_TEMPLATE = """
             }
           }
         },
+        async loadGeminiKeys() {
+          try {
+            const res = await fetch('/api/gemini_keys');
+            const data = await res.json();
+            this.geminiKeys = data.keys || [];
+          } catch(e) {}
+        },
+        async addGeminiKey() {
+          if (!this.newGeminiKey || !this.newGeminiKey.trim()) return;
+          try {
+            const res = await fetch('/api/gemini_keys', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ api_key: this.newGeminiKey.trim(), label: this.newGeminiLabel.trim() })
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.newGeminiKey = '';
+              this.newGeminiLabel = '';
+              await this.loadGeminiKeys();
+              this.notify('✅ Đã lưu GEMINI_API_KEY vào SQLite DB!', 'success');
+            } else {
+              this.notify(data.error || 'Lỗi thêm key', 'error');
+            }
+          } catch(e) {
+            this.notify('Lỗi kết nối: ' + e, 'error');
+          }
+        },
+        async toggleGeminiKey(k) {
+          try {
+            await fetch('/api/gemini_keys/' + k.id, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ is_active: !k.is_active })
+            });
+            await this.loadGeminiKeys();
+          } catch(e) {}
+        },
+        async deleteGeminiKey(id) {
+          try {
+            await fetch('/api/gemini_keys/' + id, { method: 'DELETE' });
+            await this.loadGeminiKeys();
+            this.notify('Đã xóa key khỏi DB.', 'success');
+          } catch(e) {}
+        },
         async loadDirectorConfig() {
           try {
             const res = await fetch('/api/director_config');
@@ -4243,7 +4359,7 @@ HTML_TEMPLATE = """
             (item.extra_meta && item.extra_meta.affiliate_eligible === false) ||
             (item.extra_meta && item.extra_meta.url_status && item.extra_meta.url_status !== 'da_kiem_chung');
           if (isUnverified) {
-            const ok = confirm('⚠️ Dữ liệu này đang ở trạng thái needs_verification / chưa đủ bằng chứng xác minh.\nBạn vẫn muốn nạp vào Studio để biên tập thủ công?');
+            const ok = confirm('⚠️ Dữ liệu này đang ở trạng thái needs_verification / chưa đủ bằng chứng xác minh.\\nBạn vẫn muốn nạp vào Studio để biên tập thủ công?');
             if (!ok) return;
           }
           const text = item.summary_vi || item.title || item.text_content || '';
@@ -4389,69 +4505,65 @@ def api_bgm_list():
     return jsonify({"bgm_list": items})
 
 
-@app.route("/api/settings", methods=["GET", "POST"])
-def api_settings():
+@app.route("/api/gemini_keys", methods=["GET", "POST"])
+def api_gemini_keys():
+    db_mod = load_mod("db_store", "db_store.py")
     if request.method == "POST":
-        data = request.json
-        platform = data.get("platform", "threads")
-        layout_preset = data.get("layout_preset", "center")
-        bg_mode = data.get("bg_mode", "split_gameplay")
-        card_theme = data.get("card_theme", "light")
-        voice = data.get("voice", "nam_hai")
-        rate = data.get("rate", "+0%")
-        bgm_choice = data.get("bgm_choice", "gentle_piano_satie.mp3")
-        bgm_volume = data.get("bgm_volume", 25)
+        data = request.json or {}
+        api_key = (data.get("api_key") or "").strip()
+        label = (data.get("label") or "").strip()
+        if not api_key:
+            return jsonify({"success": False, "error": "api_key không được rỗng."}), 400
+        item = db_mod.add_gemini_key(api_key, label=label)
+        return jsonify({"success": True, "key": item})
+    return jsonify({"success": True, "keys": db_mod.list_gemini_keys()})
 
-        lines = []
-        if os.path.exists(ENV_PATH):
-            with open(ENV_PATH, "r", encoding="utf-8") as f:
-                for line in f:
-                    if not any(line.strip().startswith(k + "=") for k in ["PLATFORM", "LAYOUT_PRESET", "BG_MODE", "CARD_THEME", "TTS_VOICE", "TTS_RATE", "BGM_CHOICE", "BGM_VOLUME"]):
-                        lines.append(line)
-        lines.append(f"PLATFORM={platform}\n")
-        lines.append(f"LAYOUT_PRESET={layout_preset}\n")
-        lines.append(f"BG_MODE={bg_mode}\n")
-        lines.append(f"CARD_THEME={card_theme}\n")
-        lines.append(f"TTS_VOICE={voice}\n")
-        lines.append(f"TTS_RATE={rate}\n")
-        lines.append(f"BGM_CHOICE={bgm_choice}\n")
-        lines.append(f"BGM_VOLUME={bgm_volume}\n")
-        with open(ENV_PATH, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+
+@app.route("/api/gemini_keys/<int:key_id>", methods=["PATCH", "DELETE"])
+def api_gemini_key_item(key_id):
+    db_mod = load_mod("db_store", "db_store.py")
+    if request.method == "DELETE":
+        ok = db_mod.delete_gemini_key(key_id)
+        return jsonify({"success": ok})
+    data = request.json or {}
+    ok = db_mod.toggle_gemini_key(key_id, bool(data.get("is_active", True)))
+    return jsonify({"success": ok})
+
+
+@app.route("/api/settings", methods=["GET", "POST", "DELETE"])
+def api_settings():
+    db_mod = load_mod("db_store", "db_store.py")
+    if request.method == "DELETE":
+        db_mod.reset_studio_settings()
+        return jsonify({"success": True})
+    if request.method == "POST":
+        data = request.json or {}
+        db_mod.save_studio_settings({
+            "PLATFORM": data.get("platform", "threads"),
+            "LAYOUT_PRESET": data.get("layout_preset", "center"),
+            "BG_MODE": data.get("bg_mode", "split_gameplay"),
+            "CARD_THEME": data.get("card_theme", "light"),
+            "TTS_VOICE": data.get("voice", "nam_hai"),
+            "TTS_RATE": data.get("rate", "+0%"),
+            "BGM_CHOICE": data.get("bgm_choice", "gentle_piano_satie.mp3"),
+            "BGM_VOLUME": str(data.get("bgm_volume", 25)),
+        })
         return jsonify({"success": True})
     else:
-        platform = "threads"
-        layout_preset = "center"
-        bg_mode = "split_gameplay"
-        card_theme = "light"
-        voice = "nam_hai"
-        rate = "+0%"
-        bgm_choice = "gentle_piano_satie.mp3"
-        bgm_volume = 25
-        if os.path.exists(ENV_PATH):
-            with open(ENV_PATH, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("PLATFORM="): platform = line.split("=", 1)[1].strip()
-                    elif line.startswith("LAYOUT_PRESET="): layout_preset = line.split("=", 1)[1].strip()
-                    elif line.startswith("BG_MODE="): bg_mode = line.split("=", 1)[1].strip()
-                    elif line.startswith("CARD_THEME="): card_theme = line.split("=", 1)[1].strip()
-                    elif line.startswith("TTS_VOICE="): voice = line.split("=", 1)[1].strip()
-                    elif line.startswith("TTS_RATE="): rate = line.split("=", 1)[1].strip()
-                    elif line.startswith("BGM_CHOICE="): bgm_choice = line.split("=", 1)[1].strip()
-                    elif line.startswith("BGM_VOLUME="):
-                        try: bgm_volume = int(line.split("=", 1)[1].strip())
-                        except ValueError: pass
-
+        cfg_s = db_mod.get_studio_settings()
+        try:
+            bgm_vol = int(cfg_s.get("BGM_VOLUME", 25))
+        except ValueError:
+            bgm_vol = 25
         return jsonify({
-            "platform": platform,
-            "layout_preset": layout_preset,
-            "bg_mode": bg_mode,
-            "card_theme": card_theme,
-            "voice": voice,
-            "rate": rate,
-            "bgm_choice": bgm_choice,
-            "bgm_volume": bgm_volume
+            "platform": cfg_s.get("PLATFORM", "threads"),
+            "layout_preset": cfg_s.get("LAYOUT_PRESET", "center"),
+            "bg_mode": cfg_s.get("BG_MODE", "split_gameplay"),
+            "card_theme": cfg_s.get("CARD_THEME", "light"),
+            "voice": cfg_s.get("TTS_VOICE", "nam_hai"),
+            "rate": cfg_s.get("TTS_RATE", "+0%"),
+            "bgm_choice": cfg_s.get("BGM_CHOICE", "gentle_piano_satie.mp3"),
+            "bgm_volume": bgm_vol,
         })
 
 
