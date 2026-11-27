@@ -14,6 +14,7 @@ Toàn bộ SQL, Atomic Claim, Lease, Durable Outbox (`registry_sync_outbox`), Da
 - **Header khuyến nghị:** `User-Agent: Muse-Custom-Connector/1.0`, `Content-Type: application/json` (cho `POST`).
 - **Tách biệt quyền:**
   - `MUSE_APP_VIDEO_TOKEN` chỉ truy cập được `/api/crawl/*` và chỉ thao tác trên các request `platform = 'threads'`.
+  - **Bắt buộc owner phía server:** Worker luôn ép `claimed_by = "muse-ai"` cho mọi thao tác (`claim`, `progress`, `complete`, `fail`); mọi request tự khai `claimed_by` / `worker_id` khác `"muse-ai"` bị từ chối **`403 Forbidden`**.
   - Mọi yêu cầu sang `/api/app/*` bằng token của Muse bị từ chối `401`.
   - `GET /api/crawl-queue/signal` giữ nguyên công khai (chỉ trả `{"queued": true|false}`, không cần token) cho Hook script bash.
 
@@ -183,12 +184,16 @@ Toàn bộ SQL, Atomic Claim, Lease, Durable Outbox (`registry_sync_outbox`), Da
     ]
   }
   ```
-- **Hành vi nguyên tử phía Worker:**
-  1. Kiểm tra `request_id`, `claimed_by`, `attempt`, `status = 'running'`, lease còn hạn và `platform = 'threads'` (`409` nếu vi phạm; `403` nếu không phải `threads`).
-  2. Chèn các chunk (`<= 100` bài) vào `registry_sync_outbox` và chốt `crawl_requests.status = 'completed'`, `registry_sync_status = 'pending'` **trong cùng một `DB.batch`**.
-  3. Drain chunk-atomic từng phần vào `market_post_registry` & `market_post_snapshots` (kiểm tra đủ 5 trường chứng cứ views V3.2 để tính `new_qualified_count`, chống ghi đè metrics mới bằng snapshot cũ, nâng cấp URL → `post_id`).
-  4. **Telegram Gate:** Tuyệt đối không gửi Telegram nếu `registry_sync_status` vẫn ở `pending`/`error` hoặc outbox đang `in_progress`. Khi gặp lỗi D1 giữa chừng, trả HTTP **`503`** (`recovery_pending: true`).
-  5. **Idempotent Retry:** Nếu cùng `(request_id, claimed_by, attempt)` gọi lại `POST /api/crawl/complete` khi `registry_sync_status` còn `error`/`pending` → tự động phục hồi các chunk còn lại, chốt `registry_sync_status = "ok"` và gửi Telegram đúng 1 lần. Nếu đã `ok` trước đó → trả `200` (`already_finalized: true`, không nhân đôi).
+- **Hành vi nguyên tử & Ràng buộc kiểm tra dữ liệu phía Worker:**
+  1. Kiểm tra `request_id`, owner cố định `"muse-ai"` (`403` nếu tự khai owner khác, `409` nếu bản ghi thuộc owner khác), `attempt`, `status = 'running'`, lease còn hạn và `platform = 'threads'` (`403` nếu không phải `threads`).
+  2. **Kiểm tra payload Threads & Data Contract V3.2 (trước khi ghi D1):**
+     - Toàn bộ phần tử trong `items`/`records` phải thuộc `threads` (`platform` nếu có phải là `'threads'`, không chứa `dedup_key` hay URL của `tiktok`/`shopee`, ngược lại trả **`400`**).
+     - Bắt buộc gửi kèm mảng `items`/`records`: **từ chối `400`** nếu báo cáo khai `new_count > 0` / `new_qualified_count > 0` mà thiếu mảng records hoặc số records ít hơn số khai báo.
+     - **Cho phép kết quả `0` bài** khi truyền `items: []` (hoặc `records: []`) kèm đúng cấu trúc V3.2: `contract_version: "3.2"`, `run_id` hợp lệ, `run_status` thuộc `('no_qualifying_posts', 'insufficient_data', 'partial', 'completed')` (nếu `'completed'` hoặc `'partial'` phải có `stop_reason` rõ ràng) và bộ đếm `new_count = 0`, `new_qualified_count = 0`.
+  3. Chèn các chunk (`<= 100` bài) vào `registry_sync_outbox` và chốt `crawl_requests.status = 'completed'`, `registry_sync_status = 'pending'` **trong cùng một `DB.batch`**.
+  4. Drain chunk-atomic từng phần vào `market_post_registry` & `market_post_snapshots` (kiểm tra đủ 5 trường chứng cứ views V3.2 để tính `new_qualified_count`, chống ghi đè metrics mới bằng snapshot cũ, nâng cấp URL → `post_id`).
+  5. **Telegram Gate:** Tuyệt đối không gửi Telegram nếu `registry_sync_status` vẫn ở `pending`/`error` hoặc outbox đang `in_progress`. Khi gặp lỗi D1 giữa chừng, trả HTTP **`503`** (`recovery_pending: true`).
+  6. **Idempotent Retry:** Nếu cùng `(request_id, "muse-ai", attempt)` gọi lại `POST /api/crawl/complete` khi `registry_sync_status` còn `error`/`pending` → tự động phục hồi các chunk còn lại, chốt `registry_sync_status = "ok"` và gửi Telegram đúng 1 lần. Nếu đã `ok` trước đó → trả `200` (`already_finalized: true`, không nhân đôi).
 
 ### 2.7. `POST /api/crawl/fail` (Báo lỗi & Xử lý Retry)
 - **Headers:** `Authorization: Bearer <token>`, `Content-Type: application/json`

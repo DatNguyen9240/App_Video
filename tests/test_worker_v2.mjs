@@ -5018,7 +5018,8 @@ assert.equal(v3StartBtns.length, 6);
         method: "POST", headers: hMuse21,
         body: JSON.stringify({ request_id: "crw_21_th1", claimed_by: "rogue-agent", attempt: 1, counters: { scanned_count: 5 } }),
       }), env21)).status,
-      409
+      403,
+      "MUSE_APP_VIDEO_TOKEN must reject caller declaring non-muse-ai owner"
     );
     assert.equal(
       (await worker.fetch(new Request("https://example.workers.dev/api/crawl/progress", {
@@ -5135,7 +5136,7 @@ assert.equal(v3StartBtns.length, 6);
         run_id: "run_p2_21",
         crawled_at: "2026-11-27T14:20:00Z",
         run_status: "completed",
-        counters: { requested_count: 150, scanned_count: 180, new_qualified_count: 999 },
+        counters: { requested_count: 150, scanned_count: 180, new_qualified_count: 150 },
       },
       items: items21,
     };
@@ -5198,6 +5199,139 @@ assert.equal(v3StartBtns.length, 6);
       }), env21)).status,
       409
     );
+
+    // 21f: Hardened pre-deploy checks:
+    // (1) Server enforces owner='muse-ai' on claim/progress/complete/fail (403 on other declared owner, 409 on non-muse-ai DB row)
+    // (2) Completion rejects any non-Threads item (tiktok/shopee/non-threads URL/dedup_key)
+    // (3) Completion rejects new/qualified > 0 without items/records OR empty {}, while accepting valid V3.2 zero-post run
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", {
+        method: "POST", headers: hMuse21, body: JSON.stringify({ worker_id: "other-bot" }),
+      }), env21)).status,
+      403
+    );
+    const otherOwnerReq = {
+      id: "crw_21_other_owner",
+      platform: "threads",
+      keywords: "owned_by_other",
+      requested_count: 10,
+      status: "running",
+      claimed_by: "other-desktop-worker",
+      attempts: 1,
+      max_attempts: 3,
+      lease_expires_at: new Date(Date.now() + 1800 * 1000).toISOString(),
+      created_at: "2026-11-27T15:00:00.000Z",
+      updated_at: "2026-11-27T15:00:00.000Z",
+    };
+    env21.DB.crawlRequests.push(otherOwnerReq);
+    // Even with omitted claimed_by (so server defaults to muse-ai) or with claimed_by='other-desktop-worker', MUSE_APP_VIDEO_TOKEN cannot touch it!
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/progress", {
+        method: "POST", headers: hMuse21, body: JSON.stringify({ request_id: "crw_21_other_owner", attempt: 1, counters: { scanned_count: 3 } }),
+      }), env21)).status,
+      409
+    );
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+        method: "POST", headers: hMuse21, body: JSON.stringify({ request_id: "crw_21_other_owner", claimed_by: "other-desktop-worker", attempt: 1, items: [] }),
+      }), env21)).status,
+      403
+    );
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/fail", {
+        method: "POST", headers: hMuse21, body: JSON.stringify({ request_id: "crw_21_other_owner", claimed_by: "other-desktop-worker", attempt: 1 }),
+      }), env21)).status,
+      403
+    );
+
+    // Prepare valid active request owned by muse-ai for completion payload checks (mark th3 claimed first)
+    // Finish/remove otherOwnerReq so single-flight lets crw_21_th3_wait get claimed
+    otherOwnerReq.status = "completed";
+    const claim3Wait = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", {
+      method: "POST", headers: hMuse21, body: "{}",
+    }), env21)).json();
+    assert.equal(claim3Wait.request.id, "crw_21_th3_wait");
+
+    // Non-Threads items rejected 400 (platform='tiktok', shopee URL, non-threads dedup_key)
+    for (const badItem of [
+      { platform: "tiktok", post_id: "TK_99" },
+      { canonical_url: "https://shopee.vn/product/12345" },
+      { dedup_key: "shopee:item:999" },
+    ]) {
+      const badComp = await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({
+          request_id: "crw_21_th3_wait",
+          attempt: 1,
+          result_summary: { contract_version: "3.2", run_id: "run_bad_plat" },
+          items: [badItem],
+        }),
+      }), env21);
+      assert.equal(badComp.status, 400, `Expected 400 for non-Threads item ${JSON.stringify(badItem)}`);
+    }
+
+    // Claims new posts > 0 with missing/insufficient records rejected 400
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({
+          request_id: "crw_21_th3_wait",
+          attempt: 1,
+          result_summary: { contract_version: "3.2", run_id: "run_no_recs", counters: { new_count: 5, new_qualified_count: 5 } },
+        }),
+      }), env21)).status,
+      400,
+      "Must reject completion claiming new posts without items/records"
+    );
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({
+          request_id: "crw_21_th3_wait",
+          attempt: 1,
+          result_summary: { contract_version: "3.2", run_id: "run_partial_recs", counters: { new_qualified_count: 5 } },
+          items: [{ post_id: "ONLY_ONE_1" }],
+        }),
+      }), env21)).status,
+      400,
+      "Must reject completion claiming 5 new posts with only 1 record"
+    );
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({ request_id: "crw_21_th3_wait", attempt: 1, result_summary: {} }),
+      }), env21)).status,
+      400,
+      "Must reject empty completion missing V3.2 contract & items[]"
+    );
+
+    // Valid V3.2 zero-post completion ('no_qualifying_posts' + contract_version '3.2' + items: []) MUST SUCCEED 200
+    const zeroValidComp = await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST", headers: hMuse21,
+      body: JSON.stringify({
+        request_id: "crw_21_th3_wait",
+        attempt: 1,
+        result_summary: {
+          contract_version: "3.2",
+          run_id: "run_zero_v32_ok",
+          run_status: "no_qualifying_posts",
+          data_quality_status: "khong_dat",
+          counters: {
+            requested_count: 10,
+            scanned_count: 30,
+            new_count: 0,
+            new_qualified_count: 0,
+            rejected_count: 30,
+            stop_reason: "no_qualifying_posts",
+          },
+        },
+        items: [],
+      }),
+    }), env21);
+    assert.equal(zeroValidComp.status, 200);
+    const zeroJson = await zeroValidComp.json();
+    assert.equal(zeroJson.status, "completed");
+    assert.equal(zeroJson.registry_sync_status, "ok");
   } finally {
     globalThis.fetch = prevFetch21;
   }

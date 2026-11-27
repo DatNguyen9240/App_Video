@@ -5031,7 +5031,7 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
     return { ok: true, request: null };
 }
 
-function parseCrawlClaimInputs(crawlId, body, defaultOwner = "") {
+function parseCrawlClaimInputs(crawlId, body, defaultOwner = "", enforceFixedOwner = null) {
     const cleanId = String(crawlId || "").trim();
     if (!cleanId) {
         return { errorResponse: jsonResponse({ ok: false, error: "Missing crawl request ID", conflict: false }, 400) };
@@ -5044,11 +5044,124 @@ function parseCrawlClaimInputs(crawlId, body, defaultOwner = "") {
     if (body?.claimed_by !== undefined && !String(body.claimed_by || "").trim()) {
         return { errorResponse: jsonResponse({ ok: false, error: "Invalid empty claimed_by field", conflict: false }, 400) };
     }
+    if (body?.worker_id !== undefined && !String(body.worker_id || "").trim()) {
+        return { errorResponse: jsonResponse({ ok: false, error: "Invalid empty worker_id field", conflict: false }, 400) };
+    }
+    if (enforceFixedOwner) {
+        if (body?.claimed_by !== undefined && String(body.claimed_by).trim() !== enforceFixedOwner) {
+            return { errorResponse: jsonResponse({ ok: false, error: `Forbidden: owner identity is fixed server-side to '${enforceFixedOwner}'`, conflict: false }, 403) };
+        }
+        if (body?.worker_id !== undefined && String(body.worker_id).trim() !== enforceFixedOwner) {
+            return { errorResponse: jsonResponse({ ok: false, error: `Forbidden: owner identity is fixed server-side to '${enforceFixedOwner}'`, conflict: false }, 403) };
+        }
+        return { crawlId: cleanId, parsedAttempt, callerOwner: enforceFixedOwner };
+    }
     const callerOwner = String(body?.claimed_by || body?.worker_id || defaultOwner || "").trim();
     if (!callerOwner) {
         return { errorResponse: jsonResponse({ ok: false, error: "Missing crawl claim owner identity", conflict: false }, 400) };
     }
     return { crawlId: cleanId, parsedAttempt, callerOwner };
+}
+
+function validateThreadsOnlyCompletionItems(rawItems) {
+    if (!Array.isArray(rawItems)) return { items: null };
+    const normalized = [];
+    for (let i = 0; i < rawItems.length; i++) {
+        const it = rawItems[i];
+        if (!it || typeof it !== "object" || Array.isArray(it)) {
+            return { errorResponse: jsonResponse({ ok: false, error: `Invalid completion item at index ${i}` }, 400) };
+        }
+        const rawPlat = it.platform !== undefined && it.platform !== null ? String(it.platform).trim().toLowerCase() : "";
+        if (rawPlat && rawPlat !== "threads") {
+            return { errorResponse: jsonResponse({ ok: false, error: `Only platform='threads' items/records are allowed (found '${rawPlat}' at index ${i})` }, 400) };
+        }
+        const dk = it.dedup_key !== undefined && it.dedup_key !== null ? String(it.dedup_key).trim().toLowerCase() : "";
+        if (dk && dk.includes(":") && !dk.startsWith("threads:")) {
+            return { errorResponse: jsonResponse({ ok: false, error: `Non-Threads dedup_key '${dk}' at index ${i} is rejected` }, 400) };
+        }
+        const urlFields = [it.canonical_url, it.post_url, it.video_url, it.product_url, it.url, it.views_evidence_url];
+        for (const u of urlFields) {
+            if (typeof u === "string" && u.trim()) {
+                const lowerU = u.trim().toLowerCase();
+                if (lowerU.includes("tiktok.com") || lowerU.includes("shopee.") || lowerU.includes("shope.ee")) {
+                    return { errorResponse: jsonResponse({ ok: false, error: `Non-Threads URL '${u.trim()}' at index ${i} is rejected` }, 400) };
+                }
+            }
+        }
+        normalized.push({ ...it, platform: "threads" });
+    }
+    return { items: normalized };
+}
+
+function validateStrictV32CompletionPayload(summaryObj, rawItems) {
+    const c = (summaryObj?.counters && typeof summaryObj.counters === "object") ? summaryObj.counters : {};
+    const s1 = summaryObj?.sections?.["1_screening"] || summaryObj?.section_1_screening || summaryObj?.screening || {};
+    const t = (summaryObj?.totals && typeof summaryObj.totals === "object") ? summaryObj.totals : {};
+
+    const reportedNewCount = pickFirstFiniteInt(
+        c.new_count, summaryObj.new_count, s1.new_count, summaryObj.new_items, summaryObj.records_inserted
+    ) ?? 0;
+    const reportedQualifiedCount = pickFirstFiniteInt(
+        c.new_qualified_count, c.qualified_count, summaryObj.new_qualified_count,
+        summaryObj.qualified_count, summaryObj.qualified_posts,
+        s1.new_qualified_count, s1.qualified_count, t.business_usable_records, summaryObj.record_count, t.records
+    ) ?? 0;
+    const declaredCount = Math.max(reportedNewCount, reportedQualifiedCount);
+
+    const hasItemsArray = Array.isArray(rawItems);
+    const itemsLen = hasItemsArray ? rawItems.length : 0;
+
+    if (declaredCount > 0 && (!hasItemsArray || itemsLen === 0)) {
+        return jsonResponse(
+            { ok: false, error: "Report declares new/qualified posts (>0) but items/records array is missing or empty" },
+            400
+        );
+    }
+    if (declaredCount > 0 && itemsLen < declaredCount) {
+        return jsonResponse(
+            { ok: false, error: `Report declares ${declaredCount} new/qualified posts but only supplied ${itemsLen} records` },
+            400
+        );
+    }
+    if (!hasItemsArray) {
+        return jsonResponse(
+            { ok: false, error: "Completion payload must include items/records array (use [] for valid 0-post V3.2 run)" },
+            400
+        );
+    }
+
+    if (itemsLen === 0) {
+        const cv = String(summaryObj?.contract_version || "").trim();
+        if (!cv.startsWith("3.")) {
+            return jsonResponse(
+                { ok: false, error: "Zero-post completion requires Data Contract V3.2 (contract_version: '3.2')" },
+                400
+            );
+        }
+        const runId = String(summaryObj?.run_id || "").trim();
+        if (!runId) {
+            return jsonResponse(
+                { ok: false, error: "Zero-post Data Contract V3.2 completion requires non-empty run_id" },
+                400
+            );
+        }
+        const rawStatus = String(summaryObj?.run_status || "").trim().toLowerCase();
+        const stopReason = String(c.stop_reason || summaryObj.stop_reason || s1.stop_reason || "").trim();
+        const validZeroStatuses = new Set(["no_qualifying_posts", "insufficient_data", "partial", "completed"]);
+        if (!validZeroStatuses.has(rawStatus)) {
+            return jsonResponse(
+                { ok: false, error: "Zero-post completion requires V3.2 run_status ('no_qualifying_posts', 'insufficient_data', 'partial', or 'completed' with stop_reason)" },
+                400
+            );
+        }
+        if ((rawStatus === "completed" || rawStatus === "partial") && !stopReason) {
+            return jsonResponse(
+                { ok: false, error: "Zero-post completion with run_status='completed'/'partial' requires explicit stop_reason" },
+                400
+            );
+        }
+    }
+    return null;
 }
 
 function normalizeProgressMetricsPatch(existingSummary, body, reqRow, nowIso) {
@@ -5107,8 +5220,8 @@ function normalizeProgressMetricsPatch(existingSummary, body, reqRow, nowIso) {
     return summaryObj;
 }
 
-async function updateCrawlProgressInD1(env, { crawlId, body, defaultOwner = "", requireThreads = false }) {
-    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner);
+async function updateCrawlProgressInD1(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, requireThreads = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
     if (parsed.errorResponse) return parsed.errorResponse;
     const { parsedAttempt, callerOwner } = parsed;
     const cleanId = parsed.crawlId;
@@ -5160,8 +5273,8 @@ async function updateCrawlProgressInD1(env, { crawlId, body, defaultOwner = "", 
     });
 }
 
-async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "", forcedStatus = null, requireThreads = false }) {
-    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner);
+async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, forcedStatus = null, requireThreads = false, strictV32Completion = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
     if (parsed.errorResponse) return parsed.errorResponse;
     const { parsedAttempt, callerOwner } = parsed;
     const cleanId = parsed.crawlId;
@@ -5169,16 +5282,14 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
     const nextStatus = forcedStatus || (body.status === "failed" ? "failed" : "completed");
     const nowIso = new Date().toISOString();
 
-    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
-    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
-    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
-        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
-    }
-
     const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
         ? { ...body.result_summary }
         : {};
-    const bodyDedupItems = Array.isArray(bodySummaryObj.items)
+    if (requireThreads && bodySummaryObj.platform !== undefined && bodySummaryObj.platform !== null && String(bodySummaryObj.platform).trim().toLowerCase() !== "threads") {
+        return jsonResponse({ ok: false, error: "Only platform='threads' summary payloads are allowed" }, 400);
+    }
+
+    let bodyDedupItems = Array.isArray(bodySummaryObj.items)
         ? bodySummaryObj.items
         : (Array.isArray(bodySummaryObj.records)
             ? bodySummaryObj.records
@@ -5186,8 +5297,26 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
                 ? body.items
                 : (Array.isArray(body.records) ? body.records : null)));
 
+    if (requireThreads && bodyDedupItems !== null) {
+        const itemsCheck = validateThreadsOnlyCompletionItems(bodyDedupItems);
+        if (itemsCheck.errorResponse) return itemsCheck.errorResponse;
+        bodyDedupItems = itemsCheck.items;
+    }
+
+    if (strictV32Completion && nextStatus === "completed") {
+        const v32Err = validateStrictV32CompletionPayload(bodySummaryObj, bodyDedupItems);
+        if (v32Err) return v32Err;
+    }
+
+    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
+        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
+    }
+
     if (["completed", "failed", "cancelled"].includes(existing.status)) {
         if (
+            (enforceFixedOwner && existing.claimed_by !== enforceFixedOwner) ||
             (existing.claimed_by && callerOwner !== existing.claimed_by) ||
             parsedAttempt !== Number(existing.attempts || 0) ||
             existing.status !== nextStatus
@@ -5479,8 +5608,8 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
     });
 }
 
-async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", requireThreads = false }) {
-    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner);
+async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, requireThreads = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
     if (parsed.errorResponse) return parsed.errorResponse;
     const { parsedAttempt, callerOwner } = parsed;
     const cleanId = parsed.crawlId;
@@ -5497,6 +5626,7 @@ async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", req
             crawlId: cleanId,
             body: { ...body, error_message: errMsg },
             defaultOwner,
+            enforceFixedOwner,
             forcedStatus: "failed",
             requireThreads,
         });
@@ -5523,6 +5653,7 @@ async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", req
             crawlId: cleanId,
             body: { ...body, error_message: errMsg },
             defaultOwner,
+            enforceFixedOwner,
             forcedStatus: "failed",
             requireThreads,
         });
@@ -5619,10 +5750,15 @@ async function handleMuseCrawlApi(request, env, url) {
         }
         let body = {};
         try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        if (body.platform !== undefined && body.platform !== null && String(body.platform).trim() !== "" && String(body.platform).trim().toLowerCase() !== "threads") {
+            return jsonResponse({ ok: false, error: "Only platform='threads' is permitted for MUSE_APP_VIDEO_TOKEN" }, 403);
+        }
         const normalized = normalizeCrawlRegistryCheckItems(body);
         if (normalized.error) {
             return jsonResponse({ ok: false, error: normalized.error }, 400);
         }
+        const itemPlatErr = validateThreadsOnlyCompletionItems(normalized.items);
+        if (itemPlatErr.errorResponse) return itemPlatErr.errorResponse;
         try {
             const res = await checkCrossRunDedupInD1(env, normalized.items);
             return jsonResponse({ ok: true, read_only: true, ...res });
@@ -5634,7 +5770,7 @@ async function handleMuseCrawlApi(request, env, url) {
         }
     }
 
-    // 3. POST /api/crawl/claim (Threads only, single-flight, atomic claim, fixed muse-ai, 30-min lease)
+    // 3. POST /api/crawl/claim (Threads only, single-flight, atomic claim, fixed server owner muse-ai, 30-min lease)
     if (path === "/api/crawl/claim") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -5645,6 +5781,15 @@ async function handleMuseCrawlApi(request, env, url) {
             try { body = JSON.parse(rawText); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
             if (!body || typeof body !== "object" || Array.isArray(body)) {
                 return jsonResponse({ ok: false, error: "Request body must be a JSON object" }, 400);
+            }
+            if (
+                (body.claimed_by !== undefined && String(body.claimed_by).trim() !== MUSE_DEFAULT_CLAIM_OWNER) ||
+                (body.worker_id !== undefined && String(body.worker_id).trim() !== MUSE_DEFAULT_CLAIM_OWNER)
+            ) {
+                return jsonResponse(
+                    { ok: false, error: `Forbidden: owner identity is fixed server-side to '${MUSE_DEFAULT_CLAIM_OWNER}'` },
+                    403
+                );
             }
         }
         try {
@@ -5661,7 +5806,7 @@ async function handleMuseCrawlApi(request, env, url) {
         }
     }
 
-    // 4. POST /api/crawl/progress (guarded live progress update)
+    // 4. POST /api/crawl/progress (guarded live progress update, fixed owner muse-ai)
     if (path === "/api/crawl/progress") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -5672,11 +5817,12 @@ async function handleMuseCrawlApi(request, env, url) {
             crawlId: body.request_id,
             body,
             defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            enforceFixedOwner: MUSE_DEFAULT_CLAIM_OWNER,
             requireThreads: true,
         });
     }
 
-    // 5. POST /api/crawl/complete (guarded completion + atomic outbox + V3.2 registry + Telegram gate)
+    // 5. POST /api/crawl/complete (guarded completion + Threads items + V3.2 contract + outbox + Telegram gate)
     if (path === "/api/crawl/complete") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -5687,12 +5833,14 @@ async function handleMuseCrawlApi(request, env, url) {
             crawlId: body.request_id,
             body,
             defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            enforceFixedOwner: MUSE_DEFAULT_CLAIM_OWNER,
             forcedStatus: "completed",
             requireThreads: true,
+            strictV32Completion: true,
         });
     }
 
-    // 6. POST /api/crawl/fail (guarded failure + retry up to max_attempts or terminal fail + Telegram)
+    // 6. POST /api/crawl/fail (guarded failure + fixed owner muse-ai + retry/terminal fail + Telegram)
     if (path === "/api/crawl/fail") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -5703,6 +5851,7 @@ async function handleMuseCrawlApi(request, env, url) {
             crawlId: body.request_id,
             body,
             defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            enforceFixedOwner: MUSE_DEFAULT_CLAIM_OWNER,
             requireThreads: true,
         });
     }
