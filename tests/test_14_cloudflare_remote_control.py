@@ -220,12 +220,12 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
         self.poll_profile = "test_5m" if poll_profile == "test_5m" else "production_6h"
         return {"ok": True, "poll_profile": self.poll_profile, "expected_pickup_at": "2026-11-26T15:05:00Z"}
 
-    def check_cross_run_dedup(self, items: list):
+    def check_cross_run_dedup(self, items: list, **kwargs):
         reg = getattr(self, "mock_registry", {})
         existing = {it.get("dedup_key"): reg[it.get("dedup_key")] for it in (items or []) if it.get("dedup_key") in reg}
         return {"ok": True, "existing": existing, "existing_keys": list(existing.keys()), "existing_count": len(existing)}
 
-    def record_cross_run_dedup(self, items: list, run_id: str = None):
+    def record_cross_run_dedup(self, items: list, run_id: str = None, **kwargs):
         if not hasattr(self, "mock_registry"):
             self.mock_registry = {}
         new_c = 0
@@ -1160,8 +1160,118 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
             self.assertIn("Tăng trưởng", html)
             self.assertIn("Toàn bộ lịch sử", html)
             self.assertIn("Lịch sử Engagement Snapshots", html)
+            self.assertIn("formatViewsDisplay(item)", html)
+            self.assertIn("display_approx", html)
+            self.assertIn("📤 Shares:", html)
+            self.assertIn("🔁 Reposts:", html)
         finally:
             app_ui.get_market_runtime = orig_runtime
+
+    def test_v32_fail_closed_outbox_recovery_and_batching_over_500(self):
+        """V3.2: Client chunks >500 items without truncation, fails closed on registry outage, raises StaleClaimConflictError on 409, and recovers SQLite registry_sync_outbox on reconnect."""
+        from unittest.mock import MagicMock
+        from market_intelligence.cloudflare_client import StaleClaimConflictError
+
+        # 1) Real CloudflareBridgeClient batching over 550 items & fail-closed / 409 handling
+        real_client = CloudflareBridgeClient(
+            worker_url="https://example.workers.dev",
+            api_token="test-token-v32-real",
+            client_id="laptop-a",
+        )
+        batch_sizes_seen = []
+
+        def fake_req_ok(method, path, json_body=None, **kwargs):
+            chunk = (json_body or {}).get("items") or []
+            batch_sizes_seen.append((path, len(chunk)))
+            resp = MagicMock()
+            resp.ok = True
+            resp.status_code = 200
+            if path.endswith("/check"):
+                resp.json.return_value = {"ok": True, "existing": {}, "existing_keys": []}
+            else:
+                resp.json.return_value = {
+                    "ok": True,
+                    "new_count": len(chunk),
+                    "duplicate_count": 0,
+                    "updated_count": 0,
+                    "missing_views_count": 0,
+                    "total_processed": len(chunk),
+                }
+            return resp
+
+        real_client._request_with_retry = fake_req_ok
+        large_items = [{"platform": "threads", "dedup_key": f"threads:post:P{i}", "post_id": f"P{i}"} for i in range(550)]
+        chk = real_client.check_cross_run_dedup(large_items, batch_size=100)
+        rec = real_client.record_cross_run_dedup(large_items, run_id="run_550", batch_size=100)
+        self.assertEqual(len([b for b in batch_sizes_seen if b[0].endswith("/check")]), 6)
+        self.assertEqual(sum(b[1] for b in batch_sizes_seen if b[0].endswith("/check")), 550)
+        self.assertEqual(rec["total_processed"], 550)
+
+        # Fail-closed 503 check
+        def fake_req_503(method, path, json_body=None, **kwargs):
+            resp = MagicMock()
+            resp.ok = False
+            resp.status_code = 503
+            resp.text = '{"ok":false,"registry_unavailable":true}'
+            return resp
+
+        real_client._request_with_retry = fake_req_503
+        with self.assertRaises(RuntimeError) as ctx_503:
+            real_client.check_cross_run_dedup(large_items[:5])
+        self.assertIn("RegistryUnavailable", str(ctx_503.exception))
+
+        # Lease expired / conflict 409 check
+        def fake_req_409(method, path, json_body=None, **kwargs):
+            resp = MagicMock()
+            resp.ok = False
+            resp.status_code = 409
+            resp.text = '{"ok":false,"conflict":true}'
+            return resp
+
+        real_client._request_with_retry = fake_req_409
+        with self.assertRaises(StaleClaimConflictError):
+            real_client.record_cross_run_dedup(large_items[:2], request_id="crw_1", claimed_by="w1", attempt=1)
+
+        # 2) SyncService SQLite registry_sync_outbox crash/outage recovery across 250 items (3 chunks of 100, 100, 50)
+        big_payload = {
+            "run_id": "run_outbox_250",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T13:00:00Z",
+            "records": [
+                {
+                    "post_id": f"OB_{i}",
+                    "post_url": f"https://threads.net/@ob/post/OB_{i}",
+                    "views": 1000 + i,
+                    "likes": 10,
+                    "shares": 2,
+                    "reposts": 1,
+                }
+                for i in range(250)
+            ],
+        }
+        self.client.add_drive_file("f_ob_250", "threads_trend_ob250.json", json.dumps(big_payload).encode("utf-8"), "2026-11-27T13:00:00Z", "md5_ob250")
+
+        rec_calls = {"count": 0}
+        orig_rec = self.client.record_cross_run_dedup
+
+        def flaky_record(items, run_id=None, **kwargs):
+            rec_calls["count"] += 1
+            if rec_calls["count"] == 2:
+                raise RuntimeError("RegistryUnavailable: simulated mid-batch outage")
+            return orig_rec(items, run_id=run_id)
+
+        self.client.record_cross_run_dedup = flaky_record
+        res_outage = self.sync_service.sync_now(trigger_source="test_outbox_1")
+        self.assertEqual(res_outage["registry_sync_status"], "error")
+        pending_after_fail = self.store.list_pending_registry_batches()
+        self.assertEqual(len(pending_after_fail), 2)  # Chunk 1 succeeded & was acked; chunks 2 & 3 stay queued!
+
+        # Recover registry and replay pending outbox batches on next sync
+        self.client.record_cross_run_dedup = orig_rec
+        res_recover = self.sync_service.sync_now(trigger_source="test_outbox_2")
+        self.assertEqual(res_recover["registry_sync_status"], "ok")
+        self.assertEqual(len(self.store.list_pending_registry_batches()), 0)
+        self.assertEqual(len(self.client.mock_registry), 250)
 
 
 if __name__ == "__main__":

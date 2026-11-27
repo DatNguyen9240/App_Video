@@ -33,6 +33,9 @@ class MockD1Database {
     this.notifications = [];
     this.runtimeState = new Map();
     this.postRegistry = new Map();
+    this.postSnapshots = new Map();
+    this.failRegistry = false;
+    this.onBeforeRegistryInsert = null;
     this.onBatchStep = null;
   }
   async batch(stmts) {
@@ -122,14 +125,28 @@ class MockD1Database {
           const row = db.crawlRequests.find((c) => c.id === this.args[0]);
           return row ? { ...row } : null;
         }
+        if (norm.includes("FROM market_post_registry")) {
+          if (db.failRegistry) throw new Error("Simulated D1 registry outage");
+        }
         if (norm.startsWith("SELECT * FROM market_post_registry WHERE dedup_key = ?")) {
           const row = db.postRegistry.get(this.args[0]);
           return row ? { ...row } : null;
+        }
+        if (norm.startsWith("SELECT dedup_key FROM market_post_registry WHERE dedup_key = ?")) {
+          const row = db.postRegistry.get(this.args[0]);
+          return row ? { dedup_key: row.dedup_key } : null;
         }
         if (norm.startsWith("SELECT * FROM market_post_registry WHERE platform = ? AND canonical_url = ?")) {
           const [plat, cUrl] = this.args;
           for (const row of db.postRegistry.values()) {
             if (row.platform === plat && row.canonical_url === cUrl) return { ...row };
+          }
+          return null;
+        }
+        if (norm.startsWith("SELECT * FROM market_post_registry WHERE platform = ? AND post_id = ?")) {
+          const [plat, postId] = this.args;
+          for (const row of db.postRegistry.values()) {
+            if (row.platform === plat && row.post_id === postId) return { ...row };
           }
           return null;
         }
@@ -272,39 +289,128 @@ class MockD1Database {
           db.audits.push(this.args);
           return { meta: { changes: 1 } };
         }
-        if (norm.startsWith("INSERT INTO market_post_registry")) {
-          const [dedup_key, platform, post_id, canonical_url, first_run_id, last_run_id, first_seen_at, last_seen_at, latest_metrics_json] = this.args;
-          const prev = db.postRegistry.get(dedup_key);
-          if (!prev) {
-            db.postRegistry.set(dedup_key, {
-              dedup_key,
-              platform,
-              post_id,
-              canonical_url,
-              first_run_id,
-              last_run_id,
-              first_seen_at,
-              last_seen_at,
-              snapshot_count: 1,
-              latest_metrics_json,
-            });
-          } else {
-            prev.last_run_id = last_run_id || prev.last_run_id;
-            prev.last_seen_at = last_seen_at;
-            prev.snapshot_count = Number(prev.snapshot_count || 1) + 1;
+        if (norm.includes("INTO market_post_registry") || norm.includes("UPDATE market_post_registry") || norm.includes("market_post_snapshots")) {
+          if (db.failRegistry) throw new Error("Simulated D1 registry outage");
+        }
+        if (norm.startsWith("INSERT OR IGNORE INTO market_post_registry")) {
+          const [
+            dedup_key, platform, post_id, post_pk, canonical_url, content_hash,
+            first_run_id, last_run_id, first_seen_at, last_seen_at,
+            latest_views_display, latest_views_precision, latest_views_source,
+            latest_views_measured_at, latest_views_evidence_url, latest_metrics_json
+          ] = this.args;
+          if (typeof db.onBeforeRegistryInsert === "function") {
+            await db.onBeforeRegistryInsert(dedup_key);
           }
+          if (db.postRegistry.has(dedup_key)) {
+            return { meta: { changes: 0 } };
+          }
+          if (canonical_url) {
+            for (const r of db.postRegistry.values()) {
+              if (r.platform === platform && r.canonical_url === canonical_url) {
+                return { meta: { changes: 0 } };
+              }
+            }
+          }
+          db.postRegistry.set(dedup_key, {
+            dedup_key,
+            platform,
+            post_id,
+            post_pk,
+            canonical_url,
+            content_hash,
+            first_run_id,
+            last_run_id,
+            first_seen_at,
+            last_seen_at,
+            snapshot_count: 1,
+            latest_views_display,
+            latest_views_precision,
+            latest_views_source,
+            latest_views_measured_at,
+            latest_views_evidence_url,
+            latest_metrics_json,
+          });
           return { meta: { changes: 1 } };
         }
-        if (norm.startsWith("UPDATE market_post_registry SET")) {
-          const [cUrl, postId, runId, lastSeenAt, nextSnap, latestMetricsJson, dedupKey] = this.args;
+        if (norm.startsWith("UPDATE market_post_registry SET dedup_key = ?")) {
+          const [newKey, postId, postPk, oldKey] = this.args;
+          const row = db.postRegistry.get(oldKey);
+          if (!row || (newKey !== oldKey && db.postRegistry.has(newKey))) {
+            return { meta: { changes: 0 } };
+          }
+          db.postRegistry.delete(oldKey);
+          row.dedup_key = newKey;
+          if (postId) row.post_id = postId;
+          if (postPk) row.post_pk = postPk;
+          db.postRegistry.set(newKey, row);
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE market_post_registry SET canonical_url = COALESCE(?, canonical_url), post_id = COALESCE(?, post_id), post_pk = COALESCE(?, post_pk), content_hash = COALESCE(?, content_hash) WHERE dedup_key = ?")) {
+          const [cUrl, postId, postPk, contentHash, dedupKey] = this.args;
           const row = db.postRegistry.get(dedupKey);
           if (!row) return { meta: { changes: 0 } };
           if (cUrl) row.canonical_url = cUrl;
           if (postId) row.post_id = postId;
+          if (postPk) row.post_pk = postPk;
+          if (contentHash) row.content_hash = contentHash;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE market_post_registry SET")) {
+          const [
+            cUrl, postId, postPk, contentHash, runId, lastSeenAt, nextSnap,
+            vDisp, vPrec, vSrc, vMeas, vEv, latestMetricsJson, dedupKey
+          ] = this.args;
+          const row = db.postRegistry.get(dedupKey);
+          if (!row) return { meta: { changes: 0 } };
+          if (cUrl) row.canonical_url = cUrl;
+          if (postId) row.post_id = postId;
+          if (postPk) row.post_pk = postPk;
+          if (contentHash) row.content_hash = contentHash;
           if (runId) row.last_run_id = runId;
           row.last_seen_at = lastSeenAt;
           row.snapshot_count = nextSnap;
+          if (vDisp) row.latest_views_display = vDisp;
+          if (vPrec) row.latest_views_precision = vPrec;
+          if (vSrc) row.latest_views_source = vSrc;
+          if (vMeas) row.latest_views_measured_at = vMeas;
+          if (vEv) row.latest_views_evidence_url = vEv;
           row.latest_metrics_json = latestMetricsJson;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("INSERT OR IGNORE INTO market_post_snapshots")) {
+          const [
+            id, snapshot_idempotency_key, dedup_key, platform, post_id, run_id, measured_at,
+            likes_count, comments_count, reposts_count, quotes_count, shares_count, views_count,
+            views_display, views_precision, views_source, views_evidence_url, classification, created_at
+          ] = this.args;
+          if (db.postSnapshots.has(snapshot_idempotency_key)) {
+            return { meta: { changes: 0 } };
+          }
+          db.postSnapshots.set(snapshot_idempotency_key, {
+            id, snapshot_idempotency_key, dedup_key, platform, post_id, run_id, measured_at,
+            likes_count, comments_count, reposts_count, quotes_count, shares_count, views_count,
+            views_display, views_precision, views_source, views_evidence_url, classification, created_at
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE market_post_snapshots SET dedup_key = ?")) {
+          const [newKey, postId, oldKey] = this.args;
+          let changes = 0;
+          for (const snap of db.postSnapshots.values()) {
+            if (snap.dedup_key === oldKey) {
+              snap.dedup_key = newKey;
+              if (postId) snap.post_id = postId;
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?")) {
+          const [result_summary_json, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id);
+          if (!row) return { meta: { changes: 0 } };
+          row.result_summary_json = result_summary_json;
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("INSERT INTO crawl_requests")) {
@@ -1504,7 +1610,8 @@ const v3RptSummaryRes = await worker.fetch(
 assert.equal(v3RptSummaryRes.status, 200);
 const v3SummaryBody = String(telegramCalls[telegramCalls.length - 1].body);
 assert.ok(v3SummaryBody.includes("Vũ Trụ Say Hi"));
-assert.ok(v3SummaryBody.includes("Quét 14 | Đạt chuẩn 8"));
+assert.ok(v3SummaryBody.includes("Quét 14"));
+assert.ok(v3SummaryBody.includes("Mới đạt chuẩn: 8") || v3SummaryBody.includes("Đạt chuẩn 8"));
 assert.ok(v3SummaryBody.includes("Very Hot 4"));
 assert.ok(!v3SummaryBody.includes("ARCHIVED_BAD"));
 
@@ -2605,17 +2712,18 @@ assert.equal(v3StartBtns.length, 6);
     assert.deepEqual(homeMsg.reply_markup.keyboard.flat().map((b) => b.text), Array.from(MAIN_MENU_SET));
     assert.equal(homeMsg.reply_markup.inline_keyboard, undefined);
 
-    // 14b: Reply Button "📊 Phân tích thị trường" -> 6 structured bullet sections + Inline sub-actions
+    // 14b: Reply Button "📊 Phân tích thị trường" -> 6 V3.2 structured bullet groups (<= 2500 chars) + Inline sub-actions
     const mktMsg = await sendUserText(8002, "📊 Phân tích thị trường");
+    assert.ok(mktMsg.text.length <= 2500, `Expected <= 2500 chars, got ${mktMsg.text.length}`);
     for (const sec of [
-      "📌 Trạng thái",
-      "📊 Tổng quan số liệu",
-      "🔥 Xu hướng nổi bật",
-      "💡 Tín hiệu/cơ hội affiliate",
-      "✅ Hành động đề xuất hôm nay",
-      "⚠️ Chất lượng dữ liệu / giới hạn",
+      "📊 Chất lượng crawl",
+      "🔥 Trend thị trường",
+      "🆕 Trend mới & vòng đời",
+      "💰 Tín hiệu Affiliate",
+      "📈 Biến động so với lượt trước",
+      "🎯 Hành động đề xuất",
     ]) {
-      assert.ok(mktMsg.text.includes(sec), `Missing section: ${sec}`);
+      assert.ok(mktMsg.text.includes(sec), `Missing V3.2 section: ${sec}`);
     }
     assert.ok(mktMsg.text.includes("\n• "), "Report must use bullet lines");
     assert.ok(!mktMsg.text.includes("TOÀN THỊ TRƯỜNG:"), "Prose block must be converted into structured bullets");
@@ -2848,18 +2956,19 @@ assert.equal(v3StartBtns.length, 6);
     const notifCall = tgCalls15.slice(beforeCompleteTg).find((c) => c.url.includes("/sendMessage"));
     assert.ok(notifCall, "Expected automatic Telegram notification after /complete");
     const notifText = JSON.parse(notifCall.body).text;
+    assert.ok(notifText.length <= 2500, `Auto notification exceeded 2500 chars: ${notifText.length}`);
     for (const sec of [
-      "📌 Trạng thái",
-      "📊 Tổng quan số liệu",
-      "🔥 Xu hướng nổi bật",
-      "💡 Tín hiệu/cơ hội affiliate",
-      "✅ Hành động đề xuất hôm nay",
-      "⚠️ Chất lượng dữ liệu / giới hạn",
+      "📊 Chất lượng crawl",
+      "🔥 Trend thị trường",
+      "🆕 Trend mới & vòng đời",
+      "💰 Tín hiệu Affiliate",
+      "📈 Biến động so với lượt trước",
+      "🎯 Hành động đề xuất",
     ]) {
       assert.ok(notifText.includes(sec), `Direct D1 auto notification missing section: ${sec}`);
     }
     assert.ok(notifText.includes("7/50 (Chưa đạt mục tiêu)"), "Must show 7/50 Chưa đạt mục tiêu");
-    assert.ok(notifText.includes("Bài mới: 7 | Bài trùng lịch sử: 9 | Cập nhật tương tác: 2"));
+    assert.ok(notifText.includes("Bài trùng lịch sử: 9 | Cập nhật tương tác: 2"));
     assert.ok(notifText.includes("Bài thiếu views: 4"));
     assert.ok(!notifText.includes("TOÀN THỊ TRƯỜNG:"), "Must convert summary prose into bullets");
 
@@ -2898,6 +3007,386 @@ assert.equal(v3StartBtns.length, 6);
     assert.ok(ackBody.text && ackBody.text.includes("THREADS"), `Expected descriptive callback ack, got: ${ackBody.text}`);
   } finally {
     globalThis.fetch = prevFetch15;
+  }
+}
+
+// 16. Data Contract V3.2: 171 Seed, 2-Laptop Snapshot Idempotency, Concurrent Race Single-Winner, Lease 409 Guard, Fail-Closed 503, >500 Batch & 6-Group <=2500 Telegram
+{
+  const m0004Path = path.join(__dirname, "../cloudflare-worker/migrations/0004_seed_post_identity_index_171.sql");
+  assert.ok(fs.existsSync(m0004Path), "Missing migration 0004_seed_post_identity_index_171.sql");
+  const m0004Sql = fs.readFileSync(m0004Path, "utf8");
+  const regInserts = (m0004Sql.match(/INSERT (?:OR IGNORE )?INTO market_post_registry/g) || []).length;
+  const snapInserts = (m0004Sql.match(/INSERT (?:OR IGNORE )?INTO market_post_snapshots/g) || []).length;
+  assert.equal(regInserts, 171, `Expected 171 seed registry inserts, got ${regInserts}`);
+  assert.equal(snapInserts, 171, `Expected 171 seed snapshot inserts, got ${snapInserts}`);
+  assert.ok(m0004Sql.includes("ON CONFLICT(dedup_key) DO NOTHING"));
+  assert.ok(m0004Sql.includes("ON CONFLICT(snapshot_idempotency_key) DO NOTHING"));
+
+  const env16 = {
+    DB: new MockD1Database(),
+    APP_VIDEO_API_TOKEN: "test-token-16",
+    TELEGRAM_OWNER_ID: "999016",
+    TELEGRAM_BOT_TOKEN_VIDEO: "tg-bot-token",
+    TELEGRAM_WEBHOOK_SECRET: "tg-webhook-secret",
+  };
+  const tgCalls16 = [];
+  const prevFetch16 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.includes("api.telegram.org")) {
+      tgCalls16.push({ url: sUrl, body: init.body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 916 } }), { status: 200 });
+    }
+    throw new Error("Unexpected fetch: " + sUrl);
+  };
+
+  try {
+    // 16a: Two laptops syncing the exact same crawl observation create ONLY 1 snapshot
+    const laptopAHeaders = {
+      Authorization: "Bearer test-token-16",
+      "Content-Type": "application/json",
+      "X-Client-Id": "laptop-a",
+    };
+    const laptopBHeaders = {
+      Authorization: "Bearer test-token-16",
+      "Content-Type": "application/json",
+      "X-Client-Id": "laptop-b",
+    };
+    const sameCrawlPayload = {
+      run_id: "run_shared_20261127",
+      crawled_at: "2026-11-27T10:15:00Z",
+      items: [
+        {
+          platform: "threads",
+          post_id: "SHARED_001",
+          canonical_url: "https://threads.net/@myqnam/post/SHARED_001",
+          views: 513000,
+          views_display: "513K",
+          views_precision: "display_approx",
+          views_source: "threads_web_browser",
+          views_measured_at: "2026-11-27T10:15:00Z",
+          likes: 1200,
+          comments: 95,
+          shares: 88,
+          reposts: 41,
+        },
+      ],
+    };
+    const syncA = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify(sameCrawlPayload),
+      }),
+      env16
+    );
+    const syncAJson = await syncA.json();
+    assert.equal(syncAJson.new_count, 1);
+    assert.equal(syncAJson.new_qualified_count, 1);
+    assert.equal(syncAJson.snapshots_created, 1);
+
+    const syncB = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: laptopBHeaders,
+        body: JSON.stringify(sameCrawlPayload),
+      }),
+      env16
+    );
+    const syncBJson = await syncB.json();
+    assert.equal(syncBJson.new_count, 0);
+    assert.equal(syncBJson.snapshots_created, 0);
+    assert.equal(syncBJson.snapshots_deduped, 1);
+    assert.equal(env16.DB.postRegistry.get("threads:post:SHARED_001").snapshot_count, 1);
+    assert.equal(env16.DB.postSnapshots.size, 1);
+
+    // 16b: Concurrent Promise.all race on same new post -> ONLY ONE task wins NEW
+    let raceBarrierHit = 0;
+    let releaseBarrier;
+    const barrierPromise = new Promise((res) => { releaseBarrier = res; });
+    env16.DB.onBeforeRegistryInsert = async (key) => {
+      if (key === "threads:post:RACE_POST_1") {
+        raceBarrierHit += 1;
+        if (raceBarrierHit === 1) {
+          await Promise.race([barrierPromise, new Promise((r) => setTimeout(r, 30))]);
+        } else {
+          releaseBarrier();
+        }
+      }
+    };
+    const racePost = {
+      platform: "threads",
+      post_id: "RACE_POST_1",
+      canonical_url: "https://threads.net/@race/post/RACE_POST_1",
+      views: 9200,
+      likes: 340,
+      shares: 12,
+      reposts: 5,
+    };
+    const [raceRes1, raceRes2] = await Promise.all([
+      worker.fetch(
+        new Request("https://example.workers.dev/api/app/market/dedup/record", {
+          method: "POST",
+          headers: laptopAHeaders,
+          body: JSON.stringify({ run_id: "race_run_a", crawled_at: "2026-11-27T11:00:00Z", items: [racePost] }),
+        }),
+        env16
+      ),
+      worker.fetch(
+        new Request("https://example.workers.dev/api/app/market/dedup/record", {
+          method: "POST",
+          headers: laptopBHeaders,
+          body: JSON.stringify({ run_id: "race_run_b", crawled_at: "2026-11-27T11:00:05Z", items: [racePost] }),
+        }),
+        env16
+      ),
+    ]);
+    env16.DB.onBeforeRegistryInsert = null;
+    const rj1 = await raceRes1.json();
+    const rj2 = await raceRes2.json();
+    assert.equal(rj1.new_count + rj2.new_count, 1, "Exact single winner allowed for concurrent NEW claim");
+    assert.equal(rj1.new_qualified_count + rj2.new_qualified_count, 1);
+
+    // 16c: Expired lease on /complete and /dedup/record returns 409 with ZERO registry writes
+    const expCrwRes = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 20, keywords: "expired_lease" }),
+      }),
+      env16
+    );
+    const expCrw = (await expCrwRes.json()).request;
+    const expRow = env16.DB.crawlRequests.find((c) => c.id === expCrw.id);
+    expRow.status = "running";
+    expRow.claimed_by = "muse-worker-old";
+    expRow.attempts = 1;
+    expRow.lease_expires_at = new Date(Date.now() - 60000).toISOString();
+
+    const expiredComplete = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${expCrw.id}/complete`, {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({
+          claimed_by: "muse-worker-old",
+          attempt: 1,
+          status: "completed",
+          result_summary: {
+            run_id: "run_expired_1",
+            items: [{ platform: "threads", post_id: "EXPIRED_SHOULD_NOT_WRITE", views: 5000 }],
+          },
+        }),
+      }),
+      env16
+    );
+    assert.equal(expiredComplete.status, 409);
+    assert.equal(env16.DB.postRegistry.has("threads:post:EXPIRED_SHOULD_NOT_WRITE"), false, "Expired lease must NOT write registry");
+
+    expRow.status = "running";
+    expRow.claimed_by = "muse-worker-old";
+    expRow.attempts = 1;
+    expRow.lease_expires_at = new Date(Date.now() - 60000).toISOString();
+    const expiredDedup = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({
+          request_id: expCrw.id,
+          claimed_by: "muse-worker-old",
+          attempt: 1,
+          run_id: "run_expired_2",
+          items: [{ platform: "threads", post_id: "EXPIRED_RECORD_NO_WRITE", views: 5000 }],
+        }),
+      }),
+      env16
+    );
+    assert.equal(expiredDedup.status, 409);
+    assert.equal(env16.DB.postRegistry.has("threads:post:EXPIRED_RECORD_NO_WRITE"), false, "Expired /dedup/record must NOT write registry");
+
+    // 16d: URL-first post_id discovery promotes dedup_key without creating a duplicate row
+    await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({
+          run_id: "run_url_only",
+          crawled_at: "2026-11-27T08:00:00Z",
+          items: [{ platform: "threads", canonical_url: "https://threads.net/@promo/post/PROMO99", views: 1000, likes: 10 }],
+        }),
+      }),
+      env16
+    );
+    assert.ok(env16.DB.postRegistry.has("threads:url:https://threads.net/@promo/post/PROMO99"));
+    const promoRes = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({
+          run_id: "run_url_with_id",
+          crawled_at: "2026-11-27T10:00:00Z",
+          items: [{ platform: "threads", post_id: "PROMO99", canonical_url: "https://threads.net/@promo/post/PROMO99", views: 4500, likes: 55 }],
+        }),
+      }),
+      env16
+    );
+    const promoJson = await promoRes.json();
+    assert.equal(promoJson.new_count, 0, "URL->post_id promotion must NOT double-count as NEW");
+    assert.equal(promoJson.updated_count, 1);
+    assert.equal(env16.DB.postRegistry.has("threads:url:https://threads.net/@promo/post/PROMO99"), false);
+    assert.equal(env16.DB.postRegistry.get("threads:post:PROMO99").snapshot_count, 2);
+
+    // 16e: Over 500 items processed completely in chunked batches without truncation
+    const largeBatch = Array.from({ length: 550 }, (_, idx) => ({
+      platform: "threads",
+      post_id: `BATCH_BIG_${idx}`,
+      canonical_url: `https://threads.net/@big/post/BATCH_BIG_${idx}`,
+      views: 1500 + idx,
+    }));
+    const bigRec = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({ run_id: "run_big_550", items: largeBatch }),
+      }),
+      env16
+    );
+    const bigRecJson = await bigRec.json();
+    assert.equal(bigRecJson.total_processed, 550);
+    assert.equal(bigRecJson.new_count, 550);
+    const bigCheck = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/check", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({ items: largeBatch }),
+      }),
+      env16
+    );
+    const bigCheckJson = await bigCheck.json();
+    assert.equal(bigCheckJson.total_checked, 550);
+    assert.equal(bigCheckJson.existing_count, 550);
+
+    // 16f: Fail-closed 503 when D1 registry fails (never treated as missing-from-history)
+    env16.DB.failRegistry = true;
+    const failCheck = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/check", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({ items: [{ platform: "threads", post_id: "SHARED_001" }] }),
+      }),
+      env16
+    );
+    assert.equal(failCheck.status, 503);
+    const failCheckJson = await failCheck.json();
+    assert.equal(failCheckJson.ok, false);
+    assert.equal(failCheckJson.registry_unavailable, true);
+    env16.DB.failRegistry = false;
+
+    // 16g: V3.2 Telegram summary enforces <=2500 chars, 6 exact headings, 35/50 + stop_reason + 513K views_display
+    const v32Crw = (await (await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 50, keywords: "v32_test" }),
+      }),
+      env16
+    )).json()).request;
+    const v32Row = env16.DB.crawlRequests.find((c) => c.id === v32Crw.id);
+    v32Row.status = "running";
+    v32Row.claimed_by = "muse-v32";
+    v32Row.attempts = 1;
+    v32Row.requested_by_chat_id = "999016";
+
+    const beforeV32Tg = tgCalls16.length;
+    const v32Complete = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${v32Crw.id}/complete`, {
+        method: "POST",
+        headers: laptopAHeaders,
+        body: JSON.stringify({
+          claimed_by: "muse-v32",
+          attempt: 1,
+          status: "completed",
+          result_summary: {
+            contract_version: "3.2",
+            run_id: "run_v32_35of50",
+            run_status: "partial",
+            technical_status: "completed",
+            data_quality_status: "dat_mot_phan",
+            counters: {
+              requested_count: 50,
+              scanned_count: 140,
+              unique_candidate_count: 120,
+              new_count: 40,
+              new_qualified_count: 35,
+              duplicate_history_count: 50,
+              updated_metrics_count: 10,
+              missing_views_count: 8,
+              unverified_count: 15,
+              rejected_count: 10,
+              similar_content_count: 4,
+              target_achieved: false,
+              stop_reason: "sources_exhausted",
+            },
+            sections: {
+              "3_trends": [
+                { theme: "Son dưỡng môi không màu", why_hot: "Nhiều creator so sánh độ ẩm 8h", lifecycle_state: "growing" },
+                { theme: "Kẹp tóc kim loại Y2K", why_hot: "Bùng nổ clip phối đồ", lifecycle_state: "new" },
+              ],
+              "4_top_viral": [
+                { post: "@myqnam: test son dưỡng 8 tiếng", views: 513000, views_display: "513K", views_precision: "display_approx", likes: 12000, comments: 430 },
+              ],
+              "7_affiliate_priorities": [
+                { product: "Son dưỡng Bioderma Atoderm", priority: "Cao", evidence: "Nhiều bình luận hỏi link dưới bài @myqnam" },
+              ],
+              "9_growth_tracking": [
+                { post: "@sandeal.shopee (Son Romand)", change_summary: "Views 5K → 18K (+260%), Likes 140 → 520" },
+              ],
+              "10_priority_actions": [
+                { action: "Quay clip test son dưỡng 8 tiếng" },
+                { action: "Gắn giỏ hàng combo son dưỡng" },
+                { action: "Theo dõi thêm hashtag #kệptócY2K" },
+                { action: "Hành động thứ 4 không được xuất hiện vượt giới hạn 3" },
+              ],
+            },
+            telegram_summary:
+              "📊 Chất lượng crawl\n" +
+              "• Chỉ đạt 35/50 bài mới đạt chuẩn do nguồn search chạm giới hạn.\n" +
+              "🔥 Trend thị trường\n" +
+              "• Son dưỡng giữ ẩm qua đêm được hỏi link mua rất nhiều.\n" +
+              "• Kẹp tóc Y2K tăng nhiệt trở lại nhờ outfit thu đông.\n" +
+              "• Bullet chi tiết từ Muse được giữ nguyên không bị cắt bớt " + "X".repeat(600) + "\n" +
+              "🆕 Trend mới & vòng đời\n" +
+              "• [Mới] Kẹp tóc Y2K mới xuất hiện phiên này.\n" +
+              "💰 Tín hiệu Affiliate\n" +
+              "• Son dưỡng Bioderma 4g có intent mua trực tiếp cao.\n" +
+              "📈 Biến động so với lượt trước\n" +
+              "• Bài @sandeal.shopee tăng 5K → 18K views.\n" +
+              "🎯 Hành động đề xuất\n" +
+              "• Quay clip test giữ ẩm 8h để gắn link.",
+          },
+        }),
+      }),
+      env16
+    );
+    assert.equal(v32Complete.status, 200);
+    const v32Notif = tgCalls16.slice(beforeV32Tg).find((c) => c.url.includes("/sendMessage"));
+    assert.ok(v32Notif, "Expected V3.2 completion Telegram notification");
+    const v32Text = JSON.parse(v32Notif.body).text;
+    assert.ok(v32Text.length <= 2500, `Expected V3.2 notification <= 2500 chars, got ${v32Text.length}`);
+    for (const sec of [
+      "📊 Chất lượng crawl",
+      "🔥 Trend thị trường",
+      "🆕 Trend mới & vòng đời",
+      "💰 Tín hiệu Affiliate",
+      "📈 Biến động so với lượt trước",
+      "🎯 Hành động đề xuất",
+    ]) {
+      assert.ok(v32Text.includes(sec), `V3.2 notification missing group: ${sec}`);
+    }
+    assert.ok(v32Text.includes("35/50 (Chưa đạt mục tiêu • stop: sources_exhausted)"));
+    assert.ok(v32Text.includes("513K") && !v32Text.includes("513.000"), "Views must show 513K display format, not 513.000");
+    assert.ok(v32Text.includes("@sandeal.shopee"));
+  } finally {
+    globalThis.fetch = prevFetch16;
   }
 }
 

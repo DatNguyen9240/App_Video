@@ -2660,6 +2660,7 @@ HTML_TEMPLATE = """
                           {{ getCrawlProgress(crw).newQualified }}/{{ getCrawlProgress(crw).target }} • {{ getCrawlProgress(crw).reached ? 'Đủ mục tiêu' : 'Chưa đạt mục tiêu' }}
                         </span>
                       </template>
+                      <span v-if="getCrawlProgress(crw).stopReason" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 text-[10px] font-mono">{{ getCrawlProgress(crw).stopReason }}</span>
                       <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
                     </div>
                     <div class="text-[10px] text-slate-400 truncate mt-0.5">
@@ -2681,11 +2682,15 @@ HTML_TEMPLATE = """
                   </div>
                   <div class="flex flex-wrap gap-1.5 text-[10px] font-mono">
                     <span v-if="getCrawlProgress(crw).scanned !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200">Quét: {{ getCrawlProgress(crw).scanned }}</span>
+                    <span v-if="getCrawlProgress(crw).uniqueCandidates !== null" class="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700">Ứng viên: {{ getCrawlProgress(crw).uniqueCandidates }}</span>
+                    <span v-if="getCrawlProgress(crw).newCount !== null && getCrawlProgress(crw).newCount !== getCrawlProgress(crw).newQualified" class="px-1.5 py-0.5 rounded bg-teal-950/50 text-teal-300 border border-teal-500/30">Mới (tổng): {{ getCrawlProgress(crw).newCount }}</span>
                     <span v-if="getCrawlProgress(crw).newQualified !== null" class="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-500/30">Mới đạt chuẩn: {{ getCrawlProgress(crw).newQualified }}</span>
                     <span v-if="getCrawlProgress(crw).duplicate !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">Trùng: {{ getCrawlProgress(crw).duplicate }}</span>
                     <span v-if="getCrawlProgress(crw).updated !== null" class="px-1.5 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-500/30">Cập nhật tương tác: {{ getCrawlProgress(crw).updated }}</span>
+                    <span v-if="getCrawlProgress(crw).unverified !== null && getCrawlProgress(crw).unverified > 0" class="px-1.5 py-0.5 rounded bg-orange-950/50 text-orange-300 border border-orange-500/30">Chưa xác minh: {{ getCrawlProgress(crw).unverified }}</span>
                     <span v-if="getCrawlProgress(crw).missingViews !== null" class="px-1.5 py-0.5 rounded bg-amber-950/50 text-amber-300 border border-amber-500/30">Thiếu views: {{ getCrawlProgress(crw).missingViews }}</span>
                     <span v-if="getCrawlProgress(crw).rejected !== null" class="px-1.5 py-0.5 rounded bg-rose-950/50 text-rose-300 border border-rose-500/30">Bị loại: {{ getCrawlProgress(crw).rejected }}</span>
+                    <span v-if="getCrawlProgress(crw).similarContent !== null && getCrawlProgress(crw).similarContent > 0" class="px-1.5 py-0.5 rounded bg-purple-950/50 text-purple-300 border border-purple-500/30">Nội dung tương tự: {{ getCrawlProgress(crw).similarContent }}</span>
                   </div>
                 </div>
               </div>
@@ -2853,9 +2858,15 @@ HTML_TEMPLATE = """
                     <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
                       <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_likes_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_likes_delta) }})</span></div>
                       <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_comments_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_comments_delta) }})</span></div>
-                      <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ item.reposts_count.toLocaleString('vi-VN') }}</div>
+                      <div v-if="item.shares_count !== null && item.shares_count !== undefined">📤 Shares: {{ item.shares_count.toLocaleString('vi-VN') }} <span v-if="item.last_shares_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_shares_delta) }})</span></div>
+                      <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ item.reposts_count.toLocaleString('vi-VN') }} <span v-if="item.last_reposts_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_reposts_delta) }})</span></div>
                       <div v-if="item.quotes_count !== null && item.quotes_count !== undefined">🗣️ Quotes: {{ item.quotes_count.toLocaleString('vi-VN') }}</div>
-                      <div v-if="item.views_count !== null && item.views_count !== undefined">👁️ Views: {{ formatCompactMetric(item.views_count) }} <span v-if="item.last_views_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_views_delta) }})</span></div>
+                      <div :title="formatViewsTooltip(item)">
+                        👁️ Views: <span :class="hasViewsValue(item) ? 'text-cyan-300 font-semibold' : 'text-slate-500'">{{ formatViewsDisplay(item) }}</span>
+                        <span v-if="item.views_precision === 'display_approx'" class="text-[9px] text-amber-300/90">(≈ hiển thị)</span>
+                        <a v-if="item.views_evidence_url" :href="item.views_evidence_url" target="_blank" rel="noreferrer" class="text-[9px] text-sky-400 hover:underline ml-0.5" title="Bằng chứng views">🔗</a>
+                        <span v-if="item.last_views_delta > 0" class="text-[10px] text-emerald-300"> (+{{ formatCompactMetric(item.last_views_delta) }})</span>
+                      </div>
                       <div v-if="(item.snapshot_count || 1) > 1" class="pt-0.5">
                         <span class="px-1.5 py-0.5 rounded text-[10px] font-sans bg-sky-500/20 text-sky-300 border border-sky-500/30">
                           📈 {{ item.snapshot_count }} snapshots
@@ -2981,10 +2992,11 @@ HTML_TEMPLATE = """
                   <div v-else class="text-[10px] text-amber-300">⚠️ URL chưa xác minh (không có video_url)</div>
                 </td>
                 <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
-                  <div>👁️ Views: <strong class="text-cyan-300">{{ formatCompactMetric(item.views_count) }}</strong></div>
+                  <div :title="formatViewsTooltip(item)">👁️ Views: <strong class="text-cyan-300">{{ formatViewsDisplay(item) }}</strong> <span v-if="item.views_precision === 'display_approx'" class="text-[9px] text-amber-300/90">(≈ hiển thị)</span></div>
                   <div>❤️ Likes: {{ formatCompactMetric(item.likes_count) }}</div>
                   <div>💬 Comments: {{ formatCompactMetric(item.comments_count) }}</div>
-                  <div>🔁 Shares: {{ formatCompactMetric(item.shares_count) }}</div>
+                  <div>📤 Shares: {{ formatCompactMetric(item.shares_count) }}</div>
+                  <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ formatCompactMetric(item.reposts_count) }}</div>
                 </td>
                 <td class="px-3 py-3 align-top max-w-xs text-[11px] space-y-1">
                   <div>
@@ -3328,15 +3340,16 @@ HTML_TEMPLATE = """
           </div>
           <table class="w-full text-left text-[11px] font-mono">
             <thead class="text-slate-400 border-b border-slate-800">
-              <tr><th class="py-1 pr-2">Run</th><th class="py-1 pr-2">Thời điểm</th><th class="py-1 pr-2">Views (Δ)</th><th class="py-1 pr-2">Likes (Δ)</th><th class="py-1 pr-2">Cmt (Δ)</th><th class="py-1">Loại</th></tr>
+              <tr><th class="py-1 pr-2">Run</th><th class="py-1 pr-2">Thời điểm đo</th><th class="py-1 pr-2">Views (Δ)</th><th class="py-1 pr-2">Likes (Δ)</th><th class="py-1 pr-2">Cmt (Δ)</th><th class="py-1 pr-2">Shares / Reposts</th><th class="py-1">Loại</th></tr>
             </thead>
             <tbody class="divide-y divide-slate-800/70 text-slate-200">
               <tr v-for="sn in selectedMarketDetail.snapshots" :key="sn.id">
                 <td class="py-1 pr-2 truncate max-w-[140px]">{{ sn.run_id || sn.source_file_name || '—' }}</td>
-                <td class="py-1 pr-2">{{ formatIsoTime(sn.snapshot_at) }}</td>
-                <td class="py-1 pr-2">{{ formatCompactMetric(sn.views_count) }} <span v-if="sn.views_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.views_delta) }})</span></td>
+                <td class="py-1 pr-2">{{ formatIsoTime(sn.measured_at || sn.snapshot_at) }}</td>
+                <td class="py-1 pr-2">{{ formatViewsDisplay(sn) }} <span v-if="sn.views_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.views_delta) }})</span></td>
                 <td class="py-1 pr-2">{{ formatCompactMetric(sn.likes_count) }} <span v-if="sn.likes_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.likes_delta) }})</span></td>
                 <td class="py-1 pr-2">{{ formatCompactMetric(sn.comments_count) }} <span v-if="sn.comments_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.comments_delta) }})</span></td>
+                <td class="py-1 pr-2">📤 {{ formatCompactMetric(sn.shares_count) }} / 🔁 {{ formatCompactMetric(sn.reposts_count) }}</td>
                 <td class="py-1">{{ sn.change_type }}</td>
               </tr>
             </tbody>
@@ -4428,7 +4441,7 @@ HTML_TEMPLATE = """
               ? JSON.parse(crw.result_summary_json || '{}')
               : (crw?.result_summary || {});
           } catch (e) {}
-          const s1 = summary?.sections?.['1_screening'] || summary?.screening || {};
+          const s1 = summary?.sections?.['1_screening'] || summary?.screening || summary?.['1_screening'] || {};
           const pickInt = (...vals) => {
             for (const v of vals) {
               if (v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v))) {
@@ -4438,14 +4451,24 @@ HTML_TEMPLATE = """
             return null;
           };
           const scanned = pickInt(pm.scanned_count, summary.scanned_count, summary.scanned_posts, s1.scanned_count, s1.scanned_posts);
-          const newQualified = pickInt(pm.new_qualified_count, pm.new_count, pm.qualified_count, summary.new_qualified_count, summary.new_count, summary.qualified_count, summary.qualified_posts, s1.qualified_count, summary.record_count);
-          const duplicate = pickInt(pm.duplicate_count, summary.duplicate_count, summary.historical_duplicates, s1.duplicate_count);
-          const updated = pickInt(pm.updated_count, summary.updated_count, summary.engagement_updated_count, summary.growth_count);
+          const uniqueCandidates = pickInt(pm.unique_candidate_count, summary.unique_candidate_count, s1.unique_candidate_count);
+          const newCount = pickInt(pm.new_count, summary.new_count, s1.new_count);
+          const explicitQualified = pickInt(pm.new_qualified_count, summary.new_qualified_count, pm.qualified_count, summary.qualified_count, summary.qualified_posts, s1.new_qualified_count, s1.qualified_count);
+          const newQualified = explicitQualified !== null ? explicitQualified : (newCount === null ? pickInt(summary.record_count) : newCount);
+          const duplicate = pickInt(pm.duplicate_history_count, pm.duplicate_count, summary.duplicate_history_count, summary.duplicate_count, summary.historical_duplicates, s1.duplicate_history_count, s1.duplicate_count);
+          const updated = pickInt(pm.updated_metrics_count, pm.updated_count, summary.updated_metrics_count, summary.updated_count, summary.engagement_updated_count, summary.growth_count, s1.updated_metrics_count);
+          const unverified = pickInt(pm.unverified_count, summary.unverified_count, s1.unverified_count);
           const missingViews = pickInt(pm.missing_views_count, summary.missing_views_count, summary.views_missing_count, s1.missing_views_count);
           const rejected = pickInt(pm.rejected_count, summary.rejected_count, summary.rejected_posts, s1.rejected_count);
-          const hasRealMetrics = [scanned, newQualified, duplicate, updated, missingViews, rejected].some(v => v !== null);
-          const reached = newQualified !== null ? newQualified >= target : null;
-          return { target, scanned, newQualified, duplicate, updated, missingViews, rejected, hasRealMetrics, reached };
+          const similarContent = pickInt(pm.similar_content_count, summary.similar_content_count, s1.similar_content_count);
+          const stopReason = pm.stop_reason || summary.stop_reason || null;
+          const hasRealMetrics = [scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified, missingViews, rejected].some(v => v !== null);
+          const explicitTargetAchieved = (typeof pm.target_achieved === 'boolean') ? pm.target_achieved : ((typeof summary.target_achieved === 'boolean') ? summary.target_achieved : null);
+          const reached = explicitTargetAchieved !== null ? explicitTargetAchieved : (newQualified !== null ? newQualified >= target : null);
+          return {
+            target, scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified,
+            missingViews, rejected, similarContent, stopReason, hasRealMetrics, reached,
+          };
         },
         async loadMarketStatus() {
           try {
@@ -4456,6 +4479,29 @@ HTML_TEMPLATE = """
               this.marketConfigInterval = data.stats.sync_interval_seconds;
             }
           } catch (e) {}
+        },
+        hasViewsValue(item) {
+          if (!item || typeof item !== 'object') return false;
+          if (item.views_display && String(item.views_display).trim()) return true;
+          return item.views_count !== null && item.views_count !== undefined;
+        },
+        formatViewsDisplay(item) {
+          if (!item || typeof item !== 'object') return '—';
+          const disp = item.views_display ? String(item.views_display).trim() : '';
+          if (disp) return disp;
+          if (item.views_count !== null && item.views_count !== undefined) {
+            return this.formatCompactMetric(item.views_count);
+          }
+          return '—';
+        },
+        formatViewsTooltip(item) {
+          if (!item || typeof item !== 'object') return '';
+          const parts = [];
+          if (item.views_precision) parts.push(`Độ chính xác: ${item.views_precision}`);
+          if (item.views_source) parts.push(`Nguồn: ${item.views_source}`);
+          if (item.views_measured_at) parts.push(`Đo lúc: ${this.formatIsoTime(item.views_measured_at)}`);
+          if (item.views_evidence_url) parts.push(`Bằng chứng: ${item.views_evidence_url}`);
+          return parts.join(' • ');
         },
         formatCompactMetric(val) {
           if (val === null || val === undefined) return '—';

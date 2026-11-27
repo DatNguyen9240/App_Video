@@ -374,26 +374,86 @@ class CloudflareBridgeClient:
             raise RuntimeError(f"set_crawl_schedule failed: HTTP {resp.status_code}")
         return resp.json()
 
-    def check_cross_run_dedup(self, items: list) -> Dict[str, Any]:
-        """Check historical post registry on Worker V2/D1 across runs."""
-        resp = self._request_with_retry(
-            "POST",
-            "/api/app/market/dedup/check",
-            json_body={"items": list(items or [])[:500]},
-            max_attempts=2,
-        )
-        if not resp.ok:
-            raise RuntimeError(f"check_cross_run_dedup failed: HTTP {resp.status_code}")
-        return resp.json()
+    def check_cross_run_dedup(self, items: list, batch_size: int = 100) -> Dict[str, Any]:
+        """
+        Check historical post registry on Worker V2/D1 in full lossless batches.
+        Fail-closed: raises RuntimeError if registry is unavailable (never treat lookup failure as empty history).
+        """
+        all_items = list(items or [])
+        if not all_items:
+            return {"ok": True, "existing": {}, "existing_keys": [], "existing_count": 0, "new_count": 0}
+        step = max(1, min(int(batch_size or 100), 250))
+        merged_existing: Dict[str, Any] = {}
+        merged_keys: list = []
+        seen_keys = set()
+        for i in range(0, len(all_items), step):
+            chunk = all_items[i : i + step]
+            resp = self._request_with_retry(
+                "POST",
+                "/api/app/market/dedup/check",
+                json_body={"items": chunk},
+                max_attempts=2,
+            )
+            if not resp.ok:
+                raise RuntimeError(f"RegistryUnavailable: check_cross_run_dedup failed HTTP {resp.status_code}")
+            data = resp.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"RegistryUnavailable: {data.get('error') or 'unknown error'}")
+            for k, v in (data.get("existing") or {}).items():
+                merged_existing[k] = v
+            for k in (data.get("existing_keys") or []):
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    merged_keys.append(k)
+        return {
+            "ok": True,
+            "existing": merged_existing,
+            "existing_keys": merged_keys,
+            "existing_count": len(merged_keys),
+            "new_count": max(0, len(all_items) - len(merged_keys)),
+        }
 
-    def record_cross_run_dedup(self, items: list, run_id: Optional[str] = None) -> Dict[str, Any]:
-        """Atomically record ingested post keys/snapshots into shared Worker V2 D1 registry."""
-        resp = self._request_with_retry(
-            "POST",
-            "/api/app/market/dedup/record",
-            json_body={"run_id": run_id, "items": list(items or [])[:500]},
-            max_attempts=2,
-        )
-        if not resp.ok:
-            raise RuntimeError(f"record_cross_run_dedup failed: HTTP {resp.status_code}")
-        return resp.json()
+    def record_cross_run_dedup(
+        self,
+        items: list,
+        run_id: Optional[str] = None,
+        *,
+        request_id: Optional[str] = None,
+        claimed_by: Optional[str] = None,
+        attempt: Optional[int] = None,
+        batch_size: int = 100,
+    ) -> Dict[str, Any]:
+        """Atomically record ingested post keys/snapshots into shared Worker V2 D1 registry without truncating batches."""
+        all_items = list(items or [])
+        if not all_items:
+            return {"ok": True, "new_count": 0, "duplicate_count": 0, "updated_count": 0, "missing_views_count": 0, "total_processed": 0}
+        step = max(1, min(int(batch_size or 100), 250))
+        totals = {"ok": True, "new_count": 0, "duplicate_count": 0, "updated_count": 0, "missing_views_count": 0, "total_processed": 0}
+        for i in range(0, len(all_items), step):
+            chunk = all_items[i : i + step]
+            body: Dict[str, Any] = {"run_id": run_id, "items": chunk}
+            if request_id is not None:
+                body["request_id"] = request_id
+            if claimed_by is not None:
+                body["claimed_by"] = claimed_by
+            if attempt is not None:
+                body["attempt"] = int(attempt)
+            resp = self._request_with_retry(
+                "POST",
+                "/api/app/market/dedup/record",
+                json_body=body,
+                max_attempts=2,
+            )
+            if resp.status_code == 409:
+                raise StaleClaimConflictError(f"record_cross_run_dedup rejected (HTTP 409): {resp.text[:200]}")
+            if not resp.ok:
+                raise RuntimeError(f"RegistryUnavailable: record_cross_run_dedup failed HTTP {resp.status_code}")
+            data = resp.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"RegistryUnavailable: {data.get('error') or 'unknown error'}")
+            totals["new_count"] += int(data.get("new_count") or 0)
+            totals["duplicate_count"] += int(data.get("duplicate_count") or 0)
+            totals["updated_count"] += int(data.get("updated_count") or 0)
+            totals["missing_views_count"] += int(data.get("missing_views_count") or 0)
+            totals["total_processed"] += int(data.get("total_processed") or len(chunk))
+        return totals

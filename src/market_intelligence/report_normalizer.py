@@ -113,7 +113,9 @@ def has_muse_report_sections(raw_obj: Any) -> bool:
     # Never treat data_contract, crawl_strategy, capability tests, research docs, or quality audits as a market report
     if "contract" in raw_obj or "audit" in raw_obj or "strategy" in raw_obj:
         return False
-    if "engagement_verification_map" in raw_obj:
+    if "engagement_verification_map" in raw_obj or ("document" in raw_obj and "proposed_version" in raw_obj):
+        return False
+    if isinstance(raw_obj.get("entries"), list) and ("completeness_audit" in raw_obj or "primary_key" in raw_obj):
         return False
     if isinstance(raw_obj.get("sources"), list) and "sections" not in raw_obj and "platform_results" not in raw_obj:
         return False
@@ -187,8 +189,16 @@ def normalize_muse_report(
 
     sections = src.get("sections") if isinstance(src.get("sections"), dict) else {}
     fname_lower = (file_name or "").lower()
+    has_counters = isinstance(raw_obj.get("counters"), dict) or isinstance(src.get("counters"), dict)
+    is_v32 = bool(
+        has_counters
+        or str(raw_obj.get("version") or src.get("version") or "").startswith("3.2")
+        or isinstance(sections.get("9_growth_tracking"), list)
+        or "10_priority_actions" in sections
+    )
     is_v3 = bool(
-        sections
+        is_v32
+        or sections
         or "run_status" in src
         or "section_1_screening" in src
         or fname_lower.startswith("trend_report")
@@ -216,7 +226,10 @@ def normalize_muse_report(
     platform_results = src.get("platform_results") if isinstance(src.get("platform_results"), dict) else {}
     totals = dict(src.get("totals")) if isinstance(src.get("totals"), dict) else {}
 
-    # V3.1 Section 1 (Screening) & Section 2 (Tier Distribution)
+    # V3.1/V3.2 Section 1 (Screening & Root Counters) & Section 2 (Tier Distribution)
+    from .normalizer import extract_v32_counters
+
+    counters = extract_v32_counters(raw_obj, legacy_fallback_qualified=False)
     s1 = sections.get("1_screening") or src.get("section_1_screening") or {}
     if not isinstance(s1, dict):
         s1 = {}
@@ -230,12 +243,25 @@ def normalize_muse_report(
     raw_groups = s2.get("groups") if isinstance(s2.get("groups"), dict) else {}
 
     screening = {
-        "scanned_count": s1.get("scanned_count") if s1.get("scanned_count") is not None else s1.get("scanned_posts"),
-        "qualified_count": s1.get("qualified_count") if s1.get("qualified_count") is not None else s1.get("qualified_posts"),
-        "rejected_count": s1.get("rejected_count") if s1.get("rejected_count") is not None else s1.get("rejected_posts"),
+        "requested_count": counters.get("requested_count"),
+        "scanned_count": counters.get("scanned_count") if counters.get("scanned_count") is not None else (s1.get("scanned_count") if s1.get("scanned_count") is not None else s1.get("scanned_posts")),
+        "unique_candidate_count": counters.get("unique_candidate_count"),
+        "new_count": counters.get("new_count"),
+        "new_qualified_count": counters.get("new_qualified_count"),
+        "qualified_count": counters.get("new_qualified_count") if counters.get("new_qualified_count") is not None else (s1.get("qualified_count") if s1.get("qualified_count") is not None else s1.get("qualified_posts")),
+        "duplicate_current_run_count": counters.get("duplicate_current_run_count"),
+        "duplicate_history_count": counters.get("duplicate_history_count"),
+        "updated_metrics_count": counters.get("updated_metrics_count"),
+        "similar_content_count": counters.get("similar_content_count"),
+        "missing_views_count": counters.get("missing_views_count"),
+        "rejected_count": counters.get("rejected_count") if counters.get("rejected_count") is not None else (s1.get("rejected_count") if s1.get("rejected_count") is not None else s1.get("rejected_posts")),
         "rejected_reasons": s1.get("rejected_reasons") if isinstance(s1.get("rejected_reasons"), dict) else {},
         "cross_verified_count": s1.get("cross_verified_count"),
-        "unverified_count": s1.get("unverified_count") if s1.get("unverified_count") is not None else raw_tiers.get("unverified"),
+        "unverified_count": counters.get("unverified_count") if counters.get("unverified_count") is not None else (s1.get("unverified_count") if s1.get("unverified_count") is not None else raw_tiers.get("unverified")),
+        "target_achieved": counters.get("target_achieved"),
+        "stop_reason": counters.get("stop_reason"),
+        "counters_reconciled": counters.get("counters_reconciled"),
+        "reconciliation_diff": counters.get("reconciliation_diff"),
         "sources": s1.get("sources"),
     }
     tier_distribution = {
@@ -289,6 +315,8 @@ def normalize_muse_report(
                 "reposts": tv.get("reposts"),
                 "quotes": tv.get("quotes"),
                 "views": tv.get("views"),
+                "views_display": tv.get("views_display"),
+                "views_precision": tv.get("views_precision"),
                 "shares": tv.get("shares"),
                 "verification_status": tv.get("verification_status"),
             }
@@ -334,6 +362,7 @@ def normalize_muse_report(
                     "basis": ev_text,
                     "why_hot": t.get("why_hot"),
                     "evidence": ev_text,
+                    "lifecycle_state": t.get("lifecycle_state"),
                     "evidence_urls": _infer_evidence_urls(ev_text, t.get("evidence_urls") or t.get("urls") or t.get("sources")),
                     "evidence_ids": _as_list(t.get("evidence_ids") or t.get("post_ids")),
                 }
@@ -502,9 +531,21 @@ def normalize_muse_report(
     if not short_videos and src.get("video_ideas_shortform"):
         short_videos = [s for s in (_idea_to_str(x) for x in _as_list(src.get("video_ideas_shortform"))) if s]
 
-    # V3.1 Section 9: Priority actions
-    raw_actions = sections.get("9_priority_actions") or src.get("section_9_priority_actions") or src.get("priority_actions") or []
-    priority_actions = [str(x).strip() for x in _as_list(raw_actions) if str(x or "").strip()]
+    # V3.2 Section 9 (Growth Tracking) + V3.1/V3.2 Priority actions (9_priority_actions or 10_priority_actions)
+    raw_growth = sections.get("9_growth_tracking") or src.get("growth_tracking") or []
+    growth_tracking = [g for g in _as_list(raw_growth) if isinstance(g, dict)]
+    raw_actions = (
+        sections.get("10_priority_actions")
+        or sections.get("9_priority_actions")
+        or src.get("section_9_priority_actions")
+        or src.get("priority_actions")
+        or []
+    )
+    priority_actions = [
+        str(x.get("action") or x.get("title") or "").strip() if isinstance(x, dict) else str(x).strip()
+        for x in _as_list(raw_actions)
+        if (str(x.get("action") or x.get("title") or "").strip() if isinstance(x, dict) else str(x or "").strip())
+    ]
 
     # 5. Data quality & source links
     raw_dq = src.get("data_quality") if isinstance(src.get("data_quality"), dict) else {}
@@ -660,7 +701,7 @@ def normalize_muse_report(
     )
     return {
         "report_key": report_key,
-        "schema_version": "v3.1" if is_v3 else "v2",
+        "schema_version": "v3.2" if is_v32 else ("v3.1" if is_v3 else "v2"),
         "source_type": "muse_report_json",
         "source_label": f"Muse Report ({file_name or 'Drive JSON'})",
         "file_name": file_name,
@@ -679,10 +720,12 @@ def normalize_muse_report(
         "data_quality_status": status_meta["data_quality_status"],
         "business_usable_records": data_quality["business_usable_records"],
         "totals": totals,
+        "counters": counters if has_counters else None,
         "screening": screening if (is_v3 or any(v is not None for v in screening.values())) else None,
         "tier_distribution": tier_distribution if (tier_distribution["tiers"] or tier_distribution["groups"]) else None,
         "top_viral": top_viral,
         "emerging_and_signals": {"emerging": s5_emerging, "signals": s5_signals} if (s5_emerging or s5_signals) else None,
+        "growth_tracking": growth_tracking,
         "priority_actions": priority_actions,
         "verification_detail": raw_verif_detail,
         "platform_results": platform_results,

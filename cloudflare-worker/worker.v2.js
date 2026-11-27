@@ -479,7 +479,9 @@ function isNonReportDocName(fileName) {
         low.includes("strategy") ||
         low.includes("audit") ||
         low.includes("discovery_sources") ||
-        low.includes("capability_test")
+        low.includes("capability_test") ||
+        low.includes("identity_index") ||
+        low.includes("contract_amendment")
     );
 }
 
@@ -494,19 +496,78 @@ function extractMuseReportStats(d) {
     if (!d || typeof d !== "object") return null;
     const s1 = d.sections?.["1_screening"] || d.section_1_screening || {};
     const s2 = d.sections?.["2_tier_distribution"] || d.section_2_tier_distribution || {};
+    const c = (d.counters && typeof d.counters === "object") ? d.counters : (s1.counters && typeof s1.counters === "object" ? s1.counters : {});
     const tiers = s2.tiers || s2 || {};
     const groups = s2.groups || {};
-    const isV3 = Boolean(d.sections || d.run_status || d.section_1_screening);
+    const isV32 = Boolean(
+        d.counters ||
+        d.sections?.["9_growth_tracking"] ||
+        d.sections?.["10_priority_actions"] ||
+        String(d.contract_version || d.schema_version || "").includes("3.2") ||
+        c.new_qualified_count !== undefined
+    );
+    const isV3 = Boolean(isV32 || d.sections || d.run_status || d.section_1_screening);
     const rawRunStatus = d.run_status ? String(d.run_status).trim().toLowerCase() : null;
     const rawTechStatus = d.technical_status ? String(d.technical_status).trim().toLowerCase() : null;
     const rawDqStatus = d.data_quality_status ? String(d.data_quality_status).trim() : null;
     const effStatus = rawRunStatus || rawTechStatus || "completed";
 
-    const scanned = s1.scanned_count ?? s1.scanned_posts ?? d.totals?.records ?? null;
-    const qualified = s1.qualified_count ?? s1.qualified_posts ?? d.totals?.business_usable_records ?? null;
-    const rejected = s1.rejected_count ?? s1.rejected_posts ?? null;
-    const crossVerified = s1.cross_verified_count ?? null;
-    const unverified = s1.unverified_count ?? tiers.unverified ?? null;
+    const requestedCount = pickFirstFiniteInt(c.requested_count, d.requested_count, s1.requested_count);
+    const scanned = pickFirstFiniteInt(c.scanned_count, d.scanned_count, s1.scanned_count, s1.scanned_posts, d.totals?.records);
+    const uniqueCandidates = pickFirstFiniteInt(c.unique_candidate_count, d.unique_candidate_count, s1.unique_candidate_count);
+    const newQualifiedCount = pickFirstFiniteInt(c.new_qualified_count, d.new_qualified_count, s1.new_qualified_count);
+    const newCount = pickFirstFiniteInt(c.new_count, d.new_count, s1.new_count);
+    const qualified = pickFirstFiniteInt(
+        newQualifiedCount,
+        c.qualified_count,
+        d.qualified_count,
+        s1.qualified_count,
+        s1.qualified_posts,
+        d.totals?.business_usable_records
+    );
+    const duplicateHistoryCount = pickFirstFiniteInt(
+        c.duplicate_history_count,
+        d.duplicate_history_count,
+        s1.duplicate_history_count,
+        c.duplicate_count,
+        d.duplicate_count,
+        s1.duplicate_count
+    );
+    const updatedMetricsCount = pickFirstFiniteInt(
+        c.updated_metrics_count,
+        d.updated_metrics_count,
+        s1.updated_metrics_count,
+        c.updated_count,
+        d.updated_count,
+        s1.updated_count
+    );
+    const similarContentCount = pickFirstFiniteInt(c.similar_content_count, d.similar_content_count, s1.similar_content_count);
+    const missingViewsCount = pickFirstFiniteInt(c.missing_views_count, d.missing_views_count, s1.missing_views_count);
+    const rejected = pickFirstFiniteInt(c.rejected_count, d.rejected_count, s1.rejected_count, s1.rejected_posts);
+    const crossVerified = pickFirstFiniteInt(s1.cross_verified_count, c.cross_verified_count);
+    const unverifiedRaw = pickFirstFiniteInt(c.unverified_count, d.unverified_count, s1.unverified_count, tiers.unverified);
+    const unverified = unverifiedRaw ?? 0;
+
+    let targetAchieved = null;
+    if (typeof c.target_achieved === "boolean") targetAchieved = c.target_achieved;
+    else if (typeof d.target_achieved === "boolean") targetAchieved = d.target_achieved;
+    else if (typeof s1.target_achieved === "boolean") targetAchieved = s1.target_achieved;
+    else if (newQualifiedCount !== null && requestedCount !== null) targetAchieved = newQualifiedCount >= requestedCount;
+
+    const stopReason = c.stop_reason || d.stop_reason || s1.stop_reason || null;
+
+    let countersReconciled = null;
+    if (
+        uniqueCandidates !== null &&
+        newQualifiedCount !== null &&
+        unverifiedRaw !== null &&
+        duplicateHistoryCount !== null &&
+        updatedMetricsCount !== null &&
+        rejected !== null
+    ) {
+        const expected = newQualifiedCount + unverifiedRaw + duplicateHistoryCount + updatedMetricsCount + rejected;
+        countersReconciled = uniqueCandidates === expected;
+    }
 
     const trends = d.sections?.["3_trends"] || d.section_3_trending_themes || d.trending_highlights || [];
     const topViral = d.sections?.["4_top_viral"] || d.section_4_top_viral || [];
@@ -515,11 +576,18 @@ function extractMuseReportStats(d) {
     const signals = Array.isArray(s5.signals) ? s5.signals : [];
     const needs = d.sections?.["6_consumer_needs"] || d.section_6_consumer_needs || d.consumer_needs_problems || [];
     const aff = d.sections?.["7_affiliate_priorities"] || d.section_7_affiliate_products || d.affiliate_opportunities || [];
-    const actions = d.sections?.["9_priority_actions"] || d.section_9_priority_actions || d.priority_actions || [];
     const contentSuggestions = d.sections?.["8_content_suggestions"] || d.content_suggestions || {};
+    const growthTracking = d.sections?.["9_growth_tracking"] || d.section_9_growth_tracking || d.growth_tracking || [];
+    const actions =
+        d.sections?.["10_priority_actions"] ||
+        d.sections?.["9_priority_actions"] ||
+        d.section_9_priority_actions ||
+        d.priority_actions ||
+        [];
 
     return {
         isV3,
+        isV32,
         rawRunStatus,
         rawTechStatus,
         rawDqStatus,
@@ -530,20 +598,33 @@ function extractMuseReportStats(d) {
             hot: tiers.hot ?? 0,
             emerging: tiers.emerging ?? 0,
             watchlist: tiers.watchlist ?? 0,
-            unverified: unverified ?? 0
+            unverified
         },
         groups,
+        requestedCount,
         scanned,
+        uniqueCandidates,
+        newCount,
+        newQualifiedCount,
         qualified,
+        duplicateHistoryCount,
+        updatedMetricsCount,
+        similarContentCount,
+        missingViewsCount,
         rejected,
         crossVerified,
-        unverified: unverified ?? 0,
+        unverified,
+        unverifiedExplicit: unverifiedRaw,
+        targetAchieved,
+        stopReason,
+        countersReconciled,
         trends: Array.isArray(trends) ? trends : [],
         topViral: Array.isArray(topViral) ? topViral : [],
         emerging,
         signals,
         needs: Array.isArray(needs) ? needs : [],
         aff: Array.isArray(aff) ? aff : [],
+        growthTracking: Array.isArray(growthTracking) ? growthTracking : [],
         actions: Array.isArray(actions) ? actions : [],
         contentSuggestions,
         verifDetail: d.verification_detail?.note || null,
@@ -553,21 +634,27 @@ function extractMuseReportStats(d) {
     };
 }
 
-function getReportStatusBadge(effStatus, isCorr, isV3) {
+function getReportStatusBadge(effStatus, isCorr, isV3, isV32 = false) {
     if (effStatus === "source_error" || effStatus === "failed") {
         return "❌ LỖI NGUỒN DỮ LIỆU (source_error) — Không kết luận về thị trường";
     }
-    if (effStatus === "insufficient_data" || effStatus === "partial") {
+    if (effStatus === "insufficient_data") {
         return "⚠️ THIẾU DỮ LIỆU (insufficient_data) — Chưa đủ cơ sở kết luận xu hướng";
+    }
+    if (effStatus === "partial") {
+        return isV32
+            ? "⚠️ ĐẠT MỘT PHẦN MỤC TIÊU (partial) — BÁO CÁO THREADS V3.2"
+            : "⚠️ ĐẠT MỘT PHẦN (partial) — Tổng hợp dữ liệu đã thu thập";
     }
     if (effStatus === "no_qualifying_posts") {
         return "⚪ NGUỒN OK — KHÔNG CÓ BÀI ĐẠT CHUẨN (no_qualifying_posts)";
     }
     if (isCorr) return "🔔 BÁO CÁO MUSE (BẢN CORRECTED V2)";
+    if (isV32) return "🔔 BÁO CÁO XU HƯỚNG THREADS V3.2";
     return isV3 ? "🔔 BÁO CÁO XU HƯỚNG THREADS V3.1" : "🔔 BÁO CÁO PHÂN TÍCH THỊ TRƯỜNG";
 }
 
-function trimBullet(raw, maxLen = 145) {
+function trimBullet(raw, maxLen = 220) {
     const clean = String(raw || "")
         .replace(/^\s*(?:[•\-\*]|\d+[.)])\s*/, "")
         .replace(/\s+/g, " ")
@@ -665,130 +752,352 @@ function haveRegistryMetricsChanged(incoming, existing) {
     return false;
 }
 
+function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt = null) {
+    const metrics = extractRegistryMetrics(rawItem);
+    const key = buildCanonicalDedupKey(rawItem);
+    const plat = String(rawItem?.platform || "threads").toLowerCase().trim() || "threads";
+    const cUrl = canonicalizeSocialUrl(
+        rawItem?.canonical_url || rawItem?.post_url || rawItem?.video_url || rawItem?.product_url || rawItem?.url
+    );
+    const postId = rawItem?.post_id ? String(rawItem.post_id).trim() : null;
+    const postPk = rawItem?.post_pk ? String(rawItem.post_pk).trim() : null;
+    const contentHash = rawItem?.content_hash ? String(rawItem.content_hash).trim() : null;
+    const viewsDisplay = rawItem?.views_display ?? rawItem?.metrics?.views_display ?? null;
+    const viewsPrecision = rawItem?.views_precision ?? rawItem?.metrics?.views_precision ?? null;
+    const viewsSource = rawItem?.views_source ?? rawItem?.metrics?.views_source ?? null;
+    const viewsEvidenceUrl = rawItem?.views_evidence_url ?? rawItem?.metrics?.views_evidence_url ?? null;
+    const measuredAt = rawItem?.views_measured_at || rawItem?.measured_at || rawItem?.crawled_at || rawItem?.scraped_at || defaultMeasuredAt || null;
+    const cls = String(rawItem?.classification || "").trim().toUpperCase();
+    const isRejected = cls === "REJECTED" || String(rawItem?.data_quality || "").toLowerCase() === "rejected";
+    const hasVerifiedViews = metrics.views !== undefined && metrics.views !== null;
+    const isUnverified =
+        cls === "UNVERIFIED" ||
+        !hasVerifiedViews ||
+        String(rawItem?.verification_status || "").toLowerCase() === "unverified";
+    const isNewQualified = !isRejected && !isUnverified && hasVerifiedViews;
+    const effCls = cls || (isRejected ? "REJECTED" : (isUnverified ? "UNVERIFIED" : "NEW"));
+    const itemRunId = rawItem?.run_id || rawItem?.last_seen_run_id || defaultRunId || null;
+    return {
+        metrics,
+        key,
+        plat,
+        cUrl,
+        postId,
+        postPk,
+        contentHash,
+        viewsDisplay: viewsDisplay ? String(viewsDisplay).trim() : null,
+        viewsPrecision: viewsPrecision ? String(viewsPrecision).trim() : null,
+        viewsSource: viewsSource ? String(viewsSource).trim() : null,
+        viewsEvidenceUrl: viewsEvidenceUrl ? String(viewsEvidenceUrl).trim() : null,
+        measuredAt: measuredAt ? String(measuredAt).trim() : null,
+        isRejected,
+        hasVerifiedViews,
+        isUnverified,
+        isNewQualified,
+        classification: effCls,
+        runId: itemRunId ? String(itemRunId).trim() : null,
+    };
+}
+
+function buildSnapshotIdempotencyKey({ dedupKey, runId, measuredAt, metrics }) {
+    const effKey = String(dedupKey || "").trim();
+    const effRun = String(runId || "no_run").trim();
+    const effMeas = String(measuredAt || "").trim();
+    const m = metrics || {};
+    const mSig = `${m.views ?? ""}:${m.likes ?? ""}:${m.comments ?? ""}:${m.shares ?? ""}:${m.reposts ?? ""}:${m.quotes ?? ""}`;
+    return `${effKey}|${effRun}|${effMeas}|${mSig}`;
+}
+
+async function lookupRegistryRow(env, key, plat, cUrl, postId) {
+    let row = null;
+    if (key) {
+        row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(key).first();
+    }
+    if (!row && cUrl) {
+        row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE platform = ? AND canonical_url = ? LIMIT 1")
+            .bind(plat, cUrl).first();
+    }
+    if (!row && postId) {
+        row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE platform = ? AND post_id = ? LIMIT 1")
+            .bind(plat, postId).first();
+    }
+    return row;
+}
+
 async function checkCrossRunDedupInD1(env, rawItems) {
-    const items = Array.isArray(rawItems) ? rawItems.slice(0, 500) : [];
+    const items = Array.isArray(rawItems) ? rawItems : [];
     const existing = {};
     const existingKeys = [];
-    for (const rawItem of items) {
-        const key = buildCanonicalDedupKey(rawItem);
-        const plat = String(rawItem?.platform || "threads").toLowerCase().trim() || "threads";
-        const cUrl = canonicalizeSocialUrl(rawItem?.canonical_url || rawItem?.post_url || rawItem?.url);
-        if (!key && !cUrl) continue;
-        try {
-            let row = null;
-            if (key) {
-                row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(key).first();
+    const chunkSize = 100;
+
+    for (let offset = 0; offset < items.length; offset += chunkSize) {
+        const chunk = items.slice(offset, offset + chunkSize);
+        for (const rawItem of chunk) {
+            const key = buildCanonicalDedupKey(rawItem);
+            const plat = String(rawItem?.platform || "threads").toLowerCase().trim() || "threads";
+            const cUrl = canonicalizeSocialUrl(rawItem?.canonical_url || rawItem?.post_url || rawItem?.video_url || rawItem?.product_url || rawItem?.url);
+            const postId = rawItem?.post_id ? String(rawItem.post_id).trim() : null;
+            if (!key && !cUrl && !postId) continue;
+
+            try {
+                const row = await lookupRegistryRow(env, key, plat, cUrl, postId);
+                if (row) {
+                    let latestMetrics = {};
+                    try { latestMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
+                    const resolvedKey = key || row.dedup_key;
+                    existing[resolvedKey] = {
+                        dedup_key: row.dedup_key,
+                        post_id: row.post_id || null,
+                        canonical_url: row.canonical_url || null,
+                        first_seen_at: row.first_seen_at,
+                        last_seen_at: row.last_seen_at,
+                        snapshot_count: Number(row.snapshot_count || 1),
+                        latest_metrics: latestMetrics,
+                        latest_views_display: row.latest_views_display || null,
+                        latest_views_precision: row.latest_views_precision || null,
+                    };
+                    existingKeys.push(resolvedKey);
+                }
+            } catch (err) {
+                const re = new Error(`D1_REGISTRY_UNAVAILABLE: ${err?.message || "check failed"}`);
+                re.isRegistryError = true;
+                throw re;
             }
-            if (!row && cUrl) {
-                row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE platform = ? AND canonical_url = ? LIMIT 1").bind(plat, cUrl).first();
-            }
-            if (row) {
-                let latestMetrics = {};
-                try { latestMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
-                const resolvedKey = key || row.dedup_key;
-                existing[resolvedKey] = {
-                    dedup_key: row.dedup_key,
-                    first_seen_at: row.first_seen_at,
-                    last_seen_at: row.last_seen_at,
-                    snapshot_count: Number(row.snapshot_count || 1),
-                    latest_metrics: latestMetrics,
-                };
-                existingKeys.push(resolvedKey);
-            }
-        } catch {
-            // Table may not exist on legacy schema before migration 0003
         }
     }
+
     return {
         existing,
         existing_keys: existingKeys,
         existing_count: existingKeys.length,
         new_count: Math.max(0, items.length - existingKeys.length),
+        total_checked: items.length,
     };
 }
 
-async function recordCrossRunDedupInD1(env, rawItems, runId = null) {
-    const items = Array.isArray(rawItems) ? rawItems.slice(0, 500) : [];
+async function insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls, nowIso) {
+    const idempKey = buildSnapshotIdempotencyKey({
+        dedupKey: targetDedupKey,
+        runId: meta.runId,
+        measuredAt: meta.measuredAt,
+        metrics: meta.metrics,
+    });
+    const snapId = `snp_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const ins = await env.DB.prepare(`
+        INSERT OR IGNORE INTO market_post_snapshots
+        (id, snapshot_idempotency_key, dedup_key, platform, post_id, run_id, measured_at, likes_count, comments_count, reposts_count, quotes_count, shares_count, views_count, views_display, views_precision, views_source, views_evidence_url, classification, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+        snapId,
+        idempKey,
+        targetDedupKey,
+        meta.plat,
+        meta.postId,
+        meta.runId,
+        meta.measuredAt,
+        meta.metrics.likes ?? null,
+        meta.metrics.comments ?? null,
+        meta.metrics.reposts ?? null,
+        meta.metrics.quotes ?? null,
+        meta.metrics.shares ?? null,
+        meta.metrics.views ?? null,
+        meta.viewsDisplay,
+        meta.viewsPrecision,
+        meta.viewsSource,
+        meta.viewsEvidenceUrl,
+        snapCls,
+        nowIso
+    ).run();
+    return Number(ins?.meta?.changes || 0) === 1;
+}
+
+async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
+    const items = Array.isArray(rawItems) ? rawItems : [];
     const nowIso = new Date().toISOString();
+    const defaultMeasuredAt = opts?.crawledAt || null;
+    const chunkSize = 100;
+
     let newCount = 0;
+    let newQualifiedCount = 0;
     let duplicateCount = 0;
     let updatedCount = 0;
     let missingViewsCount = 0;
+    let unverifiedCount = 0;
+    let rejectedCount = 0;
+    let snapshotsCreated = 0;
+    let snapshotsDeduped = 0;
 
-    for (const rawItem of items) {
-        const metrics = extractRegistryMetrics(rawItem);
-        if (metrics.views === undefined || metrics.views === null) {
-            missingViewsCount += 1;
-        }
-        const key = buildCanonicalDedupKey(rawItem);
-        const plat = String(rawItem?.platform || "threads").toLowerCase().trim() || "threads";
-        const cUrl = canonicalizeSocialUrl(rawItem?.canonical_url || rawItem?.post_url || rawItem?.video_url || rawItem?.product_url || rawItem?.url);
-        const postId = rawItem?.post_id ? String(rawItem.post_id).trim() : null;
-        if (!key) continue;
-
-        try {
-            let row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(key).first();
-            if (!row && cUrl) {
-                row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE platform = ? AND canonical_url = ? LIMIT 1").bind(plat, cUrl).first();
+    for (let offset = 0; offset < items.length; offset += chunkSize) {
+        const chunk = items.slice(offset, offset + chunkSize);
+        for (const rawItem of chunk) {
+            const meta = extractRegistryItemMeta(rawItem, runId, defaultMeasuredAt);
+            if (!meta.key) continue;
+            if (!meta.hasVerifiedViews) {
+                missingViewsCount += 1;
             }
-            if (!row) {
-                await env.DB.prepare(`
-                    INSERT INTO market_post_registry
-                    (dedup_key, platform, post_id, canonical_url, first_run_id, last_run_id, first_seen_at, last_seen_at, snapshot_count, latest_metrics_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                    ON CONFLICT(dedup_key) DO UPDATE SET
-                        last_run_id = COALESCE(excluded.last_run_id, market_post_registry.last_run_id),
-                        last_seen_at = excluded.last_seen_at,
-                        snapshot_count = market_post_registry.snapshot_count + 1
-                `).bind(
-                    key,
-                    plat,
-                    postId,
-                    cUrl,
-                    runId,
-                    runId,
-                    nowIso,
-                    nowIso,
-                    JSON.stringify(metrics)
-                ).run();
-                newCount += 1;
-            } else {
+
+            try {
+                let row = await lookupRegistryRow(env, meta.key, meta.plat, meta.cUrl, meta.postId);
+
+                if (!row) {
+                    const firstSeen = meta.measuredAt || nowIso;
+                    const ins = await env.DB.prepare(`
+                        INSERT OR IGNORE INTO market_post_registry
+                        (dedup_key, platform, post_id, post_pk, canonical_url, content_hash, first_run_id, last_run_id, first_seen_at, last_seen_at, snapshot_count, latest_views_display, latest_views_precision, latest_views_source, latest_views_measured_at, latest_views_evidence_url, latest_metrics_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                    `).bind(
+                        meta.key,
+                        meta.plat,
+                        meta.postId,
+                        meta.postPk,
+                        meta.cUrl,
+                        meta.contentHash,
+                        meta.runId,
+                        meta.runId,
+                        firstSeen,
+                        meta.measuredAt || nowIso,
+                        meta.viewsDisplay,
+                        meta.viewsPrecision,
+                        meta.viewsSource,
+                        meta.measuredAt,
+                        meta.viewsEvidenceUrl,
+                        JSON.stringify(meta.metrics)
+                    ).run();
+
+                    if (Number(ins?.meta?.changes || 0) === 1) {
+                        newCount += 1;
+                        if (meta.isRejected) rejectedCount += 1;
+                        else if (meta.isNewQualified) newQualifiedCount += 1;
+                        else unverifiedCount += 1;
+
+                        const snapInserted = await insertMeasurementSnapshotInD1(
+                            env,
+                            meta.key,
+                            meta,
+                            meta.classification || "NEW",
+                            nowIso
+                        );
+                        if (snapInserted) snapshotsCreated += 1;
+                        else snapshotsDeduped += 1;
+                        continue;
+                    }
+
+                    row = await lookupRegistryRow(env, meta.key, meta.plat, meta.cUrl, meta.postId);
+                    if (!row) {
+                        continue;
+                    }
+                }
+
+                let targetDedupKey = row.dedup_key;
+                if (
+                    String(row.dedup_key || "").includes(":url:") &&
+                    meta.key &&
+                    !meta.key.includes(":url:") &&
+                    meta.key !== row.dedup_key
+                ) {
+                    const targetTaken = await env.DB.prepare("SELECT dedup_key FROM market_post_registry WHERE dedup_key = ?")
+                        .bind(meta.key).first();
+                    if (!targetTaken) {
+                        const prom = await env.DB.prepare(`
+                            UPDATE market_post_registry
+                            SET dedup_key = ?, post_id = COALESCE(?, post_id), post_pk = COALESCE(?, post_pk)
+                            WHERE dedup_key = ?
+                        `).bind(meta.key, meta.postId, meta.postPk, row.dedup_key).run();
+                        if (Number(prom?.meta?.changes || 0) === 1) {
+                            await env.DB.prepare(`
+                                UPDATE market_post_snapshots
+                                SET dedup_key = ?, post_id = COALESCE(?, post_id)
+                                WHERE dedup_key = ?
+                            `).bind(meta.key, meta.postId, row.dedup_key).run();
+                            targetDedupKey = meta.key;
+                            row.dedup_key = meta.key;
+                        }
+                    }
+                }
+
                 let prevMetrics = {};
                 try { prevMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
-                const changed = haveRegistryMetricsChanged(metrics, prevMetrics);
-                const mergedMetrics = { ...prevMetrics, ...metrics };
+                const changed = haveRegistryMetricsChanged(meta.metrics, prevMetrics);
+                const snapCls = meta.isRejected
+                    ? "REJECTED"
+                    : (meta.isUnverified ? "UNVERIFIED" : (changed ? "UPDATED_METRICS" : "DUPLICATE_HISTORY"));
+
+                const snapInserted = await insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls, nowIso);
+                if (!snapInserted) {
+                    snapshotsDeduped += 1;
+                    duplicateCount += 1;
+                    if (meta.cUrl || meta.postId) {
+                        await env.DB.prepare(`
+                            UPDATE market_post_registry
+                            SET canonical_url = COALESCE(?, canonical_url),
+                                post_id = COALESCE(?, post_id),
+                                post_pk = COALESCE(?, post_pk),
+                                content_hash = COALESCE(?, content_hash)
+                            WHERE dedup_key = ?
+                        `).bind(meta.cUrl, meta.postId, meta.postPk, meta.contentHash, targetDedupKey).run();
+                    }
+                    continue;
+                }
+
+                snapshotsCreated += 1;
+                const mergedMetrics = { ...prevMetrics, ...meta.metrics };
                 const nextSnap = Number(row.snapshot_count || 1) + 1;
+                const effSeenAt = meta.measuredAt || nowIso;
                 await env.DB.prepare(`
                     UPDATE market_post_registry
                     SET canonical_url = COALESCE(?, canonical_url),
                         post_id = COALESCE(?, post_id),
+                        post_pk = COALESCE(?, post_pk),
+                        content_hash = COALESCE(?, content_hash),
                         last_run_id = COALESCE(?, last_run_id),
                         last_seen_at = ?,
                         snapshot_count = ?,
+                        latest_views_display = COALESCE(?, latest_views_display),
+                        latest_views_precision = COALESCE(?, latest_views_precision),
+                        latest_views_source = COALESCE(?, latest_views_source),
+                        latest_views_measured_at = COALESCE(?, latest_views_measured_at),
+                        latest_views_evidence_url = COALESCE(?, latest_views_evidence_url),
                         latest_metrics_json = ?
                     WHERE dedup_key = ?
                 `).bind(
-                    cUrl,
-                    postId,
-                    runId,
-                    nowIso,
+                    meta.cUrl,
+                    meta.postId,
+                    meta.postPk,
+                    meta.contentHash,
+                    meta.runId,
+                    effSeenAt,
                     nextSnap,
+                    meta.viewsDisplay,
+                    meta.viewsPrecision,
+                    meta.viewsSource,
+                    meta.measuredAt,
+                    meta.viewsEvidenceUrl,
                     JSON.stringify(mergedMetrics),
-                    row.dedup_key
+                    targetDedupKey
                 ).run();
+
                 if (changed) updatedCount += 1;
                 else duplicateCount += 1;
+            } catch (err) {
+                const re = new Error(`D1_REGISTRY_UNAVAILABLE: ${err?.message || "record failed"}`);
+                re.isRegistryError = true;
+                throw re;
             }
-        } catch {
-            // Safe fallback if D1 table missing before migration 0003
         }
     }
 
     return {
         new_count: newCount,
+        new_qualified_count: newQualifiedCount,
         duplicate_count: duplicateCount,
+        duplicate_history_count: duplicateCount,
         updated_count: updatedCount,
+        updated_metrics_count: updatedCount,
         missing_views_count: missingViewsCount,
+        unverified_count: unverifiedCount,
+        rejected_count: rejectedCount,
+        snapshots_created: snapshotsCreated,
+        snapshots_deduped: snapshotsDeduped,
         total_processed: items.length,
     };
 }
@@ -805,44 +1114,78 @@ function pickFirstFiniteInt(...vals) {
 
 function extractCrossRunDedupStats(obj) {
     if (!obj || typeof obj !== "object") return {};
+    const c = (obj.counters && typeof obj.counters === "object") ? obj.counters : {};
     const s1 = obj.sections?.["1_screening"] || obj.section_1_screening || obj.screening || {};
     const ds = (obj.dedup_stats && typeof obj.dedup_stats === "object") ? obj.dedup_stats : obj;
     const newCount = pickFirstFiniteInt(
         ds.new_count,
+        c.new_count,
         obj.new_count,
-        obj.new_qualified_count,
-        obj.new_items,
         s1.new_count,
-        s1.new_qualified_count,
+        obj.new_items,
         obj.records_inserted
     );
+    const newQualifiedCount = pickFirstFiniteInt(
+        ds.new_qualified_count,
+        c.new_qualified_count,
+        obj.new_qualified_count,
+        s1.new_qualified_count,
+        obj.qualified_count,
+        s1.qualified_count
+    );
     const duplicateCount = pickFirstFiniteInt(
+        ds.duplicate_history_count,
         ds.duplicate_count,
+        c.duplicate_history_count,
+        c.duplicate_count,
+        obj.duplicate_history_count,
         obj.duplicate_count,
         obj.historical_duplicates,
+        s1.duplicate_history_count,
         s1.duplicate_count,
         obj.records_deduped,
         obj.deduped
     );
     const updatedCount = pickFirstFiniteInt(
+        ds.updated_metrics_count,
         ds.updated_count,
+        c.updated_metrics_count,
+        c.updated_count,
+        obj.updated_metrics_count,
         obj.updated_count,
         obj.engagement_updated_count,
         obj.growth_count,
+        s1.updated_metrics_count,
         s1.updated_count
     );
     const missingViewsCount = pickFirstFiniteInt(
         ds.missing_views_count,
+        c.missing_views_count,
         obj.missing_views_count,
         obj.views_missing_count,
         s1.missing_views_count
     );
+    const unverifiedCount = pickFirstFiniteInt(
+        ds.unverified_count,
+        c.unverified_count,
+        obj.unverified_count,
+        s1.unverified_count
+    );
+    const similarContentCount = pickFirstFiniteInt(
+        ds.similar_content_count,
+        c.similar_content_count,
+        obj.similar_content_count,
+        s1.similar_content_count
+    );
     return {
         newCount,
+        newQualifiedCount,
         duplicateCount,
         updatedCount,
         missingViewsCount,
-        hasAny: [newCount, duplicateCount, updatedCount, missingViewsCount].some(v => v !== null),
+        unverifiedCount,
+        similarContentCount,
+        hasAny: [newCount, newQualifiedCount, duplicateCount, updatedCount, missingViewsCount, unverifiedCount, similarContentCount].some(v => v !== null),
     };
 }
 
@@ -853,294 +1196,469 @@ function computeCrawlRequestProgress(reqRow) {
             ? JSON.parse(reqRow.result_summary_json || "{}")
             : (reqRow?.result_summary || {});
     } catch {}
-    const reqCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || 50);
-    const dedup = extractCrossRunDedupStats(summary);
+    const c = (summary.counters && typeof summary.counters === "object") ? summary.counters : {};
     const s1 = summary?.sections?.["1_screening"] || summary?.screening || {};
-    const scannedCount = pickFirstFiniteInt(summary.scanned_count, summary.scanned_posts, s1.scanned_count, s1.scanned_posts);
-    const qualifiedCount = pickFirstFiniteInt(summary.new_qualified_count, summary.qualified_count, summary.qualified_posts, s1.qualified_count, summary.record_count);
-    const rejectedCount = pickFirstFiniteInt(summary.rejected_count, summary.rejected_posts, s1.rejected_count);
-    const effNew = dedup.newCount !== null ? dedup.newCount : qualifiedCount;
-    const targetReached = effNew !== null ? effNew >= reqCount : null;
+    const reqCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || Number.parseInt(c.requested_count, 10) || 50);
+    const dedup = extractCrossRunDedupStats(summary);
+    const scannedCount = pickFirstFiniteInt(c.scanned_count, summary.scanned_count, summary.scanned_posts, s1.scanned_count, s1.scanned_posts);
+    const uniqueCandidateCount = pickFirstFiniteInt(c.unique_candidate_count, summary.unique_candidate_count, s1.unique_candidate_count);
+    const explicitQualified = dedup.newQualifiedCount ?? pickFirstFiniteInt(summary.qualified_posts, summary.record_count);
+    const qualifiedCount = explicitQualified !== null ? explicitQualified : dedup.newCount;
+    const rejectedCount = pickFirstFiniteInt(c.rejected_count, summary.rejected_count, summary.rejected_posts, s1.rejected_count);
+    const stopReason = c.stop_reason || summary.stop_reason || s1.stop_reason || null;
+    const explicitAchieved =
+        typeof c.target_achieved === "boolean"
+            ? c.target_achieved
+            : (typeof summary.target_achieved === "boolean" ? summary.target_achieved : null);
+    const targetReached = explicitAchieved !== null ? explicitAchieved : (qualifiedCount !== null ? qualifiedCount >= reqCount : null);
     return {
         requested_count: reqCount,
         scanned_count: scannedCount,
+        unique_candidate_count: uniqueCandidateCount,
         qualified_count: qualifiedCount,
-        new_qualified_count: dedup.newCount !== null ? dedup.newCount : qualifiedCount,
+        new_qualified_count: qualifiedCount,
         new_count: dedup.newCount,
+        duplicate_history_count: dedup.duplicateCount,
         duplicate_count: dedup.duplicateCount,
+        updated_metrics_count: dedup.updatedCount,
         updated_count: dedup.updatedCount,
         missing_views_count: dedup.missingViewsCount,
+        unverified_count: dedup.unverifiedCount,
+        similar_content_count: dedup.similarContentCount,
         rejected_count: rejectedCount,
+        target_achieved: targetReached,
         target_reached: targetReached,
+        stop_reason: stopReason,
     };
 }
 
 function isPureMetricEchoLine(line) {
     const clean = String(line || "").trim();
     if (!clean) return true;
-    // Strip lines that merely echo scanned/qualified/rejected numbers already rendered in Tổng quan số liệu
-    return /^(?:qu[eé]t|đạt\s*chuẩn|bị\s*loại|loại|tổng\s*bản\s*ghi|bài\s*mới|trùng\s*lịch\s*sử|thiếu\s*views)/i.test(clean);
+    return /^(?:qu[eé]t|đạt\s*chuẩn|bị\s*loại|loại|tổng\s*bản\s*ghi|bài\s*mới|trùng\s*lịch\s*sử|thiếu\s*views) /i.test(clean);
 }
 
-function splitSummaryClauses(rawText) {
+function splitSummaryClauses(rawText, preserveLines = false) {
+    const splitter = preserveLines ? /(?:\r?\n+)/ : /(?:\r?\n|[•\|;]|(?<=\.)\s+)/;
     return String(rawText || "")
-        .split(/(?:\r?\n|[•\|;]|(?<=\.)\s+)/)
-        .map(s => trimBullet(s, 140))
+        .split(splitter)
+        .map(s => trimBullet(s, 220))
         .filter(s => s && !isPureMetricEchoLine(s));
 }
 
 function parseTelegramSummaryBlocks(rawSummary) {
-    const out = { raw: String(rawSummary || "").trim(), status: [], market: [], affiliate: [], emerging: [], actions: [], quality: [], matched: false };
+    const out = {
+        raw: String(rawSummary || "").trim(),
+        quality: [],
+        market: [],
+        lifecycle: [],
+        affiliate: [],
+        growth: [],
+        actions: [],
+        matched: false,
+    };
     if (!out.raw) return out;
     const lines = out.raw.split(/\r?\n+/).map(l => l.trim()).filter(Boolean);
+    let activeBucket = null;
+
+    const matchHeader = (line) => {
+        const up = line.replace(/^[•\-*\s]+/, "").toUpperCase();
+        if (/^(?:📊\s*)?CHẤT LƯỢNG CRAWL\b/.test(up) || /^(?:📌\s*)?TRẠNG THÁI\b/.test(up) || /^(?:⚠️\s*)?(?:CHẤT LƯỢNG DỮ LIỆU|GIỚI HẠN)\b/.test(up)) {
+            return "quality";
+        }
+        if (/^(?:🔥\s*)?(?:TREND THỊ TRƯỜNG|TOÀN THỊ TRƯỜNG|XU HƯỚNG)/.test(up)) {
+            return "market";
+        }
+        if (/^(?:🆕\s*)?(?:TREND MỚI|VÒNG ĐỜI|MỚI NỔI)\b/.test(up)) {
+            return "lifecycle";
+        }
+        if (/^(?:💰\s*|💡\s*)?(?:TÍN HIỆU\s*AFFILIATE|TÍN HIỆU|AFFILIATE)\b/.test(up)) {
+            return "affiliate";
+        }
+        if (/^(?:📈\s*)?BIẾN ĐỘNG SO VỚI LƯỢT TRƯỚC\b/.test(up) || /^(?:📈\s*)?BIẾN ĐỘNG\b/.test(up)) {
+            return "growth";
+        }
+        if (/^(?:🎯\s*|✅\s*)?(?:HÀNH ĐỘNG ĐỀ XUẤT|ƯU TIÊN|HÀNH ĐỘNG)\b/.test(up)) {
+            return "actions";
+        }
+        return null;
+    };
+
     for (const line of lines) {
-        const up = line.toUpperCase();
-        if (/^(?:📌\s*)?TRẠNG THÁI\b/.test(up)) {
-            const val = line.replace(/^(?:📌\s*)?TRẠNG THÁI[^:]*:\s*/i, "");
-            if (val && !isPureMetricEchoLine(val)) out.status.push(val);
+        if (/^[━─=]{4,}$/.test(line)) continue;
+        const headerBucket = matchHeader(line);
+        if (headerBucket) {
+            activeBucket = headerBucket;
             out.matched = true;
-        } else if (/^(?:🔥\s*)?(?:TOÀN THỊ TRƯỜNG|XU HƯỚNG)/.test(up)) {
-            const val = line.replace(/^(?:🔥\s*)?(?:TOÀN THỊ TRƯỜNG|XU HƯỚNG[^:]*)[:：]?\s*/i, "");
-            out.market.push(...splitSummaryClauses(val));
-            out.matched = true;
-        } else if (/^(?:💡\s*)?(?:TÍN HIỆU|AFFILIATE)\b/.test(up)) {
-            const val = line.replace(/^[^:]{3,55}:\s*/i, "");
-            out.affiliate.push(...splitSummaryClauses(val));
-            out.matched = true;
-        } else if (/^MỚI NỔI\b/.test(up)) {
-            const val = line.replace(/^MỚI NỔI[^:]*:\s*/i, "");
-            out.emerging.push(...splitSummaryClauses(val));
-            out.matched = true;
-        } else if (/^(?:✅\s*)?(?:ƯU TIÊN|HÀNH ĐỘNG)\b/.test(up)) {
-            const val = line.replace(/^[^:]{3,50}:\s*/i, "");
-            out.actions.push(...splitSummaryClauses(val));
-            out.matched = true;
-        } else if (/^(?:⚠️\s*)?(?:CHẤT LƯỢNG DỮ LIỆU|GIỚI HẠN)\b/.test(up)) {
-            const val = line.replace(/^[^:]{3,55}:\s*/i, "");
-            out.quality.push(...splitSummaryClauses(val));
-            out.matched = true;
+            const colonIdx = line.indexOf(":");
+            if (colonIdx !== -1 && colonIdx < 60) {
+                const rest = line.slice(colonIdx + 1).trim();
+                if (rest) {
+                    const isLegacyInline = !/^(?:📊|🔥|🆕|💰|📈|🎯)/.test(line);
+                    out[activeBucket].push(...splitSummaryClauses(rest, !isLegacyInline));
+                }
+            }
+            continue;
+        }
+        if (activeBucket) {
+            const clean = trimBullet(line, 220);
+            if (clean && !isPureMetricEchoLine(clean)) {
+                out[activeBucket].push(clean);
+            }
         }
     }
     return out;
 }
 
-function pushUniqueBullet(list, rawLine, seenSet, maxLen = 140) {
+function pushUniqueBullet(list, rawLine, seenSet, maxLen = 220, iconPrefix = "•") {
     const clean = trimBullet(rawLine, maxLen);
     if (!clean) return false;
     const normKey = clean.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
     if (!normKey || seenSet.has(normKey)) return false;
     seenSet.add(normKey);
-    list.push(`• ${clean}`);
+    const hasLeadingIcon = /^[📌📊🔍🎯🆕♻️📈⏳🔗⚠️❗ℹ️🔥🚀💎💰💡📝✅💬❤️👁️•]/u.test(clean);
+    list.push(hasLeadingIcon ? (clean.startsWith("•") ? clean : `• ${clean}`) : `${iconPrefix} ${clean}`);
     return true;
+}
+
+function formatTrendLifecycleTag(rawState) {
+    const s = String(rawState || "").trim().toLowerCase();
+    if (!s) return "";
+    const map = {
+        new: "[Mới]",
+        continuing: "[Tiếp diễn]",
+        growing: "[Tăng trưởng]",
+        declining: "[Suy giảm]",
+        insufficient_evidence: "[Chưa đủ bằng chứng]",
+    };
+    return map[s] || `[${s}]`;
+}
+
+function formatViewsLabel(tv) {
+    if (!tv || typeof tv !== "object") return "— views";
+    if (tv.views_display && String(tv.views_display).trim()) {
+        const approxTag = String(tv.views_precision || "").toLowerCase() === "display_approx" ? " (≈ hiển thị)" : "";
+        return `${String(tv.views_display).trim()}${approxTag} views`;
+    }
+    if (tv.views !== null && tv.views !== undefined && Number.isFinite(Number(tv.views))) {
+        return `${Number(tv.views).toLocaleString("vi-VN")} views`;
+    }
+    return "chưa xác minh views";
+}
+
+function fitTelegramSummarySections(header, sections, maxChars = 2500) {
+    const render = () =>
+        [
+            header,
+            ...sections.map((s) => `${s.title}\n${s.bullets.join("\n")}`),
+        ].join("\n\n");
+
+    let text = render();
+    if (text.length <= maxChars) return text;
+
+    // First compact overly long single bullets before dropping items
+    for (const s of sections) {
+        s.bullets = s.bullets.map((b) => (b.length > 165 ? `${b.slice(0, 164).trimEnd()}…` : b));
+    }
+    text = render();
+    if (text.length <= maxChars) return text;
+
+    let guard = 0;
+    while (text.length > maxChars && guard < 100) {
+        guard += 1;
+        let maxIdx = -1;
+        let maxLen = 1;
+        for (let i = 0; i < sections.length; i++) {
+            if (sections[i].bullets.length > maxLen) {
+                maxLen = sections[i].bullets.length;
+                maxIdx = i;
+            }
+        }
+        if (maxIdx === -1) break;
+        sections[maxIdx].bullets.pop();
+        text = render();
+    }
+
+    if (text.length > maxChars) {
+        for (let pass = 0; pass < 4 && text.length > maxChars; pass++) {
+            const limit = Math.max(48, 120 - pass * 25);
+            for (const s of sections) {
+                s.bullets = s.bullets.map((b) => (b.length > limit ? `${b.slice(0, limit - 1).trimEnd()}…` : b));
+            }
+            text = render();
+        }
+    }
+
+    return text.length <= maxChars ? text : text.slice(0, maxChars);
 }
 
 function formatStructuredReportSummary(d, fileName, isCorr, metaInput = null, opts = {}) {
     const meta = metaInput || extractMuseReportStats(d) || {};
     const effStatus = meta.effStatus || "completed";
-    const statusBadge = getReportStatusBadge(effStatus, isCorr, meta.isV3);
+    const statusBadge = getReportStatusBadge(effStatus, isCorr, meta.isV3, meta.isV32);
     const parsedSummary = parseTelegramSummaryBlocks(d?.telegram_summary || opts.fallbackSummary || "");
     const dedup = opts.dedupStats ? extractCrossRunDedupStats({ ...d, dedup_stats: opts.dedupStats }) : extractCrossRunDedupStats(d);
     const req = opts.crawlReq || null;
     const seen = new Set();
 
-    // 1. 📌 Trạng thái (không lặp lại số liệu chi tiết của Tổng quan)
-    const statusBullets = [];
+    // 1. 📊 Chất lượng crawl
+    const qualityBullets = [];
     const srcLabel = fileName || d?.run_id || opts.sourceLabel || "report";
-    pushUniqueBullet(statusBullets, `Nguồn: ${trimBullet(srcLabel, 90)}${isCorr ? " (Corrected V2)" : ""}`, seen, 140);
-    if (d?.run_id && fileName && d.run_id !== fileName) {
-        pushUniqueBullet(statusBullets, `Run: ${trimBullet(d.run_id, 64)}`, seen, 110);
-    }
-    if (req?.requested_count) {
-        const targetN = Number(req.requested_count);
-        const effGot = dedup.newCount ?? meta.qualified ?? pickFirstFiniteInt(d?.record_count) ?? 0;
-        const reachedLabel = effGot >= targetN ? "Đạt mục tiêu" : "Chưa đạt mục tiêu";
-        pushUniqueBullet(statusBullets, `Mục tiêu đạt chuẩn: ${effGot}/${targetN} (${reachedLabel})`, seen, 140);
-    }
-    const statusFlags = [];
-    if (meta.rawRunStatus) statusFlags.push(`run_status: ${meta.rawRunStatus}`);
-    if (meta.rawTechStatus) statusFlags.push(`technical_status: ${meta.rawTechStatus}`);
-    if (meta.rawDqStatus) statusFlags.push(`data_quality_status: ${meta.rawDqStatus}`);
-    if (statusFlags.length) {
-        pushUniqueBullet(statusBullets, statusFlags.join(" | "), seen, 140);
-    }
+    const statusTags = [];
+    if (meta.rawRunStatus) statusTags.push(meta.rawRunStatus);
+    if (meta.rawTechStatus && meta.rawTechStatus !== meta.rawRunStatus) statusTags.push(meta.rawTechStatus);
+    if (meta.rawDqStatus) statusTags.push(meta.rawDqStatus);
+    pushUniqueBullet(
+        qualityBullets,
+        `📌 Nguồn: ${trimBullet(srcLabel, 80)}${isCorr ? " (Corrected V2)" : ""}${statusTags.length ? ` [${statusTags.join(" | ")}]` : ""}`,
+        seen,
+        180
+    );
     if (opts.appStatusTag) {
-        pushUniqueBullet(statusBullets, opts.appStatusTag, seen, 120);
-    }
-    if (effStatus === "source_error" || effStatus === "insufficient_data" || effStatus === "failed") {
-        pushUniqueBullet(statusBullets, "❗ Nguồn lỗi/thiếu dữ liệu — không kết luận thị trường", seen, 140);
-    } else if (effStatus === "no_qualifying_posts") {
-        pushUniqueBullet(statusBullets, "ℹ️ Nguồn bình thường nhưng chưa có bài đạt chuẩn", seen, 140);
-    } else if (parsedSummary.status.length) {
-        pushUniqueBullet(statusBullets, parsedSummary.status[0], seen, 130);
+        pushUniqueBullet(qualityBullets, opts.appStatusTag, seen, 130);
     }
 
-    // 2. 📊 Tổng quan số liệu (mỗi chỉ số xuất hiện duy nhất 1 lần)
-    const statBullets = [];
-    if (meta.isV3 && (meta.scanned !== null || meta.qualified !== null || meta.rejected !== null)) {
-        const cvPart = meta.crossVerified !== null ? ` | Xác minh chéo Web: ${meta.crossVerified}` : "";
-        const rejPart = meta.rejected !== null ? ` | Loại ${meta.rejected}` : "";
-        pushUniqueBullet(statBullets, `Quét ${meta.scanned ?? "N/A"} | Đạt chuẩn ${meta.qualified ?? "N/A"}${rejPart}${cvPart}`, seen, 150);
-        pushUniqueBullet(statBullets, `Phân tầng: Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`, seen, 150);
+    const targetN = pickFirstFiniteInt(req?.requested_count, meta.requestedCount);
+    const effQualified = dedup.newQualifiedCount ?? meta.newQualifiedCount ?? meta.qualified ?? dedup.newCount ?? pickFirstFiniteInt(d?.record_count);
+    const effNewTotal = dedup.newCount ?? meta.newCount;
+    const stopReason = meta.stopReason || null;
+    if (targetN !== null && effQualified !== null) {
+        const reached = typeof meta.targetAchieved === "boolean" ? meta.targetAchieved : effQualified >= targetN;
+        const reachedLabel = reached ? "Đạt mục tiêu" : "Chưa đạt mục tiêu";
+        const stopPart = stopReason ? ` • stop: ${stopReason}` : "";
+        pushUniqueBullet(qualityBullets, `🎯 Tiến độ đạt chuẩn: ${effQualified}/${targetN} (${reachedLabel}${stopPart})`, seen, 180);
+    } else if (stopReason) {
+        pushUniqueBullet(qualityBullets, `🎯 Trạng thái dừng: ${stopReason}`, seen, 140);
+    }
+
+    if (meta.isV3 || dedup.hasAny || meta.scanned !== null || meta.uniqueCandidates !== null) {
+        const scanParts = [];
+        if (meta.scanned !== null) scanParts.push(`Quét ${meta.scanned}`);
+        if (meta.uniqueCandidates !== null) scanParts.push(`Duy nhất ${meta.uniqueCandidates}`);
+        if (meta.rejected !== null) scanParts.push(`Loại ${meta.rejected}`);
+        if (meta.crossVerified !== null) scanParts.push(`Web check ${meta.crossVerified}`);
+        if (scanParts.length) {
+            pushUniqueBullet(qualityBullets, `🔍 ${scanParts.join(" | ")}`, seen, 180);
+        }
+
+        const dedupParts = [];
+        if (effNewTotal !== null && (targetN === null || effNewTotal !== effQualified)) {
+            dedupParts.push(`Bài mới: ${effNewTotal}`);
+        } else if (effQualified !== null && targetN === null) {
+            dedupParts.push(`Mới đạt chuẩn: ${effQualified}`);
+        }
+        const effDup = dedup.duplicateCount ?? meta.duplicateHistoryCount;
+        const effUpd = dedup.updatedCount ?? meta.updatedMetricsCount;
+        if (effDup !== null) dedupParts.push(`Bài trùng lịch sử: ${effDup}`);
+        if (effUpd !== null) dedupParts.push(`Cập nhật tương tác: ${effUpd}`);
+        if (dedupParts.length) {
+            pushUniqueBullet(qualityBullets, `🆕 ${dedupParts.join(" | ")}`, seen, 180);
+        }
+
+        const unvParts = [];
+        const effMissingViews = dedup.missingViewsCount ?? meta.missingViewsCount;
+        const effUnverif = dedup.unverifiedCount ?? meta.unverifiedExplicit;
+        if (effUnverif !== null) unvParts.push(`Chưa xác minh: ${effUnverif}`);
+        if (effMissingViews !== null) unvParts.push(`Bài thiếu views: ${effMissingViews}`);
+        if (meta.similarContentCount !== null && meta.similarContentCount > 0) {
+            unvParts.push(`Nội dung tương tự: ${meta.similarContentCount}`);
+        }
+        if (meta.countersReconciled === false) {
+            unvParts.push("⚠️ Lệch đối soát số liệu");
+        }
+        if (unvParts.length) {
+            pushUniqueBullet(qualityBullets, `⏳ ${unvParts.join(" | ")}`, seen, 180);
+        }
     } else if (meta.totals || Object.keys(meta.platformResults || {}).length) {
         const rec = meta.totals?.records ?? "N/A";
         const usable = meta.totals?.business_usable_records ?? "N/A";
         const needsVerif = meta.totals?.needs_verification_records ?? "N/A";
-        pushUniqueBullet(statBullets, `Tổng: ${rec} | Dùng được (usable): ${usable} | Cần xác minh: ${needsVerif}`, seen, 140);
-        for (const pKey of ["threads", "tiktok", "shopee"]) {
-            const p = meta.platformResults[pKey];
-            if (!p) continue;
-            pushUniqueBullet(statBullets, `${pKey.toUpperCase()}: ${p.business_usable_records ?? 0}/${p.records ?? 0} usable (KT: ${p.technical_status || p.status || "—"} | CL: ${p.data_quality_status || "—"})`, seen, 140);
-        }
+        pushUniqueBullet(qualityBullets, `🔍 Tổng ${rec} | Usable ${usable} | Cần xác minh ${needsVerif}`, seen, 160);
     } else if (opts.hbCounts) {
         const dq = d?.data_quality || {};
-        pushUniqueBullet(statBullets, `Kho local: ${opts.hbCounts.total_items ?? dq.total_items ?? 0} bản ghi | Usable: ${dq.usable_items ?? "N/A"} | Cần xác minh: ${dq.needs_verification_items ?? "N/A"}`, seen, 145);
+        pushUniqueBullet(qualityBullets, `🔍 Kho local: ${opts.hbCounts.total_items ?? dq.total_items ?? 0} bản ghi | Usable ${dq.usable_items ?? "N/A"}`, seen, 160);
     } else if (d?.record_count !== undefined && d?.record_count !== null) {
-        pushUniqueBullet(statBullets, `Tổng bản ghi thu được: ${d.record_count}`, seen, 120);
+        pushUniqueBullet(qualityBullets, `🔍 Tổng bản ghi: ${d.record_count}`, seen, 140);
     }
 
-    if (dedup.hasAny) {
-        const dParts = [];
-        if (dedup.newCount !== null) dParts.push(`Bài mới: ${dedup.newCount}`);
-        if (dedup.duplicateCount !== null) dParts.push(`Bài trùng lịch sử: ${dedup.duplicateCount}`);
-        if (dedup.updatedCount !== null) dParts.push(`Cập nhật tương tác: ${dedup.updatedCount}`);
-        if (dParts.length) pushUniqueBullet(statBullets, dParts.join(" | "), seen, 150);
-        if (dedup.missingViewsCount !== null) {
-            pushUniqueBullet(statBullets, `Bài thiếu views: ${dedup.missingViewsCount}`, seen, 100);
-        }
+    if (effStatus === "source_error" || effStatus === "insufficient_data" || effStatus === "failed") {
+        const errNote = trimBullet(d?.error_message || req?.error_message || meta.s1?.sources || "Nguồn trả lỗi hoặc thiếu dữ liệu", 160);
+        pushUniqueBullet(qualityBullets, `❗ Giới hạn nguồn: ${errNote}`, seen, 180);
     }
-    if (!statBullets.length) {
-        statBullets.push("• Chưa có số liệu chi tiết từ lượt crawl này.");
+    if (meta.s1?.rejected_reasons && typeof meta.s1.rejected_reasons === "object") {
+        const rsnList = Object.entries(meta.s1.rejected_reasons).map(([k, v]) => `${k} (${v})`);
+        if (rsnList.length) pushUniqueBullet(qualityBullets, `⚠️ Lý do loại: ${rsnList.join(", ")}`, seen, 180);
+    }
+    if (meta.verifDetail) {
+        pushUniqueBullet(qualityBullets, `ℹ️ Xác minh: ${meta.verifDetail}`, seen, 180);
+    }
+    for (const seg of parsedSummary.quality) {
+        pushUniqueBullet(qualityBullets, seg, seen, 200);
+    }
+    for (const lim of (meta.dataLimitations || []).slice(0, 2)) {
+        pushUniqueBullet(qualityBullets, `⚠️ ${lim}`, seen, 180);
+    }
+    if (!qualityBullets.length) {
+        qualityBullets.push("• Chưa có số liệu chất lượng crawl từ lượt này.");
     }
 
-    // 3. 🔥 Xu hướng nổi bật
-    const trendBullets = [];
-    if (effStatus === "completed" || !meta.rawRunStatus) {
-        for (const t of (meta.trends || []).slice(0, 3)) {
-            const title = trimBullet(t?.theme || t?.title || t?.topic || t, 95);
-            const why = trimBullet(t?.why_hot || "", 70);
-            if (title) pushUniqueBullet(trendBullets, `${title}${why ? ` — ${why}` : ""}`, seen, 145);
-        }
-        if (trendBullets.length < 3 && meta.topViral.length) {
-            const tv = meta.topViral[0];
-            pushUniqueBullet(trendBullets, `Viral tiêu biểu: ${trimBullet(tv.post || tv.title, 70)} (${tv.likes ?? "—"} likes, ${tv.comments ?? "—"} cmt)`, seen, 145);
-        }
-        for (const e of (meta.emerging || []).slice(0, 2)) {
-            if (trendBullets.length >= 4) break;
-            const emText = trimBullet(e?.topic || e?.title || e, 105);
-            if (emText) pushUniqueBullet(trendBullets, `[Mới nổi] ${emText}`, seen, 140);
+    // 2. 🔥 Trend thị trường
+    const marketBullets = [];
+    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
+        if (meta.isV3 && (meta.tiers.very_hot || meta.tiers.hot || meta.tiers.emerging || meta.tiers.watchlist)) {
+            pushUniqueBullet(
+                marketBullets,
+                `📊 Phân tầng: Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist}`,
+                seen,
+                160
+            );
         }
         for (const seg of parsedSummary.market) {
-            if (trendBullets.length >= 3) break;
-            pushUniqueBullet(trendBullets, seg, seen, 140);
+            pushUniqueBullet(marketBullets, seg, seen, 220);
         }
-        if (!trendBullets.length && !parsedSummary.matched && parsedSummary.raw) {
-            for (const seg of splitSummaryClauses(parsedSummary.raw).slice(0, 3)) {
-                pushUniqueBullet(trendBullets, seg, seen, 140);
+        if (meta.topViral.length) {
+            const tv = meta.topViral[0];
+            const viewsLbl = formatViewsLabel(tv);
+            pushUniqueBullet(
+                marketBullets,
+                `🚀 Viral tiêu biểu: ${trimBullet(tv.post || tv.title, 80)} (${viewsLbl}, ${tv.likes ?? "—"} likes, ${tv.comments ?? "—"} cmt)`,
+                seen,
+                200
+            );
+        }
+        for (const t of meta.trends || []) {
+            if (marketBullets.length >= 5) break;
+            const title = trimBullet(t?.theme || t?.title || t?.topic || t, 100);
+            const why = trimBullet(t?.why_hot || "", 80);
+            if (title) pushUniqueBullet(marketBullets, `${title}${why ? ` — ${why}` : ""}`, seen, 200);
+        }
+        if (!marketBullets.length && !parsedSummary.matched && parsedSummary.raw) {
+            for (const seg of splitSummaryClauses(parsedSummary.raw, false).slice(0, 3)) {
+                pushUniqueBullet(marketBullets, seg, seen, 180);
             }
         }
     }
-    if (!trendBullets.length) {
-        trendBullets.push("• Chưa ghi nhận xu hướng nổi bật đủ chuẩn trong lượt này.");
+    if (!marketBullets.length) {
+        marketBullets.push("• Chưa ghi nhận xu hướng thị trường đủ chuẩn trong lượt này.");
     }
 
-    // 4. 💡 Tín hiệu/cơ hội affiliate
+    // 3. 🆕 Trend mới & vòng đời
+    const lifecycleBullets = [];
+    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
+        for (const seg of parsedSummary.lifecycle) {
+            pushUniqueBullet(lifecycleBullets, seg, seen, 220);
+        }
+        for (const t of meta.trends || []) {
+            const lcTag = formatTrendLifecycleTag(t?.lifecycle_state || t?.lifecycle || t?.state);
+            const tName = trimBullet(t?.theme || t?.title || t?.topic || "", 110);
+            if (lcTag && tName) {
+                pushUniqueBullet(lifecycleBullets, `${lcTag} ${tName}`, seen, 190);
+            }
+        }
+        for (const e of (meta.emerging || [])) {
+            const emText = trimBullet(e?.topic || e?.title || e, 120);
+            if (emText) pushUniqueBullet(lifecycleBullets, `[Mới nổi] ${emText}`, seen, 180);
+        }
+    }
+    if (!lifecycleBullets.length) {
+        lifecycleBullets.push("• Chưa đủ dữ liệu đa kỳ để phân tách vòng đời trend mới.");
+    }
+
+    // 4. 💰 Tín hiệu Affiliate
     const affBullets = [];
-    if (effStatus === "completed" || !meta.rawRunStatus) {
-        const cleanAff = filterCleanProductItems(meta.aff);
-        for (const a of cleanAff.slice(0, 3)) {
-            const name = trimBullet(a?.product || a?.brand_or_topic || a?.title || a, 85);
-            const prio = a?.priority ? ` [${trimBullet(a.priority, 30)}]` : "";
-            const ev = trimBullet(a?.evidence || a?.evidence_summary || "", 70);
-            if (name) pushUniqueBullet(affBullets, `${name}${prio}${ev ? ` — ${ev}` : ""}`, seen, 145);
-        }
-        for (const s of (meta.signals || []).slice(0, 2)) {
-            if (affBullets.length >= 4) break;
-            const sg = trimBullet(s?.signal || s?.topic || s, 110);
-            if (sg) pushUniqueBullet(affBullets, `[Tín hiệu] ${sg}`, seen, 140);
-        }
+    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
         for (const seg of parsedSummary.affiliate) {
-            if (affBullets.length >= 3) break;
-            pushUniqueBullet(affBullets, seg, seen, 140);
+            pushUniqueBullet(affBullets, seg, seen, 220);
+        }
+        const cleanAff = filterCleanProductItems(meta.aff);
+        for (const a of cleanAff) {
+            const name = trimBullet(a?.product || a?.brand_or_topic || a?.title || a, 95);
+            const prio = a?.priority ? ` [${trimBullet(a.priority, 30)}]` : "";
+            const ev = trimBullet(a?.evidence || a?.evidence_summary || "", 85);
+            if (name) pushUniqueBullet(affBullets, `${name}${prio}${ev ? ` — ${ev}` : ""}`, seen, 200);
+        }
+        for (const s of (meta.signals || [])) {
+            const sg = trimBullet(s?.signal || s?.topic || s, 120);
+            if (sg) pushUniqueBullet(affBullets, `💡 ${sg}`, seen, 180);
         }
         if (!affBullets.length && meta.needs.length) {
             for (const n of meta.needs.slice(0, 2)) {
-                const nt = trimBullet(n?.title || n, 115);
-                if (nt) pushUniqueBullet(affBullets, `Nhu cầu: ${nt}`, seen, 140);
+                const nt = trimBullet(n?.title || n, 120);
+                if (nt) pushUniqueBullet(affBullets, `Nhu cầu: ${nt}`, seen, 180);
             }
         }
     }
     if (!affBullets.length) {
-        affBullets.push("• Chưa có tín hiệu/cơ hội Affiliate đủ điều kiện.");
+        affBullets.push("• Chưa có tín hiệu Affiliate đủ bằng chứng ở lượt này.");
     }
 
-    // 5. ✅ Hành động đề xuất hôm nay
+    // 5. 📈 Biến động so với lượt trước
+    const growthBullets = [];
+    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
+        for (const seg of parsedSummary.growth) {
+            pushUniqueBullet(growthBullets, seg, seen, 220);
+        }
+        for (const g of (meta.growthTracking || [])) {
+            if (typeof g === "string") {
+                pushUniqueBullet(growthBullets, g, seen, 200);
+                continue;
+            }
+            const label = trimBullet(g?.post || g?.author_handle || g?.title || g?.topic || g?.post_id || "", 70);
+            const deltaText = trimBullet(g?.change_summary || g?.delta_summary || g?.note || "", 120);
+            if (label || deltaText) {
+                pushUniqueBullet(growthBullets, `${label}${deltaText ? `: ${deltaText}` : ""}`, seen, 200);
+            }
+        }
+    }
+    if (!growthBullets.length) {
+        growthBullets.push("• Chưa ghi nhận bài cũ biến động đáng kể so với lượt trước.");
+    }
+
+    // 6. 🎯 Hành động đề xuất (tối đa 3 hành động)
     const actionBullets = [];
     if (effStatus === "source_error" || effStatus === "insufficient_data" || effStatus === "failed") {
-        pushUniqueBullet(actionBullets, "Kiểm tra lại nguồn dữ liệu và chạy lại lượt crawl trước khi đánh giá trend.", seen, 140);
+        pushUniqueBullet(actionBullets, "Kiểm tra lại nguồn dữ liệu và chạy lại lượt crawl trước khi đánh giá trend.", seen, 180);
     } else if (effStatus === "no_qualifying_posts") {
-        pushUniqueBullet(actionBullets, "Giữ lịch theo dõi lượt tiếp theo; không sản xuất nội dung theo tin chưa kiểm chứng.", seen, 140);
+        pushUniqueBullet(actionBullets, "Giữ lịch theo dõi lượt tiếp theo; không sản xuất nội dung theo tin chưa kiểm chứng.", seen, 180);
     } else {
-        for (const act of (meta.actions || []).slice(0, 3)) {
-            const txt = trimBullet(act?.action || act?.title || act, 135);
-            if (txt) pushUniqueBullet(actionBullets, txt, seen, 140);
-        }
-        if (!actionBullets.length && Array.isArray(meta.contentSuggestions?.threads_facebook)) {
-            for (const p of meta.contentSuggestions.threads_facebook.slice(0, 2)) {
-                pushUniqueBullet(actionBullets, `Bài viết: ${p}`, seen, 135);
-            }
-        }
-        if (!actionBullets.length && Array.isArray(meta.contentSuggestions?.text_posts)) {
-            for (const p of meta.contentSuggestions.text_posts.slice(0, 2)) {
-                pushUniqueBullet(actionBullets, `Nội dung: ${p}`, seen, 135);
-            }
-        }
         for (const seg of parsedSummary.actions) {
             if (actionBullets.length >= 3) break;
-            pushUniqueBullet(actionBullets, seg, seen, 135);
+            pushUniqueBullet(actionBullets, seg, seen, 200);
+        }
+        for (const act of (meta.actions || [])) {
+            if (actionBullets.length >= 3) break;
+            const txt = trimBullet(act?.action || act?.title || act, 170);
+            if (txt) pushUniqueBullet(actionBullets, txt, seen, 200);
+        }
+        if (actionBullets.length < 3 && Array.isArray(meta.contentSuggestions?.threads_facebook)) {
+            for (const p of meta.contentSuggestions.threads_facebook) {
+                if (actionBullets.length >= 3) break;
+                pushUniqueBullet(actionBullets, `Bài viết: ${p}`, seen, 170);
+            }
+        }
+        if (actionBullets.length < 3 && Array.isArray(meta.contentSuggestions?.text_posts)) {
+            for (const p of meta.contentSuggestions.text_posts) {
+                if (actionBullets.length >= 3) break;
+                pushUniqueBullet(actionBullets, `Nội dung: ${p}`, seen, 170);
+            }
         }
     }
     if (!actionBullets.length) {
         actionBullets.push("• Tiếp tục theo dõi App_Video (Auto Sync ngầm) và kiểm tra chi tiết ở báo cáo đầy đủ.");
     }
 
-    // 6. ⚠️ Chất lượng dữ liệu / giới hạn (chỉ lý do/hạn chế, không lặp lại số tổng đã có)
-    const limitBullets = [];
-    if (effStatus === "source_error" || effStatus === "insufficient_data" || effStatus === "failed") {
-        const errNote = trimBullet(d?.error_message || req?.error_message || meta.s1?.sources || "Nguồn trả lỗi hoặc thiếu dữ liệu", 140);
-        pushUniqueBullet(limitBullets, `Lỗi nguồn: ${errNote}`, seen, 145);
-    }
-    if (meta.s1?.rejected_reasons && typeof meta.s1.rejected_reasons === "object") {
-        const rsnList = Object.entries(meta.s1.rejected_reasons).map(([k, v]) => `${k} (${v})`);
-        if (rsnList.length) pushUniqueBullet(limitBullets, `Lý do loại chính: ${rsnList.join(", ")}`, seen, 145);
-    }
-    if (meta.verifDetail) {
-        pushUniqueBullet(limitBullets, `Xác minh: ${meta.verifDetail}`, seen, 145);
-    }
-    for (const lim of (meta.dataLimitations || []).slice(0, 2)) {
-        pushUniqueBullet(limitBullets, lim, seen, 135);
-    }
-    for (const pKey of ["threads", "tiktok", "shopee"]) {
-        const p = meta.platformResults?.[pKey];
-        if (!p || !Array.isArray(p.remaining_issues) || !p.remaining_issues.length) continue;
-        pushUniqueBullet(limitBullets, `${pKey.toUpperCase()}: ${p.remaining_issues[0]}`, seen, 130);
-    }
-    for (const seg of parsedSummary.quality) {
-        if (limitBullets.length >= 3) break;
-        pushUniqueBullet(limitBullets, seg, seen, 140);
-    }
-    if (!limitBullets.length) {
-        limitBullets.push("• Dữ liệu chưa xác minh được tách riêng, không trộn vào cơ hội Affiliate.");
-    }
-
-    return [
+    return fitTelegramSummarySections(
         `${statusBadge}\n━━━━━━━━━━━━━━━━━━━━`,
-        `📌 Trạng thái\n${statusBullets.join("\n")}`,
-        `📊 Tổng quan số liệu\n${statBullets.join("\n")}`,
-        `🔥 Xu hướng nổi bật\n${trendBullets.join("\n")}`,
-        `💡 Tín hiệu/cơ hội affiliate\n${affBullets.join("\n")}`,
-        `✅ Hành động đề xuất hôm nay\n${actionBullets.join("\n")}`,
-        `⚠️ Chất lượng dữ liệu / giới hạn\n${limitBullets.join("\n")}`
-    ].join("\n\n").slice(0, 4000);
+        [
+            { title: "📊 Chất lượng crawl", bullets: qualityBullets },
+            { title: "🔥 Trend thị trường", bullets: marketBullets },
+            { title: "🆕 Trend mới & vòng đời", bullets: lifecycleBullets },
+            { title: "💰 Tín hiệu Affiliate", bullets: affBullets },
+            { title: "📈 Biến động so với lượt trước", bullets: growthBullets },
+            { title: "🎯 Hành động đề xuất", bullets: actionBullets.slice(0, 3) },
+        ],
+        2500
+    );
 }
 
 function buildMuseTelegramNotificationText(d, fileName, isCorr) {
@@ -1824,10 +2342,11 @@ function buildDirectD1CrawlNotificationText(req, summary) {
     const runStatus = s.run_status ? String(s.run_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
     const techStatus = s.technical_status ? String(s.technical_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
     const dqStatus = s.data_quality_status ? String(s.data_quality_status).trim() : null;
+    const c = (s.counters && typeof s.counters === "object") ? s.counters : {};
     const screening = (s.sections?.["1_screening"] || s.screening || {});
-    const scannedVal = pickFirstFiniteInt(s.scanned_count, s.scanned_posts, screening.scanned_count, screening.scanned_posts);
-    const qualifiedVal = pickFirstFiniteInt(s.new_qualified_count, s.qualified_count, s.qualified_posts, screening.qualified_count, s.record_count);
-    const rejectedVal = pickFirstFiniteInt(s.rejected_count, s.rejected_posts, screening.rejected_count);
+    const scannedVal = pickFirstFiniteInt(c.scanned_count, s.scanned_count, s.scanned_posts, screening.scanned_count, screening.scanned_posts);
+    const qualifiedVal = pickFirstFiniteInt(c.new_qualified_count, s.new_qualified_count, s.qualified_count, s.qualified_posts, screening.qualified_count, s.record_count);
+    const rejectedVal = pickFirstFiniteInt(c.rejected_count, s.rejected_count, s.rejected_posts, screening.rejected_count);
     const syntheticReport = {
         ...s,
         run_id: s.run_id || req?.id || `crw_${platLabel.toLowerCase()}`,
@@ -1950,7 +2469,7 @@ async function notifyNewCrawl(env) {
                     }
 
                     const stats = extractMuseReportStats(d) || {};
-                    const recCount = Number(stats.qualified ?? stats.scanned ?? d.totals?.records ?? 0);
+                    const recCount = Number(stats.newQualifiedCount ?? stats.qualified ?? stats.scanned ?? d.totals?.records ?? 0);
                     const summaryText = buildMuseTelegramNotificationText(d, item.file?.name, item.isCorr);
 
                     const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText, {
@@ -2632,19 +3151,57 @@ async function handleAppApi(request, env, url) {
         }
     }
 
-    // 3b. Cross-Run Deduplication & Post Registry endpoints
+    // 3b. Cross-Run Deduplication & Post Registry endpoints (Fail-closed + Lease/Owner/Attempt Guard)
     if (request.method === "POST" && path === "/api/app/market/dedup/check") {
         let body = {};
         try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
-        const res = await checkCrossRunDedupInD1(env, body.items || []);
-        return jsonResponse({ ok: true, ...res });
+        try {
+            const res = await checkCrossRunDedupInD1(env, body.items || []);
+            return jsonResponse({ ok: true, ...res });
+        } catch (err) {
+            return jsonResponse(
+                { ok: false, registry_unavailable: true, error: String(err?.message || "D1 registry unavailable") },
+                503
+            );
+        }
     }
 
     if (request.method === "POST" && path === "/api/app/market/dedup/record") {
         let body = {};
         try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
-        const res = await recordCrossRunDedupInD1(env, body.items || [], body.run_id || null);
-        return jsonResponse({ ok: true, ...res });
+        const requestId = body.request_id ? String(body.request_id).trim() : null;
+        if (requestId) {
+            const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(requestId).first();
+            if (!reqRow) {
+                return jsonResponse({ ok: false, error: "Crawl request not found", conflict: false }, 404);
+            }
+            const callerOwner = String(body.claimed_by || body.worker_id || clientId || "").trim();
+            if (!callerOwner || (reqRow.claimed_by && callerOwner !== reqRow.claimed_by)) {
+                return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+            }
+            const rawAttempt = body.attempt ?? body.attempts;
+            if (rawAttempt !== undefined && rawAttempt !== null && Number(rawAttempt) !== Number(reqRow.attempts || 0)) {
+                return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+            }
+            if (!["running", "completed"].includes(reqRow.status)) {
+                return jsonResponse({ ok: false, error: "Crawl claim is not active or expired", conflict: true }, 409);
+            }
+            if (reqRow.status === "running" && reqRow.lease_expires_at && Date.parse(reqRow.lease_expires_at) < Date.now()) {
+                await expireStaleLeases(env);
+                return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+            }
+        }
+        try {
+            const res = await recordCrossRunDedupInD1(env, body.items || [], body.run_id || null, {
+                crawledAt: body.crawled_at || body.measured_at || null,
+            });
+            return jsonResponse({ ok: true, ...res });
+        } catch (err) {
+            return jsonResponse(
+                { ok: false, registry_unavailable: true, error: String(err?.message || "D1 registry unavailable") },
+                503
+            );
+        }
     }
 
     // 4. POST /api/app/heartbeat
@@ -2943,18 +3500,8 @@ async function handleAppApi(request, env, url) {
         const summaryObj = (body.result_summary && typeof body.result_summary === "object")
             ? { ...body.result_summary }
             : {};
-        const dedupSourceItems = Array.isArray(summaryObj.items)
-            ? summaryObj.items
-            : (Array.isArray(body.items) ? body.items : null);
-        if (dedupSourceItems && dedupSourceItems.length > 0) {
-            const dRes = await recordCrossRunDedupInD1(env, dedupSourceItems, summaryObj.run_id || crawlId);
-            if (summaryObj.new_count === undefined) summaryObj.new_count = dRes.new_count;
-            if (summaryObj.duplicate_count === undefined) summaryObj.duplicate_count = dRes.duplicate_count;
-            if (summaryObj.updated_count === undefined) summaryObj.updated_count = dRes.updated_count;
-            if (summaryObj.missing_views_count === undefined) summaryObj.missing_views_count = dRes.missing_views_count;
-            summaryObj.dedup_stats = summaryObj.dedup_stats || dRes;
-        }
 
+        // Atomic completion guard FIRST so expired/conflicting requests NEVER mutate market_post_registry
         const upd = await env.DB.prepare(`
             UPDATE crawl_requests
             SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
@@ -2976,6 +3523,47 @@ async function handleAppApi(request, env, url) {
             return jsonResponse({ ok: false, error: "Crawl completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
         }
 
+        const dedupSourceItems = Array.isArray(summaryObj.items)
+            ? summaryObj.items
+            : (Array.isArray(body.items) ? body.items : null);
+        if (dedupSourceItems && dedupSourceItems.length > 0) {
+            try {
+                const dRes = await recordCrossRunDedupInD1(env, dedupSourceItems, summaryObj.run_id || crawlId, {
+                    crawledAt: summaryObj.crawled_at || summaryObj.generated_at || null,
+                });
+                if (summaryObj.new_count === undefined) summaryObj.new_count = dRes.new_count;
+                if (summaryObj.new_qualified_count === undefined) summaryObj.new_qualified_count = dRes.new_qualified_count;
+                if (summaryObj.duplicate_history_count === undefined && summaryObj.duplicate_count === undefined) {
+                    summaryObj.duplicate_history_count = dRes.duplicate_history_count;
+                    summaryObj.duplicate_count = dRes.duplicate_count;
+                }
+                if (summaryObj.updated_metrics_count === undefined && summaryObj.updated_count === undefined) {
+                    summaryObj.updated_metrics_count = dRes.updated_metrics_count;
+                    summaryObj.updated_count = dRes.updated_count;
+                }
+                if (summaryObj.missing_views_count === undefined) summaryObj.missing_views_count = dRes.missing_views_count;
+                summaryObj.dedup_stats = summaryObj.dedup_stats || dRes;
+                await env.DB.prepare(`
+                    UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?
+                `).bind(JSON.stringify(summaryObj), crawlId).run();
+            } catch (err) {
+                summaryObj.registry_sync_status = "error";
+                summaryObj.registry_sync_error = String(err?.message || "D1 registry unavailable");
+                await env.DB.prepare(`
+                    UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?
+                `).bind(JSON.stringify(summaryObj), crawlId).run();
+                return jsonResponse(
+                    {
+                        ok: false,
+                        registry_unavailable: true,
+                        completed_status: nextStatus,
+                        error: summaryObj.registry_sync_error,
+                    },
+                    503
+                );
+            }
+        }
+
         if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
             const summary = summaryObj;
             const notifKey = resolveCanonicalNotificationKey({
@@ -2994,7 +3582,7 @@ async function handleAppApi(request, env, url) {
                 updated_at: nowIso,
             };
             const text = buildDirectD1CrawlNotificationText(pseudoReq, summary);
-            const recCount = Number(summary.qualified_count ?? summary.record_count ?? 0);
+            const recCount = Number(summary.new_qualified_count ?? summary.qualified_count ?? summary.record_count ?? 0);
             const delivery = await deliverWithUncertaintyGuard(
                 env,
                 notifKey,
@@ -3084,35 +3672,41 @@ async function buildAnalysisReportBundle(env) {
 
         if (meta.isV3) {
             const detailParts = [
-                `📄 BÁO CÁO CHI TIẾT V3.1: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`,
-                `📌 Trạng thái\n• File: ${reportFileName}\n• run_status: ${meta.rawRunStatus || "—"} | technical_status: ${meta.rawTechStatus || "—"} | data_quality_status: ${meta.rawDqStatus || "—"}`,
-                `📊 Sàng lọc & Phân tầng\n• Quét ${meta.scanned ?? "N/A"} | Đạt chuẩn ${meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}${meta.crossVerified !== null ? ` | Xác minh chéo Web: ${meta.crossVerified}` : ""}\n• Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`
+                `📄 BÁO CÁO CHI TIẾT ${meta.isV32 ? "V3.2" : "V3.1"}: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`,
+                `📊 Chất lượng crawl\n• File: ${reportFileName}\n• run_status: ${meta.rawRunStatus || "—"} | technical_status: ${meta.rawTechStatus || "—"} | data_quality_status: ${meta.rawDqStatus || "—"}${meta.stopReason ? `\n• stop_reason: ${meta.stopReason} | target_achieved: ${meta.targetAchieved}` : ""}`,
+                `📊 Sàng lọc & Phân tầng\n• Quét ${meta.scanned ?? "N/A"} | Duy nhất ${meta.uniqueCandidates ?? "N/A"} | Mới đạt chuẩn ${meta.newQualifiedCount ?? meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}${meta.crossVerified !== null ? ` | Web: ${meta.crossVerified}` : ""}\n• Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`
             ];
             if (meta.trends.length) {
                 detailParts.push(
                     "🔥 XU HƯỚNG NỔI BẬT\n" +
-                    meta.trends.slice(0, 4).map(t => `• ${t.theme || t.title || t}\n  Bằng chứng: ${t.evidence || t.basis || "—"}`).join("\n")
+                    meta.trends.slice(0, 4).map(t => `• ${t.theme || t.title || t}${t.lifecycle_state ? ` ${formatTrendLifecycleTag(t.lifecycle_state)}` : ""}\n  Bằng chứng: ${t.evidence || t.basis || "—"}`).join("\n")
                 );
             }
             if (meta.topViral.length) {
                 detailParts.push(
                     "🚀 TOP BÀI VIRAL\n" +
-                    meta.topViral.slice(0, 4).map(v => `• ${v.post} (${v.likes ?? "—"} likes, ${v.comments ?? "—"} cmt)${v.url ? `\n  ${v.url}` : ""}`).join("\n")
+                    meta.topViral.slice(0, 4).map(v => `• ${v.post} (${formatViewsLabel(v)}, ${v.likes ?? "—"} likes, ${v.comments ?? "—"} cmt)${v.url ? `\n  ${v.url}` : ""}`).join("\n")
                 );
             }
             if (meta.signals.length || meta.emerging.length) {
                 const sigLines = meta.signals.slice(0, 3).map(s => `• [Tín hiệu] ${s.signal || s.topic}: ${s.evidence || ""}`);
                 const emLines = meta.emerging.slice(0, 2).map(e => `• [Mới nổi] ${e.topic}: ${e.evidence || ""}`);
-                detailParts.push("💡 MỚI NỔI & TÍN HIỆU ĐƠN LẺ\n" + [...emLines, ...sigLines].join("\n"));
+                detailParts.push("🆕 MỚI NỔI & TÍN HIỆU ĐƠN LẺ\n" + [...emLines, ...sigLines].join("\n"));
+            }
+            if (meta.growthTracking.length) {
+                detailParts.push(
+                    "📈 BIẾN ĐỘNG SO VỚI LƯỢT TRƯỚC\n" +
+                    meta.growthTracking.slice(0, 4).map(g => `• ${typeof g === "string" ? g : `${g.post || g.author_handle || g.post_id || "Bài cũ"}: ${g.change_summary || g.delta_summary || g.note || ""}`}`).join("\n")
+                );
             }
             if (meta.aff.length) {
                 detailParts.push(
-                    "🛒 CƠ HỘI AFFILIATE ƯU TIÊN\n" +
+                    "💰 CƠ HỘI AFFILIATE ƯU TIÊN\n" +
                     meta.aff.slice(0, 4).map(a => `• ${a.product} [${a.priority || "—"}]: ${a.evidence || a.evidence_summary || ""}`).join("\n")
                 );
             }
             if (meta.actions.length) {
-                detailParts.push("✅ HÀNH ĐỘNG ƯU TIÊN\n" + meta.actions.slice(0, 4).map(a => `• ${trimBullet(a, 180)}`).join("\n"));
+                detailParts.push("🎯 HÀNH ĐỘNG ƯU TIÊN\n" + meta.actions.slice(0, 3).map(a => `• ${trimBullet(a?.action || a?.title || a, 180)}`).join("\n"));
             }
             if (meta.verifDetail) {
                 detailParts.push(`⚠️ XÁC MINH & GIỚI HẠN\n• ${meta.verifDetail}`);
@@ -3150,12 +3744,12 @@ async function buildAnalysisReportBundle(env) {
     } else {
         summaryText =
             "📊 BÁO CÁO PHÂN TÍCH THỊ TRƯỜNG\n━━━━━━━━━━━━━━━━━━━━\n\n" +
-            "📌 Trạng thái\n• Chưa tìm thấy báo cáo nào trong 01_Market_Data/Reports/.\n\n" +
-            "📊 Tổng quan số liệu\n• Tổng bản ghi: 0\n\n" +
-            "🔥 Xu hướng nổi bật\n• Chưa có dữ liệu.\n\n" +
-            "💡 Tín hiệu/cơ hội affiliate\n• Chưa có dữ liệu.\n\n" +
-            "✅ Hành động đề xuất hôm nay\n• Vào 🕷️ Crawl dữ liệu để tạo lượt thu thập mới.\n\n" +
-            "⚠️ Chất lượng dữ liệu / giới hạn\n• Chờ báo cáo đầu tiên từ Muse.";
+            "📊 Chất lượng crawl\n• Chưa tìm thấy báo cáo nào trong 01_Market_Data/Reports/.\n\n" +
+            "🔥 Trend thị trường\n• Chưa có dữ liệu.\n\n" +
+            "🆕 Trend mới & vòng đời\n• Chưa có dữ liệu.\n\n" +
+            "💰 Tín hiệu Affiliate\n• Chưa có dữ liệu.\n\n" +
+            "📈 Biến động so với lượt trước\n• Chưa có dữ liệu.\n\n" +
+            "🎯 Hành động đề xuất\n• Vào 🕷️ Crawl dữ liệu để tạo lượt thu thập mới.";
         fullText = summaryText;
     }
 

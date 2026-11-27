@@ -954,6 +954,186 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertEqual(new_only["total"], 1)
         self.assertEqual(new_only["items"][0]["post_id"], "CROSS_POST_D")
 
+    def test_v32_views_display_shares_reposts_reconciliation_idempotency_and_seed171(self):
+        """V3.2: 513K views_display (no 513 truncation), separate shares/reposts, new vs new_qualified (35/50), 2-laptop snapshot idempotency, URL->post_id merge, 0004 seed 171, and report reconciliation."""
+        import sqlite3
+        from market_intelligence.normalizer import extract_v32_counters
+        from market_intelligence.report_normalizer import normalize_muse_report
+
+        # 1) Views 513K + display_approx + separate shares/reposts + absent views honesty
+        v32_posts = {
+            "run_id": "run-v32-views-01",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T09:00:00Z",
+            "records": [
+                {
+                    "post_id": "V32_513K",
+                    "post_url": "https://www.threads.com/@myqnam/post/V32_513K?ref=1",
+                    "author_handle": "@myqnam",
+                    "summary_vi": "Bài viral 513K views",
+                    "views": 513000,
+                    "views_display": "513K",
+                    "views_precision": "display_approx",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-27T09:00:00Z",
+                    "views_evidence_url": "https://threads.net/@myqnam/post/V32_513K",
+                    "likes": 1200,
+                    "comments": 95,
+                    "shares": 88,
+                    "reposts": 41,
+                    "data_quality": "usable",
+                },
+                {
+                    "post_id": "V32_DISPLAY_ONLY",
+                    "post_url": "https://threads.net/@nom/post/V32_DISPLAY_ONLY",
+                    "author_handle": "@nom",
+                    "summary_vi": "Chỉ có views_display không có integer",
+                    "views": "513K",
+                    "views_display": "513K",
+                    "views_precision": "display_approx",
+                    "likes": 45,
+                    "shares": 7,
+                    "reposts": 2,
+                    "verification_status": "unverified",
+                },
+                {
+                    "post_url": "https://www.threads.net/@canonmerge/post/MERGE77?x=1",
+                    "author_handle": "@canonmerge",
+                    "summary_vi": "URL xuất hiện trước khi biết post_id",
+                    "views": 3600,
+                    "likes": 40,
+                    "shares": 3,
+                    "reposts": 9,
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        res_1 = self.store.ingest_raw_file("f_v32_1", "threads_trend_v32_1.json", json.dumps(v32_posts).encode("utf-8"))
+        self.assertEqual(res_1["new_count"], 3)
+        self.assertEqual(res_1["new_qualified_count"], 2)  # V32_DISPLAY_ONLY lacks integer views & is unverified!
+        self.assertEqual(res_1["missing_views_count"], 1)
+
+        items_map = {it["post_id"] or it["canonical_url"]: it for it in self.store.query_items(limit=20)["items"]}
+        it_513 = items_map["V32_513K"]
+        self.assertEqual(it_513["views_count"], 513000)
+        self.assertEqual(it_513["views_display"], "513K")
+        self.assertEqual(it_513["views_precision"], "display_approx")
+        self.assertEqual(it_513["views_source"], "threads_web_browser")
+        self.assertEqual(it_513["views_measured_at"], "2026-11-27T09:00:00Z")
+        self.assertEqual(it_513["views_evidence_url"], "https://threads.net/@myqnam/post/V32_513K")
+        self.assertEqual(it_513["shares_count"], 88)
+        self.assertEqual(it_513["reposts_count"], 41)
+
+        it_disp = items_map["V32_DISPLAY_ONLY"]
+        self.assertIsNone(it_disp["views_count"])  # "513K" MUST NOT be truncated to 513
+        self.assertEqual(it_disp["views_display"], "513K")
+        self.assertEqual(it_disp["shares_count"], 7)
+        self.assertEqual(it_disp["reposts_count"], 2)
+
+        # 2) Two laptops syncing the EXACT SAME run_id & measurement timestamp MUST keep only 1 snapshot
+        self.store.ingest_raw_file("f_v32_laptop2", "threads_trend_v32_1_copy.json", json.dumps(v32_posts).encode("utf-8"), md5_checksum="md5_laptop2")
+        detail_513 = self.store.get_item_detail(it_513["id"])
+        self.assertEqual(len(detail_513["snapshots"]), 1)
+        self.assertEqual(detail_513["snapshots"][0]["measured_at"], "2026-11-27T09:00:00Z")
+
+        # 3) Later run discovers post_id for URL-first post MERGE77 -> merges into single item with 2 snapshots
+        later_id_payload = {
+            "run_id": "run-v32-views-02",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T11:30:00Z",
+            "records": [
+                {
+                    "post_id": "MERGE77",
+                    "post_url": "https://threads.net/@canonmerge/post/MERGE77",
+                    "views": 6400,
+                    "likes": 92,
+                    "shares": 5,
+                    "reposts": 12,
+                    "data_quality": "usable",
+                }
+            ],
+        }
+        res_2 = self.store.ingest_raw_file("f_v32_2", "threads_trend_v32_2.json", json.dumps(later_id_payload).encode("utf-8"))
+        self.assertEqual(res_2["new_count"], 0)
+        self.assertEqual(res_2["engagement_updated_count"], 1)
+        self.assertEqual(self.store.get_stats()["total_items"], 3)
+        merged_item = next(x for x in self.store.query_items(limit=20)["items"] if "MERGE77" in (x.get("canonical_url") or ""))
+        self.assertEqual(merged_item["post_id"], "MERGE77")
+        self.assertEqual(merged_item["snapshot_count"], 2)
+
+        # 4) post_identity_index.json is classified as 'identity_index' and never leaks into items or reports
+        raw_dir = os.path.join(ROOT_DIR, "data", "market_intelligence", "raw")
+        idx_candidates = [f for f in os.listdir(raw_dir) if "post_identity_index" in f] if os.path.isdir(raw_dir) else []
+        if idx_candidates:
+            with open(os.path.join(raw_dir, idx_candidates[0]), "rb") as f:
+                idx_res = self.store.ingest_raw_file("f_identity_idx", "post_identity_index.json", f.read())
+        else:
+            idx_mock = {"contract": "3.2", "primary_key": "post_id", "entries": [{"platform": "threads", "post_id": "IDX_1", "canonical_url": "https://threads.net/@x/post/IDX_1"}]}
+            idx_res = self.store.ingest_raw_file("f_identity_idx", "post_identity_index.json", json.dumps(idx_mock).encode("utf-8"))
+        self.assertEqual(idx_res["file_role"], "identity_index")
+        self.assertEqual(self.store.get_stats()["total_items"], 3)
+
+        # 5) V3.2 D1 migrations 0003 + 0004 (171 posts) execute cleanly & idempotently in SQLite
+        m0003_path = os.path.join(ROOT_DIR, "cloudflare-worker", "migrations", "0003_cross_run_dedup_registry.sql")
+        m0004_path = os.path.join(ROOT_DIR, "cloudflare-worker", "migrations", "0004_seed_post_identity_index_171.sql")
+        conn = sqlite3.connect(":memory:")
+        try:
+            with open(m0003_path, "r", encoding="utf-8") as f3:
+                conn.executescript(f3.read())
+            with open(m0004_path, "r", encoding="utf-8") as f4:
+                sql4 = f4.read()
+            conn.executescript(sql4)
+            conn.executescript(sql4)  # Re-apply must stay 171/171 idempotent
+            reg_cnt = conn.execute("SELECT COUNT(*) FROM market_post_registry").fetchone()[0]
+            snap_cnt = conn.execute("SELECT COUNT(*) FROM market_post_snapshots").fetchone()[0]
+            self.assertEqual(reg_cnt, 171)
+            self.assertEqual(snap_cnt, 171)
+        finally:
+            conn.close()
+
+        # 6) V3.2 report counters reconciliation & sections mapping
+        v32_report = {
+            "report": "Báo cáo V3.2 Test",
+            "run_id": "run-v32-rpt-35of50",
+            "run_status": "partial",
+            "generated_at": "2026-11-27T12:00:00Z",
+            "counters": {
+                "requested_count": 50,
+                "scanned_count": 150,
+                "unique_candidate_count": 120,
+                "new_count": 40,
+                "new_qualified_count": 35,
+                "unverified_count": 15,
+                "missing_views_count": 8,
+                "duplicate_history_count": 50,
+                "updated_metrics_count": 10,
+                "rejected_count": 10,
+                "similar_content_count": 6,
+                "target_achieved": False,
+                "stop_reason": "sources_exhausted",
+            },
+            "sections": {
+                "3_trends": [{"theme": "Son dưỡng", "lifecycle_state": "growing", "why_hot": "Cao điểm mùa lạnh"}],
+                "4_top_viral": [{"post": "@myqnam", "views": 513000, "views_display": "513K", "views_precision": "display_approx"}],
+                "9_growth_tracking": [{"post": "@sandeal.shopee", "change_summary": "5K → 18K views"}],
+                "10_priority_actions": [{"action": "Test son dưỡng 8h"}],
+            },
+        }
+        extracted = extract_v32_counters(v32_report)
+        self.assertEqual(extracted["new_qualified_count"], 35)
+        self.assertEqual(extracted["new_count"], 40)
+        self.assertTrue(extracted["counters_reconciled"])
+        self.assertEqual(extracted["reconciliation_diff"], 0)
+        self.assertFalse(extracted["target_achieved"])
+        self.assertEqual(extracted["stop_reason"], "sources_exhausted")
+
+        norm_rpt = normalize_muse_report(v32_report, file_name="trend_report_20261127_1200.json")
+        self.assertEqual(norm_rpt["schema_version"], "v3.2")
+        self.assertEqual(norm_rpt["counters"]["new_qualified_count"], 35)
+        self.assertTrue(norm_rpt["counters"]["counters_reconciled"])
+        self.assertEqual(norm_rpt["growth_tracking"][0]["post"], "@sandeal.shopee")
+        self.assertEqual(norm_rpt["priority_actions"][0], "Test son dưỡng 8h")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

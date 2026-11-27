@@ -138,12 +138,15 @@ class MarketSyncService:
             records_updated = 0
             records_deduped = 0
             new_count = 0
+            new_qualified_count = 0
             duplicate_count = 0
             engagement_updated_count = 0
             missing_views_count = 0
             scanned_count = 0
             rejected_count = 0
             registry_items = []
+            registry_sync_status = "skipped"
+            registry_sync_error = None
 
             try:
                 if not self.client.is_configured():
@@ -259,6 +262,7 @@ class MarketSyncService:
                         records_updated += ingest_res["updated"]
                         records_deduped += ingest_res["deduped"]
                         new_count += int(ingest_res.get("new_count") if ingest_res.get("new_count") is not None else ingest_res["inserted"])
+                        new_qualified_count += int(ingest_res.get("new_qualified_count") or 0)
                         duplicate_count += int(ingest_res.get("duplicate_count") if ingest_res.get("duplicate_count") is not None else ingest_res["deduped"])
                         engagement_updated_count += int(ingest_res.get("engagement_updated_count") or 0)
                         missing_views_count += int(ingest_res.get("missing_views_count") or 0)
@@ -293,11 +297,21 @@ class MarketSyncService:
                 self.store.set_state("last_sync_status", "ok" if all_ok else "partial_error")
                 self.store.set_state("last_error", err_msg or "")
 
-                if registry_items and hasattr(self.client, "record_cross_run_dedup"):
-                    try:
-                        self.client.record_cross_run_dedup(registry_items[:500], run_id=run_id)
-                    except Exception:
-                        pass
+                if registry_items:
+                    self.store.enqueue_registry_batch(registry_items, run_id=run_id, chunk_size=100)
+
+                pending_batches = self.store.list_pending_registry_batches(limit=50)
+                if pending_batches and hasattr(self.client, "record_cross_run_dedup"):
+                    registry_sync_status = "ok"
+                    for batch in pending_batches:
+                        try:
+                            self.client.record_cross_run_dedup(batch["items"], run_id=batch.get("run_id") or run_id, batch_size=100)
+                            self.store.ack_registry_batch(batch["id"])
+                        except Exception as reg_exc:
+                            registry_sync_status = "error"
+                            registry_sync_error = str(reg_exc)
+                            self.store.mark_registry_batch_failed(batch["id"], registry_sync_error)
+                            break
 
                 self.store.finish_sync_run(
                     run_id,
@@ -331,11 +345,14 @@ class MarketSyncService:
                     "records_updated": records_updated,
                     "records_deduped": records_deduped,
                     "new_count": new_count,
+                    "new_qualified_count": new_qualified_count,
                     "duplicate_count": duplicate_count,
                     "engagement_updated_count": engagement_updated_count,
                     "missing_views_count": missing_views_count,
                     "scanned_count": scanned_count,
                     "rejected_count": rejected_count,
+                    "registry_sync_status": registry_sync_status,
+                    "registry_sync_error": registry_sync_error,
                     "total_items": stats["total_items"],
                     "by_platform": stats["by_platform"],
                     "error_message": err_msg,
