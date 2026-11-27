@@ -39,8 +39,23 @@ Because Muse AI connects via official Cloudflare OAuth Connector (no inbound API
     SELECT id FROM crawl_requests WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1
   ) AND status = 'queued'
   RETURNING *;
+
+  -- Atomic completion when Muse updates D1 directly (must match owner, attempt, status, active lease):
+  UPDATE crawl_requests
+  SET status = 'completed', -- or 'failed'
+      result_summary_json = :summary_json,
+      report_file_id = :drive_report_file_id,
+      error_message = NULL,
+      notified_at = NULL, -- left NULL so Cron delivers unified notification without duplicates
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE id = :request_id
+    AND status = 'running'
+    AND claimed_by = :claimed_by
+    AND attempts = :claimed_attempt
+    AND (lease_expires_at IS NULL OR lease_expires_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  RETURNING *;
   ```
-- **Honesty rule:** Requests remain `queued` ("Đang chờ Muse tiếp nhận") until Muse actually claims them (`status = 'running'`).
+- **Honesty rule:** Requests remain `queued` ("Đang chờ Muse tiếp nhận") until Muse actually claims them (`status = 'running'`). Completion via either API (`/api/app/crawl-requests/:id/complete`) or direct D1 SQL requires explicit `attempt`, matching `claimed_by`, `status = 'running'`, and unexpired lease inside the atomic `UPDATE`.
 
 ---
 

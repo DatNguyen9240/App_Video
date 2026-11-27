@@ -739,6 +739,204 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
             app_ui._market_runtime = None
             flask_tmp.cleanup()
 
+    def test_real_http_client_heartbeat_independent_from_slow_download(self):
+        """Regression (Issue #5): Real CloudflareBridgeClient + real ThreadingHTTPServer slow download never blocks independent heartbeat session."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        slow_payload = {
+            "run_id": "real-http-slow-run",
+            "platform": "threads",
+            "posts": [{
+                "post_id": "REAL_HTTP_1",
+                "post_url": "https://www.threads.com/@real/post/REAL_HTTP_1",
+                "author_handle": "@real",
+                "content_summary_vi": "Test HTTP client that cham.",
+                "likes": 42,
+            }],
+        }
+        download_started = threading.Event()
+        download_finished_ts = []
+        heartbeat_received_ts = []
+
+        class SlowWorkerHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                if self.path.startswith("/api/app/market/files?"):
+                    body = json.dumps({
+                        "status": "ok",
+                        "files": [{
+                            "file_id": "f_real_slow",
+                            "name": "threads_real_slow.json",
+                            "folder_path": "Threads",
+                            "modified_time": "2026-11-26T20:00:00Z",
+                            "md5_checksum": "md5_real_slow",
+                            "platform_hint": "threads",
+                        }],
+                        "has_more": False,
+                        "next_page_token": None,
+                    }).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if self.path == "/api/app/market/files/f_real_slow":
+                    download_started.set()
+                    time.sleep(0.9)
+                    body = json.dumps(slow_payload).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("X-Drive-File-Id", "f_real_slow")
+                    self.send_header("X-Drive-File-Name", "threads_real_slow.json")
+                    self.send_header("X-Drive-Modified-Time", "2026-11-26T20:00:00Z")
+                    self.send_header("X-Drive-Md5", "md5_real_slow")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    download_finished_ts.append(time.monotonic())
+                    return
+
+                self.send_response(404)
+                self.end_headers()
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length:
+                    self.rfile.read(length)
+                if self.path == "/api/app/heartbeat":
+                    heartbeat_received_ts.append(time.monotonic())
+                    body = json.dumps({"ok": True}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), SlowWorkerHandler)
+        srv_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        srv_thread.start()
+        host, port = srv.server_address
+        real_client = CloudflareBridgeClient(
+            worker_url=f"http://{host}:{port}",
+            api_token="real-http-token-xyz",
+            client_id="real-test-desktop",
+            timeout_sec=(2.0, 5.0),
+            heartbeat_timeout_sec=(1.0, 2.0),
+        )
+        self.assertIsNot(real_client._session, real_client._heartbeat_session)
+        self.assertIsNot(real_client._http_lock, real_client._heartbeat_lock)
+
+        real_sync = MarketSyncService(self.store, real_client, default_interval_sec=300)
+        real_poller = RemoteCommandPoller(self.store, real_client, real_sync, poll_interval_sec=10, heartbeat_interval_sec=10)
+        sync_results = []
+        sync_thread = threading.Thread(target=lambda: sync_results.append(real_sync.sync_now(trigger_source="slow_http_test")), daemon=True)
+        try:
+            sync_thread.start()
+            self.assertTrue(download_started.wait(timeout=3.0))
+
+            # Fire two real HTTP heartbeats while download_market_file is actively sleeping 0.9s on _session/_http_lock
+            hb_latencies = []
+            for _ in range(2):
+                t0 = time.monotonic()
+                ok = real_poller.send_heartbeat_once()
+                hb_latencies.append(time.monotonic() - t0)
+                self.assertTrue(ok)
+                time.sleep(0.05)
+
+            sync_thread.join(timeout=5.0)
+            self.assertEqual(len(sync_results), 1)
+            self.assertEqual(sync_results[0]["status"], "completed")
+            self.assertEqual(len(download_finished_ts), 1)
+            self.assertEqual(len(heartbeat_received_ts), 2)
+            # Both real HTTP heartbeats finished BEFORE the slow 0.9s download completed!
+            self.assertTrue(all(hb_t < download_finished_ts[0] for hb_t in heartbeat_received_ts))
+            self.assertTrue(all(lat < 0.4 for lat in hb_latencies))
+        finally:
+            real_client.close()
+            srv.shutdown()
+            srv.server_close()
+
+    def test_pagination_partial_error_guards_never_commit_cursor(self):
+        """Regression (Issue #6): Repeated token, missing token when has_more=true, or page limit overflow reports partial_error and never commits cursor."""
+        self.store.set_state("drive_cursor", "2026-11-25T00:00:00Z")
+
+        # 1. Repeated next_page_token
+        orig_list = self.client.list_market_files
+        try:
+            def rep_tok(cursor=None, limit=50, page_token=None):
+                return {
+                    "ok": True,
+                    "status": "ok",
+                    "files": [{"file_id": "f1", "name": "t1.json", "modified_time": "2026-11-26T10:00:00Z"}],
+                    "has_more": True,
+                    "next_page_token": "tok_same",
+                }
+            self.client.list_market_files = rep_tok
+            self.client.add_drive_file(
+                "f1",
+                "t1.json",
+                json.dumps({"run_id": "r1", "posts": []}).encode("utf-8"),
+                "2026-11-26T10:00:00Z",
+                "m1",
+            )
+            res_rep = self.sync_service.sync_now(trigger_source="test_rep_tok")
+            self.assertEqual(res_rep["status"], "partial_error")
+            self.assertFalse(res_rep["cursor_committed"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+            self.assertEqual(self.store.get_state("last_sync_status"), "partial_error")
+
+            # 2. Missing next_page_token while has_more=True
+            self.client.list_market_files = lambda cursor=None, limit=50, page_token=None: {
+                "ok": True,
+                "files": [],
+                "has_more": True,
+                "next_page_token": None,
+            }
+            res_miss = self.sync_service.sync_now(trigger_source="test_miss_tok")
+            self.assertEqual(res_miss["status"], "partial_error")
+            self.assertIn("thiếu next_page_token", res_miss["pagination_error"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+
+            # 3. Exceeds max_list_pages while has_more=True
+            bounded_sync = MarketSyncService(self.store, self.client, max_list_pages=2)
+            page_counter = {"n": 0}
+            def many_pages(cursor=None, limit=50, page_token=None):
+                page_counter["n"] += 1
+                return {
+                    "ok": True,
+                    "files": [],
+                    "has_more": True,
+                    "next_page_token": f"tok_{page_counter['n']}",
+                }
+            self.client.list_market_files = many_pages
+            res_lim = bounded_sync.sync_now(trigger_source="test_page_lim")
+            self.assertEqual(res_lim["status"], "partial_error")
+            self.assertIn("vượt giới hạn 2 trang", res_lim["pagination_error"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+
+            # 4. Worker explicitly signals status='partial_error' -> Sync must abort cursor commit cleanly
+            self.client.list_market_files = lambda cursor=None, limit=50, page_token=None: {
+                "ok": True,
+                "status": "partial_error",
+                "partial_error": "repeated_page_token",
+                "files": [{"file_id": "f1", "name": "t1.json", "modified_time": "2026-11-26T10:00:00Z"}],
+                "has_more": False,
+                "next_page_token": None,
+            }
+            res_wrk = self.sync_service.sync_now(trigger_source="test_worker_partial")
+            self.assertEqual(res_wrk["status"], "partial_error")
+            self.assertFalse(res_wrk["cursor_committed"])
+            self.assertEqual(self.store.get_state("drive_cursor"), "2026-11-25T00:00:00Z")
+        finally:
+            self.client.list_market_files = orig_list
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

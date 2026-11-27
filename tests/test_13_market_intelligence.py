@@ -722,6 +722,78 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertTrue(empty_ok_rep["is_empty_market_valid"])
         self.assertIn("Không có bài đạt chuẩn", empty_ok_rep["run_status_label_vi"])
 
+    def test_crawl_time_ordering_ignores_newer_modified_time_and_keeps_statuses_distinct(self):
+        """Regression (Issues #1, #7, #8): Older run with newer modifiedTime never beats newer crawl; Archive ignored; statuses remain distinct."""
+        older_touched = {
+            "report": "Old Run Retouched Later",
+            "run_id": "run-old-20261125",
+            "ended_at": "2026-11-25T10:00:00Z",
+            "run_status": "completed",
+            "technical_status": "completed",
+            "data_quality_status": "dat",
+            "telegram_summary": "OLD RUN TOUCHED LATER",
+        }
+        newer_crawl = {
+            "report": "Newer Crawl V3.1 Report",
+            "run_id": "run-new-20261126",
+            "generated_at": "2026-11-26T22:52:00+07:00",
+            "run_status": "completed",
+            "telegram_summary": "NEWER CRAWL WINS",
+        }
+        newer_crawl_rev2 = {
+            **newer_crawl,
+            "report": "Newer Crawl V3.1 Report Rev 2",
+            "corrects_report": "trend_report_new_20261126.json",
+            "telegram_summary": "NEWER CRAWL REV 2",
+        }
+        # Newer crawl synced earlier, older run retouched days later with much newer modified_time
+        self.store.ingest_raw_file(
+            "f_new_1",
+            "trend_report_new_20261126.json",
+            json.dumps(newer_crawl).encode("utf-8"),
+            modified_time="2026-11-26T16:00:00Z",
+            folder_path="Reports",
+        )
+        self.store.ingest_raw_file(
+            "f_old_touched",
+            "market_report_old_20261125.json",
+            json.dumps(older_touched).encode("utf-8"),
+            modified_time="2026-11-29T23:59:59Z",
+            folder_path="Reports",
+        )
+
+        reports = self.store.list_reports(limit=5)
+        self.assertEqual(reports[0]["run_id"], "run-new-20261126")
+        ev = self.store.build_evidence_report(platform="all")
+        self.assertEqual(ev["latest_muse_report"]["run_id"], "run-new-20261126")
+        # Issue #8: run_status is 'completed' while missing technical_status / data_quality_status stay None (not fabricated!)
+        self.assertEqual(ev["run_status"], "completed")
+        self.assertIsNone(ev["technical_status"])
+        self.assertIsNone(ev["data_quality_status"])
+
+        # Revision within same run picks newer modified_time/corrected
+        self.store.ingest_raw_file(
+            "f_new_2",
+            "trend_report_new_20261126_corrected_v2.json",
+            json.dumps(newer_crawl_rev2).encode("utf-8"),
+            modified_time="2026-11-26T16:10:00Z",
+            folder_path="Reports",
+        )
+        reports_rev = self.store.list_reports(limit=5)
+        self.assertEqual(reports_rev[0]["run_id"], "run-new-20261126")
+        self.assertTrue(reports_rev[0]["is_corrected"])
+
+        # Issue #7: Direct ingest under Archive/ must not alter active counts or wipe historical rows
+        before_total = self.store.get_stats()["total_items"]
+        arch_res = self.store.ingest_raw_file(
+            "f_direct_arch",
+            "threads_trend_arch.json",
+            json.dumps({"run_id": "arch", "records": [{"post_id": "ARCH1", "post_url": "https://www.threads.com/@a/post/ARCH1", "likes": 999}]}).encode("utf-8"),
+            folder_path="Threads/Archive",
+        )
+        self.assertEqual(arch_res["file_role"], "archived")
+        self.assertEqual(self.store.get_stats()["total_items"], before_total)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

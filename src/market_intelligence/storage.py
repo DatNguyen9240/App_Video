@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .normalizer import NON_CRAWL_ROLES, is_archive_path, normalize_payload
 from .report_normalizer import (
@@ -28,6 +28,12 @@ from .report_normalizer import (
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_NOT_ARCHIVE_RAW_SQL = (
+    "('/' || lower(replace(COALESCE(r.folder_path, ''), '\\', '/')) || '/' NOT LIKE '%/archive/%' "
+    "AND '/' || lower(replace(COALESCE(r.file_name, ''), '\\', '/')) || '/' NOT LIKE '%/archive/%')"
+)
 
 
 def _safe_filename(name: str) -> str:
@@ -178,10 +184,11 @@ class MarketIntelligenceStore:
             """
         )
 
-        # Additive Data Contract V2 columns
+        # Additive Data Contract V2 & V3.1 columns
         self._add_column_if_missing("raw_drive_files", "file_role", "TEXT DEFAULT 'crawl_data'")
         self._add_column_if_missing("raw_drive_files", "is_corrected", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("raw_drive_files", "corrects_file", "TEXT")
+        self._add_column_if_missing("raw_drive_files", "run_status", "TEXT")
         self._add_column_if_missing("raw_drive_files", "technical_status", "TEXT")
         self._add_column_if_missing("raw_drive_files", "data_quality_status", "TEXT")
         self._add_column_if_missing("raw_drive_files", "business_usable_records", "INTEGER")
@@ -211,6 +218,7 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("market_reports", "request_id", "TEXT")
         self._add_column_if_missing("market_reports", "run_status", "TEXT")
         self._add_column_if_missing("market_reports", "run_id", "TEXT")
+        self._add_column_if_missing("market_reports", "crawl_time", "TEXT")
         self._add_column_if_missing("market_reports", "technical_status", "TEXT")
         self._add_column_if_missing("market_reports", "data_quality_status", "TEXT")
         self._add_column_if_missing("market_reports", "business_usable_records", "INTEGER")
@@ -311,6 +319,16 @@ class MarketIntelligenceStore:
         platform_hint: Optional[str] = None,
     ) -> Dict[str, int]:
         """Archive raw JSON file and priority-upsert normalized items (corrected_v2 > original)."""
+        if is_archive_path(folder_path) or is_archive_path(file_name):
+            return {
+                "file_role": "archived",
+                "is_corrected": False,
+                "parsed": 0,
+                "inserted": 0,
+                "updated": 0,
+                "deduped": 0,
+            }
+
         raw_path = self.save_raw_bytes(file_id, file_name, raw_bytes)
         computed_md5 = md5_checksum or hashlib.md5(raw_bytes).hexdigest()
         now_iso = _utc_now_iso()
@@ -356,6 +374,13 @@ class MarketIntelligenceStore:
             "run_id": envelope.get("run_id"),
             "request_id": envelope.get("request_id"),
             "run_status": envelope.get("run_status"),
+            "technical_status": envelope.get("technical_status") or envelope.get("status"),
+            "data_quality_status": envelope.get("data_quality_status"),
+            "crawled_at": envelope.get("crawled_at") or envelope.get("crawl_time"),
+            "started_at": envelope.get("started_at"),
+            "ended_at": envelope.get("ended_at"),
+            "collected_at": envelope.get("collected_at"),
+            "generated_at": envelope.get("generated_at"),
             "source": envelope.get("source"),
             "crawl": envelope.get("crawl"),
             "notes": envelope.get("notes"),
@@ -383,9 +408,9 @@ class MarketIntelligenceStore:
                 INSERT INTO raw_drive_files
                 (file_id, file_name, folder_path, modified_time, md5_checksum, size_bytes, schema_version,
                  raw_path, record_count, status, error_message, synced_at,
-                 file_role, is_corrected, corrects_file, technical_status, data_quality_status,
+                 file_role, is_corrected, corrects_file, run_status, technical_status, data_quality_status,
                  business_usable_records, run_meta_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(file_id) DO UPDATE SET
                     file_name = excluded.file_name,
                     folder_path = excluded.folder_path,
@@ -401,6 +426,7 @@ class MarketIntelligenceStore:
                     file_role = excluded.file_role,
                     is_corrected = excluded.is_corrected,
                     corrects_file = excluded.corrects_file,
+                    run_status = excluded.run_status,
                     technical_status = excluded.technical_status,
                     data_quality_status = excluded.data_quality_status,
                     business_usable_records = excluded.business_usable_records,
@@ -420,7 +446,8 @@ class MarketIntelligenceStore:
                     file_role,
                     1 if is_corrected else 0,
                     envelope.get("corrects_file") or envelope.get("corrects_report"),
-                    envelope.get("technical_status") or envelope.get("status") or envelope.get("run_status"),
+                    envelope.get("run_status"),
+                    envelope.get("technical_status") or envelope.get("status"),
                     envelope.get("data_quality_status"),
                     envelope.get("business_usable_records"),
                     json.dumps(run_meta, ensure_ascii=False),
@@ -709,7 +736,7 @@ class MarketIntelligenceStore:
 
         reprocessed = 0
         for row in sorted_rows:
-            if is_archive_path(row.get("folder_path")):
+            if is_archive_path(row.get("folder_path")) or is_archive_path(row.get("file_name")):
                 continue
             rp = row.get("raw_path")
             if not rp or not os.path.exists(rp):
@@ -746,7 +773,7 @@ class MarketIntelligenceStore:
         updated_files = 0
         for r in rows:
             row = dict(r)
-            if is_archive_path(row.get("folder_path")):
+            if is_archive_path(row.get("folder_path")) or is_archive_path(row.get("file_name")):
                 continue
             rp = row.get("raw_path")
             if not rp or not os.path.exists(rp):
@@ -916,6 +943,7 @@ class MarketIntelligenceStore:
             )
             params.extend([like, like, like, like, like, like, like, like, like])
 
+        clauses.insert(0, f"(m.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})")
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         lim = max(1, min(int(limit), 200))
         off = max(0, int(offset))
@@ -942,7 +970,7 @@ class MarketIntelligenceStore:
 
         with self._lock:
             total = self._conn.execute(
-                f"SELECT COUNT(*) AS c FROM market_items m {where_sql}",
+                f"SELECT COUNT(*) AS c FROM market_items m LEFT JOIN raw_drive_files r ON m.raw_file_id = r.file_id {where_sql}",
                 params,
             ).fetchone()["c"]
 
@@ -1013,20 +1041,32 @@ class MarketIntelligenceStore:
                     d[dst_key] = raw_txt
             return d
 
+    def _run_meta_crawl_ts(self, meta: Dict[str, Any], modified_time: Optional[str] = None) -> float:
+        for key in ("crawled_at", "crawl_time", "ended_at", "collected_at", "started_at", "generated_at"):
+            val = meta.get(key)
+            if val:
+                parsed = self._parse_iso_ts(val)
+                if parsed > 0:
+                    return parsed
+        return self._parse_iso_ts(modified_time)
+
     def get_stats(self) -> Dict[str, Any]:
+        active_item_join = f"LEFT JOIN raw_drive_files r ON m.raw_file_id = r.file_id WHERE (m.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})"
         with self._lock:
-            total_items = self._conn.execute("SELECT COUNT(*) AS c FROM market_items").fetchone()["c"]
+            total_items = self._conn.execute(f"SELECT COUNT(*) AS c FROM market_items m {active_item_join}").fetchone()["c"]
             total_raw_files = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM raw_drive_files WHERE status = 'synced'"
+                f"SELECT COUNT(*) AS c FROM raw_drive_files r WHERE r.status = 'synced' AND {_NOT_ARCHIVE_RAW_SQL}"
             ).fetchone()["c"]
 
             by_platform = {"threads": 0, "tiktok": 0, "shopee": 0}
-            for r in self._conn.execute("SELECT platform, COUNT(*) AS c FROM market_items GROUP BY platform").fetchall():
+            for r in self._conn.execute(
+                f"SELECT m.platform, COUNT(*) AS c FROM market_items m {active_item_join} GROUP BY m.platform"
+            ).fetchall():
                 by_platform[r["platform"]] = r["c"]
 
             by_quality = {"usable": 0, "needs_verification": 0, "unlabeled": 0}
             for r in self._conn.execute(
-                "SELECT COALESCE(data_quality, 'unlabeled') AS dq, COUNT(*) AS c FROM market_items GROUP BY dq"
+                f"SELECT COALESCE(m.data_quality, 'unlabeled') AS dq, COUNT(*) AS c FROM market_items m {active_item_join} GROUP BY dq"
             ).fetchall():
                 key = r["dq"] if r["dq"] in by_quality else "unlabeled"
                 by_quality[key] = r["c"]
@@ -1036,7 +1076,7 @@ class MarketIntelligenceStore:
                 for p in ("threads", "tiktok", "shopee")
             }
             for r in self._conn.execute(
-                "SELECT platform, COALESCE(data_quality, 'unlabeled') AS dq, COUNT(*) AS c FROM market_items GROUP BY platform, dq"
+                f"SELECT m.platform, COALESCE(m.data_quality, 'unlabeled') AS dq, COUNT(*) AS c FROM market_items m {active_item_join} GROUP BY m.platform, dq"
             ).fetchall():
                 plat = r["platform"]
                 if plat not in by_platform_quality:
@@ -1047,16 +1087,17 @@ class MarketIntelligenceStore:
 
             # Interaction completeness (never treats null as 0)
             eng_row = self._conn.execute(
-                """
+                f"""
                 SELECT
-                    SUM(CASE WHEN likes_count IS NOT NULL THEN 1 ELSE 0 END) AS with_likes,
-                    SUM(CASE WHEN comments_count IS NOT NULL THEN 1 ELSE 0 END) AS with_comments,
-                    SUM(CASE WHEN views_count IS NOT NULL THEN 1 ELSE 0 END) AS with_views,
-                    SUM(CASE WHEN shares_count IS NOT NULL THEN 1 ELSE 0 END) AS with_shares,
-                    SUM(CASE WHEN reposts_count IS NOT NULL THEN 1 ELSE 0 END) AS with_reposts,
-                    SUM(CASE WHEN quotes_count IS NOT NULL THEN 1 ELSE 0 END) AS with_quotes,
-                    SUM(CASE WHEN price IS NOT NULL THEN 1 ELSE 0 END) AS with_price
-                FROM market_items
+                    SUM(CASE WHEN m.likes_count IS NOT NULL THEN 1 ELSE 0 END) AS with_likes,
+                    SUM(CASE WHEN m.comments_count IS NOT NULL THEN 1 ELSE 0 END) AS with_comments,
+                    SUM(CASE WHEN m.views_count IS NOT NULL THEN 1 ELSE 0 END) AS with_views,
+                    SUM(CASE WHEN m.shares_count IS NOT NULL THEN 1 ELSE 0 END) AS with_shares,
+                    SUM(CASE WHEN m.reposts_count IS NOT NULL THEN 1 ELSE 0 END) AS with_reposts,
+                    SUM(CASE WHEN m.quotes_count IS NOT NULL THEN 1 ELSE 0 END) AS with_quotes,
+                    SUM(CASE WHEN m.price IS NOT NULL THEN 1 ELSE 0 END) AS with_price
+                FROM market_items m
+                {active_item_join}
                 """
             ).fetchone()
             denom = max(1, total_items)
@@ -1077,12 +1118,13 @@ class MarketIntelligenceStore:
             by_trend_tier = {"very_hot": 0, "hot": 0, "emerging": 0, "watchlist": 0, "unverified": 0, "legacy": 0}
             threads_by_trend_tier = {"very_hot": 0, "hot": 0, "emerging": 0, "watchlist": 0, "unverified": 0, "legacy": 0}
             for r in self._conn.execute(
-                """
-                SELECT platform,
-                       CASE WHEN verification_status = 'unverified' THEN 'unverified' ELSE trend_tier END AS eff_tier,
+                f"""
+                SELECT m.platform,
+                       CASE WHEN m.verification_status = 'unverified' THEN 'unverified' ELSE m.trend_tier END AS eff_tier,
                        COUNT(*) AS c
-                FROM market_items
-                GROUP BY platform, eff_tier
+                FROM market_items m
+                {active_item_join}
+                GROUP BY m.platform, eff_tier
                 """
             ).fetchall():
                 tkey = r["eff_tier"] if r["eff_tier"] in by_trend_tier else "legacy"
@@ -1092,82 +1134,96 @@ class MarketIntelligenceStore:
 
             by_trend_group = {"trend_toan_thi_truong": 0, "trend_affiliate": 0, "trend_moi_noi": 0}
             for r in self._conn.execute(
-                "SELECT trend_group, COUNT(*) AS c FROM market_items WHERE trend_group IS NOT NULL GROUP BY trend_group"
+                f"SELECT m.trend_group, COUNT(*) AS c FROM market_items m {active_item_join} AND m.trend_group IS NOT NULL GROUP BY m.trend_group"
             ).fetchall():
                 by_trend_group[r["trend_group"]] = r["c"]
 
             by_verification_status = {"cross_verified_web": 0, "connector_verified": 0, "unverified": 0}
             for r in self._conn.execute(
-                "SELECT verification_status, COUNT(*) AS c FROM market_items WHERE verification_status IS NOT NULL GROUP BY verification_status"
+                f"SELECT m.verification_status, COUNT(*) AS c FROM market_items m {active_item_join} AND m.verification_status IS NOT NULL GROUP BY m.verification_status"
             ).fetchall():
                 by_verification_status[r["verification_status"]] = r["c"]
 
             by_content_group = {}
             for r in self._conn.execute(
-                "SELECT COALESCE(content_group, '(không có)') AS k, COUNT(*) AS c FROM market_items GROUP BY k ORDER BY c DESC"
+                f"SELECT COALESCE(m.content_group, '(không có)') AS k, COUNT(*) AS c FROM market_items m {active_item_join} GROUP BY k ORDER BY c DESC"
             ).fetchall():
                 by_content_group[r["k"]] = r["c"]
 
             by_purchase_intent = {}
             for r in self._conn.execute(
-                "SELECT COALESCE(purchase_intent, '(không có)') AS k, COUNT(*) AS c FROM market_items GROUP BY k ORDER BY c DESC"
+                f"SELECT COALESCE(m.purchase_intent, '(không có)') AS k, COUNT(*) AS c FROM market_items m {active_item_join} GROUP BY k ORDER BY c DESC"
             ).fetchall():
                 by_purchase_intent[r["k"]] = r["c"]
 
-            # Upcoming vouchers from latest Shopee file run_meta_json
+            # Upcoming vouchers from latest Shopee file run_meta_json (ordered by crawl time, Archive excluded)
             upcoming_vouchers: List[Any] = []
+            shopee_rows = []
             for r in self._conn.execute(
-                """
-                SELECT file_name, is_corrected, run_meta_json
-                FROM raw_drive_files
-                WHERE file_role = 'crawl_data' AND lower(file_name) LIKE '%shopee%'
-                  AND lower(COALESCE(folder_path, '')) NOT LIKE '%archive%'
-                ORDER BY is_corrected DESC, COALESCE(modified_time, synced_at) DESC
-                LIMIT 3
+                f"""
+                SELECT r.file_name, r.is_corrected, r.modified_time, r.run_meta_json
+                FROM raw_drive_files r
+                WHERE r.file_role = 'crawl_data' AND lower(r.file_name) LIKE '%shopee%'
+                  AND {_NOT_ARCHIVE_RAW_SQL}
+                LIMIT 20
                 """
             ).fetchall():
                 try:
                     meta = json.loads(r["run_meta_json"] or "{}")
-                    if isinstance(meta.get("upcoming_vouchers"), list):
-                        upcoming_vouchers = meta["upcoming_vouchers"]
-                        break
+                    shopee_rows.append((self._run_meta_crawl_ts(meta, r["modified_time"]), int(r["is_corrected"] or 0), meta))
                 except Exception:
                     pass
+            shopee_rows.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            for _ts, _corr, meta in shopee_rows:
+                if isinstance(meta.get("upcoming_vouchers"), list):
+                    upcoming_vouchers = meta["upcoming_vouchers"]
+                    break
 
-            # Latest V3.1 Trends Snapshot & Screening from latest threads_trend_* run_meta_json
+            # Latest V3.1 Trends Snapshot & Screening from latest threads_trend_* ordered by crawl time
             trends_snapshot = None
             latest_v3_screening = None
+            v3_rows = []
             for r in self._conn.execute(
-                """
-                SELECT file_name, modified_time, run_meta_json
-                FROM raw_drive_files
-                WHERE file_role = 'crawl_data' AND lower(file_name) LIKE 'threads_trend%'
-                  AND lower(COALESCE(folder_path, '')) NOT LIKE '%archive%'
-                ORDER BY COALESCE(modified_time, synced_at) DESC
-                LIMIT 3
+                f"""
+                SELECT r.file_name, r.is_corrected, r.modified_time, r.run_meta_json
+                FROM raw_drive_files r
+                WHERE r.file_role = 'crawl_data' AND lower(r.file_name) LIKE 'threads_trend%'
+                  AND {_NOT_ARCHIVE_RAW_SQL}
+                LIMIT 20
                 """
             ).fetchall():
                 try:
                     meta = json.loads(r["run_meta_json"] or "{}")
-                    if not trends_snapshot and isinstance(meta.get("trends_snapshot"), dict):
-                        trends_snapshot = meta["trends_snapshot"]
-                    if not latest_v3_screening and (meta.get("screening") or meta.get("tier_counts") or meta.get("run_status")):
-                        latest_v3_screening = {
-                            "file_name": r["file_name"],
-                            "run_id": meta.get("run_id"),
-                            "run_status": meta.get("run_status"),
-                            "source": meta.get("source"),
-                            "screening": meta.get("screening"),
-                            "tier_counts": meta.get("tier_counts"),
-                            "group_counts": meta.get("group_counts"),
-                            "cross_verified_posts": meta.get("cross_verified_posts"),
-                            "thresholds": meta.get("thresholds"),
-                            "notes": meta.get("notes"),
-                        }
-                    if trends_snapshot and latest_v3_screening:
-                        break
+                    v3_rows.append((
+                        self._run_meta_crawl_ts(meta, r["modified_time"]),
+                        int(r["is_corrected"] or 0),
+                        self._parse_iso_ts(r["modified_time"]),
+                        r["file_name"],
+                        meta,
+                    ))
                 except Exception:
                     pass
+            v3_rows.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+            for _ts, _corr, _mts, fname, meta in v3_rows:
+                if not trends_snapshot and isinstance(meta.get("trends_snapshot"), dict):
+                    trends_snapshot = meta["trends_snapshot"]
+                if not latest_v3_screening and (meta.get("screening") or meta.get("tier_counts") or meta.get("run_status")):
+                    latest_v3_screening = {
+                        "file_name": fname,
+                        "run_id": meta.get("run_id"),
+                        "run_status": meta.get("run_status"),
+                        "technical_status": meta.get("technical_status"),
+                        "data_quality_status": meta.get("data_quality_status"),
+                        "source": meta.get("source"),
+                        "screening": meta.get("screening"),
+                        "tier_counts": meta.get("tier_counts"),
+                        "group_counts": meta.get("group_counts"),
+                        "cross_verified_posts": meta.get("cross_verified_posts"),
+                        "thresholds": meta.get("thresholds"),
+                        "notes": meta.get("notes"),
+                    }
+                if trends_snapshot and latest_v3_screening:
+                    break
 
             non_crawl_files = [
                 {
@@ -1176,11 +1232,12 @@ class MarketIntelligenceStore:
                     "synced_at": r["synced_at"],
                 }
                 for r in self._conn.execute(
-                    """
-                    SELECT file_name, file_role, synced_at
-                    FROM raw_drive_files
-                    WHERE file_role IN ('data_contract', 'crawl_strategy', 'quality_audit', 'research_doc', 'capability_test')
-                    ORDER BY synced_at DESC
+                    f"""
+                    SELECT r.file_name, r.file_role, r.synced_at
+                    FROM raw_drive_files r
+                    WHERE r.file_role IN ('data_contract', 'crawl_strategy', 'quality_audit', 'research_doc', 'capability_test')
+                      AND {_NOT_ARCHIVE_RAW_SQL}
+                    ORDER BY r.synced_at DESC
                     """
                 ).fetchall()
             ]
@@ -1261,7 +1318,7 @@ class MarketIntelligenceStore:
     def list_raw_files(self, limit: int = 30) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM raw_drive_files ORDER BY is_corrected DESC, synced_at DESC LIMIT ?",
+                f"SELECT * FROM raw_drive_files r WHERE {_NOT_ARCHIVE_RAW_SQL} ORDER BY r.is_corrected DESC, r.synced_at DESC LIMIT ?",
                 (max(1, min(int(limit), 200)),),
             ).fetchall()
             return [dict(r) for r in rows]
@@ -1422,8 +1479,8 @@ class MarketIntelligenceStore:
                 INSERT INTO market_reports
                 (id, report_key, source_type, title, platform, raw_file_id, report_json, raw_payload_json,
                  generated_at, created_at, updated_at, is_corrected, corrects_report, request_id, run_id,
-                 run_status, technical_status, data_quality_status, business_usable_records, source_priority)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 crawl_time, run_status, technical_status, data_quality_status, business_usable_records, source_priority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(report_key) DO UPDATE SET
                     source_type = excluded.source_type,
                     title = excluded.title,
@@ -1437,6 +1494,7 @@ class MarketIntelligenceStore:
                     corrects_report = excluded.corrects_report,
                     request_id = excluded.request_id,
                     run_id = excluded.run_id,
+                    crawl_time = COALESCE(excluded.crawl_time, market_reports.crawl_time),
                     run_status = excluded.run_status,
                     technical_status = excluded.technical_status,
                     data_quality_status = excluded.data_quality_status,
@@ -1459,6 +1517,7 @@ class MarketIntelligenceStore:
                     report.get("corrects_report"),
                     report.get("request_id"),
                     report.get("run_id"),
+                    report.get("crawl_time"),
                     report.get("run_status"),
                     report.get("technical_status"),
                     report.get("data_quality_status"),
@@ -1481,20 +1540,45 @@ class MarketIntelligenceStore:
         except Exception:
             return 0.0
 
+    def _extract_report_crawl_ts(self, row: Dict[str, Any]) -> Tuple[float, bool]:
+        rep = row.get("report") if isinstance(row.get("report"), dict) else {}
+        explicit_flag = bool(row.get("crawl_time") or rep.get("crawl_time_is_explicit"))
+        for candidate in (
+            row.get("crawl_time"),
+            rep.get("crawl_time"),
+            rep.get("ended_at"),
+            rep.get("collected_at"),
+            rep.get("started_at"),
+        ):
+            ts = self._parse_iso_ts(candidate)
+            if ts > 0:
+                return ts, True
+        gen_ts = self._parse_iso_ts(rep.get("generated_at") or row.get("generated_at"))
+        if gen_ts > 0 and explicit_flag:
+            return gen_ts, True
+        if gen_ts > 0 and self._parse_iso_ts(row.get("raw_modified_time")) == 0 and self._parse_iso_ts(row.get("updated_at")) == 0:
+            return gen_ts, False
+        # Fallback to file/updated timestamps ONLY when payload itself has no crawl execution timestamp
+        for candidate in (row.get("generated_at"), row.get("raw_modified_time"), row.get("updated_at")):
+            ts = self._parse_iso_ts(candidate)
+            if ts > 0:
+                return ts, False
+        return 0.0, False
+
     def list_reports(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Return non-archived reports ordered by newest run first, preferring corrected only within the same run/request."""
+        """Return non-archived reports ordered between runs strictly by crawl execution time; revision time breaks ties within the same run."""
         with self._lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT mr.id, mr.report_key, mr.source_type, mr.title, mr.platform, mr.raw_file_id, mr.report_json,
                        mr.generated_at, mr.updated_at, mr.is_corrected, mr.corrects_report, mr.request_id, mr.run_id,
-                       mr.run_status, mr.technical_status, mr.data_quality_status, mr.business_usable_records, mr.source_priority,
-                       r.modified_time AS raw_modified_time
+                       mr.crawl_time, mr.run_status, mr.technical_status, mr.data_quality_status, mr.business_usable_records, mr.source_priority,
+                       r.modified_time AS raw_modified_time, r.folder_path AS raw_folder_path
                 FROM market_reports mr
                 LEFT JOIN raw_drive_files r ON mr.raw_file_id = r.file_id
-                WHERE lower(COALESCE(r.folder_path, '')) NOT LIKE '%archive%'
-                ORDER BY COALESCE(mr.generated_at, r.modified_time, mr.updated_at) DESC, mr.updated_at DESC
-                LIMIT 100
+                WHERE (mr.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})
+                ORDER BY COALESCE(mr.crawl_time, mr.generated_at, mr.updated_at) DESC
+                LIMIT 500
                 """
             ).fetchall()
 
@@ -1502,18 +1586,24 @@ class MarketIntelligenceStore:
         file_name_to_group: Dict[str, str] = {}
         for r in rows:
             d = dict(r)
+            if is_archive_path(d.pop("raw_folder_path", None)):
+                continue
             d["is_corrected"] = bool(d.get("is_corrected"))
             try:
                 d["report"] = json.loads(d.pop("report_json") or "{}")
             except Exception:
                 d["report"] = {}
             fname = str((d["report"] or {}).get("file_name") or "").strip().lower()
+            if is_archive_path(fname):
+                continue
             grp = str(d.get("request_id") or d.get("run_id") or d.get("report_key"))
             if fname:
                 file_name_to_group[fname] = grp
             d["_group_key"] = grp
-            d["_item_ts"] = max(
-                self._parse_iso_ts(d.get("generated_at")),
+            crawl_ts, from_payload = self._extract_report_crawl_ts(d)
+            d["_crawl_ts"] = crawl_ts
+            d["_crawl_from_payload"] = from_payload
+            d["_revision_ts"] = max(
                 self._parse_iso_ts(d.get("raw_modified_time")),
                 self._parse_iso_ts(d.get("updated_at")),
             )
@@ -1525,23 +1615,40 @@ class MarketIntelligenceStore:
             if corr_target and corr_target in file_name_to_group:
                 d["_group_key"] = file_name_to_group[corr_target]
 
-        group_latest_ts: Dict[str, float] = {}
+        # Inter-run order uses base crawl execution time (preferring original/payload timestamp, NEVER MAX with modifiedTime/updated_at)
+        group_crawl_meta: Dict[str, Tuple[float, bool, bool]] = {}
         for d in out:
             gk = d["_group_key"]
-            group_latest_ts[gk] = max(group_latest_ts.get(gk, 0.0), d["_item_ts"])
+            ts = d["_crawl_ts"]
+            is_orig = not d["is_corrected"]
+            from_p = bool(d["_crawl_from_payload"])
+            cur = group_crawl_meta.get(gk)
+            if cur is None:
+                group_crawl_meta[gk] = (ts, is_orig, from_p)
+                continue
+            cur_ts, cur_orig, cur_p = cur
+            if from_p and not cur_p:
+                group_crawl_meta[gk] = (ts, is_orig, True)
+            elif is_orig and (not cur_orig or (ts > 0 and (cur_ts == 0 or ts < cur_ts))):
+                group_crawl_meta[gk] = (ts, True, cur_p or from_p)
+            elif cur_orig == is_orig and ts > 0 and (cur_ts == 0 or ts < cur_ts):
+                group_crawl_meta[gk] = (ts, cur_orig, cur_p or from_p)
 
         out.sort(
             key=lambda d: (
-                group_latest_ts.get(d["_group_key"], 0.0),
+                group_crawl_meta.get(d["_group_key"], (0.0, False, False))[0],
                 int(d.get("source_priority") or 1),
                 1 if d.get("is_corrected") else 0,
-                d["_item_ts"],
+                d["_revision_ts"],
+                d["_crawl_ts"],
             ),
             reverse=True,
         )
         for d in out:
             d.pop("_group_key", None)
-            d.pop("_item_ts", None)
+            d.pop("_crawl_ts", None)
+            d.pop("_crawl_from_payload", None)
+            d.pop("_revision_ts", None)
             d.pop("raw_modified_time", None)
         return out[: max(1, min(int(limit), 100))]
 

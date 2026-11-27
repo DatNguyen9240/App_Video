@@ -58,64 +58,82 @@ class CloudflareBridgeClient:
         client_id: Optional[str] = None,
         env_path: Optional[str] = None,
         timeout_sec: Any = (10.0, 45.0),
+        heartbeat_timeout_sec: Any = (5.0, 10.0),
         session: Optional[requests.Session] = None,
+        heartbeat_session: Optional[requests.Session] = None,
     ):
         if env_path is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             env_path = os.path.join(base_dir, ".env")
         self.env_path = env_path
         self.timeout_sec = timeout_sec
+        self.heartbeat_timeout_sec = heartbeat_timeout_sec
         self._session = session or requests.Session()
+        self._heartbeat_session = heartbeat_session or requests.Session()
         self._http_lock = threading.RLock()
+        self._heartbeat_lock = threading.RLock()
+        self._cfg_lock = threading.RLock()
         self._explicit_url = worker_url
         self._explicit_token = api_token
         self._explicit_client_id = client_id
         self.reload_config()
 
+    def close(self):
+        for sess in (getattr(self, "_session", None), getattr(self, "_heartbeat_session", None)):
+            if sess is not None:
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+
     def reload_config(self):
-        env_vars = _read_env_file_vars(self.env_path)
-        self.worker_url = (
-            self._explicit_url
-            or os.environ.get("CLOUDFLARE_WORKER_URL")
-            or env_vars.get("CLOUDFLARE_WORKER_URL")
-            or DEFAULT_WORKER_URL
-        ).rstrip("/")
-        self.api_token = (
-            self._explicit_token
-            if self._explicit_token is not None
-            else (
-                os.environ.get("CLOUDFLARE_APP_TOKEN")
-                or env_vars.get("CLOUDFLARE_APP_TOKEN")
-                or os.environ.get("APP_VIDEO_API_TOKEN")
-                or env_vars.get("APP_VIDEO_API_TOKEN")
-                or ""
-            )
-        ).strip()
-        self.client_id = (
-            self._explicit_client_id
-            or os.environ.get("CLOUDFLARE_CLIENT_ID")
-            or env_vars.get("CLOUDFLARE_CLIENT_ID")
-            or DEFAULT_CLIENT_ID
-        ).strip()
+        with self._cfg_lock:
+            env_vars = _read_env_file_vars(self.env_path)
+            self.worker_url = (
+                self._explicit_url
+                or os.environ.get("CLOUDFLARE_WORKER_URL")
+                or env_vars.get("CLOUDFLARE_WORKER_URL")
+                or DEFAULT_WORKER_URL
+            ).rstrip("/")
+            self.api_token = (
+                self._explicit_token
+                if self._explicit_token is not None
+                else (
+                    os.environ.get("CLOUDFLARE_APP_TOKEN")
+                    or env_vars.get("CLOUDFLARE_APP_TOKEN")
+                    or os.environ.get("APP_VIDEO_API_TOKEN")
+                    or env_vars.get("APP_VIDEO_API_TOKEN")
+                    or ""
+                )
+            ).strip()
+            self.client_id = (
+                self._explicit_client_id
+                or os.environ.get("CLOUDFLARE_CLIENT_ID")
+                or env_vars.get("CLOUDFLARE_CLIENT_ID")
+                or DEFAULT_CLIENT_ID
+            ).strip()
 
     def is_configured(self) -> bool:
-        return bool(self.worker_url and self.api_token)
+        with self._cfg_lock:
+            return bool(self.worker_url and self.api_token)
 
     def get_public_config_summary(self) -> Dict[str, Any]:
-        return {
-            "worker_url": self.worker_url,
-            "client_id": self.client_id,
-            "token_configured": bool(self.api_token),
-            "token_masked": mask_secret(self.api_token),
-        }
+        with self._cfg_lock:
+            return {
+                "worker_url": self.worker_url,
+                "client_id": self.client_id,
+                "token_configured": bool(self.api_token),
+                "token_masked": mask_secret(self.api_token),
+            }
 
     def _headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_token}",
-            "X-App-Client-Id": self.client_id,
-            "Accept": "application/json",
-            "User-Agent": "AppVideo-BridgeClient/2.3",
-        }
+        with self._cfg_lock:
+            return {
+                "Authorization": f"Bearer {self.api_token}",
+                "X-App-Client-Id": self.client_id,
+                "Accept": "application/json",
+                "User-Agent": "AppVideo-BridgeClient/2.4",
+            }
 
     def _request_with_retry(
         self,
@@ -125,23 +143,35 @@ class CloudflareBridgeClient:
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
         max_attempts: int = 3,
+        use_heartbeat_session: bool = False,
+        timeout_override: Any = None,
     ) -> requests.Response:
-        if not self.is_configured():
-            raise RuntimeError("Missing CLOUDFLARE_APP_TOKEN (unconfigured)")
+        with self._cfg_lock:
+            if not (self.worker_url and self.api_token):
+                raise RuntimeError("Missing CLOUDFLARE_APP_TOKEN (unconfigured)")
+            url = f"{self.worker_url}{path}"
+            headers = {
+                "Authorization": f"Bearer {self.api_token}",
+                "X-App-Client-Id": self.client_id,
+                "Accept": "application/json",
+                "User-Agent": "AppVideo-BridgeClient/2.4",
+            }
 
-        url = f"{self.worker_url}{path}"
+        target_session = self._heartbeat_session if use_heartbeat_session else self._session
+        target_lock = self._heartbeat_lock if use_heartbeat_session else self._http_lock
+        req_timeout = timeout_override if timeout_override is not None else self.timeout_sec
         last_exc: Optional[Exception] = None
 
         for attempt in range(1, max_attempts + 1):
             try:
-                with self._http_lock:
-                    resp = self._session.request(
+                with target_lock:
+                    resp = target_session.request(
                         method=method,
                         url=url,
-                        headers=self._headers(),
+                        headers=headers,
                         params=params,
                         json=json_body,
-                        timeout=self.timeout_sec,
+                        timeout=req_timeout,
                     )
                 if resp.status_code in (502, 503, 504) and attempt < max_attempts:
                     time.sleep(0.4 * attempt)
@@ -232,7 +262,14 @@ class CloudflareBridgeClient:
         return resp.content, headers_meta
 
     def send_heartbeat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        resp = self._request_with_retry("POST", "/api/app/heartbeat", json_body=payload, max_attempts=1)
+        resp = self._request_with_retry(
+            "POST",
+            "/api/app/heartbeat",
+            json_body=payload,
+            max_attempts=1,
+            use_heartbeat_session=True,
+            timeout_override=self.heartbeat_timeout_sec,
+        )
         if not resp.ok:
             raise RuntimeError(f"heartbeat failed: HTTP {resp.status_code}")
         return resp.json()

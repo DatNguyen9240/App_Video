@@ -153,20 +153,7 @@ def _map_run_status_metadata(raw_run_status: Optional[str], raw_tech: Optional[s
     tech = str(raw_tech or "").strip().lower() or None
     dq = str(raw_dq or "").strip() or None
 
-    if rs == "source_error":
-        tech = tech or "failed"
-        dq = dq or "source_error — lỗi nguồn dữ liệu"
-    elif rs == "insufficient_data":
-        tech = tech or "partial"
-        dq = dq or "insufficient_data — thiếu dữ liệu"
-    elif rs == "no_qualifying_posts":
-        tech = tech or "completed"
-        dq = dq or "no_qualifying_posts — nguồn OK nhưng không có bài đạt chuẩn"
-    elif rs == "completed":
-        tech = tech or "completed"
-        dq = dq or "đạt"
-
-    is_source_error = bool(rs in ("source_error", "insufficient_data") or tech == "failed")
+    is_source_error = bool(rs in ("source_error", "insufficient_data") or tech in ("failed", "partial"))
     is_empty_market_valid = bool(rs == "no_qualifying_posts")
     label = RUN_STATUS_LABELS_VI.get(rs or "")
     if not label:
@@ -648,6 +635,29 @@ def normalize_muse_report(
     report_key_src = f"{raw_obj.get('run_id') or run_id}:{platform}"
     report_key = hashlib.sha256(report_key_src.encode("utf-8")).hexdigest()[:24]
 
+    crawl_time = (
+        raw_obj.get("crawled_at")
+        or raw_obj.get("crawl_time")
+        or src.get("crawled_at")
+        or src.get("crawl_time")
+        or raw_obj.get("ended_at")
+        or src.get("ended_at")
+        or source_run.get("ended_at")
+        or raw_obj.get("collected_at")
+        or src.get("collected_at")
+        or raw_obj.get("started_at")
+        or src.get("started_at")
+        or source_run.get("started_at")
+        or raw_obj.get("generated_at")
+        or src.get("generated_at")
+    )
+    generated_at_val = (
+        raw_obj.get("generated_at")
+        or src.get("generated_at")
+        or crawl_time
+        or modified_time
+        or _utc_now_iso()
+    )
     return {
         "report_key": report_key,
         "schema_version": "v3.1" if is_v3 else "v2",
@@ -677,16 +687,9 @@ def normalize_muse_report(
         "verification_detail": raw_verif_detail,
         "platform_results": platform_results,
         "telegram_summary": src.get("telegram_summary") or raw_obj.get("telegram_summary"),
-        "generated_at": (
-            raw_obj.get("generated_at")
-            or src.get("generated_at")
-            or raw_obj.get("ended_at")
-            or raw_obj.get("collected_at")
-            or src.get("ended_at")
-            or src.get("collected_at")
-            or modified_time
-            or _utc_now_iso()
-        ),
+        "crawl_time": crawl_time,
+        "crawl_time_is_explicit": bool(crawl_time),
+        "generated_at": generated_at_val,
         "trending_highlights": trending_highlights,
         "consumer_needs_problems": consumer_needs_problems,
         "affiliate_opportunities": affiliate_opportunities,

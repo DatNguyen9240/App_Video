@@ -44,11 +44,16 @@ class MockD1Database {
       },
       async first() {
         if (norm.startsWith("SELECT 1 AS ok")) return { ok: 1 };
-        if (norm.startsWith("SELECT status FROM crawl_notifications WHERE run_id = ?")) {
-          return db.notifications.find((n) => n.run_id === this.args[0]) || null;
+        if (norm.startsWith("SELECT status, created_at FROM crawl_notifications WHERE run_id = ?") || norm.startsWith("SELECT status FROM crawl_notifications WHERE run_id = ?")) {
+          const row = db.notifications.find((n) => n.run_id === this.args[0]);
+          return row ? { ...row } : null;
         }
         if (norm.startsWith("SELECT COUNT(*) AS cnt FROM crawl_notifications")) {
           return { cnt: db.notifications.filter((n) => n.status === "delivery_uncertain").length };
+        }
+        if (norm.startsWith("SELECT status, notified_at FROM crawl_requests WHERE id = ?")) {
+          const row = db.crawlRequests.find((c) => c.id === this.args[0]);
+          return row ? { status: row.status, notified_at: row.notified_at } : null;
         }
         if (norm.startsWith("SELECT value FROM worker_runtime_state WHERE key = ?")) {
           const v = db.runtimeState.get(this.args[0]);
@@ -98,6 +103,14 @@ class MockD1Database {
         if (norm.includes("FROM crawl_requests WHERE status IN ('completed', 'failed') AND notified_at IS NULL")) {
           return {
             results: db.crawlRequests.filter((c) => ["completed", "failed"].includes(c.status) && !c.notified_at),
+          };
+        }
+        if (norm.includes("FROM crawl_notifications WHERE status IN ('delivery_uncertain', 'sending')")) {
+          return {
+            results: db.notifications
+              .filter((n) => n.status === "delivery_uncertain" || n.status === "sending")
+              .slice()
+              .reverse(),
           };
         }
         if (norm.includes("FROM crawl_notifications WHERE status = 'delivery_uncertain'")) {
@@ -170,13 +183,14 @@ class MockD1Database {
           return { meta: { changes } };
         }
         if (norm.startsWith("UPDATE app_commands SET status = ?, result_json = ?")) {
-          const [status, result_json, error_message, updated_at, id, claimed_by, attempts] = this.args;
+          const [status, result_json, error_message, updated_at, id, claimed_by, attempts, nowIso] = this.args;
           const row = db.commands.find(
             (c) =>
               c.id === id &&
               c.status === "running" &&
-              (claimed_by === undefined || c.claimed_by === claimed_by) &&
-              (attempts === undefined || c.attempts === attempts)
+              c.claimed_by === claimed_by &&
+              c.attempts === attempts &&
+              (!nowIso || !c.lease_expires_at || c.lease_expires_at >= nowIso)
           );
           if (!row) return { meta: { changes: 0 } };
           row.status = status;
@@ -248,13 +262,14 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = ?, result_summary_json = ?")) {
-          const [status, result_summary_json, report_file_id, error_message, updated_at, id, claimed_by, attempts] = this.args;
+          const [status, result_summary_json, report_file_id, error_message, updated_at, id, claimed_by, attempts, nowIso] = this.args;
           const row = db.crawlRequests.find(
             (c) =>
               c.id === id &&
               c.status === "running" &&
-              (claimed_by === undefined || c.claimed_by === claimed_by) &&
-              (attempts === undefined || c.attempts === attempts)
+              c.claimed_by === claimed_by &&
+              c.attempts === attempts &&
+              (!nowIso || !c.lease_expires_at || c.lease_expires_at >= nowIso)
           );
           if (!row) return { meta: { changes: 0 } };
           row.status = status;
@@ -287,10 +302,41 @@ class MockD1Database {
           }
           return { meta: { changes: row ? 1 : 0 } };
         }
+        if (norm.startsWith("UPDATE crawl_notifications SET status = 'delivery_uncertain' WHERE status = 'sending'")) {
+          const [cutoffIso] = this.args;
+          let changes = 0;
+          for (const n of db.notifications) {
+            if (n.status === "sending" && (!cutoffIso || n.created_at <= cutoffIso)) {
+              n.status = "delivery_uncertain";
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
+        if (norm.startsWith("DELETE FROM crawl_notifications WHERE status = 'sending'")) {
+          const [cutoffIso] = this.args;
+          const before = db.notifications.length;
+          db.notifications = db.notifications.filter(
+            (n) => !(n.status === "sending" && (!cutoffIso || n.created_at <= cutoffIso))
+          );
+          return { meta: { changes: before - db.notifications.length } };
+        }
         if (norm.startsWith("UPDATE crawl_notifications SET status = 'delivery_uncertain'")) {
           const [run_id] = this.args;
           const row = db.notifications.find((n) => n.run_id === run_id);
           if (row) row.status = "delivery_uncertain";
+          return { meta: { changes: row ? 1 : 0 } };
+        }
+        if (norm.startsWith("UPDATE crawl_notifications SET status = 'delivery_failed'")) {
+          const [run_id] = this.args;
+          const row = db.notifications.find((n) => n.run_id === run_id);
+          if (row) row.status = "delivery_failed";
+          return { meta: { changes: row ? 1 : 0 } };
+        }
+        if (norm.startsWith("UPDATE crawl_notifications SET status = ? WHERE run_id = ?")) {
+          const [nextStatus, run_id] = this.args;
+          const row = db.notifications.find((n) => n.run_id === run_id);
+          if (row) row.status = nextStatus;
           return { meta: { changes: row ? 1 : 0 } };
         }
         return { meta: { changes: 0 } };
@@ -1334,5 +1380,329 @@ await worker.fetch(
 );
 const v3StartBtns = JSON.parse(telegramCalls[v3StartBefore].body).reply_markup.inline_keyboard.flat().map((b) => b.text);
 assert.equal(v3StartBtns.length, 6);
+
+// 11. Second-Round GPT Review Regressions (#1-#8 merged with V3.1):
+//     Issue #1: Inter-run sorting uses crawl execution time ONLY; modifiedTime only breaks ties within same run
+{
+  const env11 = {
+    ...env,
+    DB: new MockD1Database(),
+    NOTIFY_BATCH_SIZE: "10",
+    TELEGRAM_RETRY_BASE_MS: "10",
+    TELEGRAM_RETRY_MAX_WAIT_MS: "40",
+  };
+  const rptOldTouched = {
+    id: "1RptOldTouched",
+    name: "trend_report_old_touched.json",
+    mimeType: "application/json",
+    size: "1200",
+    modifiedTime: "2026-11-30T23:59:59Z", // newer file edit time must NOT override newer crawl run!
+    body: {
+      run_id: "crawl-old-run",
+      ended_at: "2026-11-26T08:00:00Z",
+      generated_at: "2026-11-26T08:05:00Z",
+      run_status: "completed",
+      telegram_summary: "OLD CRAWL RETOUCHED",
+    },
+  };
+  const rptNewOrig = {
+    id: "1RptNewOrig",
+    name: "trend_report_new_run.json",
+    mimeType: "application/json",
+    size: "1200",
+    modifiedTime: "2026-11-27T12:05:00Z",
+    body: {
+      run_id: "crawl-new-run",
+      ended_at: "2026-11-27T12:00:00Z",
+      generated_at: "2026-11-27T12:05:00Z",
+      run_status: "completed",
+      telegram_summary: "NEW CRAWL ORIG",
+    },
+  };
+  const rptNewRev2 = {
+    id: "1RptNewRev2",
+    name: "trend_report_new_run_corrected_v2.json",
+    mimeType: "application/json",
+    size: "1300",
+    modifiedTime: "2026-11-27T12:15:00Z",
+    body: {
+      run_id: "crawl-new-run",
+      corrects_report: "trend_report_new_run.json",
+      ended_at: "2026-11-27T12:00:00Z",
+      generated_at: "2026-11-27T12:15:00Z",
+      run_status: "completed",
+      technical_status: "completed",
+      data_quality_status: "đạt",
+      telegram_summary: "NEW CRAWL CORRECTED WINS",
+    },
+  };
+  const batch25Files = Array.from({ length: 25 }, (_, i) => ({
+    id: `1BatchRpt_${String(i + 1).padStart(2, "0")}`,
+    name: `trend_report_batch_${String(i + 1).padStart(2, "0")}.json`,
+    mimeType: "application/json",
+    size: "900",
+    modifiedTime: `2026-11-26T1${Math.floor(i / 10)}:${String((i % 10) * 5).padStart(2, "0")}:00Z`,
+    body: {
+      run_id: `batch-run-${String(i + 1).padStart(2, "0")}`,
+      generated_at: `2026-11-26T1${Math.floor(i / 10)}:${String((i % 10) * 5).padStart(2, "0")}:00Z`,
+      run_status: "completed",
+      telegram_summary: `Batch summary #${i + 1}`,
+    },
+  }));
+
+  let activeDriveReports = [rptOldTouched, rptNewOrig, rptNewRev2];
+  let drivePaginationMode = "ok"; // "repeated" | "missing_token" | "many_pages"
+  let tg429Remaining = 0;
+
+  const prevFetch11 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+      const u = new URL(sUrl);
+      const q = u.searchParams.get("q") || "";
+      if (q.includes(`'${REPORTS_ID}' in parents`) && !q.includes("vnd.google-apps.document")) {
+        return new Response(JSON.stringify({ files: activeDriveReports }), { status: 200 });
+      }
+      if (drivePaginationMode !== "ok" && q.includes(`'${THREADS_ID}' in parents`)) {
+        if (drivePaginationMode === "repeated") {
+          return new Response(JSON.stringify({
+            files: [{ id: "1DupPageA", name: "threads_dup_a.json", mimeType: "application/json", size: "100", modifiedTime: "2026-11-26T15:00:00Z" }],
+            nextPageToken: "tok_dup",
+          }), { status: 200 });
+        }
+        if (drivePaginationMode === "missing_token") {
+          return new Response(JSON.stringify({
+            files: [{ id: "1MissTokA", name: "threads_miss_a.json", mimeType: "application/json", size: "100", modifiedTime: "2026-11-26T15:00:00Z" }],
+            has_more: true,
+          }), { status: 200 });
+        }
+        if (drivePaginationMode === "many_pages") {
+          const pt = Number(u.searchParams.get("pageToken") || "0");
+          return new Response(JSON.stringify({
+            files: [{ id: `1ManyPg_${pt}`, name: `threads_many_${pt}.json`, mimeType: "application/json", size: "100", modifiedTime: "2026-11-26T15:00:00Z" }],
+            nextPageToken: String(pt + 1),
+          }), { status: 200 });
+        }
+      }
+    }
+    for (const f of activeDriveReports) {
+      if (sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)) {
+        return new Response(JSON.stringify(f.body), { status: 200 });
+      }
+    }
+    if (tg429Remaining > 0 && sUrl.startsWith("https://api.telegram.org/bot") && sUrl.includes("/sendMessage")) {
+      tg429Remaining -= 1;
+      telegramCalls.push({ url: sUrl, body: init.body, mock429: true });
+      return new Response(JSON.stringify({ ok: false, error_code: 429, parameters: { retry_after: 0.02 }, description: "Too Many Requests" }), { status: 429 });
+    }
+    return prevFetch11(url, init);
+  };
+
+  try {
+    // Test Issue #1: rpt:summary picks crawl-new-run corrected over crawl-old-run even though old has newer modifiedTime
+    const tgBefore11 = telegramCalls.length;
+    const rptRes11 = await worker.fetch(
+      new Request("https://example.workers.dev/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+        body: JSON.stringify({
+          update_id: 7001,
+          callback_query: { id: "cq_11_1", from: { id: 999001 }, message: { message_id: 71, chat: { id: 999001, type: "private" } }, data: "rpt:summary" },
+        }),
+      }),
+      env11
+    );
+    assert.equal(rptRes11.status, 200);
+    const msg11 = String(telegramCalls[telegramCalls.length - 1].body);
+    assert.ok(msg11.includes("NEW CRAWL CORRECTED WINS"));
+    assert.ok(!msg11.includes("OLD CRAWL RETOUCHED"));
+    // Issue #8: rpt:full surfaces all 3 statuses distinctly
+    await worker.fetch(
+      new Request("https://example.workers.dev/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+        body: JSON.stringify({
+          update_id: 7002,
+          callback_query: { id: "cq_11_2", from: { id: 999001 }, message: { message_id: 71, chat: { id: 999001, type: "private" } }, data: "rpt:full" },
+        }),
+      }),
+      env11
+    );
+    const full11 = String(telegramCalls[telegramCalls.length - 1].body);
+    assert.ok(full11.includes("run_status: completed"));
+    assert.ok(full11.includes("technical_status: completed"));
+    assert.ok(full11.includes("data_quality_status: đạt"));
+
+    // Issue #2: 25-file Drive backlog processed cleanly in batches of 10 via durable cursor without missing #21..#25
+    activeDriveReports = batch25Files;
+    await worker.scheduled({}, env11, {});
+    assert.equal(env11.DB.notifications.filter(n => n.run_id.startsWith("batch-run-")).length, 10);
+    assert.ok(env11.DB.runtimeState.get("notify_drive_cursor"));
+    await worker.scheduled({}, env11, {});
+    assert.equal(env11.DB.notifications.filter(n => n.run_id.startsWith("batch-run-")).length, 20);
+    await worker.scheduled({}, env11, {});
+    assert.equal(env11.DB.notifications.filter(n => n.run_id.startsWith("batch-run-")).length, 25);
+    // Re-running cron creates zero duplicates
+    await worker.scheduled({}, env11, {});
+    assert.equal(env11.DB.notifications.filter(n => n.run_id.startsWith("batch-run-")).length, 25);
+
+    // Issue #2 Unified Key: /complete sets shared run_id key; subsequent Drive report for same run_id does NOT double-send
+    env11.DB.crawlRequests.push({
+      id: "crw_unified_shared",
+      platform: "threads",
+      keywords: "",
+      requested_count: 20,
+      status: "running",
+      claimed_by: "muse-unified",
+      claimed_at: new Date().toISOString(),
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 1,
+      max_attempts: 3,
+      requested_by_chat_id: "999001",
+      notified_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    const compUniRes = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests/crw_unified_shared/complete", {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          worker_id: "muse-unified",
+          attempt: 1,
+          status: "completed",
+          result_summary: { run_id: "shared-run-uni-1", record_count: 15, qualified_count: 8, run_status: "completed" },
+        }),
+      }),
+      env11
+    );
+    assert.equal(compUniRes.status, 200);
+    assert.ok(env11.DB.notifications.some(n => n.run_id === "shared-run-uni-1" && n.status === "sent"));
+    assert.ok(env11.DB.crawlRequests.find(c => c.id === "crw_unified_shared").notified_at);
+
+    activeDriveReports = [{
+      id: "1SharedDriveRpt",
+      name: "trend_report_shared.json",
+      mimeType: "application/json",
+      size: "900",
+      modifiedTime: "2026-11-28T01:00:00Z",
+      body: { request_id: "crw_unified_shared", run_id: "shared-run-uni-1", generated_at: "2026-11-28T01:00:00Z", run_status: "completed", telegram_summary: "SHOULD NOT DOUBLE SEND" },
+    }];
+    const callsBeforeDupUni = telegramCalls.length;
+    await worker.scheduled({}, env11, {});
+    assert.equal(telegramCalls.length, callsBeforeDupUni);
+
+    // Issue #3: Mandatory attempt on /complete (400 if omitted) + atomic lease check inside UPDATE (409 if expired)
+    env11.DB.crawlRequests.push({
+      id: "crw_req_attempt",
+      platform: "threads",
+      keywords: "",
+      requested_count: 10,
+      status: "running",
+      claimed_by: "muse-w1",
+      claimed_at: new Date().toISOString(),
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 1,
+      max_attempts: 3,
+      notified_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    const noAttemptRes = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests/crw_req_attempt/complete", {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ worker_id: "muse-w1", status: "completed", result_summary: { record_count: 5 } }),
+      }),
+      env11
+    );
+    assert.equal(noAttemptRes.status, 400);
+    assert.equal(env11.DB.crawlRequests.find(c => c.id === "crw_req_attempt").status, "running");
+
+    // Expire lease -> 409 Conflict (atomic UPDATE guard blocks expired lease)
+    env11.DB.crawlRequests.find(c => c.id === "crw_req_attempt").lease_expires_at = new Date(Date.now() - 10_000).toISOString();
+    const expiredLeaseRes = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests/crw_req_attempt/complete", {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ worker_id: "muse-w1", attempt: 1, status: "completed", result_summary: { record_count: 5 } }),
+      }),
+      env11
+    );
+    assert.equal(expiredLeaseRes.status, 409);
+
+    // Issue #4: Telegram 429 retry with backoff succeeds -> 'sent'; stuck 'sending' warning + resolution buttons
+    tg429Remaining = 1;
+    activeDriveReports = [{
+      id: "1Rpt429Retry",
+      name: "trend_report_429.json",
+      mimeType: "application/json",
+      size: "800",
+      modifiedTime: "2026-11-28T02:00:00Z",
+      body: { run_id: "run-429-recovered", generated_at: "2026-11-28T02:00:00Z", run_status: "completed", telegram_summary: "Recovered after 429" },
+    }];
+    const callsBefore429 = telegramCalls.length;
+    await worker.scheduled({}, env11, {});
+    assert.equal(telegramCalls.length - callsBefore429, 2); // 1 HTTP 429 + 1 retry 200
+    assert.ok(env11.DB.notifications.some(n => n.run_id === "run-429-recovered" && n.status === "sent"));
+
+    // Simulate stuck 'sending' (>5 min old) -> sys:status warns and provides remediation callbacks
+    env11.DB.notifications.push({
+      run_id: "run-stuck-sending-1",
+      record_count: 10,
+      status: "sending",
+      created_at: new Date(Date.now() - 15 * 60_000).toISOString(),
+      sent_at: null,
+    });
+    await worker.fetch(
+      new Request("https://example.workers.dev/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+        body: JSON.stringify({
+          update_id: 7003,
+          callback_query: { id: "cq_11_3", from: { id: 999001 }, message: { message_id: 72, chat: { id: 999001, type: "private" } }, data: "sys:status" },
+        }),
+      }),
+      env11
+    );
+    const sysStuckBody = String(telegramCalls[telegramCalls.length - 1].body);
+    assert.ok(sysStuckBody.includes("Cảnh báo trạng thái sending bị treo"));
+    assert.ok(sysStuckBody.includes("Phương án xử lý"));
+    assert.ok(sysStuckBody.includes("notif:stuck:uncertain"));
+    // Resolving stuck 'sending' -> transitions safely to 'delivery_uncertain'
+    await worker.fetch(
+      new Request("https://example.workers.dev/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+        body: JSON.stringify({
+          update_id: 7004,
+          callback_query: { id: "cq_11_4", from: { id: 999001 }, message: { message_id: 72, chat: { id: 999001, type: "private" } }, data: "notif:stuck:uncertain" },
+        }),
+      }),
+      env11
+    );
+    assert.equal(env11.DB.notifications.find(n => n.run_id === "run-stuck-sending-1").status, "delivery_uncertain");
+
+    // Issue #6: Worker Drive pagination partial_error preserves cursor & reports partial_error explicitly
+    for (const [mode, expectedErr] of [
+      ["repeated", "repeated_page_token"],
+      ["missing_token", "missing_page_token"],
+      ["many_pages", "page_limit_exceeded"],
+    ]) {
+      drivePaginationMode = mode;
+      const pRes = await worker.fetch(
+        new Request("https://example.workers.dev/api/app/market/files?cursor=2026-11-26T00:00:00Z&max_pages=2", { headers: authHeaders }),
+        env11
+      );
+      assert.equal(pRes.status, 200);
+      const pJson = await pRes.json();
+      assert.equal(pJson.status, "partial_error");
+      assert.equal(pJson.partial_error, expectedErr);
+      assert.equal(pJson.next_cursor, "2026-11-26T00:00:00Z"); // cursor NOT advanced on partial_error!
+    }
+  } finally {
+    globalThis.fetch = prevFetch11;
+  }
+}
 
 console.log("WORKER_V2_CONTRACT_TESTS_OK");

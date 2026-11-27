@@ -31,9 +31,11 @@ class MarketSyncService:
         store: MarketIntelligenceStore,
         client: CloudflareBridgeClient,
         default_interval_sec: int = 300,
+        max_list_pages: int = 50,
     ):
         self.store = store
         self.client = client
+        self.max_list_pages = max(1, int(max_list_pages))
         if self.store.get_state("sync_interval_seconds") is None:
             self.store.set_sync_interval_seconds(default_interval_sec)
 
@@ -165,16 +167,31 @@ class MarketSyncService:
                 seen_fids = set()
                 seen_page_tokens = set()
                 page_token = None
-                for _page in range(50):
+                pagination_error: Optional[str] = None
+                for page_idx in range(self.max_list_pages):
                     listing = self.client.list_market_files(cursor=cursor, limit=100, page_token=page_token)
+                    if listing.get("status") == "partial_error" or listing.get("partial_error"):
+                        pagination_error = f"Worker pagination partial_error ({listing.get('partial_error') or 'incomplete'})"
                     page_files = listing.get("files", []) or []
                     for fmeta in page_files:
                         fid = fmeta.get("file_id") or fmeta.get("id")
                         if fid and fid not in seen_fids:
                             seen_fids.add(fid)
                             all_files.append(fmeta)
+                    if pagination_error:
+                        break
+                    has_more = bool(listing.get("has_more"))
                     next_pt = listing.get("next_page_token")
-                    if not listing.get("has_more") or not next_pt or next_pt in seen_page_tokens:
+                    if not has_more:
+                        break
+                    if not next_pt:
+                        pagination_error = "Pagination partial_error: has_more=true nhưng thiếu next_page_token"
+                        break
+                    if next_pt == page_token or next_pt in seen_page_tokens:
+                        pagination_error = f"Pagination partial_error: token phân trang bị lặp ({next_pt})"
+                        break
+                    if page_idx >= self.max_list_pages - 1:
+                        pagination_error = f"Pagination partial_error: vượt giới hạn {self.max_list_pages} trang"
                         break
                     seen_page_tokens.add(next_pt)
                     page_token = next_pt
@@ -198,7 +215,7 @@ class MarketSyncService:
                     folder_path = fmeta.get("folder_path")
                     platform_hint = fmeta.get("platform_hint")
 
-                    if is_archive_path(folder_path):
+                    if is_archive_path(folder_path) or is_archive_path(fname):
                         if mtime and (not latest_mtime or mtime > latest_mtime):
                             latest_mtime = mtime
                         continue
@@ -233,15 +250,21 @@ class MarketSyncService:
                     except Exception as file_exc:
                         file_errors.append(f"{fname}: {file_exc}")
 
-                if not file_errors and latest_mtime:
+                all_errors = list(file_errors)
+                if pagination_error:
+                    all_errors.append(pagination_error)
+                all_ok = len(all_errors) == 0
+
+                # Never commit drive_cursor when pagination or file downloads were incomplete
+                if all_ok and latest_mtime:
                     self.store.set_state("drive_cursor", latest_mtime)
 
                 now_iso = _utc_now_iso()
-                final_status = "completed" if not file_errors else "failed"
-                err_msg = "; ".join(file_errors) if file_errors else None
+                final_status = "completed" if all_ok else "partial_error"
+                err_msg = "; ".join(all_errors) if all_errors else None
 
                 self.store.set_state("last_sync_at", now_iso)
-                self.store.set_state("last_sync_status", "ok" if not file_errors else "partial_error")
+                self.store.set_state("last_sync_status", "ok" if all_ok else "partial_error")
                 self.store.set_state("last_error", err_msg or "")
 
                 self.store.finish_sync_run(
@@ -260,6 +283,9 @@ class MarketSyncService:
                 return {
                     "run_id": run_id,
                     "status": final_status,
+                    "partial_error": not all_ok,
+                    "pagination_error": pagination_error,
+                    "cursor_committed": bool(all_ok and latest_mtime),
                     "files_checked": files_checked,
                     "files_downloaded": files_downloaded,
                     "records_parsed": records_parsed,

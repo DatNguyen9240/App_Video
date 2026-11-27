@@ -38,9 +38,11 @@ class RemoteCommandPoller:
         sync_service: MarketSyncService,
         poll_interval_sec: int = 10,
         heartbeat_interval_sec: int = 30,
+        heartbeat_client: Optional[CloudflareBridgeClient] = None,
     ):
         self.store = store
         self.client = client
+        self.heartbeat_client = heartbeat_client or client
         self.sync_service = sync_service
         self.poll_interval_sec = max(3, int(poll_interval_sec))
         self.heartbeat_interval_sec = max(10, int(heartbeat_interval_sec))
@@ -109,8 +111,9 @@ class RemoteCommandPoller:
             self._stop_event.wait(timeout=self.heartbeat_interval_sec)
 
     def send_heartbeat_once(self) -> bool:
-        self.client.reload_config()
-        if not self.client.is_configured():
+        hb_client = self.heartbeat_client
+        hb_client.reload_config()
+        if not hb_client.is_configured():
             return False
         stats = self.store.get_stats()
         try:
@@ -132,7 +135,7 @@ class RemoteCommandPoller:
             "sync_interval_seconds": stats.get("sync_interval_seconds", 300),
             "app_version": "2.4",
         }
-        self.client.send_heartbeat(payload)
+        hb_client.send_heartbeat(payload)
         self._last_heartbeat_ts = time.monotonic()
         return True
 
@@ -272,7 +275,7 @@ class RemoteCommandPoller:
         )
         try:
             result = self._execute_business_command(command_id, command_type)
-            status = "failed" if result.get("status") == "failed" else "completed"
+            status = "failed" if result.get("status") in ("failed", "partial_error") else "completed"
             err_msg = result.get("error_message")
         except Exception as exc:
             result = {}
