@@ -220,6 +220,34 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
         self.poll_profile = "test_5m" if poll_profile == "test_5m" else "production_6h"
         return {"ok": True, "poll_profile": self.poll_profile, "expected_pickup_at": "2026-11-26T15:05:00Z"}
 
+    def check_cross_run_dedup(self, items: list):
+        reg = getattr(self, "mock_registry", {})
+        existing = {it.get("dedup_key"): reg[it.get("dedup_key")] for it in (items or []) if it.get("dedup_key") in reg}
+        return {"ok": True, "existing": existing, "existing_keys": list(existing.keys()), "existing_count": len(existing)}
+
+    def record_cross_run_dedup(self, items: list, run_id: str = None):
+        if not hasattr(self, "mock_registry"):
+            self.mock_registry = {}
+        new_c = 0
+        dup_c = 0
+        upd_c = 0
+        for it in (items or []):
+            k = it.get("dedup_key")
+            if not k:
+                continue
+            prev = self.mock_registry.get(k)
+            if not prev:
+                self.mock_registry[k] = {"metrics": it.get("metrics") or {}, "run_id": run_id, "snapshot_count": 1}
+                new_c += 1
+            elif prev["metrics"] != (it.get("metrics") or {}):
+                prev["metrics"] = it.get("metrics") or {}
+                prev["snapshot_count"] += 1
+                upd_c += 1
+            else:
+                prev["snapshot_count"] += 1
+                dup_c += 1
+        return {"ok": True, "new_count": new_c, "duplicate_count": dup_c, "updated_count": upd_c}
+
 
 class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
     def setUp(self):
@@ -1051,6 +1079,89 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         # Explicit include_archived=True still sees full historical data
         self.assertEqual(len(self.store.list_reports(include_archived=True)), 1)
         self.assertEqual(self.store.query_items(limit=200, include_archived=True)["total"], items_total_before)
+
+    def test_crawl_center_custom_count_polling_and_cross_run_filters(self):
+        """Crawl Center supports exact custom requested_count, progress metrics, single 10s tab-scoped polling, activity filters, and pushes dedup registry on sync."""
+        orig_runtime = app_ui.get_market_runtime
+        app_ui.get_market_runtime = lambda: {
+            "store": self.store,
+            "client": self.client,
+            "sync_service": self.sync_service,
+            "remote_poller": self.poller,
+        }
+        try:
+            client = app_ui.app.test_client()
+
+            # 1) Exact custom requested_count passes through cleanly (e.g. 37) and rejects out-of-range
+            post_ok = client.post(
+                "/api/remote/crawl_requests",
+                json={"platform": "threads", "requested_count": 37, "keywords": "kem chong nang"},
+            )
+            self.assertEqual(post_ok.status_code, 200)
+            ok_json = post_ok.get_json()
+            self.assertTrue(ok_json["ok"])
+            self.assertEqual(ok_json["request"]["requested_count"], 37)
+
+            post_bad = client.post(
+                "/api/remote/crawl_requests",
+                json={"platform": "threads", "requested_count": 0, "keywords": "bad"},
+            )
+            self.assertEqual(post_bad.status_code, 400)
+
+            # 2) Ingest multi-run items & test /api/market/items?activity_filter=...
+            run_a = {
+                "run_id": "ui-run-1",
+                "platform": "threads",
+                "crawled_at": "2026-11-27T08:00:00Z",
+                "records": [{"post_id": "UI_P1", "post_url": "https://threads.net/@a/post/UI_P1", "views": 100, "likes": 10}],
+            }
+            run_b = {
+                "run_id": "ui-run-2",
+                "platform": "threads",
+                "crawled_at": "2026-11-27T12:00:00Z",
+                "records": [
+                    {"post_id": "UI_P1", "post_url": "https://threads.net/@a/post/UI_P1", "views": 800, "likes": 45},
+                    {"post_id": "UI_P2", "post_url": "https://threads.net/@b/post/UI_P2", "views": None, "likes": 5},
+                ],
+            }
+            self.client.add_drive_file("f_ui_1", "threads_trend_ui1.json", json.dumps(run_a).encode("utf-8"), "2026-11-27T08:00:00Z", "md5_ui1")
+            s1 = self.sync_service.sync_now(trigger_source="test_ui_1")
+            self.assertEqual(s1["new_count"], 1)
+            self.client.add_drive_file("f_ui_2", "threads_trend_ui2.json", json.dumps(run_b).encode("utf-8"), "2026-11-27T12:00:00Z", "md5_ui2")
+            s2 = self.sync_service.sync_now(trigger_source="test_ui_2")
+            self.assertEqual(s2["new_count"], 1)
+            self.assertEqual(s2["engagement_updated_count"], 1)
+            self.assertEqual(s2["missing_views_count"], 1)
+            self.assertGreaterEqual(len(self.client.mock_registry), 2)
+
+            r_new = client.get("/api/market/items?activity_filter=new").get_json()
+            self.assertEqual(r_new["total"], 1)
+            self.assertEqual(r_new["items"][0]["post_id"], "UI_P2")
+
+            r_growth = client.get("/api/market/items?activity_filter=growth").get_json()
+            self.assertEqual(r_growth["total"], 1)
+            self.assertEqual(r_growth["items"][0]["post_id"], "UI_P1")
+            self.assertEqual(r_growth["items"][0]["last_views_delta"], 700)
+
+            r_all = client.get("/api/market/items?activity_filter=all").get_json()
+            self.assertEqual(r_all["total"], 2)
+
+            # 3) Verify UI HTML/JS structure enforces Crawl Center single 10s tab-scoped timer, manual Làm mới, custom input, progress indicator, and zero form reset on poll
+            html = client.get("/").get_data(as_text=True)
+            self.assertIn('type="number"', html)
+            self.assertIn("crawlRequestForm.requested_count", html)
+            self.assertIn("refreshCrawlCenter(true)", html)
+            self.assertIn("startCrawlCenterPolling()", html)
+            self.assertIn("stopCrawlCenterPolling()", html)
+            self.assertIn("}, 10000);", html)
+            self.assertIn("if (this.isCrawlCenterRefreshing) return;", html)
+            self.assertIn("Chưa đạt mục tiêu", html)
+            self.assertIn("Bài mới", html)
+            self.assertIn("Tăng trưởng", html)
+            self.assertIn("Toàn bộ lịch sử", html)
+            self.assertIn("Lịch sử Engagement Snapshots", html)
+        finally:
+            app_ui.get_market_runtime = orig_runtime
 
 
 if __name__ == "__main__":

@@ -137,6 +137,13 @@ class MarketSyncService:
             records_inserted = 0
             records_updated = 0
             records_deduped = 0
+            new_count = 0
+            duplicate_count = 0
+            engagement_updated_count = 0
+            missing_views_count = 0
+            scanned_count = 0
+            rejected_count = 0
+            registry_items = []
 
             try:
                 if not self.client.is_configured():
@@ -251,6 +258,14 @@ class MarketSyncService:
                         records_inserted += ingest_res["inserted"]
                         records_updated += ingest_res["updated"]
                         records_deduped += ingest_res["deduped"]
+                        new_count += int(ingest_res.get("new_count") if ingest_res.get("new_count") is not None else ingest_res["inserted"])
+                        duplicate_count += int(ingest_res.get("duplicate_count") if ingest_res.get("duplicate_count") is not None else ingest_res["deduped"])
+                        engagement_updated_count += int(ingest_res.get("engagement_updated_count") or 0)
+                        missing_views_count += int(ingest_res.get("missing_views_count") or 0)
+                        scanned_count += int(ingest_res.get("scanned_count") or ingest_res["parsed"])
+                        rejected_count += int(ingest_res.get("rejected_count") or 0)
+                        if isinstance(ingest_res.get("registry_items"), list):
+                            registry_items.extend(ingest_res["registry_items"])
                         if mtime and (not latest_mtime or mtime > latest_mtime):
                             latest_mtime = mtime
                     except Exception as file_exc:
@@ -278,6 +293,12 @@ class MarketSyncService:
                 self.store.set_state("last_sync_status", "ok" if all_ok else "partial_error")
                 self.store.set_state("last_error", err_msg or "")
 
+                if registry_items and hasattr(self.client, "record_cross_run_dedup"):
+                    try:
+                        self.client.record_cross_run_dedup(registry_items[:500], run_id=run_id)
+                    except Exception:
+                        pass
+
                 self.store.finish_sync_run(
                     run_id,
                     status=final_status,
@@ -288,6 +309,12 @@ class MarketSyncService:
                     records_updated=records_updated,
                     records_deduped=records_deduped,
                     error_message=err_msg,
+                    new_count=new_count,
+                    duplicate_count=duplicate_count,
+                    updated_count=engagement_updated_count,
+                    missing_views_count=missing_views_count,
+                    scanned_count=scanned_count,
+                    rejected_count=rejected_count,
                 )
 
                 stats = self.store.get_stats()
@@ -303,6 +330,12 @@ class MarketSyncService:
                     "records_inserted": records_inserted,
                     "records_updated": records_updated,
                     "records_deduped": records_deduped,
+                    "new_count": new_count,
+                    "duplicate_count": duplicate_count,
+                    "engagement_updated_count": engagement_updated_count,
+                    "missing_views_count": missing_views_count,
+                    "scanned_count": scanned_count,
+                    "rejected_count": rejected_count,
                     "total_items": stats["total_items"],
                     "by_platform": stats["by_platform"],
                     "error_message": err_msg,

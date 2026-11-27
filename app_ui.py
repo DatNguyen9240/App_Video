@@ -2461,7 +2461,12 @@ HTML_TEMPLATE = """
               <span class="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">TikTok: {{ marketStatus.stats?.by_platform?.tiktok ?? 0 }}</span>
               <span class="px-2 py-0.5 rounded bg-orange-500/15 text-orange-300 border border-orange-500/30">Shopee: {{ marketStatus.stats?.by_platform?.shopee ?? 0 }}</span>
             </div>
-            <div class="text-[10px] text-slate-400">Từ {{ marketStatus.stats?.total_raw_files ?? 0 }} file Drive (tách riêng file strategy/audit/contract)</div>
+            <div class="text-[10px] text-slate-400">
+              Từ {{ marketStatus.stats?.total_raw_files ?? 0 }} file Drive •
+              <span class="text-emerald-300">Mới: {{ marketStatus.stats?.by_activity?.new ?? 0 }}</span> •
+              <span class="text-sky-300">Tăng trưởng: {{ marketStatus.stats?.by_activity?.growth ?? 0 }}</span> •
+              <span>Snapshots: {{ marketStatus.stats?.total_snapshots ?? marketStatus.stats?.total_items ?? 0 }}</span>
+            </div>
           </div>
 
           <div class="glass-panel rounded-2xl p-4 space-y-1.5">
@@ -2569,14 +2574,30 @@ HTML_TEMPLATE = """
 
           <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-3">
             <div class="flex items-center justify-between gap-2 flex-wrap">
-              <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
-                <i class="fa-solid fa-spider"></i> Crawl Center — Hàng Đợi D1
-              </h3>
-              <select v-model="crawlScheduleProfile" @change="updateCrawlScheduleProfile"
-                class="glass-input rounded-lg px-2.5 py-1 text-[11px] bg-slate-800 text-amber-300 font-semibold">
-                <option value="production_6h">Chu kỳ đề xuất Worker: Production (6h)</option>
-                <option value="test_5m">Chu kỳ đề xuất Worker: Test giới hạn (5p)</option>
-              </select>
+              <div class="space-y-0.5">
+                <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                  <i class="fa-solid fa-spider"></i> Crawl Center — Hàng Đợi D1
+                </h3>
+                <div class="text-[10px] text-slate-400 flex items-center gap-2">
+                  <span class="inline-flex items-center gap-1 text-emerald-300/90">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400" :class="crawlCenterTimer ? 'animate-pulse' : 'opacity-40'"></span>
+                    {{ crawlCenterTimer ? 'Tự làm mới mỗi 10s' : 'Tạm dừng ngoài tab' }}
+                  </span>
+                  <span v-if="crawlLastRefreshedAt" class="font-mono text-slate-500">• Cập nhật: {{ formatIsoTime(crawlLastRefreshedAt) }}</span>
+                </div>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <button @click="refreshCrawlCenter(true)" :disabled="isCrawlCenterRefreshing"
+                  class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-sky-300 border border-slate-700 text-[11px] font-semibold flex items-center gap-1 cursor-pointer">
+                  <i class="fa-solid fa-rotate" :class="isCrawlCenterRefreshing ? 'animate-spin' : ''"></i>
+                  <span>{{ isCrawlCenterRefreshing ? 'Đang tải...' : 'Làm mới' }}</span>
+                </button>
+                <select v-model="crawlScheduleProfile" @change="updateCrawlScheduleProfile"
+                  class="glass-input rounded-lg px-2.5 py-1 text-[11px] bg-slate-800 text-amber-300 font-semibold">
+                  <option value="production_6h">Chu kỳ đề xuất Worker: Production (6h)</option>
+                  <option value="test_5m">Chu kỳ đề xuất Worker: Test giới hạn (5p)</option>
+                </select>
+              </div>
             </div>
             <div class="text-[11px] text-slate-300 bg-slate-900/60 px-3 py-2 rounded-xl border border-slate-800 space-y-0.5">
               <div>
@@ -2589,48 +2610,84 @@ HTML_TEMPLATE = """
               </div>
             </div>
 
-            <div class="grid grid-cols-1 sm:grid-cols-12 gap-2">
-              <select v-model="crawlRequestForm.platform" class="sm:col-span-3 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
-                <option value="all">Tất cả (All)</option>
-                <option value="threads">Threads</option>
-                <option value="tiktok">TikTok</option>
-                <option value="shopee">Shopee</option>
-              </select>
-              <select v-model.number="crawlRequestForm.requested_count" class="sm:col-span-2 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
-                <option :value="20">20 bài</option>
-                <option :value="50">50 bài</option>
-                <option :value="100">100 bài</option>
-                <option :value="200">200 bài</option>
-              </select>
-              <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa / ngách sản phẩm..."
-                class="sm:col-span-5 glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
-              <button @click="submitCrawlRequest"
-                class="sm:col-span-2 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer">
-                Gửi Queue
-              </button>
+            <div class="space-y-2">
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                <select v-model="crawlRequestForm.platform" class="sm:col-span-3 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="all">Tất cả (All)</option>
+                  <option value="threads">Threads</option>
+                  <option value="tiktok">TikTok</option>
+                  <option value="shopee">Shopee</option>
+                </select>
+                <div class="sm:col-span-3 flex items-center gap-1">
+                  <input v-model.number="crawlRequestForm.requested_count" type="number" min="1" max="500" step="1"
+                    placeholder="Số bài (1-500)" title="Nhập số bài mục tiêu muốn crawl (1–500)"
+                    class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs font-mono bg-slate-800 text-slate-100">
+                  <span class="text-[10px] text-slate-400 shrink-0">bài</span>
+                </div>
+                <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa / ngách sản phẩm..."
+                  class="sm:col-span-4 glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
+                <button @click="submitCrawlRequest"
+                  class="sm:col-span-2 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer">
+                  Gửi Queue
+                </button>
+              </div>
+              <div class="flex items-center gap-1.5 flex-wrap text-[10px] text-slate-400">
+                <span>Chọn nhanh số lượng:</span>
+                <button v-for="preset in [10, 20, 50, 100, 200]" :key="'crw-preset-' + preset"
+                  type="button" @click="crawlRequestForm.requested_count = preset"
+                  :class="Number(crawlRequestForm.requested_count) === preset ? 'bg-amber-600 text-white border-amber-500 font-bold' : 'bg-slate-800/80 text-slate-300 border-slate-700 hover:bg-slate-700'"
+                  class="px-2 py-0.5 rounded border font-mono cursor-pointer transition">
+                  {{ preset }}
+                </button>
+              </div>
             </div>
 
-            <div class="space-y-2 max-h-48 overflow-y-auto text-xs pt-1">
+            <div class="space-y-2 max-h-64 overflow-y-auto text-xs pt-1">
               <div v-for="crw in crawlRequests" :key="crw.id"
-                class="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 flex items-center justify-between gap-2">
-                <div class="min-w-0">
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
-                    <span class="font-mono text-[11px] text-slate-300">{{ crw.requested_count || 50 }} bài</span>
-                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
-                      :class="crw.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' : (crw.status === 'running' ? 'bg-cyan-500/20 text-cyan-300' : (crw.status === 'queued' ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-800 text-slate-400'))">
-                      {{ crw.status === 'queued' ? 'Đang chờ Muse claim' : (crw.status === 'running' ? 'Muse đang crawl' : crw.status) }}
-                    </span>
-                    <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
+                class="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 space-y-1.5">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
+                      <span class="font-mono text-[11px] text-slate-200 font-semibold">Mục tiêu: {{ crw.requested_count || 50 }} bài</span>
+                      <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
+                        :class="crw.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' : (crw.status === 'running' ? 'bg-cyan-500/20 text-cyan-300' : (crw.status === 'queued' ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-800 text-slate-400'))">
+                        {{ crw.status === 'queued' ? 'Đang chờ Muse claim' : (crw.status === 'running' ? 'Muse đang crawl' : crw.status) }}
+                      </span>
+                      <template v-if="getCrawlProgress(crw).hasRealMetrics && getCrawlProgress(crw).newQualified !== null">
+                        <span class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border"
+                          :class="getCrawlProgress(crw).reached ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-amber-500/20 text-amber-300 border-amber-500/40'">
+                          {{ getCrawlProgress(crw).newQualified }}/{{ getCrawlProgress(crw).target }} • {{ getCrawlProgress(crw).reached ? 'Đủ mục tiêu' : 'Chưa đạt mục tiêu' }}
+                        </span>
+                      </template>
+                      <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
+                    </div>
+                    <div class="text-[10px] text-slate-400 truncate mt-0.5">
+                      {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
+                    </div>
                   </div>
-                  <div class="text-[10px] text-slate-400 truncate mt-0.5">
-                    {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
+                  <button v-if="crw.status === 'queued'" @click="cancelCrawlRequest(crw.id)"
+                    class="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/30 text-[10px] font-semibold shrink-0 cursor-pointer">
+                    Hủy chờ
+                  </button>
+                </div>
+
+                <!-- Tiến độ thực tế từ backend (khi có số liệu) -->
+                <div v-if="getCrawlProgress(crw).hasRealMetrics" class="space-y-1 pt-1 border-t border-slate-800/80">
+                  <div v-if="getCrawlProgress(crw).newQualified !== null" class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                    <div class="h-full transition-all duration-300 rounded-full"
+                      :class="getCrawlProgress(crw).reached ? 'bg-emerald-500' : 'bg-amber-500'"
+                      :style="{ width: Math.min(100, Math.round((getCrawlProgress(crw).newQualified / Math.max(1, getCrawlProgress(crw).target)) * 100)) + '%' }"></div>
+                  </div>
+                  <div class="flex flex-wrap gap-1.5 text-[10px] font-mono">
+                    <span v-if="getCrawlProgress(crw).scanned !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200">Quét: {{ getCrawlProgress(crw).scanned }}</span>
+                    <span v-if="getCrawlProgress(crw).newQualified !== null" class="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-500/30">Mới đạt chuẩn: {{ getCrawlProgress(crw).newQualified }}</span>
+                    <span v-if="getCrawlProgress(crw).duplicate !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">Trùng: {{ getCrawlProgress(crw).duplicate }}</span>
+                    <span v-if="getCrawlProgress(crw).updated !== null" class="px-1.5 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-500/30">Cập nhật tương tác: {{ getCrawlProgress(crw).updated }}</span>
+                    <span v-if="getCrawlProgress(crw).missingViews !== null" class="px-1.5 py-0.5 rounded bg-amber-950/50 text-amber-300 border border-amber-500/30">Thiếu views: {{ getCrawlProgress(crw).missingViews }}</span>
+                    <span v-if="getCrawlProgress(crw).rejected !== null" class="px-1.5 py-0.5 rounded bg-rose-950/50 text-rose-300 border border-rose-500/30">Bị loại: {{ getCrawlProgress(crw).rejected }}</span>
                   </div>
                 </div>
-                <button v-if="crw.status === 'queued'" @click="cancelCrawlRequest(crw.id)"
-                  class="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/30 text-[10px] font-semibold shrink-0 cursor-pointer">
-                  Hủy chờ
-                </button>
               </div>
               <div v-if="!crawlRequests.length" class="text-slate-500 italic py-4 text-center">
                 Chưa có yêu cầu Crawl nào trong hàng đợi D1.
@@ -2655,6 +2712,19 @@ HTML_TEMPLATE = """
               {{ tp.topic }} <span v-if="tp.posts_label" class="text-[10px] text-indigo-300 font-semibold">• {{ tp.posts_label }}</span>
             </button>
           </div>
+        </div>
+
+        <!-- Activity Filter Pills: Bài mới / Tăng trưởng / Toàn bộ lịch sử -->
+        <div class="flex flex-wrap items-center gap-1.5 text-xs">
+          <button @click="marketFilters.activity_filter = 'all'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'all' ? 'bg-slate-100 text-slate-900 font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">📚 Toàn bộ lịch sử ({{ marketStatus.stats?.total_items ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'new'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'new' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">🆕 Bài mới ({{ marketStatus.stats?.by_activity?.new ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'growth'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'growth' ? 'bg-sky-600 text-white font-bold shadow' : 'bg-sky-950/40 text-sky-200 border border-sky-500/30'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">📈 Tăng trưởng ({{ marketStatus.stats?.by_activity?.growth ?? 0 }})</button>
         </div>
 
         <!-- Tier Quick Filter Pills (Very Hot, Hot, Emerging, Watchlist, Unverified + Legacy V1/V2) -->
@@ -2781,11 +2851,16 @@ HTML_TEMPLATE = """
                       </div>
                     </td>
                     <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
-                      <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count.toLocaleString('vi-VN') : '—' }}</div>
-                      <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count.toLocaleString('vi-VN') : '—' }}</div>
+                      <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_likes_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_likes_delta) }})</span></div>
+                      <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_comments_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_comments_delta) }})</span></div>
                       <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ item.reposts_count.toLocaleString('vi-VN') }}</div>
                       <div v-if="item.quotes_count !== null && item.quotes_count !== undefined">🗣️ Quotes: {{ item.quotes_count.toLocaleString('vi-VN') }}</div>
-                      <div v-if="item.views_count !== null && item.views_count !== undefined">👁️ Views: {{ formatCompactMetric(item.views_count) }}</div>
+                      <div v-if="item.views_count !== null && item.views_count !== undefined">👁️ Views: {{ formatCompactMetric(item.views_count) }} <span v-if="item.last_views_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_views_delta) }})</span></div>
+                      <div v-if="(item.snapshot_count || 1) > 1" class="pt-0.5">
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-sans bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                          📈 {{ item.snapshot_count }} snapshots
+                        </span>
+                      </div>
                       <div class="pt-1">
                         <span class="px-1.5 py-0.5 rounded text-[10px] font-sans border"
                           :class="item.verification_status === 'cross_verified_web' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : (item.verification_status === 'unverified' ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30')">
@@ -2836,12 +2911,18 @@ HTML_TEMPLATE = """
       <!-- SUB-TAB 3: TIKTOK -->
       <div v-show="marketSubTab === 'tiktok'" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
         <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
-          <div class="md:col-span-5 relative">
+          <div class="md:col-span-4 relative">
             <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
             <input v-model="marketFilters.search" @keyup.enter="loadMarketItems(0)" type="text"
               placeholder="Tìm tài khoản TikTok, caption, hashtag..."
               class="w-full glass-input rounded-xl pl-8 pr-3 py-2 text-xs text-slate-100">
           </div>
+          <select v-model="marketFilters.activity_filter" @change="loadMarketItems(0)"
+            class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            <option value="all">Toàn bộ lịch sử</option>
+            <option value="new">🆕 Bài mới</option>
+            <option value="growth">📈 Tăng trưởng</option>
+          </select>
           <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
             class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
             <option value="all">Mọi chất lượng</option>
@@ -2849,7 +2930,7 @@ HTML_TEMPLATE = """
             <option value="needs_verification">Cần xác minh (needs_verification)</option>
           </select>
           <select v-model="marketFilters.sort_by" @change="loadMarketItems(0)"
-            class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+            class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
             <option value="views">Sắp xếp: Views cao nhất</option>
             <option value="engagement">Sắp xếp: Tổng tương tác</option>
             <option value="recent">Sắp xếp: Mới nhất</option>
@@ -2936,14 +3017,20 @@ HTML_TEMPLATE = """
       <div v-show="marketSubTab === 'shopee'" class="space-y-4">
         <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
           <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
-            <div class="md:col-span-5 relative">
+            <div class="md:col-span-4 relative">
               <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
               <input v-model="marketFilters.search" @keyup.enter="loadMarketItems(0)" type="text"
                 placeholder="Tìm tên sản phẩm Shopee, shop_id, item_id..."
                 class="w-full glass-input rounded-xl pl-8 pr-3 py-2 text-xs text-slate-100">
             </div>
+            <select v-model="marketFilters.activity_filter" @change="loadMarketItems(0)"
+              class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+              <option value="all">Toàn bộ lịch sử</option>
+              <option value="new">🆕 Bài mới</option>
+              <option value="growth">📈 Tăng trưởng</option>
+            </select>
             <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
-              class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+              class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
               <option value="all">Mọi chất lượng</option>
               <option value="usable">Chỉ usable</option>
               <option value="needs_verification">Cần xác minh (needs_verification)</option>
@@ -3224,8 +3311,8 @@ HTML_TEMPLATE = """
     </main>
 
     <!-- Modal Raw JSON Market Item -->
-    <div v-if="selectedMarketDetail" :style="{ display: selectedMarketDetail ? 'flex' : 'none' }" style="display: none;"
-      class="fixed inset-0 bg-black/85 backdrop-blur-md items-center justify-center z-50 p-4">
+    <div v-if="selectedMarketDetail"
+      class="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center z-50 p-4">
       <div class="glass-panel max-w-4xl w-full rounded-2xl p-6 shadow-2xl border border-indigo-500/40 space-y-4 max-h-[90vh] flex flex-col">
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
           <div>
@@ -3233,6 +3320,27 @@ HTML_TEMPLATE = """
             <p class="text-xs text-slate-400">File gốc: {{ selectedMarketDetail.source_file_name }} • Schema: {{ selectedMarketDetail.schema_version }}</p>
           </div>
           <button @click="selectedMarketDetail = null" class="text-slate-400 hover:text-white p-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+        </div>
+        <div v-if="(selectedMarketDetail.snapshots || []).length" class="p-3 rounded-xl bg-slate-900/80 border border-sky-500/30 space-y-2 max-h-40 overflow-y-auto">
+          <div class="text-xs font-bold text-sky-300 flex items-center justify-between gap-2">
+            <span>📈 Lịch sử Engagement Snapshots ({{ selectedMarketDetail.snapshots.length }} lượt)</span>
+            <span class="text-[10px] font-mono text-slate-400">Thấy lần đầu: {{ formatIsoTime(selectedMarketDetail.first_seen_at) }} • Gần nhất: {{ formatIsoTime(selectedMarketDetail.last_seen_at) }}</span>
+          </div>
+          <table class="w-full text-left text-[11px] font-mono">
+            <thead class="text-slate-400 border-b border-slate-800">
+              <tr><th class="py-1 pr-2">Run</th><th class="py-1 pr-2">Thời điểm</th><th class="py-1 pr-2">Views (Δ)</th><th class="py-1 pr-2">Likes (Δ)</th><th class="py-1 pr-2">Cmt (Δ)</th><th class="py-1">Loại</th></tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/70 text-slate-200">
+              <tr v-for="sn in selectedMarketDetail.snapshots" :key="sn.id">
+                <td class="py-1 pr-2 truncate max-w-[140px]">{{ sn.run_id || sn.source_file_name || '—' }}</td>
+                <td class="py-1 pr-2">{{ formatIsoTime(sn.snapshot_at) }}</td>
+                <td class="py-1 pr-2">{{ formatCompactMetric(sn.views_count) }} <span v-if="sn.views_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.views_delta) }})</span></td>
+                <td class="py-1 pr-2">{{ formatCompactMetric(sn.likes_count) }} <span v-if="sn.likes_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.likes_delta) }})</span></td>
+                <td class="py-1 pr-2">{{ formatCompactMetric(sn.comments_count) }} <span v-if="sn.comments_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.comments_delta) }})</span></td>
+                <td class="py-1">{{ sn.change_type }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 overflow-y-auto flex-1">
           <div>
@@ -3430,13 +3538,17 @@ HTML_TEMPLATE = """
           newGeminiKey: '',
           newGeminiLabel: '',
           pollTimer: null,
+          crawlCenterTimer: null,
+          isCrawlCenterRefreshing: false,
+          isMarketStatusInFlight: false,
+          crawlLastRefreshedAt: null,
           marketStatus: { is_syncing: false, stats: {}, cloudflare: {}, remote_poller: {}, filter_options: {}, recent_runs: [] },
           marketItems: [],
           marketTotal: 0,
           marketOffset: 0,
           marketLimit: 25,
           marketConfigInterval: 300,
-          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', trend_tier: 'all', trend_group: 'all', verification_status: 'all', sort_by: 'recent', search: '' },
+          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', trend_tier: 'all', trend_group: 'all', verification_status: 'all', activity_filter: 'all', sort_by: 'recent', search: '' },
           marketSubTab: 'overview',
           shopeeAffiliateOnly: false,
           selectedMarketDetail: null,
@@ -3527,6 +3639,15 @@ HTML_TEMPLATE = """
           return sections;
         }
       },
+      watch: {
+        currentTab(newTab) {
+          if (newTab === 'market') {
+            this.startCrawlCenterPolling();
+          } else {
+            this.stopCrawlCenterPolling();
+          }
+        }
+      },
       mounted() {
         this.loadSettings();
         this.loadBgmList();
@@ -3538,9 +3659,16 @@ HTML_TEMPLATE = """
         this.loadAvatarGallery();
         this.loadMarketDashboard();
         this.startStatusPolling();
+        if (this.currentTab === 'market') {
+          this.startCrawlCenterPolling();
+        }
       },
       beforeUnmount() {
-        if (this.pollTimer) clearInterval(this.pollTimer);
+        if (this.pollTimer) {
+          clearInterval(this.pollTimer);
+          this.pollTimer = null;
+        }
+        this.stopCrawlCenterPolling();
       },
       methods: {
         async loadDailyTrendingTopics(force = false) {
@@ -3576,6 +3704,10 @@ HTML_TEMPLATE = """
           }
         },
         startStatusPolling() {
+          if (this.pollTimer) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = null;
+          }
           let marketTick = 0;
           this.pollTimer = setInterval(async () => {
             try {
@@ -3592,16 +3724,37 @@ HTML_TEMPLATE = """
             } catch(e) {}
 
             marketTick += 1;
-            if ((this.currentTab === 'market' || this.marketStatus.is_syncing) && marketTick % 5 === 0) {
-              const prevTotal = this.marketStatus.stats?.total_items || 0;
-              const wasSyncing = Boolean(this.marketStatus.is_syncing);
-              await this.loadMarketStatus();
-              const newTotal = this.marketStatus.stats?.total_items || 0;
-              if (newTotal !== prevTotal || (wasSyncing && !this.marketStatus.is_syncing)) {
-                this.loadMarketItems(this.marketOffset);
+            if (this.marketStatus.is_syncing && !this.isMarketStatusInFlight && marketTick % 5 === 0) {
+              this.isMarketStatusInFlight = true;
+              try {
+                const prevTotal = this.marketStatus.stats?.total_items || 0;
+                const wasSyncing = Boolean(this.marketStatus.is_syncing);
+                await this.loadMarketStatus();
+                const newTotal = this.marketStatus.stats?.total_items || 0;
+                if (newTotal !== prevTotal || (wasSyncing && !this.marketStatus.is_syncing)) {
+                  this.loadMarketItems(this.marketOffset);
+                }
+              } finally {
+                this.isMarketStatusInFlight = false;
               }
             }
           }, 800);
+        },
+        startCrawlCenterPolling() {
+          this.stopCrawlCenterPolling();
+          this.crawlCenterTimer = setInterval(() => {
+            if (this.currentTab !== 'market') {
+              this.stopCrawlCenterPolling();
+              return;
+            }
+            this.refreshCrawlCenter(false);
+          }, 10000);
+        },
+        stopCrawlCenterPolling() {
+          if (this.crawlCenterTimer) {
+            clearInterval(this.crawlCenterTimer);
+            this.crawlCenterTimer = null;
+          }
         },
         setPlatform(plat) {
           this.settings.platform = plat;
@@ -4242,8 +4395,57 @@ HTML_TEMPLATE = """
                 this.crawlScheduleInfo = data.schedule;
                 this.crawlScheduleProfile = data.schedule.poll_profile || 'production_6h';
               }
+              this.crawlLastRefreshedAt = new Date().toISOString();
             }
           } catch (e) {}
+        },
+        async refreshCrawlCenter(manual = false) {
+          if (this.isCrawlCenterRefreshing) return;
+          this.isCrawlCenterRefreshing = true;
+          try {
+            const prevTotal = this.marketStatus.stats?.total_items || 0;
+            await Promise.all([
+              this.loadCrawlRequests(),
+              this.loadMarketStatus(),
+            ]);
+            const nextTotal = this.marketStatus.stats?.total_items || 0;
+            if (nextTotal !== prevTotal) {
+              await this.loadMarketItems(this.marketOffset);
+            }
+            if (manual) {
+              this.notify('🔄 Đã làm mới dữ liệu Crawl Center.', 'success');
+            }
+          } finally {
+            this.isCrawlCenterRefreshing = false;
+          }
+        },
+        getCrawlProgress(crw) {
+          const target = Math.max(1, Number.parseInt(crw?.requested_count, 10) || 50);
+          const pm = (crw?.progress_metrics && typeof crw.progress_metrics === 'object') ? crw.progress_metrics : {};
+          let summary = {};
+          try {
+            summary = typeof crw?.result_summary_json === 'string'
+              ? JSON.parse(crw.result_summary_json || '{}')
+              : (crw?.result_summary || {});
+          } catch (e) {}
+          const s1 = summary?.sections?.['1_screening'] || summary?.screening || {};
+          const pickInt = (...vals) => {
+            for (const v of vals) {
+              if (v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v))) {
+                return Math.trunc(Number(v));
+              }
+            }
+            return null;
+          };
+          const scanned = pickInt(pm.scanned_count, summary.scanned_count, summary.scanned_posts, s1.scanned_count, s1.scanned_posts);
+          const newQualified = pickInt(pm.new_qualified_count, pm.new_count, pm.qualified_count, summary.new_qualified_count, summary.new_count, summary.qualified_count, summary.qualified_posts, s1.qualified_count, summary.record_count);
+          const duplicate = pickInt(pm.duplicate_count, summary.duplicate_count, summary.historical_duplicates, s1.duplicate_count);
+          const updated = pickInt(pm.updated_count, summary.updated_count, summary.engagement_updated_count, summary.growth_count);
+          const missingViews = pickInt(pm.missing_views_count, summary.missing_views_count, summary.views_missing_count, s1.missing_views_count);
+          const rejected = pickInt(pm.rejected_count, summary.rejected_count, summary.rejected_posts, s1.rejected_count);
+          const hasRealMetrics = [scanned, newQualified, duplicate, updated, missingViews, rejected].some(v => v !== null);
+          const reached = newQualified !== null ? newQualified >= target : null;
+          return { target, scanned, newQualified, duplicate, updated, missingViews, rejected, hasRealMetrics, reached };
         },
         async loadMarketStatus() {
           try {
@@ -4294,6 +4496,7 @@ HTML_TEMPLATE = """
               trend_tier: this.marketFilters.trend_tier || 'all',
               trend_group: this.marketFilters.trend_group || 'all',
               verification_status: this.marketFilters.verification_status || 'all',
+              activity_filter: this.marketFilters.activity_filter || 'all',
               sort_by: this.marketFilters.sort_by || 'recent',
               affiliate_only: (this.marketSubTab === 'shopee' && this.shopeeAffiliateOnly) ? '1' : '0',
               search: this.marketFilters.search || '',
@@ -4388,12 +4591,19 @@ HTML_TEMPLATE = """
           }
         },
         async submitCrawlRequest() {
+          const parsedCount = Number.parseInt(this.crawlRequestForm.requested_count, 10);
+          if (!Number.isFinite(parsedCount) || parsedCount < 1 || parsedCount > 500) {
+            this.notify('⚠️ Số lượng bài muốn crawl phải là số nguyên từ 1 đến 500.', 'error');
+            return;
+          }
           try {
             const res = await fetch('/api/remote/crawl_requests', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                ...this.crawlRequestForm,
+                platform: this.crawlRequestForm.platform || 'all',
+                requested_count: parsedCount,
+                keywords: this.crawlRequestForm.keywords || '',
                 poll_profile: this.crawlScheduleProfile
               })
             });
@@ -4402,11 +4612,10 @@ HTML_TEMPLATE = """
               this.notify(
                 data.deduplicated
                   ? 'ℹ️ Đã có yêu cầu crawl tương tự đang chờ trong hàng đợi D1.'
-                  : '📝 Đã gửi yêu cầu vào Crawl Queue D1 (đang chờ Muse claim).',
+                  : `📝 Đã gửi yêu cầu ${parsedCount} bài vào Crawl Queue D1 (đang chờ Muse claim).`,
                 'success'
               );
-              this.crawlRequestForm.keywords = '';
-              this.loadCrawlRequests();
+              await this.loadCrawlRequests();
             } else {
               this.notify(data.error || 'Không thể tạo Crawl Queue (kiểm tra kết nối Cloudflare).', 'error');
             }
@@ -5433,6 +5642,7 @@ def api_market_items():
     trend_tier = request.args.get("trend_tier", "all")
     trend_group = request.args.get("trend_group", "all")
     verification_status = request.args.get("verification_status", "all")
+    activity_filter = request.args.get("activity_filter", "all")
     sort_by = request.args.get("sort_by", "recent")
     affiliate_only = request.args.get("affiliate_only", "0") in ("1", "true", "True")
     search = request.args.get("search", "")
@@ -5453,6 +5663,7 @@ def api_market_items():
             trend_tier=trend_tier,
             trend_group=trend_group,
             verification_status=verification_status,
+            activity_filter=activity_filter,
             search=search,
             sort_by=sort_by,
             affiliate_only=affiliate_only,
@@ -5527,11 +5738,17 @@ def api_remote_crawl_requests():
     try:
         if request.method == "POST":
             body = request.json or {}
+            try:
+                req_count = int(body.get("requested_count") if body.get("requested_count") is not None else 50)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "requested_count phải là số nguyên (1–500)"}), 400
+            if req_count < 1 or req_count > 500:
+                return jsonify({"ok": False, "error": "requested_count phải trong khoảng 1–500"}), 400
             return jsonify(
                 rt["client"].create_crawl_request(
                     platform=str(body.get("platform", "")).lower().strip(),
                     keywords=str(body.get("keywords", "")).strip(),
-                    requested_count=int(body.get("requested_count") or 50),
+                    requested_count=req_count,
                     poll_profile=body.get("poll_profile"),
                     dedup_token=body.get("dedup_token"),
                     options=body.get("options") if isinstance(body.get("options"), dict) else {},

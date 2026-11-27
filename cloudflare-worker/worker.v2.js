@@ -8,19 +8,18 @@
  *   3. Crawl Center Queue (`crawl_requests`) for Muse Cloudflare OAuth Connector D1 polling
  *      - Production poll cadence: 6h (`production_6h`); limited test cadence: 5m (`test_5m`)
  *      - Atomic claim, lease timeout, deduplication, queued cancellation, honest waiting state
- *   4. Telegram V2: Inline Keyboard hierarchical menus, `editMessageText`, single primary
- *      progress message, Drive Explorer + open Drive link + direct JSON `sendDocument`,
- *      standardized Muse Market Analysis Report summary + full report export
+ *   4. Telegram V2: Reply Keyboard 6-button main menu + Inline Keyboard sub-actions,
+ *      `editMessageText` single primary progress message, structured icon-bulleted
+ *      Muse Market Analysis Report (short + full views, Drive Explorer/JSON send removed)
  *
  * NOTE: Keep `worker.js` as V1 backup. Review + run `migrations/0001_v2_market_and_commands.sql`
- * before deploying.
+ * & `migrations/0002_notification_retry_state.sql` before deploying.
  */
 
 const DEFAULT_WORKSPACE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g";
 const LEGACY_THREADS_FOLDER_ID = "1jJ0ihxv_LtpZFlkAeBO_BLysLZ9XwcE8";
 const MARKET_DATA_DIR_NAME = "01_Market_Data";
 const MAX_MARKET_JSON_BYTES = 10 * 1024 * 1024;
-const MAX_TELEGRAM_DOC_BYTES = 20 * 1024 * 1024;
 const ONLINE_HEARTBEAT_TTL_MS = 90 * 1000;
 const STUCK_SENDING_THRESHOLD_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_DRIVE_LIST_PAGES = 25;
@@ -517,6 +516,7 @@ function extractMuseReportStats(d) {
     const needs = d.sections?.["6_consumer_needs"] || d.section_6_consumer_needs || d.consumer_needs_problems || [];
     const aff = d.sections?.["7_affiliate_priorities"] || d.section_7_affiliate_products || d.affiliate_opportunities || [];
     const actions = d.sections?.["9_priority_actions"] || d.section_9_priority_actions || d.priority_actions || [];
+    const contentSuggestions = d.sections?.["8_content_suggestions"] || d.content_suggestions || {};
 
     return {
         isV3,
@@ -544,7 +544,12 @@ function extractMuseReportStats(d) {
         signals,
         needs: Array.isArray(needs) ? needs : [],
         aff: Array.isArray(aff) ? aff : [],
-        actions: Array.isArray(actions) ? actions : []
+        actions: Array.isArray(actions) ? actions : [],
+        contentSuggestions,
+        verifDetail: d.verification_detail?.note || null,
+        dataLimitations: Array.isArray(d.data_quality_and_limitations) ? d.data_quality_and_limitations : [],
+        platformResults: d.platform_results && typeof d.platform_results === "object" ? d.platform_results : {},
+        totals: d.totals && typeof d.totals === "object" ? d.totals : null
     };
 }
 
@@ -559,72 +564,587 @@ function getReportStatusBadge(effStatus, isCorr, isV3) {
         return "⚪ NGUỒN OK — KHÔNG CÓ BÀI ĐẠT CHUẨN (no_qualifying_posts)";
     }
     if (isCorr) return "🔔 BÁO CÁO MUSE (BẢN CORRECTED V2)";
-    return isV3 ? "🔔 BÁO CÁO XU HƯỚNG THREADS V3.1" : "🔔 BÁO CÁO MUSE MỚI";
+    return isV3 ? "🔔 BÁO CÁO XU HƯỚNG THREADS V3.1" : "🔔 BÁO CÁO PHÂN TÍCH THỊ TRƯỜNG";
+}
+
+function trimBullet(raw, maxLen = 145) {
+    const clean = String(raw || "")
+        .replace(/^\s*(?:[•\-\*]|\d+[.)])\s*/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!clean) return "";
+    return clean.length > maxLen ? `${clean.slice(0, maxLen - 1).trimEnd()}…` : clean;
+}
+
+function canonicalizeSocialUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== "string") return null;
+    try {
+        const trimmed = rawUrl.trim();
+        if (!trimmed) return null;
+        const parsed = new URL(trimmed);
+        let host = (parsed.hostname || "").toLowerCase();
+        if (host === "threads.com" || host === "www.threads.com" || host === "www.threads.net" || host === "threads.net") {
+            host = "threads.net";
+        } else if (host === "tiktok.com" || host === "m.tiktok.com" || host === "www.tiktok.com") {
+            host = "www.tiktok.com";
+        }
+        const cleanPath = (parsed.pathname || "").replace(/\/+$/, "");
+        return `${parsed.protocol.toLowerCase()}//${host}${cleanPath}`;
+    } catch {
+        return String(rawUrl).trim() || null;
+    }
+}
+
+function buildCanonicalDedupKey(item) {
+    if (!item || typeof item !== "object") return null;
+    if (item.dedup_key) return String(item.dedup_key).trim();
+    const plat = String(item.platform || "threads").toLowerCase().trim() || "threads";
+    const postId = item.post_id ? String(item.post_id).trim() : null;
+    const itemId = item.item_id || item.video_id ? String(item.item_id || item.video_id).trim() : null;
+    const shopId = item.shop_id ? String(item.shop_id).trim() : null;
+    const cUrl = canonicalizeSocialUrl(item.canonical_url || item.post_url || item.video_url || item.product_url || item.url);
+    if (plat === "shopee") {
+        if (shopId && itemId) return `shopee:item:${shopId}:${itemId}`;
+        if (itemId) return `shopee:item:${itemId}`;
+        if (postId) return `shopee:post:${postId}`;
+        if (cUrl) return `shopee:url:${cUrl}`;
+    } else if (plat === "tiktok") {
+        if (itemId) return `tiktok:item:${itemId}`;
+        if (postId) return `tiktok:post:${postId}`;
+        if (cUrl) return `tiktok:url:${cUrl}`;
+    } else {
+        if (postId) return `${plat}:post:${postId}`;
+        if (itemId) return `${plat}:item:${itemId}`;
+        if (cUrl) return `${plat}:url:${cUrl}`;
+    }
+    return null;
+}
+
+function extractRegistryMetrics(item) {
+    if (!item || typeof item !== "object") return {};
+    const m = (item.metrics && typeof item.metrics === "object") ? item.metrics : item;
+    const pickInt = (...keys) => {
+        for (const k of keys) {
+            const v = m[k] !== undefined ? m[k] : item[k];
+            if (v !== null && v !== undefined && v !== "") {
+                const n = Number(v);
+                if (Number.isFinite(n)) return Math.trunc(n);
+            }
+        }
+        return null;
+    };
+    const out = {};
+    const views = pickInt("views", "views_count", "play_count");
+    const likes = pickInt("likes", "likes_count");
+    const comments = pickInt("comments", "comment_count", "comments_count", "replies_or_comments_count");
+    const shares = pickInt("shares", "shares_count");
+    const reposts = pickInt("reposts", "reposts_count", "repost_count");
+    const quotes = pickInt("quotes", "quotes_count", "quote_count");
+    const sold = pickInt("sold", "sold_count", "historical_sold");
+    const priceRaw = m.price ?? item.price_vnd ?? item.price;
+    const price = (priceRaw !== null && priceRaw !== undefined && priceRaw !== "" && Number.isFinite(Number(priceRaw))) ? Number(priceRaw) : null;
+    if (views !== null) out.views = views;
+    if (likes !== null) out.likes = likes;
+    if (comments !== null) out.comments = comments;
+    if (shares !== null) out.shares = shares;
+    if (reposts !== null) out.reposts = reposts;
+    if (quotes !== null) out.quotes = quotes;
+    if (sold !== null) out.sold = sold;
+    if (price !== null) out.price = price;
+    return out;
+}
+
+function haveRegistryMetricsChanged(incoming, existing) {
+    const keys = ["views", "likes", "comments", "shares", "reposts", "quotes", "sold", "price"];
+    for (const k of keys) {
+        const nv = incoming[k];
+        if (nv !== undefined && nv !== null && nv !== existing[k]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+async function checkCrossRunDedupInD1(env, rawItems) {
+    const items = Array.isArray(rawItems) ? rawItems.slice(0, 500) : [];
+    const existing = {};
+    const existingKeys = [];
+    for (const rawItem of items) {
+        const key = buildCanonicalDedupKey(rawItem);
+        const plat = String(rawItem?.platform || "threads").toLowerCase().trim() || "threads";
+        const cUrl = canonicalizeSocialUrl(rawItem?.canonical_url || rawItem?.post_url || rawItem?.url);
+        if (!key && !cUrl) continue;
+        try {
+            let row = null;
+            if (key) {
+                row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(key).first();
+            }
+            if (!row && cUrl) {
+                row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE platform = ? AND canonical_url = ? LIMIT 1").bind(plat, cUrl).first();
+            }
+            if (row) {
+                let latestMetrics = {};
+                try { latestMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
+                const resolvedKey = key || row.dedup_key;
+                existing[resolvedKey] = {
+                    dedup_key: row.dedup_key,
+                    first_seen_at: row.first_seen_at,
+                    last_seen_at: row.last_seen_at,
+                    snapshot_count: Number(row.snapshot_count || 1),
+                    latest_metrics: latestMetrics,
+                };
+                existingKeys.push(resolvedKey);
+            }
+        } catch {
+            // Table may not exist on legacy schema before migration 0003
+        }
+    }
+    return {
+        existing,
+        existing_keys: existingKeys,
+        existing_count: existingKeys.length,
+        new_count: Math.max(0, items.length - existingKeys.length),
+    };
+}
+
+async function recordCrossRunDedupInD1(env, rawItems, runId = null) {
+    const items = Array.isArray(rawItems) ? rawItems.slice(0, 500) : [];
+    const nowIso = new Date().toISOString();
+    let newCount = 0;
+    let duplicateCount = 0;
+    let updatedCount = 0;
+    let missingViewsCount = 0;
+
+    for (const rawItem of items) {
+        const metrics = extractRegistryMetrics(rawItem);
+        if (metrics.views === undefined || metrics.views === null) {
+            missingViewsCount += 1;
+        }
+        const key = buildCanonicalDedupKey(rawItem);
+        const plat = String(rawItem?.platform || "threads").toLowerCase().trim() || "threads";
+        const cUrl = canonicalizeSocialUrl(rawItem?.canonical_url || rawItem?.post_url || rawItem?.video_url || rawItem?.product_url || rawItem?.url);
+        const postId = rawItem?.post_id ? String(rawItem.post_id).trim() : null;
+        if (!key) continue;
+
+        try {
+            let row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(key).first();
+            if (!row && cUrl) {
+                row = await env.DB.prepare("SELECT * FROM market_post_registry WHERE platform = ? AND canonical_url = ? LIMIT 1").bind(plat, cUrl).first();
+            }
+            if (!row) {
+                await env.DB.prepare(`
+                    INSERT INTO market_post_registry
+                    (dedup_key, platform, post_id, canonical_url, first_run_id, last_run_id, first_seen_at, last_seen_at, snapshot_count, latest_metrics_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    ON CONFLICT(dedup_key) DO UPDATE SET
+                        last_run_id = COALESCE(excluded.last_run_id, market_post_registry.last_run_id),
+                        last_seen_at = excluded.last_seen_at,
+                        snapshot_count = market_post_registry.snapshot_count + 1
+                `).bind(
+                    key,
+                    plat,
+                    postId,
+                    cUrl,
+                    runId,
+                    runId,
+                    nowIso,
+                    nowIso,
+                    JSON.stringify(metrics)
+                ).run();
+                newCount += 1;
+            } else {
+                let prevMetrics = {};
+                try { prevMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
+                const changed = haveRegistryMetricsChanged(metrics, prevMetrics);
+                const mergedMetrics = { ...prevMetrics, ...metrics };
+                const nextSnap = Number(row.snapshot_count || 1) + 1;
+                await env.DB.prepare(`
+                    UPDATE market_post_registry
+                    SET canonical_url = COALESCE(?, canonical_url),
+                        post_id = COALESCE(?, post_id),
+                        last_run_id = COALESCE(?, last_run_id),
+                        last_seen_at = ?,
+                        snapshot_count = ?,
+                        latest_metrics_json = ?
+                    WHERE dedup_key = ?
+                `).bind(
+                    cUrl,
+                    postId,
+                    runId,
+                    nowIso,
+                    nextSnap,
+                    JSON.stringify(mergedMetrics),
+                    row.dedup_key
+                ).run();
+                if (changed) updatedCount += 1;
+                else duplicateCount += 1;
+            }
+        } catch {
+            // Safe fallback if D1 table missing before migration 0003
+        }
+    }
+
+    return {
+        new_count: newCount,
+        duplicate_count: duplicateCount,
+        updated_count: updatedCount,
+        missing_views_count: missingViewsCount,
+        total_processed: items.length,
+    };
+}
+
+function pickFirstFiniteInt(...vals) {
+    for (const v of vals) {
+        if (v !== null && v !== undefined && v !== "") {
+            const n = Number(v);
+            if (Number.isFinite(n)) return Math.trunc(n);
+        }
+    }
+    return null;
+}
+
+function extractCrossRunDedupStats(obj) {
+    if (!obj || typeof obj !== "object") return {};
+    const s1 = obj.sections?.["1_screening"] || obj.section_1_screening || obj.screening || {};
+    const ds = (obj.dedup_stats && typeof obj.dedup_stats === "object") ? obj.dedup_stats : obj;
+    const newCount = pickFirstFiniteInt(
+        ds.new_count,
+        obj.new_count,
+        obj.new_qualified_count,
+        obj.new_items,
+        s1.new_count,
+        s1.new_qualified_count,
+        obj.records_inserted
+    );
+    const duplicateCount = pickFirstFiniteInt(
+        ds.duplicate_count,
+        obj.duplicate_count,
+        obj.historical_duplicates,
+        s1.duplicate_count,
+        obj.records_deduped,
+        obj.deduped
+    );
+    const updatedCount = pickFirstFiniteInt(
+        ds.updated_count,
+        obj.updated_count,
+        obj.engagement_updated_count,
+        obj.growth_count,
+        s1.updated_count
+    );
+    const missingViewsCount = pickFirstFiniteInt(
+        ds.missing_views_count,
+        obj.missing_views_count,
+        obj.views_missing_count,
+        s1.missing_views_count
+    );
+    return {
+        newCount,
+        duplicateCount,
+        updatedCount,
+        missingViewsCount,
+        hasAny: [newCount, duplicateCount, updatedCount, missingViewsCount].some(v => v !== null),
+    };
+}
+
+function computeCrawlRequestProgress(reqRow) {
+    let summary = {};
+    try {
+        summary = typeof reqRow?.result_summary_json === "string"
+            ? JSON.parse(reqRow.result_summary_json || "{}")
+            : (reqRow?.result_summary || {});
+    } catch {}
+    const reqCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || 50);
+    const dedup = extractCrossRunDedupStats(summary);
+    const s1 = summary?.sections?.["1_screening"] || summary?.screening || {};
+    const scannedCount = pickFirstFiniteInt(summary.scanned_count, summary.scanned_posts, s1.scanned_count, s1.scanned_posts);
+    const qualifiedCount = pickFirstFiniteInt(summary.new_qualified_count, summary.qualified_count, summary.qualified_posts, s1.qualified_count, summary.record_count);
+    const rejectedCount = pickFirstFiniteInt(summary.rejected_count, summary.rejected_posts, s1.rejected_count);
+    const effNew = dedup.newCount !== null ? dedup.newCount : qualifiedCount;
+    const targetReached = effNew !== null ? effNew >= reqCount : null;
+    return {
+        requested_count: reqCount,
+        scanned_count: scannedCount,
+        qualified_count: qualifiedCount,
+        new_qualified_count: dedup.newCount !== null ? dedup.newCount : qualifiedCount,
+        new_count: dedup.newCount,
+        duplicate_count: dedup.duplicateCount,
+        updated_count: dedup.updatedCount,
+        missing_views_count: dedup.missingViewsCount,
+        rejected_count: rejectedCount,
+        target_reached: targetReached,
+    };
+}
+
+function isPureMetricEchoLine(line) {
+    const clean = String(line || "").trim();
+    if (!clean) return true;
+    // Strip lines that merely echo scanned/qualified/rejected numbers already rendered in Tổng quan số liệu
+    return /^(?:qu[eé]t|đạt\s*chuẩn|bị\s*loại|loại|tổng\s*bản\s*ghi|bài\s*mới|trùng\s*lịch\s*sử|thiếu\s*views)/i.test(clean);
+}
+
+function splitSummaryClauses(rawText) {
+    return String(rawText || "")
+        .split(/(?:\r?\n|[•\|;]|(?<=\.)\s+)/)
+        .map(s => trimBullet(s, 140))
+        .filter(s => s && !isPureMetricEchoLine(s));
+}
+
+function parseTelegramSummaryBlocks(rawSummary) {
+    const out = { raw: String(rawSummary || "").trim(), status: [], market: [], affiliate: [], emerging: [], actions: [], quality: [], matched: false };
+    if (!out.raw) return out;
+    const lines = out.raw.split(/\r?\n+/).map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+        const up = line.toUpperCase();
+        if (/^(?:📌\s*)?TRẠNG THÁI\b/.test(up)) {
+            const val = line.replace(/^(?:📌\s*)?TRẠNG THÁI[^:]*:\s*/i, "");
+            if (val && !isPureMetricEchoLine(val)) out.status.push(val);
+            out.matched = true;
+        } else if (/^(?:🔥\s*)?(?:TOÀN THỊ TRƯỜNG|XU HƯỚNG)/.test(up)) {
+            const val = line.replace(/^(?:🔥\s*)?(?:TOÀN THỊ TRƯỜNG|XU HƯỚNG[^:]*)[:：]?\s*/i, "");
+            out.market.push(...splitSummaryClauses(val));
+            out.matched = true;
+        } else if (/^(?:💡\s*)?(?:TÍN HIỆU|AFFILIATE)\b/.test(up)) {
+            const val = line.replace(/^[^:]{3,55}:\s*/i, "");
+            out.affiliate.push(...splitSummaryClauses(val));
+            out.matched = true;
+        } else if (/^MỚI NỔI\b/.test(up)) {
+            const val = line.replace(/^MỚI NỔI[^:]*:\s*/i, "");
+            out.emerging.push(...splitSummaryClauses(val));
+            out.matched = true;
+        } else if (/^(?:✅\s*)?(?:ƯU TIÊN|HÀNH ĐỘNG)\b/.test(up)) {
+            const val = line.replace(/^[^:]{3,50}:\s*/i, "");
+            out.actions.push(...splitSummaryClauses(val));
+            out.matched = true;
+        } else if (/^(?:⚠️\s*)?(?:CHẤT LƯỢNG DỮ LIỆU|GIỚI HẠN)\b/.test(up)) {
+            const val = line.replace(/^[^:]{3,55}:\s*/i, "");
+            out.quality.push(...splitSummaryClauses(val));
+            out.matched = true;
+        }
+    }
+    return out;
+}
+
+function pushUniqueBullet(list, rawLine, seenSet, maxLen = 140) {
+    const clean = trimBullet(rawLine, maxLen);
+    if (!clean) return false;
+    const normKey = clean.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    if (!normKey || seenSet.has(normKey)) return false;
+    seenSet.add(normKey);
+    list.push(`• ${clean}`);
+    return true;
+}
+
+function formatStructuredReportSummary(d, fileName, isCorr, metaInput = null, opts = {}) {
+    const meta = metaInput || extractMuseReportStats(d) || {};
+    const effStatus = meta.effStatus || "completed";
+    const statusBadge = getReportStatusBadge(effStatus, isCorr, meta.isV3);
+    const parsedSummary = parseTelegramSummaryBlocks(d?.telegram_summary || opts.fallbackSummary || "");
+    const dedup = opts.dedupStats ? extractCrossRunDedupStats({ ...d, dedup_stats: opts.dedupStats }) : extractCrossRunDedupStats(d);
+    const req = opts.crawlReq || null;
+    const seen = new Set();
+
+    // 1. 📌 Trạng thái (không lặp lại số liệu chi tiết của Tổng quan)
+    const statusBullets = [];
+    const srcLabel = fileName || d?.run_id || opts.sourceLabel || "report";
+    pushUniqueBullet(statusBullets, `Nguồn: ${trimBullet(srcLabel, 90)}${isCorr ? " (Corrected V2)" : ""}`, seen, 140);
+    if (d?.run_id && fileName && d.run_id !== fileName) {
+        pushUniqueBullet(statusBullets, `Run: ${trimBullet(d.run_id, 64)}`, seen, 110);
+    }
+    if (req?.requested_count) {
+        const targetN = Number(req.requested_count);
+        const effGot = dedup.newCount ?? meta.qualified ?? pickFirstFiniteInt(d?.record_count) ?? 0;
+        const reachedLabel = effGot >= targetN ? "Đạt mục tiêu" : "Chưa đạt mục tiêu";
+        pushUniqueBullet(statusBullets, `Mục tiêu đạt chuẩn: ${effGot}/${targetN} (${reachedLabel})`, seen, 140);
+    }
+    const statusFlags = [];
+    if (meta.rawRunStatus) statusFlags.push(`run_status: ${meta.rawRunStatus}`);
+    if (meta.rawTechStatus) statusFlags.push(`technical_status: ${meta.rawTechStatus}`);
+    if (meta.rawDqStatus) statusFlags.push(`data_quality_status: ${meta.rawDqStatus}`);
+    if (statusFlags.length) {
+        pushUniqueBullet(statusBullets, statusFlags.join(" | "), seen, 140);
+    }
+    if (opts.appStatusTag) {
+        pushUniqueBullet(statusBullets, opts.appStatusTag, seen, 120);
+    }
+    if (effStatus === "source_error" || effStatus === "insufficient_data" || effStatus === "failed") {
+        pushUniqueBullet(statusBullets, "❗ Nguồn lỗi/thiếu dữ liệu — không kết luận thị trường", seen, 140);
+    } else if (effStatus === "no_qualifying_posts") {
+        pushUniqueBullet(statusBullets, "ℹ️ Nguồn bình thường nhưng chưa có bài đạt chuẩn", seen, 140);
+    } else if (parsedSummary.status.length) {
+        pushUniqueBullet(statusBullets, parsedSummary.status[0], seen, 130);
+    }
+
+    // 2. 📊 Tổng quan số liệu (mỗi chỉ số xuất hiện duy nhất 1 lần)
+    const statBullets = [];
+    if (meta.isV3 && (meta.scanned !== null || meta.qualified !== null || meta.rejected !== null)) {
+        const cvPart = meta.crossVerified !== null ? ` | Xác minh chéo Web: ${meta.crossVerified}` : "";
+        const rejPart = meta.rejected !== null ? ` | Loại ${meta.rejected}` : "";
+        pushUniqueBullet(statBullets, `Quét ${meta.scanned ?? "N/A"} | Đạt chuẩn ${meta.qualified ?? "N/A"}${rejPart}${cvPart}`, seen, 150);
+        pushUniqueBullet(statBullets, `Phân tầng: Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`, seen, 150);
+    } else if (meta.totals || Object.keys(meta.platformResults || {}).length) {
+        const rec = meta.totals?.records ?? "N/A";
+        const usable = meta.totals?.business_usable_records ?? "N/A";
+        const needsVerif = meta.totals?.needs_verification_records ?? "N/A";
+        pushUniqueBullet(statBullets, `Tổng: ${rec} | Dùng được (usable): ${usable} | Cần xác minh: ${needsVerif}`, seen, 140);
+        for (const pKey of ["threads", "tiktok", "shopee"]) {
+            const p = meta.platformResults[pKey];
+            if (!p) continue;
+            pushUniqueBullet(statBullets, `${pKey.toUpperCase()}: ${p.business_usable_records ?? 0}/${p.records ?? 0} usable (KT: ${p.technical_status || p.status || "—"} | CL: ${p.data_quality_status || "—"})`, seen, 140);
+        }
+    } else if (opts.hbCounts) {
+        const dq = d?.data_quality || {};
+        pushUniqueBullet(statBullets, `Kho local: ${opts.hbCounts.total_items ?? dq.total_items ?? 0} bản ghi | Usable: ${dq.usable_items ?? "N/A"} | Cần xác minh: ${dq.needs_verification_items ?? "N/A"}`, seen, 145);
+    } else if (d?.record_count !== undefined && d?.record_count !== null) {
+        pushUniqueBullet(statBullets, `Tổng bản ghi thu được: ${d.record_count}`, seen, 120);
+    }
+
+    if (dedup.hasAny) {
+        const dParts = [];
+        if (dedup.newCount !== null) dParts.push(`Bài mới: ${dedup.newCount}`);
+        if (dedup.duplicateCount !== null) dParts.push(`Bài trùng lịch sử: ${dedup.duplicateCount}`);
+        if (dedup.updatedCount !== null) dParts.push(`Cập nhật tương tác: ${dedup.updatedCount}`);
+        if (dParts.length) pushUniqueBullet(statBullets, dParts.join(" | "), seen, 150);
+        if (dedup.missingViewsCount !== null) {
+            pushUniqueBullet(statBullets, `Bài thiếu views: ${dedup.missingViewsCount}`, seen, 100);
+        }
+    }
+    if (!statBullets.length) {
+        statBullets.push("• Chưa có số liệu chi tiết từ lượt crawl này.");
+    }
+
+    // 3. 🔥 Xu hướng nổi bật
+    const trendBullets = [];
+    if (effStatus === "completed" || !meta.rawRunStatus) {
+        for (const t of (meta.trends || []).slice(0, 3)) {
+            const title = trimBullet(t?.theme || t?.title || t?.topic || t, 95);
+            const why = trimBullet(t?.why_hot || "", 70);
+            if (title) pushUniqueBullet(trendBullets, `${title}${why ? ` — ${why}` : ""}`, seen, 145);
+        }
+        if (trendBullets.length < 3 && meta.topViral.length) {
+            const tv = meta.topViral[0];
+            pushUniqueBullet(trendBullets, `Viral tiêu biểu: ${trimBullet(tv.post || tv.title, 70)} (${tv.likes ?? "—"} likes, ${tv.comments ?? "—"} cmt)`, seen, 145);
+        }
+        for (const e of (meta.emerging || []).slice(0, 2)) {
+            if (trendBullets.length >= 4) break;
+            const emText = trimBullet(e?.topic || e?.title || e, 105);
+            if (emText) pushUniqueBullet(trendBullets, `[Mới nổi] ${emText}`, seen, 140);
+        }
+        for (const seg of parsedSummary.market) {
+            if (trendBullets.length >= 3) break;
+            pushUniqueBullet(trendBullets, seg, seen, 140);
+        }
+        if (!trendBullets.length && !parsedSummary.matched && parsedSummary.raw) {
+            for (const seg of splitSummaryClauses(parsedSummary.raw).slice(0, 3)) {
+                pushUniqueBullet(trendBullets, seg, seen, 140);
+            }
+        }
+    }
+    if (!trendBullets.length) {
+        trendBullets.push("• Chưa ghi nhận xu hướng nổi bật đủ chuẩn trong lượt này.");
+    }
+
+    // 4. 💡 Tín hiệu/cơ hội affiliate
+    const affBullets = [];
+    if (effStatus === "completed" || !meta.rawRunStatus) {
+        const cleanAff = filterCleanProductItems(meta.aff);
+        for (const a of cleanAff.slice(0, 3)) {
+            const name = trimBullet(a?.product || a?.brand_or_topic || a?.title || a, 85);
+            const prio = a?.priority ? ` [${trimBullet(a.priority, 30)}]` : "";
+            const ev = trimBullet(a?.evidence || a?.evidence_summary || "", 70);
+            if (name) pushUniqueBullet(affBullets, `${name}${prio}${ev ? ` — ${ev}` : ""}`, seen, 145);
+        }
+        for (const s of (meta.signals || []).slice(0, 2)) {
+            if (affBullets.length >= 4) break;
+            const sg = trimBullet(s?.signal || s?.topic || s, 110);
+            if (sg) pushUniqueBullet(affBullets, `[Tín hiệu] ${sg}`, seen, 140);
+        }
+        for (const seg of parsedSummary.affiliate) {
+            if (affBullets.length >= 3) break;
+            pushUniqueBullet(affBullets, seg, seen, 140);
+        }
+        if (!affBullets.length && meta.needs.length) {
+            for (const n of meta.needs.slice(0, 2)) {
+                const nt = trimBullet(n?.title || n, 115);
+                if (nt) pushUniqueBullet(affBullets, `Nhu cầu: ${nt}`, seen, 140);
+            }
+        }
+    }
+    if (!affBullets.length) {
+        affBullets.push("• Chưa có tín hiệu/cơ hội Affiliate đủ điều kiện.");
+    }
+
+    // 5. ✅ Hành động đề xuất hôm nay
+    const actionBullets = [];
+    if (effStatus === "source_error" || effStatus === "insufficient_data" || effStatus === "failed") {
+        pushUniqueBullet(actionBullets, "Kiểm tra lại nguồn dữ liệu và chạy lại lượt crawl trước khi đánh giá trend.", seen, 140);
+    } else if (effStatus === "no_qualifying_posts") {
+        pushUniqueBullet(actionBullets, "Giữ lịch theo dõi lượt tiếp theo; không sản xuất nội dung theo tin chưa kiểm chứng.", seen, 140);
+    } else {
+        for (const act of (meta.actions || []).slice(0, 3)) {
+            const txt = trimBullet(act?.action || act?.title || act, 135);
+            if (txt) pushUniqueBullet(actionBullets, txt, seen, 140);
+        }
+        if (!actionBullets.length && Array.isArray(meta.contentSuggestions?.threads_facebook)) {
+            for (const p of meta.contentSuggestions.threads_facebook.slice(0, 2)) {
+                pushUniqueBullet(actionBullets, `Bài viết: ${p}`, seen, 135);
+            }
+        }
+        if (!actionBullets.length && Array.isArray(meta.contentSuggestions?.text_posts)) {
+            for (const p of meta.contentSuggestions.text_posts.slice(0, 2)) {
+                pushUniqueBullet(actionBullets, `Nội dung: ${p}`, seen, 135);
+            }
+        }
+        for (const seg of parsedSummary.actions) {
+            if (actionBullets.length >= 3) break;
+            pushUniqueBullet(actionBullets, seg, seen, 135);
+        }
+    }
+    if (!actionBullets.length) {
+        actionBullets.push("• Tiếp tục theo dõi App_Video (Auto Sync ngầm) và kiểm tra chi tiết ở báo cáo đầy đủ.");
+    }
+
+    // 6. ⚠️ Chất lượng dữ liệu / giới hạn (chỉ lý do/hạn chế, không lặp lại số tổng đã có)
+    const limitBullets = [];
+    if (effStatus === "source_error" || effStatus === "insufficient_data" || effStatus === "failed") {
+        const errNote = trimBullet(d?.error_message || req?.error_message || meta.s1?.sources || "Nguồn trả lỗi hoặc thiếu dữ liệu", 140);
+        pushUniqueBullet(limitBullets, `Lỗi nguồn: ${errNote}`, seen, 145);
+    }
+    if (meta.s1?.rejected_reasons && typeof meta.s1.rejected_reasons === "object") {
+        const rsnList = Object.entries(meta.s1.rejected_reasons).map(([k, v]) => `${k} (${v})`);
+        if (rsnList.length) pushUniqueBullet(limitBullets, `Lý do loại chính: ${rsnList.join(", ")}`, seen, 145);
+    }
+    if (meta.verifDetail) {
+        pushUniqueBullet(limitBullets, `Xác minh: ${meta.verifDetail}`, seen, 145);
+    }
+    for (const lim of (meta.dataLimitations || []).slice(0, 2)) {
+        pushUniqueBullet(limitBullets, lim, seen, 135);
+    }
+    for (const pKey of ["threads", "tiktok", "shopee"]) {
+        const p = meta.platformResults?.[pKey];
+        if (!p || !Array.isArray(p.remaining_issues) || !p.remaining_issues.length) continue;
+        pushUniqueBullet(limitBullets, `${pKey.toUpperCase()}: ${p.remaining_issues[0]}`, seen, 130);
+    }
+    for (const seg of parsedSummary.quality) {
+        if (limitBullets.length >= 3) break;
+        pushUniqueBullet(limitBullets, seg, seen, 140);
+    }
+    if (!limitBullets.length) {
+        limitBullets.push("• Dữ liệu chưa xác minh được tách riêng, không trộn vào cơ hội Affiliate.");
+    }
+
+    return [
+        `${statusBadge}\n━━━━━━━━━━━━━━━━━━━━`,
+        `📌 Trạng thái\n${statusBullets.join("\n")}`,
+        `📊 Tổng quan số liệu\n${statBullets.join("\n")}`,
+        `🔥 Xu hướng nổi bật\n${trendBullets.join("\n")}`,
+        `💡 Tín hiệu/cơ hội affiliate\n${affBullets.join("\n")}`,
+        `✅ Hành động đề xuất hôm nay\n${actionBullets.join("\n")}`,
+        `⚠️ Chất lượng dữ liệu / giới hạn\n${limitBullets.join("\n")}`
+    ].join("\n\n").slice(0, 4000);
 }
 
 function buildMuseTelegramNotificationText(d, fileName, isCorr) {
-    const meta = extractMuseReportStats(d) || {};
-    const effStatus = meta.effStatus || "completed";
-    const statusBadge = getReportStatusBadge(effStatus, isCorr, meta.isV3);
-    const rawSummary = String(d?.telegram_summary || "").trim();
-
-    const statusDetails = [];
-    if (meta.rawRunStatus) statusDetails.push(`run_status: ${meta.rawRunStatus}`);
-    if (meta.rawTechStatus) statusDetails.push(`technical_status: ${meta.rawTechStatus}`);
-    if (meta.rawDqStatus) statusDetails.push(`data_quality_status: ${meta.rawDqStatus}`);
-    const statusLine = statusDetails.length ? `⚙️ Trạng thái tách biệt: ${statusDetails.join(" | ")}` : "";
-
-    let qualityLine = "";
-    if (meta.isV3 && meta.scanned !== null) {
-        qualityLine =
-            `📊 Chất lượng crawl: quét ${meta.scanned} | đạt chuẩn ${meta.qualified ?? 0}` +
-            ` (Very Hot: ${meta.tiers.very_hot}, Hot: ${meta.tiers.hot}, Emerging: ${meta.tiers.emerging}, Watchlist: ${meta.tiers.watchlist}, Unverified: ${meta.unverified})` +
-            (meta.crossVerified !== null ? ` | Web xác minh chéo: ${meta.crossVerified}` : "");
-    } else if (d?.totals) {
-        const recCount = d.totals.records ?? 0;
-        const usableCount = d.totals.business_usable_records ?? recCount;
-        qualityLine = `📊 Bản ghi usable: ${usableCount}/${recCount} | Chất lượng: ${d.data_quality_status || "N/A"}`;
-    }
-
-    const parts = [`${statusBadge}\n━━━━━━━━━━━━━━━━━━━━`];
-    if (statusLine && (meta.rawTechStatus || meta.rawDqStatus)) {
-        parts.push(statusLine);
-    }
-    if (rawSummary) {
-        parts.push(rawSummary);
-        const lowSum = rawSummary.toLowerCase();
-        if (qualityLine && !lowSum.includes("quét") && !lowSum.includes("usable") && !lowSum.includes("chất lượng")) {
-            parts.push(qualityLine);
-        }
-        if (effStatus === "completed" && meta.trends.length && !lowSum.includes("toàn thị trường") && !lowSum.includes("xu hướng")) {
-            const topThemes = meta.trends.slice(0, 3).map(t => `• ${t.theme || t.title || t.topic || t}`).join("\n");
-            parts.push(`🔥 Xu hướng nổi bật:\n${topThemes}`);
-        }
-        if (effStatus === "completed" && meta.actions.length && !lowSum.includes("ưu tiên") && !lowSum.includes("hành động")) {
-            const topActs = meta.actions.slice(0, 3).map(a => `• ${a}`).join("\n");
-            parts.push(`🎯 Hành động đề xuất:\n${topActs}`);
-        }
-    } else {
-        const rawRunId = String(d?.run_id || fileName || "report");
-        parts.push(`🆔 Run: ${rawRunId}`);
-        if (qualityLine) parts.push(qualityLine);
-        if (effStatus === "source_error" || effStatus === "insufficient_data") {
-            const errNote = d?.error_message || meta.s1?.sources || "Nguồn trả lỗi hoặc thiếu dữ liệu";
-            parts.push(`❗ Chi tiết: ${String(errNote).slice(0, 300)}\n⚠️ Tuyệt đối không kết luận thị trường không có trend khi nguồn lỗi/thiếu dữ liệu.`);
-        } else if (effStatus === "no_qualifying_posts") {
-            parts.push("ℹ️ Nguồn chạy bình thường nhưng không có bài đạt chuẩn trong cửa sổ hiện tại.");
-        } else {
-            if (meta.trends.length) {
-                const topThemes = meta.trends.slice(0, 3).map(t => `• ${t.theme || t.title || t.topic || t}`).join("\n");
-                parts.push(`🔥 Xu hướng nổi bật:\n${topThemes}`);
-            }
-            if (meta.actions.length) {
-                const topActs = meta.actions.slice(0, 3).map(a => `• ${a}`).join("\n");
-                parts.push(`🎯 Hành động đề xuất:\n${topActs}`);
-            }
-        }
-    }
-    return parts.join("\n\n").slice(0, 4000);
+    return formatStructuredReportSummary(d, fileName, isCorr);
 }
 
 async function resolveReportsFolderId(token, env) {
@@ -943,7 +1463,7 @@ async function finalizeNotificationState(env, notifKey, fields) {
 
 async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, text, options = {}) {
     const aliasKeys = Array.isArray(options.aliasKeys) ? options.aliasKeys : [];
-    const replyMarkup = options.replyMarkup || mainInlineKeyboard();
+    const replyMarkup = options.replyMarkup || homeOnlyInlineKeyboard();
     const usePrimaryMessage = Boolean(options.usePrimaryMessage);
     const requestId = options.requestId ? String(options.requestId) : null;
     const bypassRequestClaim = Boolean(options.bypassRequestClaim);
@@ -1299,38 +1819,46 @@ function compareCompositeItemToCursor(itemTsMs, itemId, parsedCursor) {
 }
 
 function buildDirectD1CrawlNotificationText(req, summary) {
-    const platLabel = String(req.platform || "all").toUpperCase();
-    const runStatus = summary.run_status ? String(summary.run_status).trim().toLowerCase() : null;
-    const techStatus = summary.technical_status ? String(summary.technical_status).trim().toLowerCase() : (req.status === "failed" ? "failed" : "completed");
-    const dqStatus = summary.data_quality_status ? String(summary.data_quality_status).trim() : null;
-    const statusParts = [];
-    if (runStatus) statusParts.push(`run_status: ${runStatus}`);
-    if (techStatus) statusParts.push(`technical_status: ${techStatus}`);
-    if (dqStatus) statusParts.push(`data_quality_status: ${dqStatus}`);
-    const statusLine = statusParts.length ? `\n⚙️ ${statusParts.join(" | ")}` : "";
-
-    if (summary.telegram_summary) {
-        const badge = req.status === "failed" || runStatus === "source_error"
-            ? "❌ MUSE CRAWL THẤT BẠI / LỖI NGUỒN"
-            : "✅ MUSE CRAWL HOÀN THÀNH";
-        return `${badge} (${platLabel})\n━━━━━━━━━━━━━━━━━━━━${statusLine}\n\n${summary.telegram_summary}`;
-    }
-    return req.status === "completed"
-        ? `✅ MUSE CRAWL HOÀN THÀNH (${platLabel})\n━━━━━━━━━━━━━━━━━━━━\n` +
-          `🆔 Mã: ${req.id}` +
-          (summary.run_id ? `\n🔖 Run: ${summary.run_id}` : "") +
-          statusLine +
-          `\n👤 Nguồn xử lý: ${req.claimed_by || "Muse"}` +
-          `\n📊 Số bản ghi: ${summary.qualified_count ?? summary.record_count ?? "N/A"}` +
-          `\n🕒 Cập nhật: ${formatVnTime(req.updated_at)}\n\n` +
-          "🔄 Auto Sync sẽ tự đồng bộ về App_Video."
-        : `❌ MUSE CRAWL THẤT BẠI (${platLabel})\n━━━━━━━━━━━━━━━━━━━━\n` +
-          `🆔 Mã: ${req.id}` +
-          (summary.run_id ? `\n🔖 Run: ${summary.run_id}` : "") +
-          statusLine +
-          `\n👤 Nguồn xử lý: ${req.claimed_by || "Muse"}` +
-          `\n❗ Lỗi: ${String(req.error_message || summary.error_message || "Không rõ nguyên nhân").slice(0, 400)}` +
-          `\n🕒 Cập nhật: ${formatVnTime(req.updated_at)}`;
+    const s = (summary && typeof summary === "object") ? summary : {};
+    const platLabel = String(req?.platform || s.platform || "all").toUpperCase();
+    const runStatus = s.run_status ? String(s.run_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
+    const techStatus = s.technical_status ? String(s.technical_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
+    const dqStatus = s.data_quality_status ? String(s.data_quality_status).trim() : null;
+    const screening = (s.sections?.["1_screening"] || s.screening || {});
+    const scannedVal = pickFirstFiniteInt(s.scanned_count, s.scanned_posts, screening.scanned_count, screening.scanned_posts);
+    const qualifiedVal = pickFirstFiniteInt(s.new_qualified_count, s.qualified_count, s.qualified_posts, screening.qualified_count, s.record_count);
+    const rejectedVal = pickFirstFiniteInt(s.rejected_count, s.rejected_posts, screening.rejected_count);
+    const syntheticReport = {
+        ...s,
+        run_id: s.run_id || req?.id || `crw_${platLabel.toLowerCase()}`,
+        run_status: runStatus,
+        technical_status: techStatus,
+        data_quality_status: dqStatus,
+        error_message: req?.error_message || s.error_message || null,
+        sections: {
+            ...(s.sections || {}),
+            ...((scannedVal !== null || qualifiedVal !== null || rejectedVal !== null) ? {
+                "1_screening": {
+                    ...screening,
+                    ...(scannedVal !== null ? { scanned_count: scannedVal } : {}),
+                    ...(qualifiedVal !== null ? { qualified_count: qualifiedVal } : {}),
+                    ...(rejectedVal !== null ? { rejected_count: rejectedVal } : {}),
+                }
+            } : {}),
+        },
+    };
+    const isCorr = Boolean(s.is_corrected || s.corrects_report);
+    return formatStructuredReportSummary(
+        syntheticReport,
+        `${platLabel} (${req?.id || s.run_id || "crawl"})`,
+        isCorr,
+        null,
+        {
+            crawlReq: req,
+            dedupStats: s.dedup_stats || s,
+            sourceLabel: req?.claimed_by ? `Muse (${req.claimed_by})` : "Muse D1",
+        }
+    );
 }
 
 async function notifyNewCrawl(env) {
@@ -1430,6 +1958,7 @@ async function notifyNewCrawl(env) {
                         requestId: reqId,
                         bypassRequestClaim: item.isCorr,
                         bypassAliasPrecheck: item.isCorr,
+                        replyMarkup: reportActionsInlineKeyboard(false),
                     });
                     if (delivery.retryableExhausted) {
                         transientDeliveryHalted = true;
@@ -1509,6 +2038,7 @@ async function notifyNewCrawl(env) {
             const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, chatId, text, {
                 aliasKeys,
                 requestId: req.id,
+                replyMarkup: reportActionsInlineKeyboard(false),
             });
             if (delivery.retryableExhausted) {
                 break;
@@ -1702,21 +2232,39 @@ async function expireStaleLeases(env) {
 
 // ─── Telegram API Helpers (Inline, editMessageText, Single Primary Message) ─
 
-function mainInlineKeyboard() {
+function mainReplyKeyboard() {
+    return {
+        keyboard: [
+            [{ text: "🕷️ Crawl dữ liệu" }, { text: "📊 Phân tích thị trường" }],
+            [{ text: "⏰ Lịch tự động" }, { text: "📋 Lịch sử tác vụ" }],
+            [{ text: "📡 Trạng thái hệ thống" }, { text: "⚙️ Cài đặt" }]
+        ],
+        resize_keyboard: true,
+        is_persistent: true
+    };
+}
+
+function homeOnlyInlineKeyboard() {
     return {
         inline_keyboard: [
-            [
-                { text: "🕷️ Crawl dữ liệu", callback_data: "crawl:menu" },
-                { text: "📊 Phân tích thị trường", callback_data: "rpt:summary" }
-            ],
-            [
-                { text: "⏱️ Lịch tự động", callback_data: "sched:view" },
-                { text: "📋 Lịch sử tác vụ", callback_data: "cmd:history" }
-            ],
-            [
-                { text: "📡 Trạng thái hệ thống", callback_data: "sys:status" },
-                { text: "⚙️ Cài đặt", callback_data: "cfg:menu" }
-            ]
+            [{ text: "🏠 Trang chủ", callback_data: "menu:home" }]
+        ]
+    };
+}
+
+function reportActionsInlineKeyboard(isFullView = false) {
+    return {
+        inline_keyboard: [
+            isFullView
+                ? [
+                    { text: "📌 Xem tóm tắt", callback_data: "rpt:summary" },
+                    { text: "🔄 Làm mới báo cáo", callback_data: "rpt:full" }
+                ]
+                : [
+                    { text: "📄 Xem báo cáo đầy đủ", callback_data: "rpt:full" },
+                    { text: "🔄 Làm mới báo cáo", callback_data: "rpt:summary" }
+                ],
+            [{ text: "🏠 Trang chủ", callback_data: "menu:home" }]
         ]
     };
 }
@@ -1798,20 +2346,6 @@ async function answerCallbackQuery(env, callbackQueryId, text = "") {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ callback_query_id: callbackQueryId, text: text.slice(0, 180) })
     });
-}
-
-async function sendTelegramDocument(env, chatId, fileName, bytesBuffer, caption = "", mimeType = "application/json") {
-    const form = new FormData();
-    form.append("chat_id", String(chatId));
-    if (caption) form.append("caption", caption.slice(0, 1000));
-    form.append("document", new Blob([bytesBuffer], { type: mimeType }), fileName);
-
-    const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN_VIDEO}/sendDocument`, {
-        method: "POST",
-        body: form
-    });
-    const data = await resp.json();
-    return { ok: Boolean(resp.ok && data.ok), data };
 }
 
 // ─── D1 Command Queue & Crawl Center Helpers ─────────────────────────────────
@@ -2098,6 +2632,21 @@ async function handleAppApi(request, env, url) {
         }
     }
 
+    // 3b. Cross-Run Deduplication & Post Registry endpoints
+    if (request.method === "POST" && path === "/api/app/market/dedup/check") {
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        const res = await checkCrossRunDedupInD1(env, body.items || []);
+        return jsonResponse({ ok: true, ...res });
+    }
+
+    if (request.method === "POST" && path === "/api/app/market/dedup/record") {
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        const res = await recordCrossRunDedupInD1(env, body.items || [], body.run_id || null);
+        return jsonResponse({ ok: true, ...res });
+    }
+
     // 4. POST /api/app/heartbeat
     if (request.method === "POST" && path === "/api/app/heartbeat") {
         let payload = {};
@@ -2254,7 +2803,7 @@ async function handleAppApi(request, env, url) {
 
         if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
             const text = formatCommandNotificationText(existing, nextStatus, body.result, errMsg);
-            const sent = await updatePrimaryProgressMessage(env, existing.requested_by_chat_id, text, mainInlineKeyboard());
+            const sent = await updatePrimaryProgressMessage(env, existing.requested_by_chat_id, text, homeOnlyInlineKeyboard());
             if (sent.ok) {
                 await env.DB.prepare("UPDATE app_commands SET notified_at = ? WHERE id = ?")
                     .bind(new Date().toISOString(), commandId).run();
@@ -2271,10 +2820,14 @@ async function handleAppApi(request, env, url) {
             SELECT * FROM crawl_requests ORDER BY created_at DESC LIMIT 40
         `).all();
         const schedule = await computeExpectedPickup(env);
+        const enriched = (rows.results || []).map(r => ({
+            ...r,
+            progress_metrics: computeCrawlRequestProgress(r),
+        }));
         return jsonResponse({
             ok: true,
             schedule,
-            items: rows.results || []
+            items: enriched
         });
     }
 
@@ -2387,6 +2940,21 @@ async function handleAppApi(request, env, url) {
             return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
         }
 
+        const summaryObj = (body.result_summary && typeof body.result_summary === "object")
+            ? { ...body.result_summary }
+            : {};
+        const dedupSourceItems = Array.isArray(summaryObj.items)
+            ? summaryObj.items
+            : (Array.isArray(body.items) ? body.items : null);
+        if (dedupSourceItems && dedupSourceItems.length > 0) {
+            const dRes = await recordCrossRunDedupInD1(env, dedupSourceItems, summaryObj.run_id || crawlId);
+            if (summaryObj.new_count === undefined) summaryObj.new_count = dRes.new_count;
+            if (summaryObj.duplicate_count === undefined) summaryObj.duplicate_count = dRes.duplicate_count;
+            if (summaryObj.updated_count === undefined) summaryObj.updated_count = dRes.updated_count;
+            if (summaryObj.missing_views_count === undefined) summaryObj.missing_views_count = dRes.missing_views_count;
+            summaryObj.dedup_stats = summaryObj.dedup_stats || dRes;
+        }
+
         const upd = await env.DB.prepare(`
             UPDATE crawl_requests
             SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
@@ -2394,7 +2962,7 @@ async function handleAppApi(request, env, url) {
               AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
         `).bind(
             nextStatus,
-            JSON.stringify(body.result_summary || {}),
+            JSON.stringify(summaryObj),
             body.report_file_id || null,
             body.error_message || null,
             nowIso,
@@ -2409,7 +2977,7 @@ async function handleAppApi(request, env, url) {
         }
 
         if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
-            const summary = body.result_summary || {};
+            const summary = summaryObj;
             const notifKey = resolveCanonicalNotificationKey({
                 requestId: crawlId,
                 runId: summary.run_id || null,
@@ -2433,7 +3001,7 @@ async function handleAppApi(request, env, url) {
                 recCount,
                 existing.requested_by_chat_id,
                 text,
-                { usePrimaryMessage: true, aliasKeys, requestId: crawlId }
+                { usePrimaryMessage: true, aliasKeys, requestId: crawlId, replyMarkup: reportActionsInlineKeyboard(false) }
             );
             if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
                 await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL").bind(nowIso, crawlId).run();
@@ -2459,7 +3027,7 @@ async function handleAppApi(request, env, url) {
     return jsonResponse({ ok: false, error: "Not found" }, 404);
 }
 
-// ─── Telegram V2 Views (Reports, Drive Explorer, Crawl Center, Task History) ─
+// ─── Telegram V2 Views (Reports, Schedule, Settings, Status, Crawl, History) ─
 
 const NON_PRODUCT_TOKENS = new Set([
     "tiktok", "threads", "shopee", "facebook", "instagram", "youtube",
@@ -2473,6 +3041,19 @@ function filterCleanProductItems(list) {
     });
 }
 
+async function buildHomeView(env) {
+    const appState = await getAppOnlineSummary(env);
+    const eta = await computeExpectedPickup(env);
+    const text =
+        "🤖 APP VIDEO MANAGER V2\n━━━━━━━━━━━━━━━━━━━━\n" +
+        "• ☁️ Cloudflare Worker: ✅ Online\n" +
+        `• 🖥️ App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE (Auto Sync chạy khi mở app)"}\n` +
+        `• ⏰ Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
+        `• 🕒 Muse poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n\n` +
+        "👇 Chọn chức năng trên bàn phím bên dưới (tin nhắn thao tác sẽ hiển thị rõ trong cuộc trò chuyện):";
+    return { text, reply_markup: mainReplyKeyboard() };
+}
+
 async function buildAnalysisReportBundle(env) {
     const appState = await getAppOnlineSummary(env);
     let hbReport = null;
@@ -2482,104 +3063,63 @@ async function buildAnalysisReportBundle(env) {
         try { hbReport = JSON.parse(appState.heartbeat.latest_report_json || "null"); } catch {}
     }
 
-    // 1. Prioritize latest corrected Muse report directly from Drive (works even when App_Video is OFFLINE)
+    // Prioritize latest corrected Muse report directly from Drive (works even when App_Video is OFFLINE)
     let museDrive = { reportsFolderId: null, file: null, data: null };
     try {
         museDrive = await getLatestMuseReportFromDrive(env);
     } catch {}
 
     const museData = museDrive.data;
-    const reportsFolderUrl = museDrive.reportsFolderId
-        ? `https://drive.google.com/drive/folders/${museDrive.reportsFolderId}`
-        : `https://drive.google.com/drive/folders/${getWorkspaceRootId(env)}`;
-
     let summaryText = "";
     let fullText = "";
-    let sendFileName = `market_report_${Date.now()}.json`;
-    let sendJsonPayload = null;
 
     if (museData && typeof museData === "object") {
         const isCorr = String(museDrive.file?.name || "").toLowerCase().includes("_corrected") || Boolean(museData.corrects_report);
         const meta = extractMuseReportStats(museData) || {};
-        const totals = museData.totals || {};
-        const pr = museData.platform_results || {};
-        sendFileName = museDrive.file?.name || (meta.isV3 ? "trend_report_v3.json" : "market_report_muse.json");
-        sendJsonPayload = museData;
-        const appStatusTag = appState.online ? "🖥️ App_Video: 🟢 ONLINE" : "🖥️ App_Video: 🔴 OFFLINE (đọc trực tiếp Drive)";
+        const pr = meta.platformResults || {};
+        const reportFileName = museDrive.file?.name || (meta.isV3 ? "trend_report_v3.json" : "market_report_muse.json");
+        const appStatusTag = appState.online ? "App_Video: 🟢 ONLINE" : "App_Video: 🔴 OFFLINE (đọc trực tiếp Drive)";
+
+        summaryText = formatStructuredReportSummary(museData, reportFileName, isCorr, meta, { appStatusTag });
 
         if (meta.isV3) {
-            const badge = getReportStatusBadge(meta.effStatus, isCorr, true);
-            const v3Header = [
-                badge,
-                `📄 File: ${sendFileName} | ${appStatusTag}`,
-                `📊 Sàng lọc V3.1: Quét ${meta.scanned ?? "N/A"} | Đạt chuẩn ${meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}` +
-                    (meta.crossVerified !== null ? ` | Xác minh chéo Web: ${meta.crossVerified}` : ""),
-                `🔥 Phân tầng: Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`
-            ];
-            summaryText = museData.telegram_summary
-                ? `${v3Header.join("\n")}\n\n${museData.telegram_summary}`
-                : buildMuseTelegramNotificationText(museData, sendFileName, isCorr);
-
             const detailParts = [
-                `📖 BÁO CÁO CHI TIẾT V3.1: ${museData.report || sendFileName}`,
-                `⚙️ run_status: ${meta.rawRunStatus || "—"} | technical_status: ${meta.rawTechStatus || "—"} | data_quality_status: ${meta.rawDqStatus || "—"}`,
-                v3Header[2],
-                v3Header[3]
+                `📄 BÁO CÁO CHI TIẾT V3.1: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`,
+                `📌 Trạng thái\n• File: ${reportFileName}\n• run_status: ${meta.rawRunStatus || "—"} | technical_status: ${meta.rawTechStatus || "—"} | data_quality_status: ${meta.rawDqStatus || "—"}`,
+                `📊 Sàng lọc & Phân tầng\n• Quét ${meta.scanned ?? "N/A"} | Đạt chuẩn ${meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}${meta.crossVerified !== null ? ` | Xác minh chéo Web: ${meta.crossVerified}` : ""}\n• Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`
             ];
             if (meta.trends.length) {
                 detailParts.push(
-                    "🔥 XU HƯỚNG NỔI BẬT:\n" +
+                    "🔥 XU HƯỚNG NỔI BẬT\n" +
                     meta.trends.slice(0, 4).map(t => `• ${t.theme || t.title || t}\n  Bằng chứng: ${t.evidence || t.basis || "—"}`).join("\n")
                 );
             }
             if (meta.topViral.length) {
                 detailParts.push(
-                    "🚀 TOP BÀI VIRAL:\n" +
-                    meta.topViral.slice(0, 4).map(v => `• ${v.post} (${v.likes ?? "—"} likes, ${v.comments ?? "—"} cmt)\n  ${v.url || ""}`).join("\n")
+                    "🚀 TOP BÀI VIRAL\n" +
+                    meta.topViral.slice(0, 4).map(v => `• ${v.post} (${v.likes ?? "—"} likes, ${v.comments ?? "—"} cmt)${v.url ? `\n  ${v.url}` : ""}`).join("\n")
                 );
             }
             if (meta.signals.length || meta.emerging.length) {
-                const sigLines = meta.signals.slice(0, 3).map(s => `• [TÍN HIỆU] ${s.signal || s.topic}: ${s.evidence || ""}`);
-                const emLines = meta.emerging.slice(0, 2).map(e => `• [MỚI NỔI] ${e.topic}: ${e.evidence || ""}`);
-                detailParts.push("🌱 MỚI NỔI & TÍN HIỆU ĐƠN LẺ:\n" + [...emLines, ...sigLines].join("\n"));
+                const sigLines = meta.signals.slice(0, 3).map(s => `• [Tín hiệu] ${s.signal || s.topic}: ${s.evidence || ""}`);
+                const emLines = meta.emerging.slice(0, 2).map(e => `• [Mới nổi] ${e.topic}: ${e.evidence || ""}`);
+                detailParts.push("💡 MỚI NỔI & TÍN HIỆU ĐƠN LẺ\n" + [...emLines, ...sigLines].join("\n"));
             }
             if (meta.aff.length) {
                 detailParts.push(
-                    "🛒 CƠ HỘI AFFILIATE ƯU TIÊN:\n" +
+                    "🛒 CƠ HỘI AFFILIATE ƯU TIÊN\n" +
                     meta.aff.slice(0, 4).map(a => `• ${a.product} [${a.priority || "—"}]: ${a.evidence || a.evidence_summary || ""}`).join("\n")
                 );
             }
             if (meta.actions.length) {
-                detailParts.push("🎯 HÀNH ĐỘNG ƯU TIÊN:\n" + meta.actions.slice(0, 4).map(a => `• ${a}`).join("\n"));
+                detailParts.push("✅ HÀNH ĐỘNG ƯU TIÊN\n" + meta.actions.slice(0, 4).map(a => `• ${trimBullet(a, 180)}`).join("\n"));
             }
-            fullText = detailParts.join("\n\n");
+            if (meta.verifDetail) {
+                detailParts.push(`⚠️ XÁC MINH & GIỚI HẠN\n• ${meta.verifDetail}`);
+            }
+            fullText = detailParts.join("\n\n").slice(0, 4000);
         } else {
-            const headerBadge = isCorr ? "BẢN CORRECTED V2" : "MUSE DRIVE REPORT";
-            const platLines = [];
-            for (const pKey of ["threads", "tiktok", "shopee"]) {
-                const p = pr[pKey];
-                if (!p) continue;
-                platLines.push(
-                    `• ${pKey.toUpperCase()}: ${p.business_usable_records ?? 0}/${p.records ?? 0} dùng được` +
-                    ` | KT: ${p.technical_status || p.status || "—"} | CL: ${p.data_quality_status || "—"}`
-                );
-            }
-
-            const headerLines = [
-                `📊 PHÂN TÍCH THỊ TRƯỜNG (${headerBadge})`,
-                `📄 File: ${sendFileName} | ${appStatusTag}`,
-                `Tổng crawl: ${totals.records ?? "N/A"} | Dùng được (usable): ${totals.business_usable_records ?? "N/A"} | Cần xác minh: ${totals.needs_verification_records ?? "N/A"}`,
-                `Kỹ thuật: ${museData.technical_status || "—"} | Chất lượng: ${museData.data_quality_status || "—"}`
-            ];
-            if (platLines.length) headerLines.push(platLines.join("\n"));
-
-            if (museData.telegram_summary) {
-                summaryText = `${headerLines.join("\n")}\n\n${museData.telegram_summary}`;
-            } else {
-                summaryText = headerLines.join("\n\n");
-            }
-
-            const detailSections = [`📖 BÁO CÁO ĐẦY ĐỦ: ${museData.report || sendFileName}`];
+            const detailSections = [`📄 BÁO CÁO ĐẦY ĐỦ: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`];
             for (const pKey of ["threads", "tiktok", "shopee"]) {
                 const p = pr[pKey];
                 if (!p) continue;
@@ -2587,60 +3127,43 @@ async function buildAnalysisReportBundle(env) {
                 const issues = Array.isArray(p.remaining_issues) ? p.remaining_issues.slice(0, 3).map(i => `  - ${i}`).join("\n") : "";
                 detailSections.push(
                     `[${pKey.toUpperCase()}] ${p.business_usable_records ?? 0}/${p.records ?? 0} usable (KT: ${p.technical_status || p.status}, CL: ${p.data_quality_status || "—"})` +
-                    (corrs ? `\nĐã chuẩn hóa:\n${corrs}` : "") +
-                    (issues ? `\nHạn chế còn lại:\n${issues}` : "")
+                    (corrs ? `\n• Đã chuẩn hóa:\n${corrs}` : "") +
+                    (issues ? `\n• Hạn chế còn lại:\n${issues}` : "")
                 );
             }
             const lims = Array.isArray(museData.data_quality_and_limitations)
                 ? museData.data_quality_and_limitations.slice(0, 4).map(l => `• ${l}`).join("\n")
                 : "";
             if (lims) detailSections.push(`⚠️ Giới hạn dữ liệu:\n${lims}`);
-            fullText = detailSections.join("\n\n");
+            fullText = detailSections.join("\n\n").slice(0, 4000);
         }
     } else if (hbReport && typeof hbReport === "object") {
         // Fallback strictly when NO Muse report JSON exists in 01_Market_Data/Reports/
-        const cleanAff = filterCleanProductItems(hbReport.affiliate_opportunities).slice(0, 3);
-        const trends = Array.isArray(hbReport.trending_highlights)
-            ? hbReport.trending_highlights.slice(0, 3).map(t => t?.title || t?.topic || t).filter(Boolean)
-            : [];
-        const needs = Array.isArray(hbReport.consumer_needs_problems)
-            ? hbReport.consumer_needs_problems.slice(0, 2).map(n => n?.title || n).filter(Boolean)
-            : [];
-        const dq = hbReport.data_quality || {};
-        summaryText = [
-            "📊 PHÂN TÍCH THỊ TRƯỜNG (Dữ liệu App_Video)",
-            `Tổng: ${hbCounts.total_items ?? dq.total_items ?? 0} bản ghi | Usable: ${dq.usable_items ?? "N/A"} | Cần xác minh: ${dq.needs_verification_items ?? "N/A"}`,
-            trends.length ? `🔥 Xu hướng: ${trends.join("; ")}` : "",
-            needs.length ? `💡 Nhu cầu: ${needs.join("; ")}` : "",
-            `🛒 Cơ hội đủ điều kiện: ${cleanAff.length ? cleanAff.map(a => a.product).join("; ") : "Chưa có sản phẩm đủ điều kiện"}`
-        ].filter(Boolean).join("\n\n");
+        summaryText = formatStructuredReportSummary(
+            hbReport,
+            "App_Video Local Heartbeat",
+            false,
+            null,
+            { appStatusTag: "App_Video: 🟢 ONLINE", hbCounts }
+        );
         fullText = summaryText;
-        sendJsonPayload = hbReport;
     } else {
-        summaryText = "📊 PHÂN TÍCH THỊ TRƯỜNG\n\nChưa tìm thấy báo cáo nào trong AI_WORKSPACE/01_Market_Data/Reports/.";
+        summaryText =
+            "📊 BÁO CÁO PHÂN TÍCH THỊ TRƯỜNG\n━━━━━━━━━━━━━━━━━━━━\n\n" +
+            "📌 Trạng thái\n• Chưa tìm thấy báo cáo nào trong 01_Market_Data/Reports/.\n\n" +
+            "📊 Tổng quan số liệu\n• Tổng bản ghi: 0\n\n" +
+            "🔥 Xu hướng nổi bật\n• Chưa có dữ liệu.\n\n" +
+            "💡 Tín hiệu/cơ hội affiliate\n• Chưa có dữ liệu.\n\n" +
+            "✅ Hành động đề xuất hôm nay\n• Vào 🕷️ Crawl dữ liệu để tạo lượt thu thập mới.\n\n" +
+            "⚠️ Chất lượng dữ liệu / giới hạn\n• Chờ báo cáo đầu tiên từ Muse.";
         fullText = summaryText;
-        sendJsonPayload = { status: "empty", generated_at: new Date().toISOString() };
     }
 
-    const kb = {
-        inline_keyboard: [
-            [
-                { text: "📖 Xem báo cáo đầy đủ", callback_data: "rpt:full" },
-                { text: "🔄 Làm mới báo cáo", callback_data: "rpt:summary" }
-            ],
-            [
-                { text: "🏠 Trang chủ", callback_data: "menu:home" }
-            ]
-        ]
-    };
     return {
         text: summaryText,
         fullText,
-        reply_markup: kb,
-        fullPayload: sendJsonPayload,
-        fileName: sendFileName,
-        reportsFolderId: museDrive.reportsFolderId,
-        driveFileId: museDrive.file?.id || null
+        reply_markup: reportActionsInlineKeyboard(false),
+        full_reply_markup: reportActionsInlineKeyboard(true)
     };
 }
 
@@ -2659,21 +3182,17 @@ async function buildAutoScheduleView(env) {
         : "Chưa xác định (chỉ tính sau khi có lượt poll thật từ Muse)";
 
     const text =
-        "⏱️ LỊCH TỰ ĐỘNG (TRẠNG THÁI THỰC TẾ)\n\n" +
+        "⏰ LỊCH TỰ ĐỘNG (TRẠNG THÁI THỰC TẾ)\n━━━━━━━━━━━━━━━━━━━━\n" +
         `• Lịch tự động Muse: ${museStatusText}\n` +
         `• Poll Muse thực tế gần nhất: ${lastPollText}\n` +
         `• Dự kiến nhận việc kế tiếp: ${nextEtaText}\n` +
-        `• Hồ sơ D1 đề xuất: ${eta.profile_label} (không tự bật lịch bên Muse)\n` +
-        `• Auto Sync App_Video: Chạy ngầm tự động mỗi ${syncIntervalSec}s khi App_Video online`;
+        `• Chu kỳ đề xuất trên D1: ${eta.profile_label} (chỉ tham chiếu)\n` +
+        `• Auto Sync App_Video: Chạy ngầm tự động mỗi ${syncIntervalSec}s khi online`;
 
     const kb = {
         inline_keyboard: [
             [
-                { text: "🔄 Kiểm tra lại", callback_data: "sched:view" },
-                { text: "🕷️ Crawl dữ liệu", callback_data: "crawl:menu" }
-            ],
-            [
-                { text: "⚙️ Cài đặt", callback_data: "cfg:menu" },
+                { text: "🔄 Kiểm tra lại lịch", callback_data: "sched:view" },
                 { text: "🏠 Trang chủ", callback_data: "menu:home" }
             ]
         ]
@@ -2690,26 +3209,17 @@ async function buildSettingsMenu(env) {
         : "Chưa ghi nhận";
 
     const text =
-        "⚙️ CÀI ĐẶT HỆ THỐNG & ĐỒNG BỘ\n\n" +
-        `• Auto Sync App_Video: Tự động chạy ngầm (${syncIntervalSec}s/lần)\n` +
-        `• App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
+        "⚙️ CÀI ĐẶT HỆ THỐNG & ĐỒNG BỘ\n━━━━━━━━━━━━━━━━━━━━\n" +
+        `• Auto Sync App_Video: Chạy ngầm tự động (${syncIntervalSec}s/lần)\n` +
         `• Đồng bộ gần nhất: ${lastSyncText}\n` +
-        `• Hồ sơ chu kỳ đề xuất (D1): ${eta.profile_label}\n` +
-        `• Xác nhận lịch phía Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa xác nhận (chỉ tham chiếu)"}`;
+        `• Chu kỳ đề xuất trên D1: ${eta.profile_label}\n` +
+        `• Xác nhận lịch phía Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa xác nhận"}`;
 
     const kb = {
         inline_keyboard: [
-            [
-                { text: "🔄 Đồng bộ thủ công ngay", callback_data: "cmd:sync_now" },
-                { text: "📡 Ping App_Video Live", callback_data: "cmd:app_status" }
-            ],
-            [
-                { text: "🔀 Đổi hồ sơ đề xuất (5p / 6h)", callback_data: "crawl:toggle_profile" }
-            ],
-            [
-                { text: "⏱️ Lịch tự động", callback_data: "sched:view" },
-                { text: "🏠 Trang chủ", callback_data: "menu:home" }
-            ]
+            [{ text: "🔄 Đồng bộ thủ công", callback_data: "cmd:sync_now" }],
+            [{ text: "🔀 Đổi chu kỳ đề xuất (5p / 6h)", callback_data: "crawl:toggle_profile" }],
+            [{ text: "🏠 Trang chủ", callback_data: "menu:home" }]
         ]
     };
     return { text, reply_markup: kb };
@@ -2767,21 +3277,21 @@ async function buildSystemStatusView(env) {
 
     const text =
         "📡 TRẠNG THÁI HỆ THỐNG\n━━━━━━━━━━━━━━━━━━━━\n" +
-        "☁️ Cloudflare Worker: ✅ Online\n" +
-        "🤖 Telegram Bot: ✅ Connected\n" +
-        `🗄️ D1 Database: ${dbStatus}\n` +
-        `🔗 Drive Connector Backend: ${driveBackendStatus}\n` +
-        `🖥️ App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
-        `🔄 Đồng bộ ngầm gần nhất: ${hb?.last_sync_at ? formatVnTime(hb.last_sync_at) : "Chưa ghi nhận"} (${hb?.sync_status || "unknown"})\n` +
-        `📦 Kho local App_Video: ${hbCounts.total_items ?? "N/A"} bản ghi\n` +
-        `⏱️ Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
-        `🕒 Muse Poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n` +
+        "• ☁️ Cloudflare Worker: ✅ Online\n" +
+        "• 🤖 Telegram Bot: ✅ Connected\n" +
+        `• 🗄️ D1 Database: ${dbStatus}\n` +
+        `• 🔗 Drive Connector Backend: ${driveBackendStatus}\n` +
+        `• 🖥️ App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
+        `• 🔄 Đồng bộ ngầm gần nhất: ${hb?.last_sync_at ? formatVnTime(hb.last_sync_at) : "Chưa ghi nhận"} (${hb?.sync_status || "unknown"})\n` +
+        `• 📦 Kho local App_Video: ${hbCounts.total_items ?? "N/A"} bản ghi\n` +
+        `• ⏰ Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
+        `• 🕒 Muse Poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n` +
         (notifWarnings.length ? `${notifWarnings.join("\n")}\n` : "") +
-        "🚫 Auto Publisher: Chưa triển khai";
+        "• 🚫 Auto Publisher: Chưa triển khai";
 
     const inlineRows = [];
     if (uncertainNotifs > 0 || stuckSendingNotifs > 0) {
-        inlineRows.push([{ text: "🔍 Xem thông báo treo / không chắc chắn", callback_data: "notif:issues" }]);
+        inlineRows.push([{ text: "🔍 Xem chi tiết thông báo cần kiểm tra", callback_data: "notif:issues" }]);
     }
     if (stuckSendingNotifs > 0) {
         inlineRows.push([
@@ -2790,10 +3300,7 @@ async function buildSystemStatusView(env) {
         ]);
     }
     inlineRows.push([
-        { text: "🔄 Làm mới", callback_data: "sys:status" },
-        { text: "⚙️ Cài đặt", callback_data: "cfg:menu" }
-    ]);
-    inlineRows.push([
+        { text: "🔄 Làm mới trạng thái", callback_data: "sys:status" },
         { text: "🏠 Trang chủ", callback_data: "menu:home" }
     ]);
 
@@ -2811,25 +3318,22 @@ async function buildNotificationIssuesView(env) {
     const stuck = rows.filter(r => r.status === "sending" && r.created_at && r.created_at <= stuckCutoffIso);
     const uncertain = rows.filter(r => r.status === "delivery_uncertain");
     const lines = [
-        "🔍 TÌNH TRẠNG THÔNG BÁO CẦN KIỂM TRA\n━━━━━━━━━━━━━━━━━━━━",
+        "🔍 CHI TIẾT THÔNG BÁO CẦN KIỂM TRA\n━━━━━━━━━━━━━━━━━━━━",
         `• Treo sending (>5p): ${stuck.length}`,
         ...stuck.slice(0, 5).map(r => `  ⏳ ${r.run_id} (lúc ${formatVnTime(r.created_at)})`),
         `• Không chắc chắn (delivery_uncertain): ${uncertain.length}`,
         ...uncertain.slice(0, 5).map(r => `  ⚠️ ${r.run_id} (lúc ${formatVnTime(r.created_at)})`),
-        "\n📌 Nguyên tắc an toàn: không tự gửi lại delivery_uncertain. Chỉ mở khóa sending treo nếu đã kiểm tra chat Telegram xác nhận chưa từng nhận."
+        "\n📌 Nguyên tắc an toàn: không tự gửi lại delivery_uncertain. Chỉ xử lý sending treo ngay tại màn Trạng thái hệ thống sau khi đã kiểm tra chat Telegram."
     ];
-    const kbRows = [];
-    if (stuck.length > 0) {
-        kbRows.push([
-            { text: "🛠️ Chuyển sending treo -> uncertain", callback_data: "notif:stuck:uncertain" },
-            { text: "🧹 Mở khóa sending treo", callback_data: "notif:stuck:reset" }
-        ]);
-    }
-    kbRows.push([
-        { text: "📡 Quay lại Trạng thái", callback_data: "sys:status" },
-        { text: "🏠 Trang chủ", callback_data: "menu:home" }
-    ]);
-    return { text: lines.join("\n"), reply_markup: { inline_keyboard: kbRows } };
+    return {
+        text: lines.join("\n"),
+        reply_markup: {
+            inline_keyboard: [[
+                { text: "⬅️ Quay lại Trạng thái", callback_data: "sys:status" },
+                { text: "🏠 Trang chủ", callback_data: "menu:home" }
+            ]]
+        }
+    };
 }
 
 async function buildCrawlCenterMenu(env) {
@@ -2859,25 +3363,17 @@ async function buildCrawlCenterMenu(env) {
             inlineRows.push([{ text: `✖️ Hủy chờ ${r.platform}/${r.requested_count} (${r.id.slice(-8)})`, callback_data: `crawl:cancel:${r.id}` }]);
         }
     }
-    inlineRows.push([
-        { text: "⏱️ Lịch tự động", callback_data: "sched:view" },
-        { text: "🏠 Trang chủ", callback_data: "menu:home" }
-    ]);
+    inlineRows.push([{ text: "🏠 Trang chủ", callback_data: "menu:home" }]);
 
     const pollRealText = eta.muse_last_poll_at
         ? `${formatVnTime(eta.muse_last_poll_at)} (dự kiến kế tiếp: ${eta.expected_pickup_at ? formatVnTime(eta.expected_pickup_at) : "Chưa có"})`
         : "Chưa ghi nhận lượt poll nào từ Muse (lịch Muse chưa bật)";
 
-    const confirmText = eta.muse_schedule_confirmed
-        ? "✅ Đã xác nhận từ lượt poll thực tế của Muse"
-        : "⚠️ Lịch phía Muse CHƯA xác nhận thay đổi (đây chỉ là mức cấu hình trên Worker/D1)";
-
     const text =
-        "🕷️ CRAWL DỮ LIỆU — HÀNG ĐỢI D1\n\n" +
-        `Chu kỳ cấu hình Worker: ${eta.profile_label}\n` +
-        `${confirmText}\n` +
-        `Poll thực tế gần nhất: ${pollRealText}\n` +
-        "ℹ️ Yêu cầu mới giữ trạng thái CHỜ (queued) cho đến khi Muse thực sự claim.\n\n" +
+        "🕷️ CRAWL DỮ LIỆU — HÀNG ĐỢI D1\n━━━━━━━━━━━━━━━━━━━━\n" +
+        `• Chu kỳ tham chiếu Worker: ${eta.profile_label} (${eta.muse_schedule_confirmed ? "Muse đã xác nhận" : "Muse chưa bật/xác nhận"})\n` +
+        `• Poll thực tế gần nhất: ${pollRealText}\n` +
+        "• Lưu ý: Yêu cầu mới giữ trạng thái CHỜ (queued) cho đến khi Muse claim.\n\n" +
         (summaryLines.length ? `Gần đây:\n${summaryLines.join("\n")}` : "Chưa có yêu cầu nào.");
 
     return { text, reply_markup: { inline_keyboard: inlineRows } };
@@ -2902,13 +3398,12 @@ async function buildTaskHistoryView(env) {
     const crwLines = crawls.map(r => `• Crawl ${r.platform}(${r.requested_count}) [${r.status}|${r.requested_by_source || "manual"}] — ${formatVnTime(r.created_at)}`);
 
     inlineRows.push([
-        { text: "🕷️ Crawl dữ liệu", callback_data: "crawl:menu" },
-        { text: "⚙️ Cài đặt", callback_data: "cfg:menu" }
+        { text: "🔄 Làm mới lịch sử", callback_data: "cmd:history" },
+        { text: "🏠 Trang chủ", callback_data: "menu:home" }
     ]);
-    inlineRows.push([{ text: "🏠 Trang chủ", callback_data: "menu:home" }]);
 
     const text =
-        "📋 LỊCH SỬ TÁC VỤ & HÀNG ĐỢI D1\n\n" +
+        "📋 LỊCH SỬ TÁC VỤ & HÀNG ĐỢI D1\n━━━━━━━━━━━━━━━━━━━━\n" +
         `Lệnh App_Video:\n${cmdLines.length ? cmdLines.join("\n") : "• Trống"}\n\n` +
         `Yêu cầu Crawl Muse:\n${crwLines.length ? crwLines.join("\n") : "• Trống"}`;
 
@@ -2936,17 +3431,29 @@ async function handleTelegramUpdate(request, env) {
             return new Response("OK");
         }
         const data = String(cq.data || "");
-        await answerCallbackQuery(env, cq.id);
+        const getCallbackAckText = (cbData) => {
+            if (cbData === "menu:home") return "🏠 Đang mở Trang chủ";
+            if (cbData === "rpt:summary") return "📊 Đang tải báo cáo tóm tắt";
+            if (cbData === "rpt:full") return "📄 Đang mở báo cáo đầy đủ";
+            if (cbData === "cmd:sync_now") return "🔄 Đã xếp lệnh đồng bộ thủ công";
+            if (cbData === "cmd:history" || cbData === "cmd:queue") return "📋 Đang tải lịch sử tác vụ";
+            if (cbData.startsWith("cmd:cancel:")) return "✅ Đã tiếp nhận yêu cầu hủy lệnh";
+            if (cbData === "sched:view") return "⏰ Đang kiểm tra lịch tự động";
+            if (cbData === "cfg:menu") return "⚙️ Đang mở Cài đặt";
+            if (cbData === "sys:status") return "📡 Đang làm mới trạng thái hệ thống";
+            if (cbData === "crawl:menu") return "🕷️ Đang mở Crawl dữ liệu";
+            if (cbData === "crawl:toggle_profile") return "🔀 Đã đổi hồ sơ tham chiếu D1";
+            if (cbData.startsWith("crawl:plat:")) return `✅ Đã chọn ${cbData.slice("crawl:plat:".length).toUpperCase()}`;
+            if (cbData.startsWith("crawl:go:") || cbData.startsWith("crawl:queue:")) return "📝 Đã gửi yêu cầu crawl vào hàng đợi";
+            if (cbData.startsWith("crawl:cancel:")) return "✅ Đã xử lý hủy yêu cầu crawl";
+            if (cbData.startsWith("notif:")) return "🔍 Đang xử lý thông báo";
+            return "✅ Đã tiếp nhận thao tác";
+        };
+        await answerCallbackQuery(env, cq.id, getCallbackAckText(data));
 
         if (data === "menu:home") {
-            const appState = await getAppOnlineSummary(env);
-            await sendOrEditTelegram(
-                env,
-                chatId,
-                msgId,
-                `🤖 APP VIDEO MANAGER V2\nApp_Video: ${appState.online ? "🟢 ONLINE" : "🔴 OFFLINE"}\nChọn thao tác:`,
-                mainInlineKeyboard()
-            );
+            const home = await buildHomeView(env);
+            await sendTelegramMessage(env, chatId, home.text, home.reply_markup);
             return new Response("OK");
         }
 
@@ -2959,7 +3466,7 @@ async function handleTelegramUpdate(request, env) {
                 (appState.online
                     ? "🟢 App_Video đang ONLINE — đang chờ nhận và thực thi..."
                     : "⏳ App_Video đang OFFLINE — lệnh đã lưu hàng đợi D1, sẽ tự chạy khi online.");
-            const edited = await sendOrEditTelegram(env, chatId, msgId, statusText, mainInlineKeyboard());
+            const edited = await sendOrEditTelegram(env, chatId, msgId, statusText, homeOnlyInlineKeyboard());
             if (edited.ok && (msgId || edited.data?.result?.message_id)) {
                 await setRuntimeState(env, "tg_primary_status_msg_id", String(msgId || edited.data.result.message_id));
             }
@@ -2985,7 +3492,7 @@ async function handleTelegramUpdate(request, env) {
             return new Response("OK");
         }
 
-        if (data === "rpt:summary" || data === "mkt:report") {
+        if (data === "rpt:summary") {
             const bundle = await buildAnalysisReportBundle(env);
             await sendOrEditTelegram(env, chatId, msgId, bundle.text, bundle.reply_markup);
             return new Response("OK");
@@ -2993,7 +3500,7 @@ async function handleTelegramUpdate(request, env) {
 
         if (data === "rpt:full") {
             const bundle = await buildAnalysisReportBundle(env);
-            await sendOrEditTelegram(env, chatId, msgId, bundle.fullText || bundle.text, bundle.reply_markup);
+            await sendOrEditTelegram(env, chatId, msgId, bundle.fullText || bundle.text, bundle.full_reply_markup || bundle.reply_markup);
             return new Response("OK");
         }
 
@@ -3048,8 +3555,8 @@ async function handleTelegramUpdate(request, env) {
                 env,
                 chatId,
                 msgId,
-                "ℹ️ Drive Explorer và gửi file JSON đã được bỏ khỏi menu Telegram. Auto Sync tự động đồng bộ ngầm về App_Video (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).",
-                mainInlineKeyboard()
+                "ℹ️ Drive Explorer và gửi file JSON đã được gỡ bỏ hoàn toàn khỏi Telegram UX. Dữ liệu đồng bộ tự động qua Auto Sync hoặc nút 🔄 Đồng bộ thủ công trong ⚙️ Cài đặt.",
+                homeOnlyInlineKeyboard()
             );
             return new Response("OK");
         }
@@ -3081,14 +3588,17 @@ async function handleTelegramUpdate(request, env) {
                         { text: "50 bài", callback_data: `crawl:go:${plat}:50` },
                         { text: "100 bài", callback_data: `crawl:go:${plat}:100` }
                     ],
-                    [{ text: "⬅️ Chọn lại nền tảng", callback_data: "crawl:menu" }]
+                    [
+                        { text: "⬅️ Quay lại Crawl dữ liệu", callback_data: "crawl:menu" },
+                        { text: "🏠 Trang chủ", callback_data: "menu:home" }
+                    ]
                 ]
             };
             await sendOrEditTelegram(
                 env,
                 chatId,
                 msgId,
-                `🕷️ CRAWL CENTER — NỀN TẢNG: ${plat.toUpperCase()}\n\nChọn số lượng mục tiêu để đưa vào hàng đợi D1 cho Muse polling:`,
+                `✓ Đã chọn nền tảng: ${plat.toUpperCase()}\n━━━━━━━━━━━━━━━━━━━━\nChọn số lượng mục tiêu để đưa vào hàng đợi D1 cho Muse polling:`,
                 kb
             );
             return new Response("OK");
@@ -3130,7 +3640,7 @@ async function handleTelegramUpdate(request, env) {
                         reqRow.status === "queued"
                             ? [{ text: "✖️ Hủy yêu cầu này", callback_data: `crawl:cancel:${reqRow.id}` }]
                             : [],
-                        [{ text: "🕷️ Về Crawl dữ liệu mới", callback_data: "crawl:menu" }, { text: "🏠 Trang chủ", callback_data: "menu:home" }]
+                        [{ text: "⬅️ Quay lại Crawl dữ liệu", callback_data: "crawl:menu" }, { text: "🏠 Trang chủ", callback_data: "menu:home" }]
                     ].filter(r => r.length > 0)
                 };
                 const edited = await sendOrEditTelegram(env, chatId, msgId, msg, kb);
@@ -3172,30 +3682,21 @@ async function handleTelegramUpdate(request, env) {
     const chatId = msg.chat.id;
     const rawInput = (msg.text || "").trim();
     const mapped = {
-        "🏠 Trang chủ": "/start",
-        "📊 Trạng thái": "/status",
-        "⏱️ Lịch tự động": "/schedule",
+        "🕷️ Crawl dữ liệu": "/crawlcenter",
+        "📊 Phân tích thị trường": "/market",
+        "⏰ Lịch tự động": "/schedule",
+        "📋 Lịch sử tác vụ": "/queue",
+        "📡 Trạng thái hệ thống": "/status",
         "⚙️ Cài đặt": "/settings",
-        "🔍 Dữ liệu thị trường": "/market",
-        "🕷️ Crawl Center": "/crawlcenter",
-        "📋 Hàng đợi lệnh": "/queue",
-        "📋 Lịch sử tác vụ": "/queue"
+        "🏠 Trang chủ": "/start"
     }[rawInput] || rawInput;
 
-    let reply = "Sử dụng /start hoặc /status.";
-    let markup = mainInlineKeyboard();
+    let reply = "Sử dụng bàn phím bên dưới hoặc gõ /start để mở menu chính.";
+    let markup = mainReplyKeyboard();
 
     if (mapped === "/start") {
-        const appState = await getAppOnlineSummary(env);
-        const eta = await computeExpectedPickup(env);
-        reply =
-            "🤖 APP VIDEO MANAGER V2\n\n" +
-            `• Cloudflare Worker: ✅ Online\n` +
-            `• App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE (Auto Sync chạy khi mở app)"}\n` +
-            `• Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
-            `• Muse poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n\n` +
-            "Chọn chức năng trong bảng điều khiển bên dưới:";
-        const sent = await updatePrimaryProgressMessage(env, chatId, reply, mainInlineKeyboard());
+        const home = await buildHomeView(env);
+        const sent = await sendTelegramMessage(env, chatId, home.text, home.reply_markup);
         return new Response(sent.ok ? "OK" : "Delivery failed", { status: sent.ok ? 200 : 502 });
     } else if (mapped === "/schedule") {
         const view = await buildAutoScheduleView(env);
@@ -3213,7 +3714,7 @@ async function handleTelegramUpdate(request, env) {
             (appState.online
                 ? "🟢 App_Video đang ONLINE — đang chờ nhận và thực thi."
                 : "⏳ App_Video hiện đang OFFLINE — lệnh sẽ chạy tự động khi mở App_Video.");
-        const sent = await updatePrimaryProgressMessage(env, chatId, reply, mainInlineKeyboard());
+        const sent = await updatePrimaryProgressMessage(env, chatId, reply, homeOnlyInlineKeyboard());
         return new Response(sent.ok ? "OK" : "Delivery failed", { status: sent.ok ? 200 : 502 });
     } else if (mapped === "/market") {
         const bundle = await buildAnalysisReportBundle(env);
@@ -3235,6 +3736,7 @@ async function handleTelegramUpdate(request, env) {
         const keywords = (Number.isFinite(maybeCount) ? parts.slice(3) : parts.slice(2)).join(" ").trim();
         if (!ALLOWED_CRAWL_PLATFORMS.has(plat)) {
             reply = "Cú pháp: /request_crawl <threads|tiktok|shopee|all> [số_lượng] [từ_khóa]";
+            markup = homeOnlyInlineKeyboard();
         } else {
             const res = await createCrawlRequestInD1(env, {
                 platform: plat,
@@ -3252,6 +3754,7 @@ async function handleTelegramUpdate(request, env) {
                 `📝 Đã xếp yêu cầu crawl (${reqRow.platform}/${reqRow.requested_count}) vào D1: ${reqRow.id}\n` +
                 `Trạng thái: ${formatCrawlStatusLabel(reqRow.status)}\n` +
                 `Dự kiến Muse nhận: ${etaText}`;
+            markup = homeOnlyInlineKeyboard();
         }
     } else if (mapped === "/notifytest") {
         try {
@@ -3265,27 +3768,7 @@ async function handleTelegramUpdate(request, env) {
         } catch {
             reply = "❌ Notification check failed.";
         }
-    } else if (mapped === "/crawl") {
-        try {
-            const data = await getLatestCrawl(env);
-            if (!data) {
-                reply = "Chưa có kết quả crawl.";
-            } else {
-                const completed = data.status === "completed";
-                reply =
-                    "📊 MARKET INTELLIGENCE\n\n" +
-                    "Nền tảng: Threads\n" +
-                    "Nguồn dữ liệu: Muse\n" +
-                    `Trạng thái: ${completed ? "✅ Hoàn thành" : "⚠️ Chưa xác nhận"}\n` +
-                    `Số bài: ${data.posts.length}\n` +
-                    `Trùng đã loại: ${Number.isSafeInteger(data.duplicates_skipped) ? data.duplicates_skipped : "N/A"}\n` +
-                    `Cập nhật: ${formatVnTime(data.ended_at)}`;
-            }
-        } catch {
-            reply = "❌ Không đọc được kết quả crawl.";
-        }
-    } else if (mapped === "/drive") {
-        reply = "ℹ️ Drive Explorer và chức năng gửi file JSON đã được bỏ khỏi menu Telegram. Auto Sync tự động đồng bộ ngầm về App_Video.";
+        markup = homeOnlyInlineKeyboard();
     } else if (mapped === "/status") {
         const view = await buildSystemStatusView(env);
         reply = view.text;

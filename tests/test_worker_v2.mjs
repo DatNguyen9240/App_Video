@@ -32,6 +32,7 @@ class MockD1Database {
     this.crawlRequests = [];
     this.notifications = [];
     this.runtimeState = new Map();
+    this.postRegistry = new Map();
     this.onBatchStep = null;
   }
   async batch(stmts) {
@@ -120,6 +121,17 @@ class MockD1Database {
         if (norm === "SELECT * FROM crawl_requests WHERE id = ?") {
           const row = db.crawlRequests.find((c) => c.id === this.args[0]);
           return row ? { ...row } : null;
+        }
+        if (norm.startsWith("SELECT * FROM market_post_registry WHERE dedup_key = ?")) {
+          const row = db.postRegistry.get(this.args[0]);
+          return row ? { ...row } : null;
+        }
+        if (norm.startsWith("SELECT * FROM market_post_registry WHERE platform = ? AND canonical_url = ?")) {
+          const [plat, cUrl] = this.args;
+          for (const row of db.postRegistry.values()) {
+            if (row.platform === plat && row.canonical_url === cUrl) return { ...row };
+          }
+          return null;
         }
         return null;
       },
@@ -258,6 +270,41 @@ class MockD1Database {
         }
         if (norm.startsWith("INSERT INTO market_sync_audit")) {
           db.audits.push(this.args);
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("INSERT INTO market_post_registry")) {
+          const [dedup_key, platform, post_id, canonical_url, first_run_id, last_run_id, first_seen_at, last_seen_at, latest_metrics_json] = this.args;
+          const prev = db.postRegistry.get(dedup_key);
+          if (!prev) {
+            db.postRegistry.set(dedup_key, {
+              dedup_key,
+              platform,
+              post_id,
+              canonical_url,
+              first_run_id,
+              last_run_id,
+              first_seen_at,
+              last_seen_at,
+              snapshot_count: 1,
+              latest_metrics_json,
+            });
+          } else {
+            prev.last_run_id = last_run_id || prev.last_run_id;
+            prev.last_seen_at = last_seen_at;
+            prev.snapshot_count = Number(prev.snapshot_count || 1) + 1;
+          }
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE market_post_registry SET")) {
+          const [cUrl, postId, runId, lastSeenAt, nextSnap, latestMetricsJson, dedupKey] = this.args;
+          const row = db.postRegistry.get(dedupKey);
+          if (!row) return { meta: { changes: 0 } };
+          if (cUrl) row.canonical_url = cUrl;
+          if (postId) row.post_id = postId;
+          if (runId) row.last_run_id = runId;
+          row.last_seen_at = lastSeenAt;
+          row.snapshot_count = nextSnap;
+          row.latest_metrics_json = latestMetricsJson;
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("INSERT INTO crawl_requests")) {
@@ -807,7 +854,7 @@ const legacyDrvSendReq = new Request("https://example.workers.dev/telegram", {
 });
 assert.equal((await worker.fetch(legacyDrvSendReq, env)).status, 200);
 assert.equal(telegramCalls.some((c) => c.url.includes("/sendDocument")), false);
-assert.ok(telegramCalls.some((c) => String(c.body).includes("Drive Explorer và gửi file JSON đã được bỏ")));
+assert.ok(telegramCalls.some((c) => String(c.body).includes("Drive Explorer và gửi file JSON đã được gỡ bỏ")));
 
 const crawlQueueReq = new Request("https://example.workers.dev/telegram", {
   method: "POST",
@@ -1031,7 +1078,7 @@ const tgToggleReq = new Request("https://example.workers.dev/telegram", {
 assert.equal((await worker.fetch(tgToggleReq, env)).status, 200);
 assert.equal(env.DB.runtimeState.get("muse_schedule_confirmed"), "0");
 
-//    b) Single-message /start uses ONLY Inline Keyboard (zero Reply Keyboard) with EXACT 6 simplified buttons
+//    b) Single-message /start uses Reply Keyboard with EXACT 6 Main Menu buttons (zero Inline Main Menu)
 const tgCallsBeforeStart = telegramCalls.length;
 const startRes = await worker.fetch(
   new Request("https://example.workers.dev/telegram", {
@@ -1048,13 +1095,15 @@ assert.equal(startRes.status, 200);
 const startMsgs = telegramCalls.slice(tgCallsBeforeStart).filter((c) => c.url.includes("/sendMessage") || c.url.includes("/editMessageText"));
 assert.equal(startMsgs.length, 1);
 const startPayload = JSON.parse(startMsgs[0].body);
-assert.ok(Array.isArray(startPayload.reply_markup?.inline_keyboard));
-assert.equal(startPayload.reply_markup?.keyboard, undefined);
-const btnTexts = startPayload.reply_markup.inline_keyboard.flat().map((b) => b.text);
+assert.ok(Array.isArray(startPayload.reply_markup?.keyboard));
+assert.equal(startPayload.reply_markup?.inline_keyboard, undefined);
+assert.equal(startPayload.reply_markup?.resize_keyboard, true);
+assert.equal(startPayload.reply_markup?.is_persistent, true);
+const btnTexts = startPayload.reply_markup.keyboard.flat().map((b) => b.text);
 assert.deepEqual(btnTexts, [
   "🕷️ Crawl dữ liệu",
   "📊 Phân tích thị trường",
-  "⏱️ Lịch tự động",
+  "⏰ Lịch tự động",
   "📋 Lịch sử tác vụ",
   "📡 Trạng thái hệ thống",
   "⚙️ Cài đặt",
@@ -1502,7 +1551,7 @@ const emptyNotifBody = String(telegramCalls[telegramCalls.length - 1].body);
 assert.ok(emptyNotifBody.includes("KHÔNG CÓ BÀI ĐẠT CHUẨN (no_qualifying_posts)"));
 assert.ok(!emptyNotifBody.includes("LỖI NGUỒN DỮ LIỆU"));
 
-// Verify /start still keeps exact 6 buttons and zero /sendDocument ever sent
+// Verify /start still keeps exact 6 Reply Keyboard buttons and zero /sendDocument ever sent
 assert.equal(telegramCalls.some((c) => c.url.includes("/sendDocument")), false);
 const v3StartBefore = telegramCalls.length;
 await worker.fetch(
@@ -1516,7 +1565,7 @@ await worker.fetch(
   }),
   env
 );
-const v3StartBtns = JSON.parse(telegramCalls[v3StartBefore].body).reply_markup.inline_keyboard.flat().map((b) => b.text);
+const v3StartBtns = JSON.parse(telegramCalls[v3StartBefore].body).reply_markup.keyboard.flat().map((b) => b.text);
 assert.equal(v3StartBtns.length, 6);
 
 // 11. Second-Round GPT Review Regressions (#1-#8 merged with V3.1):
@@ -2466,6 +2515,389 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(env13.DB.notifications.find((n) => n.run_id === "run-prim-missing").status, "sent");
   } finally {
     globalThis.fetch = prevFetch13;
+  }
+}
+
+// 14. Telegram UX Upgrade: Reply Keyboard Main Menu, Structured Bulleted Reports, Deduplicated Submenus
+{
+  const env14 = {
+    ...env,
+    DB: new MockD1Database(),
+  };
+  const tgCalls14 = [];
+  const prevFetch14 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.startsWith("https://api.telegram.org/bot")) {
+      tgCalls14.push({ url: sUrl, body: init.body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 4444 } }), { status: 200 });
+    }
+    return prevFetch14(url, init);
+  };
+
+  try {
+    const MAIN_MENU_SET = new Set([
+      "🕷️ Crawl dữ liệu",
+      "📊 Phân tích thị trường",
+      "⏰ Lịch tự động",
+      "📋 Lịch sử tác vụ",
+      "📡 Trạng thái hệ thống",
+      "⚙️ Cài đặt",
+    ]);
+
+    const sendUserText = async (updateId, text) => {
+      const before = tgCalls14.length;
+      const res = await worker.fetch(
+        new Request("https://example.workers.dev/telegram", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+          body: JSON.stringify({
+            update_id: updateId,
+            message: { message_id: updateId, from: { id: 999001 }, chat: { id: 999001, type: "private" }, text },
+          }),
+        }),
+        env14
+      );
+      assert.equal(res.status, 200);
+      const sent = tgCalls14.slice(before).find((c) => c.url.includes("/sendMessage"));
+      assert.ok(sent, `Expected /sendMessage for text ${text}`);
+      return JSON.parse(sent.body);
+    };
+
+    const sendCallback = async (updateId, data) => {
+      const before = tgCalls14.length;
+      const res = await worker.fetch(
+        new Request("https://example.workers.dev/telegram", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+          body: JSON.stringify({
+            update_id: updateId,
+            callback_query: {
+              id: `cq_14_${updateId}`,
+              from: { id: 999001 },
+              message: { message_id: 4444, chat: { id: 999001, type: "private" } },
+              data,
+            },
+          }),
+        }),
+        env14
+      );
+      assert.equal(res.status, 200);
+      const call = tgCalls14.slice(before).find((c) => c.url.includes("/sendMessage") || c.url.includes("/editMessageText"));
+      assert.ok(call, `Expected Telegram call for callback ${data}`);
+      return JSON.parse(call.body);
+    };
+
+    const assertNoMainMenuDuplicateInInline = (payload, label) => {
+      assert.ok(Array.isArray(payload.reply_markup?.inline_keyboard), `${label}: must use inline_keyboard`);
+      const btns = payload.reply_markup.inline_keyboard.flat();
+      for (const b of btns) {
+        assert.ok(!MAIN_MENU_SET.has(b.text), `${label}: inline button "${b.text}" duplicates Main Menu`);
+        assert.ok(!String(b.callback_data || "").startsWith("drv:"), `${label}: stale Drive Explorer callback`);
+        assert.notEqual(b.callback_data, "rpt:send", `${label}: stale JSON send callback`);
+      }
+      assert.ok(btns.some((b) => b.text === "🏠 Trang chủ" && b.callback_data === "menu:home"), `${label}: missing 🏠 Trang chủ`);
+      return btns;
+    };
+
+    // 14a: Reply Keyboard on /start
+    const homeMsg = await sendUserText(8001, "/start");
+    assert.deepEqual(homeMsg.reply_markup.keyboard.flat().map((b) => b.text), Array.from(MAIN_MENU_SET));
+    assert.equal(homeMsg.reply_markup.inline_keyboard, undefined);
+
+    // 14b: Reply Button "📊 Phân tích thị trường" -> 6 structured bullet sections + Inline sub-actions
+    const mktMsg = await sendUserText(8002, "📊 Phân tích thị trường");
+    for (const sec of [
+      "📌 Trạng thái",
+      "📊 Tổng quan số liệu",
+      "🔥 Xu hướng nổi bật",
+      "💡 Tín hiệu/cơ hội affiliate",
+      "✅ Hành động đề xuất hôm nay",
+      "⚠️ Chất lượng dữ liệu / giới hạn",
+    ]) {
+      assert.ok(mktMsg.text.includes(sec), `Missing section: ${sec}`);
+    }
+    assert.ok(mktMsg.text.includes("\n• "), "Report must use bullet lines");
+    assert.ok(!mktMsg.text.includes("TOÀN THỊ TRƯỜNG:"), "Prose block must be converted into structured bullets");
+    const mktBtns = assertNoMainMenuDuplicateInInline(mktMsg, "Phân tích thị trường");
+    assert.deepEqual(
+      mktBtns.map((b) => b.text),
+      ["📄 Xem báo cáo đầy đủ", "🔄 Làm mới báo cáo", "🏠 Trang chủ"]
+    );
+
+    const mktFull = await sendCallback(8003, "rpt:full");
+    assertNoMainMenuDuplicateInInline(mktFull, "Báo cáo đầy đủ");
+    assert.ok(mktFull.reply_markup.inline_keyboard.flat().some((b) => b.callback_data === "rpt:summary"));
+
+    // 14c: Reply Button "🕷️ Crawl dữ liệu" -> Threads -> 50 -> queued request in D1
+    const crawlMsg = await sendUserText(8004, "🕷️ Crawl dữ liệu");
+    const crawlBtns = assertNoMainMenuDuplicateInInline(crawlMsg, "Crawl dữ liệu");
+    assert.deepEqual(
+      crawlBtns.map((b) => b.callback_data),
+      ["crawl:plat:threads", "crawl:plat:tiktok", "crawl:plat:shopee", "crawl:plat:all", "menu:home"]
+    );
+
+    const platMsg = await sendCallback(8005, "crawl:plat:threads");
+    const platBtns = assertNoMainMenuDuplicateInInline(platMsg, "Chọn số lượng Crawl");
+    assert.deepEqual(
+      platBtns.map((b) => b.callback_data),
+      ["crawl:go:threads:20", "crawl:go:threads:50", "crawl:go:threads:100", "crawl:menu", "menu:home"]
+    );
+
+    const queuedMsg = await sendCallback(8006, "crawl:go:threads:50");
+    assertNoMainMenuDuplicateInInline(queuedMsg, "Sau khi tạo Crawl");
+    assert.equal(env14.DB.crawlRequests.length, 1);
+    assert.equal(env14.DB.crawlRequests[0].platform, "threads");
+    assert.equal(env14.DB.crawlRequests[0].requested_count, 50);
+    assert.equal(env14.DB.crawlRequests[0].status, "queued");
+
+    // 14d: Reply Button "⏰ Lịch tự động"
+    const schedMsg = await sendUserText(8007, "⏰ Lịch tự động");
+    const schedBtns = assertNoMainMenuDuplicateInInline(schedMsg, "Lịch tự động");
+    assert.deepEqual(schedBtns.map((b) => b.callback_data), ["sched:view", "menu:home"]);
+
+    // 14e: Reply Button "📋 Lịch sử tác vụ"
+    const histMsg = await sendUserText(8008, "📋 Lịch sử tác vụ");
+    const histBtns = assertNoMainMenuDuplicateInInline(histMsg, "Lịch sử tác vụ");
+    assert.deepEqual(histBtns.map((b) => b.callback_data), ["cmd:history", "menu:home"]);
+
+    // 14f: Reply Button "📡 Trạng thái hệ thống"
+    const sysMsg = await sendUserText(8009, "📡 Trạng thái hệ thống");
+    const sysBtns = assertNoMainMenuDuplicateInInline(sysMsg, "Trạng thái hệ thống");
+    assert.deepEqual(sysBtns.map((b) => b.callback_data), ["sys:status", "menu:home"]);
+
+    // 14g: Reply Button "⚙️ Cài đặt" & Manual Sync flow
+    const cfgMsg = await sendUserText(8010, "⚙️ Cài đặt");
+    const cfgBtns = assertNoMainMenuDuplicateInInline(cfgMsg, "Cài đặt");
+    assert.deepEqual(cfgBtns.map((b) => b.callback_data), ["cmd:sync_now", "crawl:toggle_profile", "menu:home"]);
+
+    const syncEnqMsg = await sendCallback(8011, "cmd:sync_now");
+    assert.equal(env14.DB.commands.length, 1);
+    assert.equal(env14.DB.commands[0].command_type, "sync_now");
+    assert.deepEqual(
+      syncEnqMsg.reply_markup.inline_keyboard.flat().map((b) => b.callback_data),
+      ["menu:home"]
+    );
+
+    // 14h: Inline "🏠 Trang chủ" restores Reply Keyboard Main Menu cleanly
+    const homeCbMsg = await sendCallback(8012, "menu:home");
+    assert.deepEqual(homeCbMsg.reply_markup.keyboard.flat().map((b) => b.text), Array.from(MAIN_MENU_SET));
+    assert.equal(homeCbMsg.reply_markup.inline_keyboard, undefined);
+  } finally {
+    globalThis.fetch = prevFetch14;
+  }
+}
+
+// 15. Cross-Run Dedup Registry (D1), Target Progress 7/50, Unified Direct-D1 Bullet Renderer & Callback Confirmations
+{
+  const m0003Path = path.join(__dirname, "../cloudflare-worker/migrations/0003_cross_run_dedup_registry.sql");
+  assert.ok(fs.existsSync(m0003Path), "Missing migration 0003_cross_run_dedup_registry.sql");
+  const m0003Sql = fs.readFileSync(m0003Path, "utf8");
+  assert.ok(m0003Sql.includes("CREATE TABLE IF NOT EXISTS market_post_registry"));
+
+  const env15 = {
+    DB: new MockD1Database(),
+    APP_VIDEO_API_TOKEN: "test-token-15",
+    TELEGRAM_OWNER_ID: "999001",
+    TELEGRAM_BOT_TOKEN_VIDEO: "tg-bot-token",
+    TELEGRAM_WEBHOOK_SECRET: "tg-webhook-secret",
+  };
+  const authHeaders15 = {
+    Authorization: "Bearer test-token-15",
+    "Content-Type": "application/json",
+    "X-Client-Id": "app-video-test",
+  };
+  const tgCalls15 = [];
+  const prevFetch15 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.includes("api.telegram.org")) {
+      tgCalls15.push({ url: sUrl, body: init.body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 777 } }), { status: 200 });
+    }
+    throw new Error("Unexpected fetch: " + sUrl);
+  };
+  try {
+    // 15a: Multi-run registry record + check across 3 runs
+    const recRun1 = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: authHeaders15,
+        body: JSON.stringify({
+          run_id: "r1",
+          items: [
+            { platform: "threads", post_id: "P100", canonical_url: "https://threads.net/@u/post/P100", views: 1000, likes: 50 },
+            { platform: "threads", post_id: "P101", canonical_url: "https://threads.net/@u/post/P101", views: null, likes: 12 },
+          ],
+        }),
+      }),
+      env15
+    );
+    const j1 = await recRun1.json();
+    assert.equal(j1.new_count, 2);
+    assert.equal(j1.duplicate_count, 0);
+    assert.equal(j1.updated_count, 0);
+    assert.equal(j1.missing_views_count, 1);
+
+    const recRun2 = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: authHeaders15,
+        body: JSON.stringify({
+          run_id: "r2",
+          items: [
+            { platform: "threads", post_id: "P100", views: 2500, likes: 120 },
+            { platform: "threads", post_id: "P101", views: null, likes: 12 },
+          ],
+        }),
+      }),
+      env15
+    );
+    const j2 = await recRun2.json();
+    assert.equal(j2.new_count, 0);
+    assert.equal(j2.updated_count, 1);
+    assert.equal(j2.duplicate_count, 1);
+    assert.equal(j2.missing_views_count, 1);
+
+    const recRun3 = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/record", {
+        method: "POST",
+        headers: authHeaders15,
+        body: JSON.stringify({
+          run_id: "r3",
+          items: [{ platform: "threads", post_id: "P100", views: 2500, likes: 120 }],
+        }),
+      }),
+      env15
+    );
+    const j3 = await recRun3.json();
+    assert.equal(j3.new_count, 0);
+    assert.equal(j3.updated_count, 0);
+    assert.equal(j3.duplicate_count, 1);
+    assert.equal(env15.DB.postRegistry.get("threads:post:P100").snapshot_count, 3);
+
+    const checkRes = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/market/dedup/check", {
+        method: "POST",
+        headers: authHeaders15,
+        body: JSON.stringify({
+          items: [
+            { platform: "threads", post_id: "P100" },
+            { platform: "threads", post_id: "P999" },
+          ],
+        }),
+      }),
+      env15
+    );
+    const checkJson = await checkRes.json();
+    assert.equal(checkJson.existing_count, 1);
+    assert.equal(checkJson.new_count, 1);
+    assert.ok(checkJson.existing["threads:post:P100"]);
+
+    // 15b: Direct D1 crawl completion uses shared 6-section bullet renderer, shows 7/50 + Chưa đạt mục tiêu + cross-run dedup bullets, without repeating numbers across sections
+    const crwRes = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", {
+        method: "POST",
+        headers: authHeaders15,
+        body: JSON.stringify({ platform: "threads", requested_count: 50, keywords: "skincare" }),
+      }),
+      env15
+    );
+    const crwData = await crwRes.json();
+    const crwId = crwData.request.id;
+    const reqRow = env15.DB.crawlRequests.find((c) => c.id === crwId);
+    reqRow.status = "running";
+    reqRow.claimed_by = "muse-worker";
+    reqRow.attempts = 1;
+    reqRow.requested_by_chat_id = "999001";
+
+    const beforeCompleteTg = tgCalls15.length;
+    const completeRes = await worker.fetch(
+      new Request(`https://example.workers.dev/api/app/crawl-requests/${crwId}/complete`, {
+        method: "POST",
+        headers: authHeaders15,
+        body: JSON.stringify({
+          claimed_by: "muse-worker",
+          attempt: 1,
+          status: "completed",
+          result_summary: {
+            run_id: "run-tg-shared-15",
+            run_status: "completed",
+            technical_status: "completed",
+            data_quality_status: "dat",
+            scanned_count: 30,
+            qualified_count: 7,
+            rejected_count: 10,
+            new_count: 7,
+            duplicate_count: 9,
+            updated_count: 2,
+            missing_views_count: 4,
+            telegram_summary:
+              "TRẠNG THÁI: Quét 30 | Đạt chuẩn 7 | Bị loại 10\n" +
+              "TOÀN THỊ TRƯỜNG: Kem chống nắng vật lý; Tẩy trang cho da nhạy cảm\n" +
+              "AFFILIATE: Nước tẩy trang Bioderma 500ml\n" +
+              "HÀNH ĐỘNG: Làm video test chống nắng 30s\n" +
+              "CHẤT LƯỢNG DỮ LIỆU: 4 bài thiếu views đã tách riêng",
+          },
+        }),
+      }),
+      env15
+    );
+    assert.equal(completeRes.status, 200);
+
+    const notifCall = tgCalls15.slice(beforeCompleteTg).find((c) => c.url.includes("/sendMessage"));
+    assert.ok(notifCall, "Expected automatic Telegram notification after /complete");
+    const notifText = JSON.parse(notifCall.body).text;
+    for (const sec of [
+      "📌 Trạng thái",
+      "📊 Tổng quan số liệu",
+      "🔥 Xu hướng nổi bật",
+      "💡 Tín hiệu/cơ hội affiliate",
+      "✅ Hành động đề xuất hôm nay",
+      "⚠️ Chất lượng dữ liệu / giới hạn",
+    ]) {
+      assert.ok(notifText.includes(sec), `Direct D1 auto notification missing section: ${sec}`);
+    }
+    assert.ok(notifText.includes("7/50 (Chưa đạt mục tiêu)"), "Must show 7/50 Chưa đạt mục tiêu");
+    assert.ok(notifText.includes("Bài mới: 7 | Bài trùng lịch sử: 9 | Cập nhật tương tác: 2"));
+    assert.ok(notifText.includes("Bài thiếu views: 4"));
+    assert.ok(!notifText.includes("TOÀN THỊ TRƯỜNG:"), "Must convert summary prose into bullets");
+
+    // Verify GET /api/app/crawl-requests returns progress_metrics matching 7/50
+    const listAfter = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests", { headers: authHeaders15 }),
+      env15
+    );
+    const listJson = await listAfter.json();
+    assert.equal(listJson.items[0].progress_metrics.new_qualified_count, 7);
+    assert.equal(listJson.items[0].progress_metrics.target_reached, false);
+    assert.equal(listJson.items[0].progress_metrics.duplicate_count, 9);
+    assert.equal(listJson.items[0].progress_metrics.missing_views_count, 4);
+
+    // 15c: Callback button clicks emit non-empty confirmation toast via answerCallbackQuery
+    const beforeCb = tgCalls15.length;
+    await worker.fetch(
+      new Request("https://example.workers.dev/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-webhook-secret" },
+        body: JSON.stringify({
+          update_id: 9001,
+          callback_query: {
+            id: "cq_ack_1",
+            from: { id: 999001 },
+            message: { message_id: 777, chat: { id: 999001, type: "private" } },
+            data: "crawl:plat:threads",
+          },
+        }),
+      }),
+      env15
+    );
+    const ackCall = tgCalls15.slice(beforeCb).find((c) => c.url.includes("/answerCallbackQuery"));
+    assert.ok(ackCall, "Expected /answerCallbackQuery call");
+    const ackBody = JSON.parse(ackCall.body);
+    assert.ok(ackBody.text && ackBody.text.includes("THREADS"), `Expected descriptive callback ack, got: ${ackBody.text}`);
+  } finally {
+    globalThis.fetch = prevFetch15;
   }
 }
 

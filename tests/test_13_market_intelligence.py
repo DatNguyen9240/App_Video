@@ -794,6 +794,166 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertEqual(arch_res["file_role"], "archived")
         self.assertEqual(self.store.get_stats()["total_items"], before_total)
 
+    def test_cross_run_dedup_three_runs_snapshots_and_activity_filters(self):
+        """Cross-run dedup across 3 consecutive runs keeps 1 primary item, 3 snapshots, preserves old metrics, handles canonical_url fallback, concurrency, and filters."""
+        # Run 1: Post A (with views/likes) + Post B (missing views)
+        run1 = {
+            "run_id": "run-cross-001",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T08:00:00Z",
+            "records": [
+                {
+                    "post_id": "CROSS_POST_A",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_A?xmt=111",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Chủ đề A lượt 1",
+                    "views": 1000,
+                    "likes": 50,
+                    "comment_count": 5,
+                    "trend_tier": "hot",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_id": "CROSS_POST_B",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_B",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Bài thiếu views lượt 1",
+                    "views": None,
+                    "likes": 15,
+                    "trend_tier": "watchlist",
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        r1 = self.store.ingest_raw_file("f_run_1", "threads_trend_run1.json", json.dumps(run1).encode("utf-8"))
+        self.assertEqual(r1["new_count"], 2)
+        self.assertEqual(r1["duplicate_count"], 0)
+        self.assertEqual(r1["engagement_updated_count"], 0)
+        self.assertEqual(r1["missing_views_count"], 1)
+        self.assertEqual(self.store.get_stats()["total_items"], 2)
+
+        # Concurrent duplicate sync of exact same file -> 0 extra snapshots!
+        r1_dup_sync = self.store.ingest_raw_file("f_run_1", "threads_trend_run1.json", json.dumps(run1).encode("utf-8"))
+        self.assertEqual(r1_dup_sync["new_count"], 0)
+        post_a_item = [it for it in self.store.query_items(limit=20)["items"] if it["post_id"] == "CROSS_POST_A"][0]
+        first_seen_run1 = post_a_item["first_seen_at"]
+        self.assertEqual(len(self.store.query_item_snapshots(post_a_item["id"])), 1)
+
+        # Run 2: Post A grew (views=3200, likes=180), Post B unchanged, Post C only has canonical URL without post_id
+        run2 = {
+            "run_id": "run-cross-002",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T14:00:00Z",
+            "records": [
+                {
+                    "post_id": "CROSS_POST_A",
+                    "post_url": "https://www.threads.net/@creator/post/CROSS_POST_A",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Chủ đề A lượt 2",
+                    "views": 3200,
+                    "likes": 180,
+                    "comment_count": 20,
+                    "trend_tier": "very_hot",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_id": "CROSS_POST_B",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_B",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Bài thiếu views lượt 2",
+                    "views": None,
+                    "likes": 15,
+                    "trend_tier": "watchlist",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_url": "https://www.threads.com/@canon/post/CANON_ONLY_1/?xmt=run2",
+                    "author_handle": "@canon",
+                    "content_summary_vi": "Bài C dùng canonical_url làm fallback",
+                    "views": 500,
+                    "likes": 25,
+                    "trend_tier": "emerging",
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        r2 = self.store.ingest_raw_file("f_run_2", "threads_trend_run2.json", json.dumps(run2).encode("utf-8"))
+        self.assertEqual(r2["new_count"], 1)  # Only Post C is new!
+        self.assertEqual(r2["engagement_updated_count"], 1)  # Post A updated
+        self.assertEqual(r2["duplicate_count"], 1)  # Post B unchanged
+        self.assertEqual(r2["missing_views_count"], 1)  # Post B missing views
+        self.assertEqual(self.store.get_stats()["total_items"], 3)
+
+        # Run 3: Post A appears again with identical metrics (duplicate, NOT new, NOT lost old snapshot); Post C appears on threads.net with updated views
+        run3 = {
+            "run_id": "run-cross-003",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T20:00:00Z",
+            "records": [
+                {
+                    "post_id": "CROSS_POST_A",
+                    "post_url": "https://www.threads.com/@creator/post/CROSS_POST_A?igshid=99",
+                    "author_handle": "@creator",
+                    "content_summary_vi": "Chủ đề A lượt 3",
+                    "views": 3200,
+                    "likes": 180,
+                    "comment_count": 20,
+                    "trend_tier": "very_hot",
+                    "data_quality": "usable",
+                },
+                {
+                    "post_url": "https://threads.net/@canon/post/CANON_ONLY_1?ref=web",
+                    "author_handle": "@canon",
+                    "content_summary_vi": "Bài C tăng trưởng qua threads.net",
+                    "views": 950,
+                    "likes": 60,
+                    "trend_tier": "hot",
+                    "data_quality": "usable",
+                },
+            ],
+        }
+        r3 = self.store.ingest_raw_file("f_run_3", "threads_trend_run3.json", json.dumps(run3).encode("utf-8"))
+        self.assertEqual(r3["new_count"], 0)
+        self.assertEqual(r3["duplicate_count"], 1)  # Post A unchanged in Run 3
+        self.assertEqual(r3["engagement_updated_count"], 1)  # Post C matched by canonical_url & updated
+
+        # Verify: only 1 primary record per post (total 3), and Post A has exactly 3 chronological snapshots preserving Run 1's 1000/50
+        stats = self.store.get_stats()
+        self.assertEqual(stats["total_items"], 3)
+        detail_a = self.store.get_item_detail(post_a_item["id"])
+        self.assertEqual(detail_a["first_seen_at"], first_seen_run1)
+        self.assertEqual(detail_a["snapshot_count"], 3)
+        snaps_a = detail_a["snapshots"]
+        self.assertEqual(len(snaps_a), 3)
+        self.assertEqual([s["change_type"] for s in snaps_a], ["new", "updated", "duplicate"])
+        self.assertEqual(snaps_a[0]["views_count"], 1000)
+        self.assertEqual(snaps_a[1]["views_count"], 3200)
+        self.assertEqual(snaps_a[1]["views_delta"], 2200)
+        self.assertEqual(snaps_a[1]["likes_delta"], 130)
+        self.assertEqual(snaps_a[2]["views_count"], 3200)
+        self.assertEqual(snaps_a[2]["views_delta"], 0)
+
+        # Verify activity filters: 'new' has 0 items now (all seen >=2 runs!), 'growth' has A & C (2 items), 'all' has 3 items
+        self.assertEqual(self.store.query_items(activity_filter="new")["total"], 0)
+        growth_res = self.store.query_items(activity_filter="growth")
+        self.assertEqual(growth_res["total"], 2)
+        growth_pids = {it["post_id"] for it in growth_res["items"]}
+        self.assertIn("CROSS_POST_A", growth_pids)
+        self.assertEqual(self.store.query_items(activity_filter="all")["total"], 3)
+
+        # Ingest a brand new Post D in Run 4 -> activity_filter='new' shows only Post D
+        run4 = {
+            "run_id": "run-cross-004",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T21:00:00Z",
+            "records": [{"post_id": "CROSS_POST_D", "post_url": "https://threads.net/@new/post/CROSS_POST_D", "views": 400, "likes": 12}],
+        }
+        r4 = self.store.ingest_raw_file("f_run_4", "threads_trend_run4.json", json.dumps(run4).encode("utf-8"))
+        self.assertEqual(r4["new_count"], 1)
+        new_only = self.store.query_items(activity_filter="new")
+        self.assertEqual(new_only["total"], 1)
+        self.assertEqual(new_only["items"][0]["post_id"], "CROSS_POST_D")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

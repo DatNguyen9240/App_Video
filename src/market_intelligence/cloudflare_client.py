@@ -373,3 +373,27 @@ class CloudflareBridgeClient:
         if not resp.ok:
             raise RuntimeError(f"set_crawl_schedule failed: HTTP {resp.status_code}")
         return resp.json()
+
+    def check_cross_run_dedup(self, items: list) -> Dict[str, Any]:
+        """Check historical post registry on Worker V2/D1 across runs."""
+        resp = self._request_with_retry(
+            "POST",
+            "/api/app/market/dedup/check",
+            json_body={"items": list(items or [])[:500]},
+            max_attempts=2,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"check_cross_run_dedup failed: HTTP {resp.status_code}")
+        return resp.json()
+
+    def record_cross_run_dedup(self, items: list, run_id: Optional[str] = None) -> Dict[str, Any]:
+        """Atomically record ingested post keys/snapshots into shared Worker V2 D1 registry."""
+        resp = self._request_with_retry(
+            "POST",
+            "/api/app/market/dedup/record",
+            json_body={"run_id": run_id, "items": list(items or [])[:500]},
+            max_attempts=2,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"record_cross_run_dedup failed: HTTP {resp.status_code}")
+        return resp.json()

@@ -298,9 +298,20 @@ def _canonical_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
     try:
-        parsed = urlparse(url)
+        raw = url.strip()
+        if not raw:
+            return None
+        parsed = urlparse(raw)
+        if not parsed.scheme and not parsed.netloc:
+            return raw
+        scheme = (parsed.scheme or "https").lower()
+        netloc = (parsed.netloc or "").lower()
+        if netloc in ("threads.com", "www.threads.com", "www.threads.net", "threads.net"):
+            netloc = "threads.net"
+        elif netloc in ("tiktok.com", "m.tiktok.com", "www.tiktok.com"):
+            netloc = "www.tiktok.com"
         clean_path = parsed.path.rstrip("/")
-        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{clean_path}"
+        return f"{scheme}://{netloc}{clean_path}"
     except Exception:
         return url.strip()
 
@@ -321,30 +332,39 @@ def build_dedup_key(
     frame_start_at: Optional[str] = None,
 ) -> str:
     """
-    Build deterministic deduplication / upsert key per Data Contract V2:
-      - Threads: post_id
-      - TikTok: video_id (or author_handle + rank + run_id)
-      - Shopee: shop_id+item_id or item_id or normalized product_name (+ run_id/frame)
+    Build deterministic cross-run deduplication key:
+      1. Primary: platform + post_id / platform-native item ID (Shopee shop_id+item_id or item_id, TikTok video_id/post_id, Threads post_id)
+      2. Secondary fallback: canonical_url across crawl runs
+      3. Tertiary fallback: external_id / platform-specific legacy composite or content hash
     """
     plat = platform or "unknown"
+    c_url = _canonical_url(url)
 
     if plat == "shopee":
         if shop_id and item_id:
             return f"shopee:item:{shop_id}:{item_id}"
         if item_id:
             return f"shopee:item:{item_id}"
+        if post_id:
+            return f"shopee:post:{post_id}"
+        if c_url:
+            return f"shopee:url:{c_url}"
+        if external_id:
+            return f"shopee:ext:{external_id}"
         if title:
             clean_name = re.sub(r"\s+", " ", title.strip().lower())
             name_hash = hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:16]
             scope = run_id or frame_start_at or "global"
             return f"shopee:name:{scope}:{name_hash}"
-        if post_id:
-            return f"shopee:post:{post_id}"
     elif plat == "tiktok":
         if item_id:
             return f"tiktok:item:{item_id}"
         if post_id:
             return f"tiktok:post:{post_id}"
+        if c_url:
+            return f"tiktok:url:{c_url}"
+        if external_id:
+            return f"tiktok:ext:{external_id}"
         if author_handle and run_id:
             rank_part = str(rank) if rank is not None else "na"
             return f"tiktok:handle_run:{run_id}:{author_handle.strip().lower()}:{rank_part}"
@@ -353,18 +373,18 @@ def build_dedup_key(
             return f"threads:post:{post_id}"
         if item_id:
             return f"threads:item:{item_id}"
+        if c_url:
+            return f"threads:url:{c_url}"
     else:
         if post_id:
             return f"{plat}:post:{post_id}"
         if item_id:
             return f"{plat}:item:{item_id}"
+        if c_url:
+            return f"{plat}:url:{c_url}"
 
     if external_id:
         return f"{plat}:ext:{external_id}"
-
-    c_url = _canonical_url(url)
-    if c_url:
-        return f"{plat}:url:{c_url}"
 
     fingerprint_src = json.dumps(
         [plat, author_handle or "", published_at or "", title or "", text_content or ""],
@@ -637,6 +657,7 @@ def normalize_record(
         "text_content": text_content,
         "summary_vi": summary_vi or text_content,
         "url": url,
+        "canonical_url": _canonical_url(url),
         "evidence_url": evidence_url,
         "content_group": content_group,
         "purchase_intent": purchase_intent,

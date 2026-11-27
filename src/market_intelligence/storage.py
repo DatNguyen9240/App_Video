@@ -56,10 +56,11 @@ class MarketIntelligenceStore:
         os.makedirs(self.raw_dir, exist_ok=True)
 
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA busy_timeout=10000;")
             self._conn.execute("PRAGMA foreign_keys=ON;")
             self._init_schema()
             self._cleanup_orphaned_running_syncs()
@@ -182,10 +183,41 @@ class MarketIntelligenceStore:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (raw_file_id) REFERENCES raw_drive_files(file_id) ON DELETE SET NULL
             );
+
+            CREATE TABLE IF NOT EXISTS market_item_snapshots (
+                id TEXT PRIMARY KEY,
+                snapshot_source_key TEXT NOT NULL UNIQUE,
+                item_id TEXT NOT NULL,
+                dedup_key TEXT NOT NULL,
+                canonical_url TEXT,
+                platform TEXT NOT NULL,
+                run_id TEXT,
+                raw_file_id TEXT,
+                snapshot_at TEXT NOT NULL,
+                views_count INTEGER,
+                likes_count INTEGER,
+                comments_count INTEGER,
+                shares_count INTEGER,
+                reposts_count INTEGER,
+                quotes_count INTEGER,
+                price REAL,
+                sold_count INTEGER,
+                views_delta INTEGER,
+                likes_delta INTEGER,
+                comments_delta INTEGER,
+                shares_delta INTEGER,
+                reposts_delta INTEGER,
+                change_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (item_id) REFERENCES market_items(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_snapshots_item_id ON market_item_snapshots(item_id, snapshot_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_snapshots_dedup_key ON market_item_snapshots(dedup_key, snapshot_at ASC);
             """
         )
 
-        # Additive Data Contract V2 & V3.1 columns
+        # Additive Data Contract V2 & V3.1 + Cross-Run Dedup columns
         self._add_column_if_missing("raw_drive_files", "file_role", "TEXT DEFAULT 'crawl_data'")
         self._add_column_if_missing("raw_drive_files", "is_corrected", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("raw_drive_files", "corrects_file", "TEXT")
@@ -196,8 +228,30 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("raw_drive_files", "run_meta_json", "TEXT DEFAULT '{}'")
         self._add_column_if_missing("raw_drive_files", "is_archived", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("raw_drive_files", "archived_at", "TEXT")
+        self._add_column_if_missing("raw_drive_files", "new_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("raw_drive_files", "duplicate_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("raw_drive_files", "updated_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("raw_drive_files", "missing_views_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("raw_drive_files", "rejected_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("raw_drive_files", "scanned_count", "INTEGER NOT NULL DEFAULT 0")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_drive_files_archived ON raw_drive_files(is_archived);")
 
+        self._add_column_if_missing("sync_runs", "new_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("sync_runs", "duplicate_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("sync_runs", "updated_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("sync_runs", "missing_views_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("sync_runs", "rejected_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("sync_runs", "scanned_count", "INTEGER NOT NULL DEFAULT 0")
+
+        self._add_column_if_missing("market_items", "canonical_url", "TEXT")
+        self._add_column_if_missing("market_items", "last_change_type", "TEXT NOT NULL DEFAULT 'new'")
+        self._add_column_if_missing("market_items", "snapshot_count", "INTEGER NOT NULL DEFAULT 1")
+        self._add_column_if_missing("market_items", "views_missing", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("market_items", "last_views_delta", "INTEGER")
+        self._add_column_if_missing("market_items", "last_likes_delta", "INTEGER")
+        self._add_column_if_missing("market_items", "last_comments_delta", "INTEGER")
+        self._add_column_if_missing("market_items", "last_shares_delta", "INTEGER")
+        self._add_column_if_missing("market_items", "last_reposts_delta", "INTEGER")
         self._add_column_if_missing("market_items", "data_quality", "TEXT")
         self._add_column_if_missing("market_items", "quality_issues_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("market_items", "source_priority", "INTEGER NOT NULL DEFAULT 1")
@@ -212,6 +266,8 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("market_items", "metrics_source", "TEXT")
         self._add_column_if_missing("market_items", "post_pk", "TEXT")
         self._add_column_if_missing("market_items", "evidence_url", "TEXT")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_canonical_url ON market_items(platform, canonical_url);")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_change_type ON market_items(last_change_type, snapshot_count);")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_quality ON market_items(data_quality);")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_tier ON market_items(trend_tier);")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_market_items_group ON market_items(trend_group);")
@@ -312,6 +368,20 @@ class MarketIntelligenceStore:
 
     # ─── Ingestion & Priority Upsert (Data Contract V2) ────────────────────────
 
+    @staticmethod
+    def _compute_metric_delta(new_val: Any, old_val: Any) -> Optional[int]:
+        if new_val is None or old_val is None:
+            return None
+        try:
+            return int(new_val) - int(old_val)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _snapshot_source_key(item_id: str, raw_file_id: Optional[str], md5_checksum: Optional[str]) -> str:
+        raw_token = f"{item_id}::{raw_file_id or ''}::{md5_checksum or ''}"
+        return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()[:32]
+
     def ingest_raw_file(
         self,
         file_id: str,
@@ -321,8 +391,8 @@ class MarketIntelligenceStore:
         md5_checksum: Optional[str] = None,
         folder_path: Optional[str] = None,
         platform_hint: Optional[str] = None,
-    ) -> Dict[str, int]:
-        """Archive raw JSON file and priority-upsert normalized items (corrected_v2 > original)."""
+    ) -> Dict[str, Any]:
+        """Archive raw JSON file and priority-upsert normalized items while preserving cross-run engagement snapshots."""
         if is_archive_path(folder_path) or is_archive_path(file_name):
             return {
                 "file_role": "archived",
@@ -331,6 +401,12 @@ class MarketIntelligenceStore:
                 "inserted": 0,
                 "updated": 0,
                 "deduped": 0,
+                "new_count": 0,
+                "duplicate_count": 0,
+                "engagement_updated_count": 0,
+                "missing_views_count": 0,
+                "scanned_count": 0,
+                "rejected_count": 0,
             }
 
         raw_path = self.save_raw_bytes(file_id, file_name, raw_bytes)
@@ -402,303 +478,574 @@ class MarketIntelligenceStore:
         }
         run_meta = {k: v for k, v in run_meta.items() if v is not None}
 
+        screening_meta = envelope.get("screening") if isinstance(envelope.get("screening"), dict) else {}
+        scanned_count = int(
+            screening_meta.get("scanned_count")
+            or screening_meta.get("scanned_posts")
+            or envelope.get("scanned_count")
+            or len(items)
+        )
+        rejected_count = int(
+            screening_meta.get("rejected_count")
+            or screening_meta.get("rejected_posts")
+            or envelope.get("rejected_count")
+            or 0
+        )
+
         inserted = 0
         updated = 0
         deduped = 0
+        new_count = 0
+        duplicate_count = 0
+        engagement_updated_count = 0
+        missing_views_count = 0
+        batch_registry_items: List[Dict[str, Any]] = []
 
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO raw_drive_files
-                (file_id, file_name, folder_path, modified_time, md5_checksum, size_bytes, schema_version,
-                 raw_path, record_count, status, error_message, synced_at,
-                 file_role, is_corrected, corrects_file, run_status, technical_status, data_quality_status,
-                 business_usable_records, run_meta_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(file_id) DO UPDATE SET
-                    file_name = excluded.file_name,
-                    folder_path = excluded.folder_path,
-                    modified_time = excluded.modified_time,
-                    md5_checksum = excluded.md5_checksum,
-                    size_bytes = excluded.size_bytes,
-                    schema_version = excluded.schema_version,
-                    raw_path = excluded.raw_path,
-                    record_count = excluded.record_count,
-                    status = 'synced',
-                    error_message = NULL,
-                    synced_at = excluded.synced_at,
-                    file_role = excluded.file_role,
-                    is_corrected = excluded.is_corrected,
-                    corrects_file = excluded.corrects_file,
-                    run_status = excluded.run_status,
-                    technical_status = excluded.technical_status,
-                    data_quality_status = excluded.data_quality_status,
-                    business_usable_records = excluded.business_usable_records,
-                    run_meta_json = excluded.run_meta_json,
-                    is_archived = 0,
-                    archived_at = NULL
-                """,
-                (
-                    file_id,
-                    file_name,
-                    folder_path,
-                    modified_time,
-                    computed_md5,
-                    len(raw_bytes),
-                    schema_version,
-                    raw_path,
-                    len(items),
-                    now_iso,
-                    file_role,
-                    1 if is_corrected else 0,
-                    envelope.get("corrects_file") or envelope.get("corrects_report"),
-                    envelope.get("run_status"),
-                    envelope.get("technical_status") or envelope.get("status"),
-                    envelope.get("data_quality_status"),
-                    envelope.get("business_usable_records"),
-                    json.dumps(run_meta, ensure_ascii=False),
-                ),
-            )
-
-            for item in items:
-                existing = self._conn.execute(
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
                     """
-                    SELECT id, content_group, purchase_intent, text_content, summary_vi, title, url, evidence_url,
-                           likes_count, comments_count, shares_count, reposts_count, quotes_count, views_count,
-                           price, sold_count, rating, trend_tier, trend_group, verification_status, metrics_source, post_pk,
-                           data_quality, quality_issues_json, source_priority, is_corrected, run_id, crawled_at, published_at,
-                           raw_payload_json, extra_meta_json, metrics_json
-                    FROM market_items
-                    WHERE dedup_key = ?
+                    INSERT INTO raw_drive_files
+                    (file_id, file_name, folder_path, modified_time, md5_checksum, size_bytes, schema_version,
+                     raw_path, record_count, status, error_message, synced_at,
+                     file_role, is_corrected, corrects_file, run_status, technical_status, data_quality_status,
+                     business_usable_records, run_meta_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(file_id) DO UPDATE SET
+                        file_name = excluded.file_name,
+                        folder_path = excluded.folder_path,
+                        modified_time = excluded.modified_time,
+                        md5_checksum = excluded.md5_checksum,
+                        size_bytes = excluded.size_bytes,
+                        schema_version = excluded.schema_version,
+                        raw_path = excluded.raw_path,
+                        record_count = excluded.record_count,
+                        status = 'synced',
+                        error_message = NULL,
+                        synced_at = excluded.synced_at,
+                        file_role = excluded.file_role,
+                        is_corrected = excluded.is_corrected,
+                        corrects_file = excluded.corrects_file,
+                        run_status = excluded.run_status,
+                        technical_status = excluded.technical_status,
+                        data_quality_status = excluded.data_quality_status,
+                        business_usable_records = excluded.business_usable_records,
+                        run_meta_json = excluded.run_meta_json,
+                        is_archived = 0,
+                        archived_at = NULL
                     """,
-                    (item["dedup_key"],),
-                ).fetchone()
+                    (
+                        file_id,
+                        file_name,
+                        folder_path,
+                        modified_time,
+                        computed_md5,
+                        len(raw_bytes),
+                        schema_version,
+                        raw_path,
+                        len(items),
+                        now_iso,
+                        file_role,
+                        1 if is_corrected else 0,
+                        envelope.get("corrects_file") or envelope.get("corrects_report"),
+                        envelope.get("run_status"),
+                        envelope.get("technical_status") or envelope.get("status"),
+                        envelope.get("data_quality_status"),
+                        envelope.get("business_usable_records"),
+                        json.dumps(run_meta, ensure_ascii=False),
+                    ),
+                )
 
-                metrics_json = json.dumps(item["metrics"], ensure_ascii=False)
-                extra_meta_json = json.dumps(item["extra_meta"], ensure_ascii=False)
-                quality_issues_json = json.dumps(item["quality_issues"], ensure_ascii=False)
-                incoming_prio = int(item.get("source_priority") or 1)
+                for item in items:
+                    if item.get("views_count") is None:
+                        missing_views_count += 1
 
-                if not existing:
-                    self._conn.execute(
+                    c_url = item.get("canonical_url")
+                    existing = self._conn.execute(
                         """
-                        INSERT INTO market_items (
-                            id, dedup_key, platform, external_id, post_id, post_pk, item_id, shop_id,
-                            author_handle, author_name, title, text_content, summary_vi, url, evidence_url,
-                            content_group, purchase_intent, language, published_at, crawled_at,
-                            likes_count, comments_count, shares_count, reposts_count, quotes_count, views_count,
-                            price, sold_count, rating, trend_tier, trend_group, verification_status, metrics_source,
-                            data_quality, quality_issues_json, source_priority, is_corrected, run_id,
-                            metrics_json, extra_meta_json, schema_version, raw_file_id, raw_item_index,
-                            raw_payload_json, first_seen_at, last_seen_at, updated_at
-                        ) VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?
-                        )
+                        SELECT id, dedup_key, canonical_url, content_group, purchase_intent, text_content, summary_vi, title, url, evidence_url,
+                               likes_count, comments_count, shares_count, reposts_count, quotes_count, views_count,
+                               price, sold_count, rating, trend_tier, trend_group, verification_status, metrics_source, post_pk,
+                               data_quality, quality_issues_json, source_priority, is_corrected, run_id, crawled_at, published_at,
+                               raw_file_id, first_seen_at, last_seen_at, snapshot_count, last_change_type,
+                               last_views_delta, last_likes_delta, last_comments_delta, last_shares_delta, last_reposts_delta,
+                               raw_payload_json, extra_meta_json, metrics_json
+                        FROM market_items
+                        WHERE dedup_key = ?
                         """,
-                        (
-                            str(uuid.uuid4()),
-                            item["dedup_key"],
-                            item["platform"],
-                            item["external_id"],
-                            item["post_id"],
-                            item.get("post_pk"),
-                            item["item_id"],
-                            item["shop_id"],
-                            item["author_handle"],
-                            item["author_name"],
-                            item["title"],
-                            item["text_content"],
-                            item["summary_vi"],
-                            item["url"],
-                            item.get("evidence_url"),
-                            item["content_group"],
-                            item["purchase_intent"],
-                            item["language"],
-                            item["published_at"],
-                            item["crawled_at"],
-                            item["likes_count"],
-                            item["comments_count"],
-                            item["shares_count"],
-                            item.get("reposts_count"),
-                            item.get("quotes_count"),
-                            item["views_count"],
-                            item["price"],
-                            item["sold_count"],
-                            item["rating"],
-                            item.get("trend_tier"),
-                            item.get("trend_group"),
-                            item.get("verification_status"),
-                            item.get("metrics_source"),
-                            item["data_quality"],
-                            quality_issues_json,
-                            incoming_prio,
-                            1 if item.get("is_corrected") else 0,
-                            item.get("run_id"),
-                            metrics_json,
-                            extra_meta_json,
-                            item["schema_version"],
-                            file_id,
-                            item["raw_item_index"],
-                            item["raw_payload_json"],
-                            now_iso,
-                            now_iso,
-                            now_iso,
-                        ),
+                        (item["dedup_key"],),
+                    ).fetchone()
+                    if not existing and c_url:
+                        existing = self._conn.execute(
+                            """
+                            SELECT id, dedup_key, canonical_url, content_group, purchase_intent, text_content, summary_vi, title, url, evidence_url,
+                                   likes_count, comments_count, shares_count, reposts_count, quotes_count, views_count,
+                                   price, sold_count, rating, trend_tier, trend_group, verification_status, metrics_source, post_pk,
+                                   data_quality, quality_issues_json, source_priority, is_corrected, run_id, crawled_at, published_at,
+                                   raw_file_id, first_seen_at, last_seen_at, snapshot_count, last_change_type,
+                                   last_views_delta, last_likes_delta, last_comments_delta, last_shares_delta, last_reposts_delta,
+                                   raw_payload_json, extra_meta_json, metrics_json
+                            FROM market_items
+                            WHERE platform = ? AND canonical_url = ?
+                            LIMIT 1
+                            """,
+                            (item["platform"], c_url),
+                        ).fetchone()
+
+                    metrics_json = json.dumps(item["metrics"], ensure_ascii=False)
+                    extra_meta_json = json.dumps(item["extra_meta"], ensure_ascii=False)
+                    quality_issues_json = json.dumps(item["quality_issues"], ensure_ascii=False)
+                    incoming_prio = int(item.get("source_priority") or 1)
+                    snap_at = (
+                        item.get("crawled_at")
+                        or envelope.get("crawled_at")
+                        or envelope.get("ended_at")
+                        or envelope.get("collected_at")
+                        or modified_time
+                        or now_iso
                     )
-                    inserted += 1
-                else:
-                    existing_prio = int(existing["source_priority"] or 1)
-                    existing_run = existing["run_id"] or ""
-                    incoming_run = item.get("run_id") or ""
-                    same_run = bool(existing_run and incoming_run and existing_run == incoming_run)
-                    same_or_unknown_run = same_run or not existing_run or not incoming_run
-                    existing_ts = self._parse_iso_ts(existing["crawled_at"] or existing["published_at"])
-                    incoming_ts = self._parse_iso_ts(item.get("crawled_at") or item.get("published_at") or modified_time)
-                    is_newer_distinct_run = bool(
-                        existing_run and incoming_run and existing_run != incoming_run and incoming_ts >= existing_ts
-                    )
+                    effective_run_id = item.get("run_id") or envelope.get("run_id")
 
-                    # Original files must NEVER overwrite corrected_v2 within the same run or from an older run
-                    if (incoming_prio < existing_prio and not is_newer_distinct_run) or (
-                        not same_or_unknown_run and existing_ts > 0 and incoming_ts > 0 and incoming_ts < existing_ts
-                    ):
-                        self._conn.execute(
-                            "UPDATE market_items SET last_seen_at = ? WHERE id = ?",
-                            (now_iso, existing["id"]),
-                        )
-                        deduped += 1
-                        continue
-
-                    merged_cg = item["content_group"] if item["content_group"] is not None else existing["content_group"]
-                    merged_pi = item["purchase_intent"] if item["purchase_intent"] is not None else existing["purchase_intent"]
-                    merged_title = item["title"] if item["title"] is not None else existing["title"]
-                    merged_text = item["text_content"] if item["text_content"] is not None else existing["text_content"]
-                    merged_svi = item["summary_vi"] if item["summary_vi"] is not None else existing["summary_vi"]
-                    merged_url = item["url"] if item["url"] is not None else existing["url"]
-                    merged_ev_url = item.get("evidence_url") if item.get("evidence_url") is not None else existing["evidence_url"]
-                    merged_post_pk = item.get("post_pk") if item.get("post_pk") is not None else existing["post_pk"]
-                    merged_tier = item.get("trend_tier") if item.get("trend_tier") is not None else existing["trend_tier"]
-                    merged_group = item.get("trend_group") if item.get("trend_group") is not None else existing["trend_group"]
-                    merged_verif = item.get("verification_status") if item.get("verification_status") is not None else existing["verification_status"]
-                    merged_msrc = item.get("metrics_source") if item.get("metrics_source") is not None else existing["metrics_source"]
-                    merged_likes = item["likes_count"] if item["likes_count"] is not None else existing["likes_count"]
-                    merged_comments = item["comments_count"] if item["comments_count"] is not None else existing["comments_count"]
-                    merged_shares = item["shares_count"] if item["shares_count"] is not None else existing["shares_count"]
-                    merged_reposts = item.get("reposts_count") if item.get("reposts_count") is not None else existing["reposts_count"]
-                    merged_quotes = item.get("quotes_count") if item.get("quotes_count") is not None else existing["quotes_count"]
-                    merged_views = item["views_count"] if item["views_count"] is not None else existing["views_count"]
-                    merged_price = item["price"] if item["price"] is not None else existing["price"]
-                    merged_sold = item["sold_count"] if item["sold_count"] is not None else existing["sold_count"]
-                    merged_rating = item["rating"] if item["rating"] is not None else existing["rating"]
-
-                    if incoming_prio > existing_prio or is_newer_distinct_run:
-                        merged_dq = item["data_quality"] if item["data_quality"] is not None else existing["data_quality"]
-                        merged_qi = quality_issues_json
-                        force_update = True
-                    else:
-                        merged_dq = item["data_quality"] if item["data_quality"] is not None else existing["data_quality"]
-                        merged_qi = quality_issues_json if item["quality_issues"] else (existing["quality_issues_json"] or "[]")
-                        force_update = any(
-                            [
-                                merged_cg != existing["content_group"],
-                                merged_pi != existing["purchase_intent"],
-                                merged_title != existing["title"],
-                                merged_text != existing["text_content"],
-                                merged_svi != existing["summary_vi"],
-                                merged_url != existing["url"],
-                                merged_ev_url != existing["evidence_url"],
-                                merged_tier != existing["trend_tier"],
-                                merged_group != existing["trend_group"],
-                                merged_verif != existing["verification_status"],
-                                merged_dq != existing["data_quality"],
-                                merged_qi != (existing["quality_issues_json"] or "[]"),
-                                merged_likes != existing["likes_count"],
-                                merged_comments != existing["comments_count"],
-                                merged_shares != existing["shares_count"],
-                                merged_reposts != existing["reposts_count"],
-                                merged_quotes != existing["quotes_count"],
-                                merged_views != existing["views_count"],
-                                merged_price != existing["price"],
-                                merged_sold != existing["sold_count"],
-                                merged_rating != existing["rating"],
-                                extra_meta_json != (existing["extra_meta_json"] or "{}"),
-                                metrics_json != (existing["metrics_json"] or "{}"),
-                            ]
-                        )
-
-                    if force_update:
+                    if not existing:
+                        item_uuid = str(uuid.uuid4())
                         self._conn.execute(
                             """
-                            UPDATE market_items
-                            SET title = ?, text_content = ?, summary_vi = ?, url = ?, evidence_url = ?, post_pk = COALESCE(?, post_pk),
-                                language = COALESCE(?, language), published_at = COALESCE(?, published_at), crawled_at = COALESCE(?, crawled_at),
-                                content_group = ?, purchase_intent = ?,
-                                likes_count = ?, comments_count = ?, shares_count = ?, reposts_count = ?, quotes_count = ?, views_count = ?,
-                                price = ?, sold_count = ?, rating = ?,
-                                trend_tier = ?, trend_group = ?, verification_status = ?, metrics_source = ?,
-                                data_quality = ?, quality_issues_json = ?,
-                                source_priority = ?, is_corrected = ?, run_id = COALESCE(?, run_id),
-                                metrics_json = ?, extra_meta_json = ?, schema_version = ?,
-                                raw_file_id = ?, raw_payload_json = ?,
-                                last_seen_at = ?, updated_at = ?
-                            WHERE id = ?
+                            INSERT INTO market_items (
+                                id, dedup_key, platform, external_id, post_id, post_pk, item_id, shop_id,
+                                author_handle, author_name, title, text_content, summary_vi, url, canonical_url, evidence_url,
+                                content_group, purchase_intent, language, published_at, crawled_at,
+                                likes_count, comments_count, shares_count, reposts_count, quotes_count, views_count,
+                                price, sold_count, rating, trend_tier, trend_group, verification_status, metrics_source,
+                                data_quality, quality_issues_json, source_priority, is_corrected, run_id,
+                                last_change_type, snapshot_count, views_missing,
+                                metrics_json, extra_meta_json, schema_version, raw_file_id, raw_item_index,
+                                raw_payload_json, first_seen_at, last_seen_at, updated_at
+                            ) VALUES (
+                                ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?,
+                                'new', 1, ?,
+                                ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?
+                            )
                             """,
                             (
-                                merged_title,
-                                merged_text,
-                                merged_svi,
-                                merged_url,
-                                merged_ev_url,
-                                merged_post_pk,
+                                item_uuid,
+                                item["dedup_key"],
+                                item["platform"],
+                                item["external_id"],
+                                item["post_id"],
+                                item.get("post_pk"),
+                                item["item_id"],
+                                item["shop_id"],
+                                item["author_handle"],
+                                item["author_name"],
+                                item["title"],
+                                item["text_content"],
+                                item["summary_vi"],
+                                item["url"],
+                                c_url,
+                                item.get("evidence_url"),
+                                item["content_group"],
+                                item["purchase_intent"],
                                 item["language"],
                                 item["published_at"],
                                 item["crawled_at"],
-                                merged_cg,
-                                merged_pi,
-                                merged_likes,
-                                merged_comments,
-                                merged_shares,
-                                merged_reposts,
-                                merged_quotes,
-                                merged_views,
-                                merged_price,
-                                merged_sold,
-                                merged_rating,
-                                merged_tier,
-                                merged_group,
-                                merged_verif,
-                                merged_msrc,
-                                merged_dq,
-                                merged_qi,
+                                item["likes_count"],
+                                item["comments_count"],
+                                item["shares_count"],
+                                item.get("reposts_count"),
+                                item.get("quotes_count"),
+                                item["views_count"],
+                                item["price"],
+                                item["sold_count"],
+                                item["rating"],
+                                item.get("trend_tier"),
+                                item.get("trend_group"),
+                                item.get("verification_status"),
+                                item.get("metrics_source"),
+                                item["data_quality"],
+                                quality_issues_json,
                                 incoming_prio,
                                 1 if item.get("is_corrected") else 0,
-                                item.get("run_id"),
+                                effective_run_id,
+                                1 if item.get("views_count") is None else 0,
                                 metrics_json,
                                 extra_meta_json,
                                 item["schema_version"],
                                 file_id,
+                                item["raw_item_index"],
                                 item["raw_payload_json"],
                                 now_iso,
                                 now_iso,
-                                existing["id"],
+                                now_iso,
                             ),
                         )
-                        updated += 1
-                    else:
+                        snap_src_key = self._snapshot_source_key(item_uuid, file_id, computed_md5)
                         self._conn.execute(
-                            "UPDATE market_items SET last_seen_at = ? WHERE id = ?",
-                            (now_iso, existing["id"]),
+                            """
+                            INSERT INTO market_item_snapshots (
+                                id, snapshot_source_key, item_id, dedup_key, canonical_url, platform,
+                                run_id, raw_file_id, snapshot_at,
+                                views_count, likes_count, comments_count, shares_count, reposts_count, quotes_count, price, sold_count,
+                                views_delta, likes_delta, comments_delta, shares_delta, reposts_delta,
+                                change_type, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'new', ?)
+                            ON CONFLICT(snapshot_source_key) DO NOTHING
+                            """,
+                            (
+                                str(uuid.uuid4()),
+                                snap_src_key,
+                                item_uuid,
+                                item["dedup_key"],
+                                c_url,
+                                item["platform"],
+                                effective_run_id,
+                                file_id,
+                                snap_at,
+                                item["views_count"],
+                                item["likes_count"],
+                                item["comments_count"],
+                                item["shares_count"],
+                                item.get("reposts_count"),
+                                item.get("quotes_count"),
+                                item["price"],
+                                item["sold_count"],
+                                now_iso,
+                            ),
                         )
-                        deduped += 1
+                        inserted += 1
+                        new_count += 1
+                        batch_registry_items.append({
+                            "dedup_key": item["dedup_key"],
+                            "platform": item["platform"],
+                            "post_id": item.get("post_id"),
+                            "canonical_url": c_url,
+                            "run_id": effective_run_id,
+                            "metrics": item["metrics"],
+                        })
+                    else:
+                        existing_prio = int(existing["source_priority"] or 1)
+                        existing_run = existing["run_id"] or ""
+                        incoming_run = effective_run_id or ""
+                        same_run = bool(existing_run and incoming_run and existing_run == incoming_run)
+                        same_or_unknown_run = same_run or not existing_run or not incoming_run
+                        existing_ts = self._parse_iso_ts(existing["crawled_at"] or existing["published_at"])
+                        incoming_ts = self._parse_iso_ts(item.get("crawled_at") or item.get("published_at") or modified_time)
+                        is_newer_distinct_run = bool(
+                            existing_run and incoming_run and existing_run != incoming_run and incoming_ts >= existing_ts
+                        )
 
-            self._conn.commit()
+                        # Original files must NEVER overwrite corrected_v2 within the same run or from an older run
+                        if (incoming_prio < existing_prio and not is_newer_distinct_run) or (
+                            not same_or_unknown_run and existing_ts > 0 and incoming_ts > 0 and incoming_ts < existing_ts
+                        ):
+                            self._conn.execute(
+                                "UPDATE market_items SET last_seen_at = ? WHERE id = ?",
+                                (now_iso, existing["id"]),
+                            )
+                            deduped += 1
+                            duplicate_count += 1
+                            continue
+
+                        # Preserve legacy pre-snapshot metrics before updating in-place
+                        existing_snap_total = self._conn.execute(
+                            "SELECT COUNT(*) AS c FROM market_item_snapshots WHERE item_id = ?",
+                            (existing["id"],),
+                        ).fetchone()["c"]
+                        if existing_snap_total == 0:
+                            base_snap_key = self._snapshot_source_key(
+                                existing["id"],
+                                existing["raw_file_id"] or "legacy_baseline",
+                                "baseline",
+                            )
+                            base_at = existing["crawled_at"] or existing["published_at"] or existing["first_seen_at"] or now_iso
+                            self._conn.execute(
+                                """
+                                INSERT INTO market_item_snapshots (
+                                    id, snapshot_source_key, item_id, dedup_key, canonical_url, platform,
+                                    run_id, raw_file_id, snapshot_at,
+                                    views_count, likes_count, comments_count, shares_count, reposts_count, quotes_count, price, sold_count,
+                                    views_delta, likes_delta, comments_delta, shares_delta, reposts_delta,
+                                    change_type, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'new', ?)
+                                ON CONFLICT(snapshot_source_key) DO NOTHING
+                                """,
+                                (
+                                    str(uuid.uuid4()),
+                                    base_snap_key,
+                                    existing["id"],
+                                    existing["dedup_key"],
+                                    existing["canonical_url"],
+                                    item["platform"],
+                                    existing["run_id"],
+                                    existing["raw_file_id"],
+                                    base_at,
+                                    existing["views_count"],
+                                    existing["likes_count"],
+                                    existing["comments_count"],
+                                    existing["shares_count"],
+                                    existing["reposts_count"],
+                                    existing["quotes_count"],
+                                    existing["price"],
+                                    existing["sold_count"],
+                                    existing["first_seen_at"] or now_iso,
+                                ),
+                            )
+
+                        d_views = self._compute_metric_delta(item["views_count"], existing["views_count"])
+                        d_likes = self._compute_metric_delta(item["likes_count"], existing["likes_count"])
+                        d_comments = self._compute_metric_delta(item["comments_count"], existing["comments_count"])
+                        d_shares = self._compute_metric_delta(item["shares_count"], existing["shares_count"])
+                        d_reposts = self._compute_metric_delta(item.get("reposts_count"), existing["reposts_count"])
+
+                        metric_pairs = (
+                            (item["views_count"], existing["views_count"]),
+                            (item["likes_count"], existing["likes_count"]),
+                            (item["comments_count"], existing["comments_count"]),
+                            (item["shares_count"], existing["shares_count"]),
+                            (item.get("reposts_count"), existing["reposts_count"]),
+                            (item.get("quotes_count"), existing["quotes_count"]),
+                            (item["price"], existing["price"]),
+                            (item["sold_count"], existing["sold_count"]),
+                        )
+                        metrics_changed = any((nv is not None and nv != ov) for nv, ov in metric_pairs)
+                        snap_change_type = "updated" if metrics_changed else "duplicate"
+
+                        merged_cg = item["content_group"] if item["content_group"] is not None else existing["content_group"]
+                        merged_pi = item["purchase_intent"] if item["purchase_intent"] is not None else existing["purchase_intent"]
+                        merged_title = item["title"] if item["title"] is not None else existing["title"]
+                        merged_text = item["text_content"] if item["text_content"] is not None else existing["text_content"]
+                        merged_svi = item["summary_vi"] if item["summary_vi"] is not None else existing["summary_vi"]
+                        merged_url = item["url"] if item["url"] is not None else existing["url"]
+                        merged_c_url = c_url or existing["canonical_url"]
+                        merged_ev_url = item.get("evidence_url") if item.get("evidence_url") is not None else existing["evidence_url"]
+                        merged_post_pk = item.get("post_pk") if item.get("post_pk") is not None else existing["post_pk"]
+                        merged_tier = item.get("trend_tier") if item.get("trend_tier") is not None else existing["trend_tier"]
+                        merged_group = item.get("trend_group") if item.get("trend_group") is not None else existing["trend_group"]
+                        merged_verif = item.get("verification_status") if item.get("verification_status") is not None else existing["verification_status"]
+                        merged_msrc = item.get("metrics_source") if item.get("metrics_source") is not None else existing["metrics_source"]
+                        merged_likes = item["likes_count"] if item["likes_count"] is not None else existing["likes_count"]
+                        merged_comments = item["comments_count"] if item["comments_count"] is not None else existing["comments_count"]
+                        merged_shares = item["shares_count"] if item["shares_count"] is not None else existing["shares_count"]
+                        merged_reposts = item.get("reposts_count") if item.get("reposts_count") is not None else existing["reposts_count"]
+                        merged_quotes = item.get("quotes_count") if item.get("quotes_count") is not None else existing["quotes_count"]
+                        merged_views = item["views_count"] if item["views_count"] is not None else existing["views_count"]
+                        merged_price = item["price"] if item["price"] is not None else existing["price"]
+                        merged_sold = item["sold_count"] if item["sold_count"] is not None else existing["sold_count"]
+                        merged_rating = item["rating"] if item["rating"] is not None else existing["rating"]
+
+                        if incoming_prio > existing_prio or is_newer_distinct_run:
+                            merged_dq = item["data_quality"] if item["data_quality"] is not None else existing["data_quality"]
+                            merged_qi = quality_issues_json
+                            force_update = True
+                        else:
+                            merged_dq = item["data_quality"] if item["data_quality"] is not None else existing["data_quality"]
+                            merged_qi = quality_issues_json if item["quality_issues"] else (existing["quality_issues_json"] or "[]")
+                            force_update = metrics_changed or any(
+                                [
+                                    merged_cg != existing["content_group"],
+                                    merged_pi != existing["purchase_intent"],
+                                    merged_title != existing["title"],
+                                    merged_text != existing["text_content"],
+                                    merged_svi != existing["summary_vi"],
+                                    merged_url != existing["url"],
+                                    merged_ev_url != existing["evidence_url"],
+                                    merged_tier != existing["trend_tier"],
+                                    merged_group != existing["trend_group"],
+                                    merged_verif != existing["verification_status"],
+                                    merged_dq != existing["data_quality"],
+                                    merged_qi != (existing["quality_issues_json"] or "[]"),
+                                    extra_meta_json != (existing["extra_meta_json"] or "{}"),
+                                    metrics_json != (existing["metrics_json"] or "{}"),
+                                ]
+                            )
+
+                        snap_src_key = self._snapshot_source_key(existing["id"], file_id, computed_md5)
+                        snap_exists = (
+                            self._conn.execute(
+                                "SELECT 1 FROM market_item_snapshots WHERE snapshot_source_key = ?",
+                                (snap_src_key,),
+                            ).fetchone()
+                            is not None
+                        )
+                        if not snap_exists:
+                            self._conn.execute(
+                                """
+                                INSERT INTO market_item_snapshots (
+                                    id, snapshot_source_key, item_id, dedup_key, canonical_url, platform,
+                                    run_id, raw_file_id, snapshot_at,
+                                    views_count, likes_count, comments_count, shares_count, reposts_count, quotes_count, price, sold_count,
+                                    views_delta, likes_delta, comments_delta, shares_delta, reposts_delta,
+                                    change_type, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(snapshot_source_key) DO NOTHING
+                                """,
+                                (
+                                    str(uuid.uuid4()),
+                                    snap_src_key,
+                                    existing["id"],
+                                    existing["dedup_key"],
+                                    merged_c_url,
+                                    item["platform"],
+                                    effective_run_id,
+                                    file_id,
+                                    snap_at,
+                                    item["views_count"],
+                                    item["likes_count"],
+                                    item["comments_count"],
+                                    item["shares_count"],
+                                    item.get("reposts_count"),
+                                    item.get("quotes_count"),
+                                    item["price"],
+                                    item["sold_count"],
+                                    d_views,
+                                    d_likes,
+                                    d_comments,
+                                    d_shares,
+                                    d_reposts,
+                                    snap_change_type,
+                                    now_iso,
+                                ),
+                            )
+
+                        total_snaps = self._conn.execute(
+                            "SELECT COUNT(*) AS c FROM market_item_snapshots WHERE item_id = ?",
+                            (existing["id"],),
+                        ).fetchone()["c"]
+                        snap_cnt = max(1, int(total_snaps or existing["snapshot_count"] or 1))
+
+                        if metrics_changed:
+                            engagement_updated_count += 1
+                        else:
+                            duplicate_count += 1
+
+                        if force_update:
+                            self._conn.execute(
+                                """
+                                UPDATE market_items
+                                SET title = ?, text_content = ?, summary_vi = ?, url = ?, canonical_url = COALESCE(?, canonical_url),
+                                    evidence_url = ?, post_pk = COALESCE(?, post_pk),
+                                    language = COALESCE(?, language), published_at = COALESCE(?, published_at), crawled_at = COALESCE(?, crawled_at),
+                                    content_group = ?, purchase_intent = ?,
+                                    likes_count = ?, comments_count = ?, shares_count = ?, reposts_count = ?, quotes_count = ?, views_count = ?,
+                                    price = ?, sold_count = ?, rating = ?,
+                                    trend_tier = ?, trend_group = ?, verification_status = ?, metrics_source = ?,
+                                    data_quality = ?, quality_issues_json = ?,
+                                    source_priority = ?, is_corrected = ?, run_id = COALESCE(?, run_id),
+                                    last_change_type = ?, snapshot_count = ?, views_missing = ?,
+                                    last_views_delta = COALESCE(?, last_views_delta),
+                                    last_likes_delta = COALESCE(?, last_likes_delta),
+                                    last_comments_delta = COALESCE(?, last_comments_delta),
+                                    last_shares_delta = COALESCE(?, last_shares_delta),
+                                    last_reposts_delta = COALESCE(?, last_reposts_delta),
+                                    metrics_json = ?, extra_meta_json = ?, schema_version = ?,
+                                    raw_file_id = ?, raw_payload_json = ?,
+                                    last_seen_at = ?, updated_at = ?
+                                WHERE id = ?
+                                """,
+                                (
+                                    merged_title,
+                                    merged_text,
+                                    merged_svi,
+                                    merged_url,
+                                    merged_c_url,
+                                    merged_ev_url,
+                                    merged_post_pk,
+                                    item["language"],
+                                    item["published_at"],
+                                    item["crawled_at"],
+                                    merged_cg,
+                                    merged_pi,
+                                    merged_likes,
+                                    merged_comments,
+                                    merged_shares,
+                                    merged_reposts,
+                                    merged_quotes,
+                                    merged_views,
+                                    merged_price,
+                                    merged_sold,
+                                    merged_rating,
+                                    merged_tier,
+                                    merged_group,
+                                    merged_verif,
+                                    merged_msrc,
+                                    merged_dq,
+                                    merged_qi,
+                                    incoming_prio,
+                                    1 if item.get("is_corrected") else 0,
+                                    effective_run_id,
+                                    snap_change_type,
+                                    snap_cnt,
+                                    1 if merged_views is None else 0,
+                                    d_views if metrics_changed else None,
+                                    d_likes if metrics_changed else None,
+                                    d_comments if metrics_changed else None,
+                                    d_shares if metrics_changed else None,
+                                    d_reposts if metrics_changed else None,
+                                    metrics_json,
+                                    extra_meta_json,
+                                    item["schema_version"],
+                                    file_id,
+                                    item["raw_payload_json"],
+                                    now_iso,
+                                    now_iso,
+                                    existing["id"],
+                                ),
+                            )
+                            updated += 1
+                        else:
+                            self._conn.execute(
+                                """
+                                UPDATE market_items
+                                SET last_seen_at = ?,
+                                    snapshot_count = ?,
+                                    last_change_type = ?,
+                                    canonical_url = COALESCE(?, canonical_url)
+                                WHERE id = ?
+                                """,
+                                (now_iso, snap_cnt, snap_change_type, merged_c_url, existing["id"]),
+                            )
+                            deduped += 1
+
+                        batch_registry_items.append({
+                            "dedup_key": existing["dedup_key"],
+                            "platform": item["platform"],
+                            "post_id": item.get("post_id"),
+                            "canonical_url": merged_c_url,
+                            "run_id": effective_run_id,
+                            "metrics": item["metrics"],
+                        })
+
+                self._conn.execute(
+                    """
+                    UPDATE raw_drive_files
+                    SET new_count = ?, duplicate_count = ?, updated_count = ?,
+                        missing_views_count = ?, scanned_count = ?, rejected_count = ?
+                    WHERE file_id = ?
+                    """,
+                    (
+                        new_count,
+                        duplicate_count,
+                        engagement_updated_count,
+                        missing_views_count,
+                        scanned_count,
+                        rejected_count,
+                        file_id,
+                    ),
+                )
+                self._conn.commit()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                raise
 
         if file_role not in ("data_contract", "crawl_strategy", "quality_audit", "research_doc", "capability_test") and has_muse_report_sections(raw_obj):
             try:
@@ -714,6 +1061,13 @@ class MarketIntelligenceStore:
             "inserted": inserted,
             "updated": updated,
             "deduped": deduped,
+            "new_count": new_count,
+            "duplicate_count": duplicate_count,
+            "engagement_updated_count": engagement_updated_count,
+            "missing_views_count": missing_views_count,
+            "scanned_count": scanned_count,
+            "rejected_count": rejected_count,
+            "registry_items": batch_registry_items,
         }
 
     def reconcile_cached_raw_files(self) -> Dict[str, int]:
@@ -824,6 +1178,13 @@ class MarketIntelligenceStore:
         records_updated: int = 0,
         records_deduped: int = 0,
         error_message: Optional[str] = None,
+        *,
+        new_count: Optional[int] = None,
+        duplicate_count: Optional[int] = None,
+        updated_count: Optional[int] = None,
+        missing_views_count: Optional[int] = None,
+        scanned_count: Optional[int] = None,
+        rejected_count: Optional[int] = None,
     ):
         now_iso = _utc_now_iso()
         with self._lock:
@@ -832,7 +1193,10 @@ class MarketIntelligenceStore:
                 UPDATE sync_runs
                 SET status = ?, files_checked = ?, files_downloaded = ?,
                     records_parsed = ?, records_inserted = ?, records_updated = ?,
-                    records_deduped = ?, finished_at = ?, error_message = ?
+                    records_deduped = ?,
+                    new_count = ?, duplicate_count = ?, updated_count = ?,
+                    missing_views_count = ?, scanned_count = ?, rejected_count = ?,
+                    finished_at = ?, error_message = ?
                 WHERE run_id = ?
                 """,
                 (
@@ -843,6 +1207,12 @@ class MarketIntelligenceStore:
                     records_inserted,
                     records_updated,
                     records_deduped,
+                    int(new_count if new_count is not None else records_inserted),
+                    int(duplicate_count if duplicate_count is not None else records_deduped),
+                    int(updated_count if updated_count is not None else records_updated),
+                    int(missing_views_count or 0),
+                    int(scanned_count if scanned_count is not None else records_parsed),
+                    int(rejected_count or 0),
                     now_iso,
                     error_message,
                     run_id,
@@ -876,6 +1246,7 @@ class MarketIntelligenceStore:
         trend_tier: Optional[str] = None,
         trend_group: Optional[str] = None,
         verification_status: Optional[str] = None,
+        activity_filter: Optional[str] = None,
         search: Optional[str] = None,
         sort_by: str = "recent",
         affiliate_only: bool = False,
@@ -935,6 +1306,20 @@ class MarketIntelligenceStore:
                 clauses.append("m.verification_status = ?")
                 params.append(verification_status.lower().strip())
 
+        if activity_filter and activity_filter != "all":
+            act_norm = activity_filter.lower().strip()
+            if act_norm == "new":
+                clauses.append("COALESCE(m.snapshot_count, 1) = 1 AND COALESCE(m.last_change_type, 'new') = 'new'")
+            elif act_norm in ("growth", "updated"):
+                clauses.append(
+                    "(COALESCE(m.last_views_delta, 0) > 0 OR COALESCE(m.last_likes_delta, 0) > 0 "
+                    "OR COALESCE(m.last_comments_delta, 0) > 0 OR COALESCE(m.last_shares_delta, 0) > 0 "
+                    "OR COALESCE(m.last_reposts_delta, 0) > 0 OR m.last_change_type = 'updated' "
+                    "OR EXISTS (SELECT 1 FROM market_item_snapshots s WHERE s.item_id = m.id AND s.change_type = 'updated'))"
+                )
+            elif act_norm == "duplicate":
+                clauses.append("COALESCE(m.snapshot_count, 1) > 1")
+
         if affiliate_only:
             clauses.append(
                 "(m.data_quality IS NULL OR m.data_quality != 'needs_verification') "
@@ -985,12 +1370,14 @@ class MarketIntelligenceStore:
             rows = self._conn.execute(
                 f"""
                 SELECT m.id, m.dedup_key, m.platform, m.external_id, m.post_id, m.post_pk, m.item_id, m.shop_id,
-                       m.author_handle, m.author_name, m.title, m.text_content, m.summary_vi, m.url, m.evidence_url,
+                       m.author_handle, m.author_name, m.title, m.text_content, m.summary_vi, m.url, m.canonical_url, m.evidence_url,
                        m.content_group, m.purchase_intent, m.language, m.published_at, m.crawled_at,
                        m.likes_count, m.comments_count, m.shares_count, m.reposts_count, m.quotes_count, m.views_count,
                        m.price, m.sold_count, m.rating,
                        m.trend_tier, m.trend_group, m.verification_status, m.metrics_source,
                        m.data_quality, m.quality_issues_json, m.source_priority, m.is_corrected, m.run_id,
+                       m.last_change_type, m.snapshot_count, m.views_missing,
+                       m.last_views_delta, m.last_likes_delta, m.last_comments_delta, m.last_shares_delta, m.last_reposts_delta,
                        m.metrics_json, m.extra_meta_json, m.schema_version, m.raw_file_id, m.first_seen_at, m.last_seen_at,
                        r.file_name AS source_file_name
                 FROM market_items m
@@ -1022,6 +1409,20 @@ class MarketIntelligenceStore:
 
         return {"total": total, "limit": lim, "offset": off, "items": items}
 
+    def query_item_snapshots(self, item_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT s.*, r.file_name AS source_file_name
+                FROM market_item_snapshots s
+                LEFT JOIN raw_drive_files r ON s.raw_file_id = r.file_id
+                WHERE s.item_id = ?
+                ORDER BY s.snapshot_at ASC, s.rowid ASC
+                """,
+                (item_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_item_detail(self, item_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             row = self._conn.execute(
@@ -1047,6 +1448,17 @@ class MarketIntelligenceStore:
                     d[dst_key] = json.loads(raw_txt or "{}")
                 except Exception:
                     d[dst_key] = raw_txt
+            snaps = self._conn.execute(
+                """
+                SELECT s.*, r.file_name AS source_file_name
+                FROM market_item_snapshots s
+                LEFT JOIN raw_drive_files r ON s.raw_file_id = r.file_id
+                WHERE s.item_id = ?
+                ORDER BY s.snapshot_at ASC, s.rowid ASC
+                """,
+                (item_id,),
+            ).fetchall()
+            d["snapshots"] = [dict(s) for s in snaps]
             return d
 
     def _run_meta_crawl_ts(self, meta: Dict[str, Any], modified_time: Optional[str] = None) -> float:
@@ -1251,10 +1663,38 @@ class MarketIntelligenceStore:
             ]
 
             latest_run = self.get_latest_sync_run()
+            total_snapshots = self._conn.execute(
+                f"""
+                SELECT COUNT(*) AS c
+                FROM market_item_snapshots s
+                JOIN market_items m ON s.item_id = m.id
+                LEFT JOIN raw_drive_files r ON m.raw_file_id = r.file_id
+                WHERE (m.raw_file_id IS NULL OR {_NOT_ARCHIVE_RAW_SQL})
+                """
+            ).fetchone()["c"]
+            act_row = self._conn.execute(
+                f"""
+                SELECT
+                    SUM(CASE WHEN COALESCE(m.snapshot_count, 1) = 1 AND COALESCE(m.last_change_type, 'new') = 'new' THEN 1 ELSE 0 END) AS new_items,
+                    SUM(CASE WHEN COALESCE(m.last_views_delta, 0) > 0 OR COALESCE(m.last_likes_delta, 0) > 0 OR COALESCE(m.last_comments_delta, 0) > 0 OR COALESCE(m.last_shares_delta, 0) > 0 OR COALESCE(m.last_reposts_delta, 0) > 0 OR m.last_change_type = 'updated' OR EXISTS (SELECT 1 FROM market_item_snapshots s WHERE s.item_id = m.id AND s.change_type = 'updated') THEN 1 ELSE 0 END) AS growth_items,
+                    SUM(CASE WHEN COALESCE(m.snapshot_count, 1) > 1 THEN 1 ELSE 0 END) AS multi_run_items,
+                    SUM(CASE WHEN m.views_count IS NULL THEN 1 ELSE 0 END) AS missing_views_items
+                FROM market_items m
+                {active_item_join}
+                """
+            ).fetchone()
+            by_activity = {
+                "new": (act_row["new_items"] or 0) if act_row else 0,
+                "growth": (act_row["growth_items"] or 0) if act_row else 0,
+                "multi_run": (act_row["multi_run_items"] or 0) if act_row else 0,
+                "missing_views": (act_row["missing_views_items"] or 0) if act_row else 0,
+            }
 
         return {
             "total_items": total_items,
+            "total_snapshots": total_snapshots,
             "total_raw_files": total_raw_files,
+            "by_activity": by_activity,
             "by_platform": by_platform,
             "by_quality": by_quality,
             "by_platform_quality": by_platform_quality,
