@@ -7,9 +7,16 @@ Chức năng:
   - Lưu trữ log hoạt động có timestamp để truyền về Web UI Tab "Giám Sát Quy Trình"
 """
 
+import subprocess
 import threading
+import time
 from datetime import datetime
 from copy import deepcopy
+
+
+class PipelineCancelledError(Exception):
+    """Ngoại lệ báo hiệu quy trình sản xuất video đã bị người dùng ngắt."""
+    pass
 
 STEP_DEFINITIONS = [
     {
@@ -57,6 +64,8 @@ STEP_DEFINITIONS = [
 ]
 
 _lock = threading.Lock()
+_cancel_event = threading.Event()
+_active_procs: set = set()
 _state = {
     "is_running": False,
     "current_step_id": "idle",
@@ -76,7 +85,14 @@ _state = {
 def reset():
     """Khởi tạo lại trạng thái mới."""
     global _state
+    _cancel_event.clear()
     with _lock:
+        for proc in list(_active_procs):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        _active_procs.clear()
         _state["is_running"] = True
         _state["current_step_id"] = "init"
         _state["current_step_title"] = "Khởi động quy trình"
@@ -90,6 +106,109 @@ def reset():
         _state["emotional_arc_data"] = []
         _state["logs"] = []
     log("🚀 Bắt đầu phiên sản xuất video mới.")
+
+
+def is_cancelled() -> bool:
+    """Kiểm tra xem quy trình hiện tại có đang bị yêu cầu ngắt hay không."""
+    return _cancel_event.is_set()
+
+
+def check_cancelled():
+    """Ném PipelineCancelledError nếu người dùng đã bấm ngắt quy trình."""
+    if _cancel_event.is_set():
+        raise PipelineCancelledError("Quy trình đã bị người dùng ngắt.")
+
+
+def register_process(proc):
+    """Đăng ký tiến trình con (như FFmpeg) để có thể tiêu diệt ngay khi ngắt."""
+    with _lock:
+        _active_procs.add(proc)
+
+
+def unregister_process(proc):
+    """Gỡ đăng ký tiến trình con sau khi đã chạy xong."""
+    with _lock:
+        _active_procs.discard(proc)
+
+
+def request_cancel(reason: str = "Đã ngắt quá trình sản xuất video theo yêu cầu.") -> dict:
+    """Ngắt ngay lập tức quy trình đang chạy và tiêu diệt toàn bộ tiến trình con FFmpeg."""
+    global _state
+    _cancel_event.set()
+    with _lock:
+        procs_to_kill = list(_active_procs)
+        _active_procs.clear()
+    for proc in procs_to_kill:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    with _lock:
+        _state["is_running"] = False
+        _state["current_step_id"] = "cancelled"
+        _state["current_step_title"] = "Đã ngắt quy trình"
+        _state["error"] = None
+        _state["message"] = f"🛑 {reason}"
+        for s in _state["steps"]:
+            if s["status"] == "running":
+                s["status"] = "cancelled"
+        snapshot = deepcopy(_state)
+    log(f"🛑 ĐÃ NGẮT QUY TRÌNH: {reason}", level="WARN")
+    return snapshot
+
+
+def run_cancellable_subprocess(cmd, timeout=None, text=False, **kwargs):
+    """
+    Chạy subprocess qua Popen và kiểm tra cờ ngắt mỗi 0.25s để có thể dừng FFmpeg tức thì.
+    """
+    check_cancelled()
+    popen_kwargs = dict(kwargs)
+    popen_kwargs.setdefault("stdout", subprocess.PIPE)
+    popen_kwargs.setdefault("stderr", subprocess.PIPE)
+    if text:
+        popen_kwargs["text"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    register_process(proc)
+    start_ts = time.monotonic()
+    try:
+        while True:
+            if _cancel_event.is_set():
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.communicate(timeout=1.0)
+                except Exception:
+                    pass
+                raise PipelineCancelledError("Quy trình đã bị người dùng ngắt khi đang chạy FFmpeg.")
+
+            wait_slice = 0.25
+            if timeout is not None:
+                elapsed = time.monotonic() - start_ts
+                remaining = timeout - elapsed
+                if remaining <= 0:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        proc.communicate(timeout=1.0)
+                    except Exception:
+                        pass
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                wait_slice = min(0.25, remaining)
+
+            try:
+                stdout, stderr = proc.communicate(timeout=wait_slice)
+                if _cancel_event.is_set():
+                    raise PipelineCancelledError("Quy trình đã bị người dùng ngắt khi đang chạy FFmpeg.")
+                return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        unregister_process(proc)
 
 
 def log(text: str, level: str = "INFO"):

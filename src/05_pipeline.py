@@ -1097,7 +1097,7 @@ def compose_video(bg_video: str, audio_path: str, timeline: list[dict],
     ]
 
     tracker.log(f"⏳ FFmpeg đang render video Studio ({fps} FPS, CRF {video_crf}, BT.709, Slide-Up Animation)...")
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = tracker.run_cancellable_subprocess(cmd, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"FFmpeg composite lỗi:\n{res.stderr[-1000:]}")
     tracker.log(f"✅ FFmpeg xuất video chất lượng cao thành công: {output_path}")
@@ -1429,6 +1429,8 @@ def run_pipeline(post=None, bg_mode: str = None, card_theme: str = None,
 
         return final_video
 
+    except tracker.PipelineCancelledError:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()

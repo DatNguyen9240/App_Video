@@ -56,6 +56,8 @@ data/
 # Scratch & Temporary test files
 scratch/
 test_*.mp3
+remotion-studio/node_modules/
+remotion-studio/out/
 
 # Python cache & virtual environment
 __pycache__/

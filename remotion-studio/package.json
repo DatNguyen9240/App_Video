@@ -1,0 +1,30 @@
+{
+  "name": "app-video-remotion-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remotion & Motion Graphics Studio supporting iart-ai motion skills",
+  "scripts": {
+    "dev": "remotion studio",
+    "build": "tsc --noEmit",
+    "render:sample": "remotion render src/index.ts KineticStory out/sample.mp4"
+  },
+  "dependencies": {
+    "@lottiefiles/dotlottie-react": "^0.14.0",
+    "@remotion/cli": "^4.0.0",
+    "@remotion/renderer": "^4.0.0",
+    "d3": "^7.9.0",
+    "gsap": "^3.12.7",
+    "motion": "^12.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.0",
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "@types/d3": "^7.4.3",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.170.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -402,6 +402,11 @@ HTML_TEMPLATE = """
 
       <!-- Right Action Tools -->
       <div class="flex items-center space-x-3">
+        <button v-if="pipelineState.is_running" @click="cancelPipeline" :disabled="isCancellingPipeline"
+          class="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-md shadow-rose-600/30 transition flex items-center gap-1.5 disabled:opacity-60 cursor-pointer">
+          <i class="fa-solid fa-stop"></i>
+          <span>{{ isCancellingPipeline ? 'Đang ngắt...' : 'Ngắt Render' }}</span>
+        </button>
         <button @click="openFinalFolder" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold glass-input hover:bg-slate-700/60 transition flex items-center gap-2 text-slate-300 cursor-pointer">
           <i class="fa-regular fa-folder-open text-indigo-400"></i> Thư Mục Video
         </button>
@@ -1275,6 +1280,18 @@ HTML_TEMPLATE = """
                 </select>
                 <span class="text-xs text-slate-500 block">Video động chạy phía sau thẻ chữ</span>
               </div>
+              <div v-if="settings.platform === 'documentary'" class="space-y-1.5 pt-2 border-t border-slate-800/70">
+                <label class="text-xs font-semibold text-amber-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-wand-magic-sparkles"></i> Phong Cách Motion (Hình + Video):
+                </label>
+                <select v-model="settings.motion_style" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                  <option value="tiktok_split">🎬 TikTok / Reels Split-Screen (Ảnh trên + Satisfying dưới)</option>
+                  <option value="kinetic_type">⚡ Kinetic Typography (Chữ động cỡ lớn + Nhịp nhanh)</option>
+                  <option value="explainer_doc">🗺️ Explainer / Phóng Sự & Bản Đồ (Khung rộng)</option>
+                  <option value="ad_ecommerce">🛍️ Quảng Cáo / E-Commerce (Cắt nhanh + Năng lượng cao)</option>
+                  <option value="motion_clean">📊 Motion Minimalist (Data / Manim tối giản)</option>
+                </select>
+              </div>
             </div>
 
             <!-- Nhóm C: Giọng Đọc, Tốc Độ & BGM -->
@@ -1602,9 +1619,38 @@ HTML_TEMPLATE = """
               </p>
             </div>
           </div>
-          <button @click="currentTab = 'studio'" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium cursor-pointer">
-            <i class="fa-solid fa-eye text-indigo-400 mr-1"></i> Xem kịch bản ở Tab 1
-          </button>
+          <div class="flex items-center gap-2">
+            <button @click="cancelPipeline" :disabled="isCancellingPipeline"
+              class="px-4 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-md shadow-rose-600/30 transition flex items-center gap-1.5 disabled:opacity-60 cursor-pointer">
+              <i class="fa-solid fa-stop"></i>
+              <span>{{ isCancellingPipeline ? 'Đang ngắt...' : 'Ngắt / Dừng Ngay' }}</span>
+            </button>
+            <button @click="currentTab = 'studio'" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium cursor-pointer">
+              <i class="fa-solid fa-eye text-indigo-400 mr-1"></i> Xem kịch bản ở Tab 1
+            </button>
+          </div>
+        </div>
+
+        <!-- Khi ĐÃ NGẮT QUY TRÌNH: -->
+        <div v-else-if="pipelineState.current_step_id === 'cancelled'" class="p-4 rounded-2xl bg-amber-950/50 border border-amber-500/40 flex items-center justify-between gap-4 flex-wrap shadow-lg">
+          <div class="flex items-center gap-3">
+            <span class="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-300 flex items-center justify-center text-sm">
+              <i class="fa-solid fa-ban"></i>
+            </span>
+            <div>
+              <h4 class="text-xs font-bold text-amber-200">🛑 ĐÃ NGẮT QUÁ TRÌNH SẢN XUẤT VIDEO</h4>
+              <p class="text-[11px] text-amber-300/70 mt-0.5">{{ pipelineState.message || 'Tiến trình FFmpeg và pipeline đã được dừng an toàn.' }}</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button @click="currentTab = 'studio'" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold cursor-pointer">
+              <i class="fa-solid fa-arrow-left mr-1"></i> Về Tab 1
+            </button>
+            <button @click="startRender" :disabled="pipelineState.is_running"
+              class="px-4 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-indigo-600 hover:opacity-90 text-white font-bold text-xs transition flex items-center gap-2 shadow-md shadow-pink-500/20 cursor-pointer">
+              <i class="fa-solid fa-rotate-right"></i> Thử Render Lại
+            </button>
+          </div>
         </div>
 
         <!-- Action Callout CHỈ HIỆN khi người dùng bấm "TẠO KỊCH BẢN ĐỂ DUYỆT" (đã xong bước 1 & 2 và đang tạm dừng chờ duyệt) -->
@@ -1680,12 +1726,14 @@ HTML_TEMPLATE = """
             'bg-slate-900/40 border-slate-800 text-slate-400': step.status === 'idle',
             'bg-indigo-950/40 border-indigo-500/60 text-white shadow-lg shadow-indigo-500/10 ring-1 ring-indigo-500/40': step.status === 'running',
             'bg-emerald-950/30 border-emerald-600/40 text-emerald-200': step.status === 'done',
+            'bg-amber-950/40 border-amber-500/50 text-amber-200': step.status === 'cancelled',
             'bg-red-950/40 border-red-500/50 text-red-200': step.status === 'error'
           }">
           <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
               <i v-if="step.status === 'running'" class="fa-solid fa-spinner fa-spin text-indigo-400"></i>
               <i v-else-if="step.status === 'done'" class="fa-solid fa-circle-check text-emerald-400"></i>
+              <i v-else-if="step.status === 'cancelled'" class="fa-solid fa-ban text-amber-400"></i>
               <i v-else-if="step.status === 'error'" class="fa-solid fa-circle-exclamation text-red-400"></i>
               <i v-else class="fa-regular fa-circle text-slate-600"></i>
               {{ step.title }}
@@ -3429,6 +3477,7 @@ HTML_TEMPLATE = """
           geminiKeys: [],
           newGeminiKey: '',
           newGeminiLabel: '',
+          isCancellingPipeline: false,
           pollTimer: null,
           marketStatus: { is_syncing: false, stats: {}, cloudflare: {}, remote_poller: {}, filter_options: {}, recent_runs: [] },
           marketItems: [],
@@ -4159,6 +4208,25 @@ HTML_TEMPLATE = """
             alert('Lỗi: ' + e);
           }
         },
+        async cancelPipeline() {
+          if (this.isCancellingPipeline) return;
+          this.isCancellingPipeline = true;
+          try {
+            const res = await fetch('/api/cancel_pipeline', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reason: 'Người dùng đã bấm nút Ngắt Render trên giao diện.' })
+            });
+            const data = await res.json();
+            if (data.state) {
+              this.pipelineState = data.state;
+            }
+          } catch(e) {
+            alert('Lỗi khi ngắt quy trình: ' + e);
+          } finally {
+            this.isCancellingPipeline = false;
+          }
+        },
         async startBatch(count) {
           if (!confirm(`Bạn có chắc muốn tạo tự động ${count} video liên tiếp?`)) return;
           this.currentTab = 'pipeline';
@@ -4465,6 +4533,15 @@ def api_pipeline_status():
     return jsonify(tracker.get_state())
 
 
+@app.route("/api/cancel_pipeline", methods=["POST"])
+def api_cancel_pipeline():
+    """Ngắt ngay lập tức quy trình đang chạy và tiêu diệt tiến trình con FFmpeg."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason") or "Người dùng đã ngắt quá trình sản xuất video."
+    state = tracker.request_cancel(reason=reason)
+    return jsonify({"success": True, "state": state})
+
+
 @app.route("/api/director_config", methods=["GET", "POST"])
 def api_director_config():
     """Đọc và lưu cấu hình đạo diễn không hardcode."""
@@ -4693,6 +4770,8 @@ def api_generate_script():
                 ]
             }
         })
+    except tracker.PipelineCancelledError:
+        tracker.log("🛑 Worker Render đã dừng theo yêu cầu ngắt.", level="WARN")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -4746,6 +4825,8 @@ def api_crawl_trending_threads():
                 ]
             }
         })
+    except tracker.PipelineCancelledError:
+        tracker.log("🛑 Worker Render đã dừng theo yêu cầu ngắt.", level="WARN")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -4777,8 +4858,16 @@ def api_create_video_one_click():
 
             # Xử lý riêng cho Phim Tư Liệu Hình + Video (Visual Documentary)
             if platform == "documentary" or story_mode == "true_story":
-                post_scenes = post_data.get("documentary_scenes")
-                if post_scenes:
+                post_scenes = post_data.get("documentary_scenes") or []
+                topic_clean = (topic or "").strip().lower()
+                existing_meta = (
+                    (post_data.get("video_title") or "") + " " + (post_data.get("content") or "")
+                ).lower()
+                has_matching_scenes = (
+                    len(post_scenes) >= 4
+                    and (not topic_clean or any(w in existing_meta for w in topic_clean.split()[:3] if len(w) >= 3))
+                )
+                if has_matching_scenes:
                     tracker.start_step("script", f"Đang nạp kịch bản phân cảnh tư liệu cho: '{topic or 'Hồ sơ tư liệu'}'...", 25)
                     post = content_mod.Post(
                         username=post_data.get("username", "director"),
@@ -4791,7 +4880,7 @@ def api_create_video_one_click():
                         voice_id=author_voice
                     )
                 else:
-                    tracker.start_step("script", f"AI đang sáng tạo kịch bản phim tư liệu theo chủ đề: '{topic or 'thịnh hành'}'...", 20)
+                    tracker.start_step("script", f"AI đang sáng tạo kịch bản phim tư liệu (5-6 cảnh) cho: '{topic or 'thịnh hành'}'...", 20)
                     ai_mod = load_mod("ai_content", "01_ai_content.py")
                     post = ai_mod.generate_story_with_gemini(
                         topic=topic,
@@ -4802,6 +4891,7 @@ def api_create_video_one_click():
                 if author_voice:
                     post.voice_id = author_voice
                 post.platform = "documentary"
+                tracker.finish_step("script")
             else:
                 post_cmts = post_data.get("comments")
                 if post_cmts and len(post_cmts) > 0 and post_data.get("content"):
@@ -4849,7 +4939,7 @@ def api_create_video_one_click():
             if platform == "documentary":
                 from copy import deepcopy
                 post_data = data.get("post") or {}
-                scenes = post_data.get("documentary_scenes") or getattr(post, "documentary_scenes", [])
+                scenes = getattr(post, "documentary_scenes", []) or post_data.get("documentary_scenes") or []
                 if not scenes:
                     # Nếu có comments, chuyển thành scenes
                     comments = getattr(post, "comments", []) or post_data.get("comments", [])
@@ -4870,8 +4960,8 @@ def api_create_video_one_click():
                     else:
                         scenes = deepcopy(visual_builder_mod.DEFAULT_TROJAN_SCENES)
 
-                story_title = post_data.get("video_title") or getattr(post, "video_title", "") or (topic[:60].upper() if topic else "HỒ SƠ TƯ LIỆU QUỐC TẾ")
-                story_badge = post_data.get("story_badge") or getattr(post, "story_badge", "") or "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT"
+                story_title = getattr(post, "video_title", "") or post_data.get("video_title") or (topic[:60].upper() if topic else "HỒ SƠ TƯ LIỆU QUỐC TẾ")
+                story_badge = getattr(post, "story_badge", "") or post_data.get("story_badge") or "HỒ SƠ KỲ THÚ • TƯ LIỆU THẬT"
                 for sc in scenes:
                     if author_voice:
                         sc["voice"] = author_voice
@@ -4884,7 +4974,8 @@ def api_create_video_one_click():
                     story_badge=story_badge,
                     scenes=scenes,
                     output_filename=out_name,
-                    tracker=tracker
+                    tracker=tracker,
+                    motion_style=sets.get("motion_style", "tiktok_split"),
                 )
                 return
 
@@ -4924,6 +5015,8 @@ def api_create_video_one_click():
                 platform=platform
             )
 
+        except tracker.PipelineCancelledError:
+            tracker.log("🛑 Worker 1-Click đã dừng theo yêu cầu ngắt.", level="WARN")
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -5138,7 +5231,7 @@ def api_reset_tracker():
     return jsonify({"success": True})
 
 
-def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_screen", bgm_choice=None, bgm_volume=None, platform="threads"):
+def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_screen", bgm_choice=None, bgm_volume=None, platform="threads", motion_style="tiktok_split"):
     """Hàm chạy nền cho pipeline để không bao giờ bị timeout trên browser."""
     try:
         if platform == "documentary" or getattr(post_obj, "platform", "") == "documentary":
@@ -5178,7 +5271,8 @@ def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_scr
                 story_badge=story_badge,
                 scenes=scenes,
                 output_filename=out_name,
-                tracker=tracker
+                tracker=tracker,
+                motion_style=motion_style,
             )
             return
 
@@ -5191,6 +5285,8 @@ def _async_render_worker(post_obj, bg_mode, card_theme, layout_preset="split_scr
             bgm_volume=bgm_volume,
             platform=platform
         )
+    except tracker.PipelineCancelledError:
+        tracker.log("🛑 Worker Render đã dừng theo yêu cầu ngắt.", level="WARN")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -5276,11 +5372,12 @@ def api_render_video():
         bgm_choice = sets.get("bgm_choice", "random")
         raw_vol = sets.get("bgm_volume")
         bgm_volume = (float(raw_vol) / 100.0) if raw_vol is not None else None
+        motion_style = sets.get("motion_style", "tiktok_split")
 
         # Khởi chạy quy trình render trong background thread
         thread = threading.Thread(
             target=_async_render_worker,
-            args=(post_obj, bg_mode, card_theme, layout_preset, bgm_choice, bgm_volume, platform)
+            args=(post_obj, bg_mode, card_theme, layout_preset, bgm_choice, bgm_volume, platform, motion_style)
         )
         thread.daemon = True
         thread.start()

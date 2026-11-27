@@ -59,9 +59,11 @@ class TestAppUiApi(unittest.TestCase):
         res = self.client.get("/api/latest_video")
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
-        self.assertIn("filename", data)
-        if data.get("filename"):
-            self.assertFalse(data["filename"].startswith("_"))
+        self.assertIn("exists", data)
+        if data.get("exists"):
+            self.assertIn("filename", data)
+            if data.get("filename"):
+                self.assertFalse(data["filename"].startswith("_"))
 
     def test_api_trending_topics(self):
         """Endpoint /api/trending_topics trả về danh sách các chủ đề thịnh hành."""

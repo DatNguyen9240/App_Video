@@ -220,10 +220,10 @@ VOICE_PROFILES = {
         "name": "Nam Hài Hước (Dí dỏm, nhanh nhảu, âm thanh sạch không rè)",
         "gender": "male"
     },
-    # 5. Nam Trầm Hài: Giọng Andrew Multilingual hoặc Nam Minh trầm ấm, điện ảnh
+    # 5. Nam Trầm Hài: Giọng Nam Minh chuẩn Việt trầm ấm, dứt khoát (+14%)
     "nam_tram_hai": {
-        "base_voice": "en-US-AndrewMultilingualNeural",
-        "rate": "+10%",
+        "base_voice": "vi-VN-NamMinhNeural",
+        "rate": "+14%",
         "af_filter": "",
         "name": "Nam Trầm Hài (Podcast, truyền cảm, trầm ấm)",
         "gender": "male"
@@ -294,12 +294,12 @@ VOICE_MAP = {
     "nu": "nu_cakhia",
     "female": "nu_cakhia",
 
-    # Giọng tiếng Anh podcast quốc tế
-    "adam": "en-US-AndrewMultilingualNeural",
-    "andrew": "en-US-AndrewMultilingualNeural",
-    "brian": "en-US-BrianMultilingualNeural",
-    "ava": "en-US-AvaMultilingualNeural",
-    "emma": "en-US-EmmaMultilingualNeural",
+    # Giọng dẫn chuyện chuẩn Việt & podcast (khi không dùng ElevenLabs)
+    "adam": "vi-VN-NamMinhNeural",
+    "andrew": "vi-VN-NamMinhNeural",
+    "brian": "vi-VN-NamMinhNeural",
+    "ava": "vi-VN-HoaiMyNeural",
+    "emma": "vi-VN-HoaiMyNeural",
 }
 
 
