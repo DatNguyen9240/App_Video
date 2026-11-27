@@ -367,27 +367,27 @@ async def _run_edge_tts_chunk_async(text: str, output_path: str, voice: str, rat
     """Tạo audio cho một câu / mệnh đề với cơ chế tự động thử lại khi Edge-TTS bị nghẽn mạng."""
     import edge_tts
     actual_voice = resolve_voice_id(voice)
-    clean_rate = rate if (rate and "%" in rate) else "+0%"
 
     for attempt in range(max_retries):
         try:
-            comm = edge_tts.Communicate(text, actual_voice, rate=clean_rate)
+            # Endpoint mới của Edge-TTS trả về NoAudioReceived nếu rate != +0%; tốc độ sẽ được xử lý qua FFmpeg atempo
+            comm = edge_tts.Communicate(text, actual_voice, rate="+0%")
             await comm.save(output_path)
             if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
                 return True
         except Exception:
             if attempt == max_retries - 1:
-                # Dự phòng giọng BrianMultilingual nếu Hoài My bị Microsoft chặn
-                if actual_voice != "en-US-BrianMultilingualNeural":
+                fallback_vi = "vi-VN-HoaiMyNeural" if "HoaiMy" in actual_voice else "vi-VN-NamMinhNeural"
+                if actual_voice != fallback_vi:
                     try:
-                        fallback_comm = edge_tts.Communicate(text, "en-US-BrianMultilingualNeural", rate=clean_rate)
+                        fallback_comm = edge_tts.Communicate(text, fallback_vi, rate="+0%")
                         await fallback_comm.save(output_path)
                         if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
                             return True
                     except Exception:
                         pass
                 return False
-            await asyncio.sleep(1.0 * (attempt + 1))
+            await asyncio.sleep(0.6 * (attempt + 1))
     return False
 
 
@@ -407,11 +407,22 @@ def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0
         if not cleaned:
             return False
 
+        # Chuyển rate (+18%, -5%) thành bộ lọc atempo trong FFmpeg để tránh lỗi NoAudioReceived của Edge-TTS
+        tempo_filter = ""
+        try:
+            r_num = int(str(rate or "+0%").replace("%", "").replace("+", "").strip() or 0)
+            tempo = max(0.85, min(1.35, 1.0 + r_num / 100.0))
+            if abs(tempo - 1.0) >= 0.02:
+                tempo_filter = f"atempo={tempo:.2f}"
+        except Exception:
+            tempo_filter = ""
+        combined_filter = ",".join([f for f in [tempo_filter, extra_filter] if f])
+
         # Tối ưu cho Threads: 100% bài đăng và bình luận dưới 500 ký tự được sinh trực tiếp nguyên khối
         if len(cleaned) < 500:
             ok = asyncio.run(_run_edge_tts_chunk_async(cleaned, output_path, voice, rate=rate))
             if ok and os.path.exists(output_path) and os.path.getsize(output_path) > 400:
-                return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
+                return verify_and_standardize_mp3(output_path, extra_filter=combined_filter)
 
         # Dự phòng cho kịch bản cực dài: Tách theo câu và ghép qua filter nối sạch
         raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if len(s.strip()) > 3]
@@ -449,7 +460,7 @@ def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0
                 except OSError: pass
 
         if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
-            return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
+            return verify_and_standardize_mp3(output_path, extra_filter=combined_filter)
 
         return False
     except Exception as e:
