@@ -32,6 +32,29 @@ class MockD1Database {
     this.crawlRequests = [];
     this.notifications = [];
     this.runtimeState = new Map();
+    this.onBatchStep = null;
+  }
+  async batch(stmts) {
+    const snapCommands = this.commands.map((x) => ({ ...x }));
+    const snapRequests = this.crawlRequests.map((x) => ({ ...x }));
+    const snapNotifications = this.notifications.map((x) => ({ ...x }));
+    const snapState = new Map(this.runtimeState);
+    try {
+      const results = [];
+      for (let i = 0; i < stmts.length; i++) {
+        if (typeof this.onBatchStep === "function") {
+          await this.onBatchStep(i, stmts[i]);
+        }
+        results.push(await stmts[i].run());
+      }
+      return results;
+    } catch (err) {
+      this.commands = snapCommands;
+      this.crawlRequests = snapRequests;
+      this.notifications = snapNotifications;
+      this.runtimeState = snapState;
+      throw err;
+    }
   }
   prepare(sql) {
     const db = this;
@@ -299,6 +322,17 @@ class MockD1Database {
           row.updated_at = updated_at;
           return { meta: { changes: 1 } };
         }
+        if (norm.startsWith("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL AND EXISTS")) {
+          const [notified_at, id, run_id, matchVal] = this.args;
+          const reqRow = db.crawlRequests.find((c) => c.id === id && !c.notified_at);
+          if (!reqRow) return { meta: { changes: 0 } };
+          const hasNotif = norm.includes("retry_payload_json = ?")
+            ? db.notifications.some((n) => n.run_id === run_id && n.status === "sending" && n.retry_payload_json === matchVal)
+            : db.notifications.some((n) => n.run_id === run_id && n.status === "sending" && n.created_at === matchVal);
+          if (!hasNotif) return { meta: { changes: 0 } };
+          reqRow.notified_at = notified_at;
+          return { meta: { changes: 1 } };
+        }
         if (norm.startsWith("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")) {
           const [notified_at, id] = this.args;
           const row = db.crawlRequests.find((c) => c.id === id && !c.notified_at);
@@ -314,10 +348,16 @@ class MockD1Database {
         }
         if (norm.startsWith("INSERT OR IGNORE INTO crawl_notifications")) {
           const run_id = this.args[0];
+          const hasWhereExists = norm.includes("WHERE EXISTS (SELECT 1 FROM crawl_requests WHERE id = ? AND notified_at IS NULL)");
+          if (hasWhereExists) {
+            const reqIdArg = this.args[this.args.length - 1];
+            const eligible = db.crawlRequests.some((c) => c.id === reqIdArg && !c.notified_at);
+            if (!eligible) return { meta: { changes: 0 } };
+          }
           if (db.notifications.some((n) => n.run_id === run_id)) {
             return { meta: { changes: 0 } };
           }
-          if (this.args.length >= 5) {
+          if (this.args.length >= 6 || (!hasWhereExists && this.args.length >= 5)) {
             const [, record_count, created_at, max_retries, retry_payload_json] = this.args;
             db.notifications.push({
               run_id,
@@ -349,6 +389,12 @@ class MockD1Database {
             });
           }
           return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("DELETE FROM crawl_notifications WHERE run_id = ? AND status = 'sending'")) {
+          const [run_id] = this.args;
+          const before = db.notifications.length;
+          db.notifications = db.notifications.filter((n) => !(n.run_id === run_id && n.status === "sending"));
+          return { meta: { changes: before - db.notifications.length } };
         }
         if (norm.startsWith("UPDATE crawl_notifications SET status = 'sending'")) {
           const [reclaimNowIso, retryPayloadJson, notifKey, cmpIso] = this.args;
@@ -2106,6 +2152,320 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(recoveredCrw.claimed_by, null);
   } finally {
     globalThis.fetch = prevFetch12;
+  }
+}
+
+// 13. Pre-Deploy Final Guardrails (#1 Atomic batch claim vs mid-tx crash, #2 updatePrimaryProgressMessage no 429/uncertain fallback):
+{
+  const env13 = {
+    ...env,
+    DB: new MockD1Database(),
+    NOTIFY_BATCH_SIZE: "20",
+    TELEGRAM_MAX_ATTEMPTS: "1",
+    TELEGRAM_MAX_RETRIES: "3",
+    TELEGRAM_RETRY_BASE_MS: "10",
+    TELEGRAM_IMMEDIATE_RETRY_MAX_MS: "0",
+  };
+
+  let editMode13 = "ok"; // "ok" | "429_then_ok" | "503" | "408" | "throw_timeout" | "400_missing_msg"
+  let edit429Remaining = 0;
+  let editCalls13 = [];
+  let sendCalls13 = [];
+
+  const prevFetch13 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.startsWith("https://oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "mock-token-13" }), { status: 200 });
+    }
+    if (sUrl.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+      const q = new URL(sUrl).searchParams.get("q") || "";
+      if (q.includes(`'${REPORTS_ID}' in parents`) || q.includes(`'${THREADS_ID}' in parents`)) {
+        return new Response(JSON.stringify({ files: [] }), { status: 200 });
+      }
+      return prevFetch13(url, init);
+    }
+    if (sUrl.startsWith("https://api.telegram.org/bot") && sUrl.includes("/editMessageText")) {
+      editCalls13.push({ url: sUrl, body: init.body });
+      if (editMode13 === "429_then_ok" && edit429Remaining > 0) {
+        edit429Remaining -= 1;
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 429, parameters: { retry_after: 0.08 }, description: "Too Many Requests" }),
+          { status: 429 }
+        );
+      }
+      if (editMode13 === "503") {
+        return new Response(JSON.stringify({ ok: false, error_code: 503, description: "Service Unavailable" }), { status: 503 });
+      }
+      if (editMode13 === "408") {
+        return new Response(JSON.stringify({ ok: false, error_code: 408, description: "Request Timeout" }), { status: 408 });
+      }
+      if (editMode13 === "throw_timeout") {
+        throw new Error("Simulated editMessageText socket timeout");
+      }
+      if (editMode13 === "400_missing_msg") {
+        return new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: message to edit not found" }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 777 } }), { status: 200 });
+    }
+    if (sUrl.startsWith("https://api.telegram.org/bot") && sUrl.includes("/sendMessage")) {
+      sendCalls13.push({ url: sUrl, body: init.body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 8888 } }), { status: 200 });
+    }
+    return prevFetch13(url, init);
+  };
+
+  try {
+    // 13a-1: Interruption BETWEEN DB statement 1 (INSERT crawl_notifications) and statement 2 (UPDATE crawl_requests)
+    //        inside D1 batch MUST roll back cleanly so notified_at is NEVER set without durable notification row.
+    env13.DB.runtimeState.set("tg_primary_status_msg_id", "777");
+    env13.DB.crawlRequests.push({
+      id: "crw_tx_interrupt",
+      platform: "threads",
+      keywords: "",
+      requested_count: 20,
+      status: "running",
+      claimed_by: "muse-tx",
+      claimed_at: new Date().toISOString(),
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 1,
+      max_attempts: 3,
+      requested_by_chat_id: "999001",
+      notified_at: null,
+      updated_at: "2026-11-28T05:00:00Z",
+    });
+
+    env13.DB.onBatchStep = (stepIdx) => {
+      if (stepIdx === 1) throw new Error("Simulated D1 interruption between INSERT and UPDATE");
+    };
+    let batchInterrupted = false;
+    try {
+      await worker.fetch(
+        new Request("https://example.workers.dev/api/app/crawl-requests/crw_tx_interrupt/complete", {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "completed",
+            attempt: 1,
+            claimed_by: "muse-tx",
+            result_summary: { run_id: "run-tx-interrupt", qualified_count: 4, run_status: "completed", telegram_summary: "Atomic tx recovery" },
+          }),
+        }),
+        env13
+      );
+    } catch (err) {
+      batchInterrupted = String(err?.message || "").includes("Simulated D1 interruption");
+    } finally {
+      env13.DB.onBatchStep = null;
+    }
+    assert.equal(batchInterrupted, true);
+    const reqAfterAbort = env13.DB.crawlRequests.find((c) => c.id === "crw_tx_interrupt");
+    assert.equal(reqAfterAbort.notified_at, null);
+    assert.equal(env13.DB.notifications.length, 0);
+    assert.equal(editCalls13.length, 0);
+    assert.equal(sendCalls13.length, 0);
+
+    // Recover cleanly on next Cron without losing the notification
+    await worker.scheduled({}, env13, {});
+    assert.ok(reqAfterAbort.notified_at);
+    const notifRecovered = env13.DB.notifications.find((n) => n.run_id === "run-tx-interrupt");
+    assert.ok(notifRecovered);
+    assert.equal(notifRecovered.status, "sent");
+
+    // 13a-2: Non-batch sequential fallback interrupted after INSERT before UPDATE cleans up orphan & leaves notified_at NULL
+    env13.DB.crawlRequests.push({
+      id: "crw_nobatch_interrupt",
+      platform: "threads",
+      keywords: "",
+      requested_count: 20,
+      status: "running",
+      claimed_by: "muse-nb",
+      claimed_at: new Date().toISOString(),
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 1,
+      max_attempts: 3,
+      requested_by_chat_id: "999001",
+      notified_at: null,
+      updated_at: "2026-11-28T05:05:00Z",
+    });
+    const origBatch13 = env13.DB.batch.bind(env13.DB);
+    const origPrepare13 = env13.DB.prepare.bind(env13.DB);
+    env13.DB.batch = undefined;
+    env13.DB.prepare = (sql) => {
+      if (String(sql).includes("UPDATE crawl_requests") && String(sql).includes("SET notified_at = ?") && String(sql).includes("AND EXISTS")) {
+        return {
+          bind() { return this; },
+          async run() { throw new Error("Simulated non-batch interruption before notified_at"); },
+        };
+      }
+      return origPrepare13(sql);
+    };
+    let nobatchErr = false;
+    try {
+      await worker.fetch(
+        new Request("https://example.workers.dev/api/app/crawl-requests/crw_nobatch_interrupt/complete", {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "completed",
+            attempt: 1,
+            claimed_by: "muse-nb",
+            result_summary: { run_id: "run-nobatch-interrupt", qualified_count: 3, run_status: "completed", telegram_summary: "No-batch fallback rollback" },
+          }),
+        }),
+        env13
+      );
+    } catch (err) {
+      nobatchErr = String(err?.message || "").includes("Simulated non-batch interruption");
+    } finally {
+      env13.DB.batch = origBatch13;
+      env13.DB.prepare = origPrepare13;
+    }
+    assert.equal(nobatchErr, true);
+    const reqNb = env13.DB.crawlRequests.find((c) => c.id === "crw_nobatch_interrupt");
+    assert.equal(reqNb.notified_at, null);
+    assert.equal(env13.DB.notifications.some((n) => n.run_id === "run-nobatch-interrupt"), false);
+
+    // Next Cron cleanly picks up un-notified crw_nobatch_interrupt without dropping it
+    await worker.scheduled({}, env13, {});
+    assert.ok(reqNb.notified_at);
+    assert.equal(env13.DB.notifications.find((n) => n.run_id === "run-nobatch-interrupt")?.status, "sent");
+
+    // 13b-1: updatePrimaryProgressMessage hits 429 on editMessageText -> MUST NOT fallback to sendMessage;
+    //        schedules retry_after and succeeds cleanly on reclaim without ever calling sendMessage.
+    editCalls13.length = 0;
+    sendCalls13.length = 0;
+    editMode13 = "429_then_ok";
+    edit429Remaining = 1;
+    env13.DB.crawlRequests.push({
+      id: "crw_prim_429",
+      platform: "threads",
+      keywords: "",
+      requested_count: 20,
+      status: "running",
+      claimed_by: "muse-prim",
+      claimed_at: new Date().toISOString(),
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 1,
+      max_attempts: 3,
+      requested_by_chat_id: "999001",
+      notified_at: null,
+      updated_at: "2026-11-28T05:10:00Z",
+    });
+    const res429Edit = await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests/crw_prim_429/complete", {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "completed",
+          attempt: 1,
+          claimed_by: "muse-prim",
+          result_summary: { run_id: "run-prim-429", qualified_count: 6, run_status: "completed", telegram_summary: "Primary 429 test" },
+        }),
+      }),
+      env13
+    );
+    assert.equal(res429Edit.status, 200);
+    assert.equal(editCalls13.length, 1);
+    assert.equal(sendCalls13.length, 0); // NO fallback to sendMessage!
+    const prim429Row = env13.DB.notifications.find((n) => n.run_id === "run-prim-429");
+    assert.equal(prim429Row.status, "delivery_failed");
+    assert.equal(prim429Row.retryable, 1);
+    assert.ok(prim429Row.next_retry_at && Date.parse(prim429Row.next_retry_at) > Date.now());
+
+    // Wait for retry_after and reclaim via scheduled cron
+    await new Promise((r) => setTimeout(r, 110));
+    await worker.scheduled({}, env13, {});
+    assert.equal(editCalls13.length, 2);
+    assert.equal(sendCalls13.length, 0); // Still NO sendMessage!
+    assert.equal(prim429Row.status, "sent");
+    assert.equal(prim429Row.retryable, 0);
+
+    // 13b-2: updatePrimaryProgressMessage hits 503, 408, or ambiguous throw -> delivery_uncertain, NO fallback, NO retry
+    for (const [mode, reqId, runTag] of [
+      ["503", "crw_prim_503", "run-prim-503"],
+      ["408", "crw_prim_408", "run-prim-408"],
+      ["throw_timeout", "crw_prim_throw", "run-prim-throw"],
+    ]) {
+      editCalls13.length = 0;
+      sendCalls13.length = 0;
+      editMode13 = mode;
+      env13.DB.crawlRequests.push({
+        id: reqId,
+        platform: "threads",
+        keywords: "",
+        requested_count: 20,
+        status: "running",
+        claimed_by: "muse-prim",
+        claimed_at: new Date().toISOString(),
+        lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+        attempts: 1,
+        max_attempts: 3,
+        requested_by_chat_id: "999001",
+        notified_at: null,
+        updated_at: "2026-11-28T05:15:00Z",
+      });
+      await worker.fetch(
+        new Request(`https://example.workers.dev/api/app/crawl-requests/${reqId}/complete`, {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "completed",
+            attempt: 1,
+            claimed_by: "muse-prim",
+            result_summary: { run_id: runTag, qualified_count: 2, run_status: "completed", telegram_summary: `Primary ${mode}` },
+          }),
+        }),
+        env13
+      );
+      assert.equal(editCalls13.length, 1);
+      assert.equal(sendCalls13.length, 0); // NO fallback to sendMessage!
+      const uncRow = env13.DB.notifications.find((n) => n.run_id === runTag);
+      assert.equal(uncRow.status, "delivery_uncertain");
+      assert.equal(uncRow.retryable, 0);
+      await worker.scheduled({}, env13, {}); // must NOT retry delivery_uncertain
+      assert.equal(editCalls13.length, 1);
+      assert.equal(sendCalls13.length, 0);
+    }
+
+    // 13b-3: Permanent 400 "message to edit not found" DOES safely fall back once to sendMessage and updates primary msg id
+    editCalls13.length = 0;
+    sendCalls13.length = 0;
+    editMode13 = "400_missing_msg";
+    env13.DB.crawlRequests.push({
+      id: "crw_prim_missing",
+      platform: "threads",
+      keywords: "",
+      requested_count: 20,
+      status: "running",
+      claimed_by: "muse-prim",
+      claimed_at: new Date().toISOString(),
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 1,
+      max_attempts: 3,
+      requested_by_chat_id: "999001",
+      notified_at: null,
+      updated_at: "2026-11-28T05:20:00Z",
+    });
+    await worker.fetch(
+      new Request("https://example.workers.dev/api/app/crawl-requests/crw_prim_missing/complete", {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "completed",
+          attempt: 1,
+          claimed_by: "muse-prim",
+          result_summary: { run_id: "run-prim-missing", qualified_count: 5, run_status: "completed", telegram_summary: "Missing primary fallback ok" },
+        }),
+      }),
+      env13
+    );
+    assert.equal(editCalls13.length, 1);
+    assert.equal(sendCalls13.length, 1);
+    assert.equal(env13.DB.runtimeState.get("tg_primary_status_msg_id"), "8888");
+    assert.equal(env13.DB.notifications.find((n) => n.run_id === "run-prim-missing").status, "sent");
+  } finally {
+    globalThis.fetch = prevFetch13;
   }
 }
 

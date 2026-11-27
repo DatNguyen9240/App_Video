@@ -907,14 +907,6 @@ async function checkExistingNotificationKeys(env, keysToCheck) {
     return null;
 }
 
-async function claimCrawlRequestNotificationSlot(env, requestId) {
-    if (!requestId) return true;
-    const upd = await env.DB.prepare(
-        "UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL"
-    ).bind(new Date().toISOString(), String(requestId)).run();
-    return upd?.meta?.changes === 1;
-}
-
 async function finalizeNotificationState(env, notifKey, fields) {
     const {
         status,
@@ -961,12 +953,14 @@ async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, t
         0,
         Number(env?.TELEGRAM_IMMEDIATE_RETRY_MAX_MS ?? env?.TELEGRAM_RETRY_MAX_WAIT_MS ?? 2000)
     );
+    const claimNonce = genId("clm");
     const retryPayloadJson = JSON.stringify({
         chatId: String(chatId),
         text: String(text),
         usePrimaryMessage,
         recordCount,
         requestId,
+        claim_nonce: claimNonce,
     });
 
     const nowIso = new Date().toISOString();
@@ -1006,32 +1000,107 @@ async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, t
         }
     }
 
-    // 3. Atomic request-slot claim BEFORE sending when linked to crawl_requests (stops concurrent complete/D1/Drive double-send)
-    if (!existingExact && requestId && !bypassRequestClaim) {
-        const slotWon = await claimCrawlRequestNotificationSlot(env, requestId);
-        if (!slotWon) {
-            return { claimed: false, delivered: false, status: "duplicate_request", retries: 0 };
-        }
-    }
-
-    // 4. Initial atomic INSERT OR IGNORE or atomic reclaim UPDATE for retryable delivery_failed
+    // 3. Atomic durable outbox + request-slot claim inside ONE D1 transaction:
+    //    `notified_at` is NEVER written before or without a durable `crawl_notifications` record.
     if (!existingExact) {
-        let claim;
-        try {
-            claim = await env.DB.prepare(`
-                INSERT OR IGNORE INTO crawl_notifications
-                (run_id, record_count, status, created_at, retry_count, max_retries, next_retry_at, retryable, last_error, retry_payload_json)
-                VALUES (?, ?, 'sending', ?, 0, ?, NULL, 0, NULL, ?)
-            `).bind(notifKey, recordCount, nowIso, maxRetries, retryPayloadJson).run();
-        } catch {
-            claim = await env.DB.prepare(`
-                INSERT OR IGNORE INTO crawl_notifications
-                (run_id, record_count, status, created_at)
-                VALUES (?, ?, 'sending', ?)
-            `).bind(notifKey, recordCount, nowIso).run();
-        }
-        if (claim.meta.changes !== 1) {
-            return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
+        if (requestId && !bypassRequestClaim) {
+            const reqIdStr = String(requestId);
+            const runAtomicClaim = async (useCompat0001 = false) => {
+                const insertStmt = useCompat0001
+                    ? env.DB.prepare(`
+                        INSERT OR IGNORE INTO crawl_notifications
+                        (run_id, record_count, status, created_at)
+                        SELECT ?, ?, 'sending', ?
+                        WHERE EXISTS (SELECT 1 FROM crawl_requests WHERE id = ? AND notified_at IS NULL)
+                    `).bind(notifKey, recordCount, nowIso, reqIdStr)
+                    : env.DB.prepare(`
+                        INSERT OR IGNORE INTO crawl_notifications
+                        (run_id, record_count, status, created_at, retry_count, max_retries, next_retry_at, retryable, last_error, retry_payload_json)
+                        SELECT ?, ?, 'sending', ?, 0, ?, NULL, 0, NULL, ?
+                        WHERE EXISTS (SELECT 1 FROM crawl_requests WHERE id = ? AND notified_at IS NULL)
+                    `).bind(notifKey, recordCount, nowIso, maxRetries, retryPayloadJson, reqIdStr);
+                const updateReqStmt = useCompat0001
+                    ? env.DB.prepare(`
+                        UPDATE crawl_requests
+                        SET notified_at = ?
+                        WHERE id = ?
+                          AND notified_at IS NULL
+                          AND EXISTS (
+                              SELECT 1 FROM crawl_notifications
+                              WHERE run_id = ? AND status = 'sending' AND created_at = ?
+                          )
+                    `).bind(nowIso, reqIdStr, notifKey, nowIso)
+                    : env.DB.prepare(`
+                        UPDATE crawl_requests
+                        SET notified_at = ?
+                        WHERE id = ?
+                          AND notified_at IS NULL
+                          AND EXISTS (
+                              SELECT 1 FROM crawl_notifications
+                              WHERE run_id = ? AND status = 'sending' AND retry_payload_json = ?
+                          )
+                    `).bind(nowIso, reqIdStr, notifKey, retryPayloadJson);
+
+                if (typeof env.DB.batch === "function") {
+                    const batchRes = await env.DB.batch([insertStmt, updateReqStmt]);
+                    return {
+                        inserted: Number(batchRes?.[0]?.meta?.changes || 0),
+                        slotUpdated: Number(batchRes?.[1]?.meta?.changes || 0),
+                    };
+                }
+                // Non-batch fallback: insert durable notification FIRST, only claim slot after insert succeeds
+                const insRes = await insertStmt.run();
+                const insChanges = Number(insRes?.meta?.changes || 0);
+                if (insChanges !== 1) return { inserted: 0, slotUpdated: 0 };
+                try {
+                    const updRes = await updateReqStmt.run();
+                    const updChanges = Number(updRes?.meta?.changes || 0);
+                    if (updChanges !== 1) {
+                        await env.DB.prepare("DELETE FROM crawl_notifications WHERE run_id = ? AND status = 'sending'")
+                            .bind(notifKey).run();
+                    }
+                    return { inserted: updChanges === 1 ? 1 : 0, slotUpdated: updChanges };
+                } catch (slotErr) {
+                    try {
+                        await env.DB.prepare("DELETE FROM crawl_notifications WHERE run_id = ? AND status = 'sending'")
+                            .bind(notifKey).run();
+                    } catch {}
+                    throw slotErr;
+                }
+            };
+
+            let atomicRes;
+            try {
+                atomicRes = await runAtomicClaim(false);
+            } catch (err) {
+                if (/no such column/i.test(String(err?.message || ""))) {
+                    atomicRes = await runAtomicClaim(true);
+                } else {
+                    throw err;
+                }
+            }
+            if (atomicRes.inserted !== 1 || atomicRes.slotUpdated !== 1) {
+                return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
+            }
+        } else {
+            let claim;
+            try {
+                claim = await env.DB.prepare(`
+                    INSERT OR IGNORE INTO crawl_notifications
+                    (run_id, record_count, status, created_at, retry_count, max_retries, next_retry_at, retryable, last_error, retry_payload_json)
+                    VALUES (?, ?, 'sending', ?, 0, ?, NULL, 0, NULL, ?)
+                `).bind(notifKey, recordCount, nowIso, maxRetries, retryPayloadJson).run();
+            } catch (err) {
+                if (!/no such column/i.test(String(err?.message || ""))) throw err;
+                claim = await env.DB.prepare(`
+                    INSERT OR IGNORE INTO crawl_notifications
+                    (run_id, record_count, status, created_at)
+                    VALUES (?, ?, 'sending', ?)
+                `).bind(notifKey, recordCount, nowIso).run();
+            }
+            if (claim.meta.changes !== 1) {
+                return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
+            }
         }
     } else {
         // Atomic reclaim: ONLY delivery_failed + retryable=1 + retry_count < max_retries + next_retry_at elapsed
@@ -1051,8 +1120,11 @@ async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, t
                   AND retry_count < max_retries
                   AND (next_retry_at IS NULL OR next_retry_at <= ?)
             `).bind(reclaimNowIso, retryPayloadJson, notifKey, reclaimNowIso).run();
-        } catch {
-            return { claimed: false, delivered: false, status: "delivery_failed", retries: 0 };
+        } catch (err) {
+            if (/no such column/i.test(String(err?.message || ""))) {
+                return { claimed: false, delivered: false, status: "delivery_failed", retries: 0 };
+            }
+            throw err;
         }
         if (reclaim.meta.changes !== 1) {
             return { claimed: false, delivered: false, status: "reclaim_rejected", retries: 0 };
@@ -1443,7 +1515,7 @@ async function notifyNewCrawl(env) {
             }
             if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
                 try {
-                    await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ?")
+                    await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
                         .bind(new Date().toISOString(), req.id).run();
                 } catch {}
             }
@@ -1657,7 +1729,7 @@ async function sendTelegramMessage(env, chatId, text, replyMarkup = null) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
     });
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     return { ok: Boolean(resp.ok && data.ok), httpStatus: resp.status, data };
 }
 
@@ -1673,15 +1745,30 @@ async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = n
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
     });
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     const notModified = !resp.ok && String(data.description || "").includes("message is not modified");
-    return { ok: Boolean((resp.ok && data.ok) || notModified), data };
+    return { ok: Boolean((resp.ok && data.ok) || notModified), httpStatus: resp.status, data };
+}
+
+function isUneditablePrimaryMessageError(httpStatus, data) {
+    const apiStatus = Number(httpStatus || 0);
+    if (apiStatus !== 400 && apiStatus !== 404) return false;
+    const desc = String(data?.description || "").toLowerCase();
+    return (
+        desc.includes("message to edit not found") ||
+        desc.includes("message can't be edited") ||
+        desc.includes("message_id_invalid") ||
+        desc.includes("message not found")
+    );
 }
 
 async function sendOrEditTelegram(env, chatId, messageId, text, replyMarkup = null) {
     if (messageId) {
         const edited = await editTelegramMessage(env, chatId, messageId, text, replyMarkup);
         if (edited.ok) return edited;
+        if (!isUneditablePrimaryMessageError(edited.httpStatus, edited.data)) {
+            return edited;
+        }
     }
     return sendTelegramMessage(env, chatId, text, replyMarkup);
 }
@@ -1689,8 +1776,13 @@ async function sendOrEditTelegram(env, chatId, messageId, text, replyMarkup = nu
 async function updatePrimaryProgressMessage(env, chatId, text, replyMarkup = null) {
     const primaryMsgId = await getRuntimeState(env, "tg_primary_status_msg_id", null);
     if (primaryMsgId) {
+        // Any 429, delivery_uncertain (408/5xx/transport throw), or non-missing permanent error MUST NOT
+        // silently fall back to sendMessage — return/throw directly for deliverWithUncertaintyGuard retry taxonomy.
         const edited = await editTelegramMessage(env, chatId, primaryMsgId, text, replyMarkup);
         if (edited.ok) return edited;
+        if (!isUneditablePrimaryMessageError(edited.httpStatus, edited.data)) {
+            return edited;
+        }
     }
     const sent = await sendTelegramMessage(env, chatId, text, replyMarkup);
     if (sent.ok && sent.data?.result?.message_id) {
