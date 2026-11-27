@@ -42,6 +42,7 @@ class MockD1Database {
     this.onBatchStep = null;
     this.failSignalQuery = false;
     this.writeOps = 0;
+    this.onBeforeClaimUpdate = null;
   }
   _countSnaps(dedupKey) {
     let c = 0;
@@ -192,6 +193,45 @@ class MockD1Database {
           const row = db.crawlRequests.find(
             (c) => c.platform === plat && c.keywords.trim().toLowerCase() === kw && c.requested_count === cnt && ["queued", "running"].includes(c.status)
           );
+          return row ? { ...row } : null;
+        }
+        if (norm.startsWith("SELECT id FROM crawl_requests WHERE status = 'running'")) {
+          const [nowIso] = this.args;
+          const active = db.crawlRequests.find(
+            (r) => r.status === "running" && (!r.lease_expires_at || String(r.lease_expires_at) >= String(nowIso))
+          );
+          return active ? { id: active.id } : null;
+        }
+        if (norm.startsWith("SELECT id FROM registry_sync_outbox WHERE status IN ('pending', 'error', 'processing', 'done')")) {
+          const hit = db.registryOutbox.find((o) => ["pending", "error", "processing", "done"].includes(o.status));
+          return hit ? { id: hit.id } : null;
+        }
+        if (norm.startsWith("SELECT 1 AS blocked FROM ( SELECT result_summary_json FROM crawl_requests")) {
+          const blocked = db.crawlRequests
+            .filter((r) => ["completed", "failed"].includes(r.status))
+            .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+            .slice(0, 50)
+            .some((r) => {
+              if (!r.result_summary_json) return false;
+              try {
+                const p = JSON.parse(r.result_summary_json);
+                const rs = String(p?.registry_sync_status || "").toLowerCase();
+                return rs === "pending" || rs === "error";
+              } catch {
+                return false;
+              }
+            });
+          return blocked ? { blocked: 1 } : null;
+        }
+        if (norm.includes("FROM crawl_requests WHERE status = 'queued' AND lower(trim(platform)) = 'threads'")) {
+          const row = db.crawlRequests
+            .filter(
+              (c) =>
+                c.status === "queued" &&
+                String(c.platform || "").trim().toLowerCase() === "threads" &&
+                Number(c.attempts ?? 0) < Number(c.max_attempts ?? 3)
+            )
+            .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))[0];
           return row ? { ...row } : null;
         }
         if (norm.includes("FROM crawl_requests WHERE status = 'queued'")) {
@@ -726,6 +766,21 @@ class MockD1Database {
           row.updated_at = updated_at;
           return { meta: { changes: 1 } };
         }
+        if (norm.startsWith("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ? AND status = 'running'")) {
+          const [result_summary_json, updated_at, id, claimed_by, attempts, nowIso] = this.args;
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              c.claimed_by === claimed_by &&
+              Number(c.attempts) === Number(attempts) &&
+              (!nowIso || !c.lease_expires_at || String(c.lease_expires_at) >= String(nowIso))
+          );
+          if (!row) return { meta: { changes: 0 } };
+          row.result_summary_json = result_summary_json;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
         if (
           norm.startsWith("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?") ||
           norm.startsWith("UPDATE crawl_requests SET result_summary_json = ? WHERE id = ?")
@@ -748,14 +803,52 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'running'")) {
-          const [claimed_by, claimed_at, lease_expires_at, updated_at, id] = this.args;
-          const row = db.crawlRequests.find((c) => c.id === id && c.status === "queued");
+          if (typeof db.onBeforeClaimUpdate === "function") {
+            await db.onBeforeClaimUpdate(this.args);
+          }
+          const [claimed_by, claimed_at, lease_expires_at, updated_at, id, nowIsoGuard] = this.args;
+          if (norm.includes("AND lower(trim(platform)) = 'threads'")) {
+            const hasActiveRun = db.crawlRequests.some(
+              (r) => r.status === "running" && (!r.lease_expires_at || String(r.lease_expires_at) >= String(nowIsoGuard))
+            );
+            const hasOutbox = db.registryOutbox.some((o) => ["pending", "error", "processing", "done"].includes(o.status));
+            if (hasActiveRun || hasOutbox) {
+              return { meta: { changes: 0 } };
+            }
+          }
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "queued" &&
+              (!norm.includes("AND lower(trim(platform)) = 'threads'") ||
+                (String(c.platform || "").trim().toLowerCase() === "threads" &&
+                  Number(c.attempts ?? 0) < Number(c.max_attempts ?? 3)))
+          );
           if (!row) return { meta: { changes: 0 } };
           row.status = "running";
           row.claimed_by = claimed_by;
           row.claimed_at = claimed_at;
           row.lease_expires_at = lease_expires_at;
-          row.attempts += 1;
+          row.attempts = Number(row.attempts || 0) + 1;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, error_message = ?")) {
+          const [error_message, updated_at, id, claimed_by, attempts, nowIso] = this.args;
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              c.claimed_by === claimed_by &&
+              Number(c.attempts) === Number(attempts) &&
+              (!nowIso || !c.lease_expires_at || String(c.lease_expires_at) >= String(nowIso))
+          );
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "queued";
+          row.claimed_by = null;
+          row.claimed_at = null;
+          row.lease_expires_at = null;
+          row.error_message = error_message;
           row.updated_at = updated_at;
           return { meta: { changes: 1 } };
         }
@@ -4779,14 +4872,24 @@ assert.equal(v3StartBtns.length, 6);
   );
   assert.equal(checkGet.status, 405);
 
-  const phase2Pending = await worker.fetch(
+  const phase2ClaimEmpty = await worker.fetch(
     new Request("https://example.workers.dev/api/crawl/claim", {
       method: "POST",
       headers: { Authorization: "Bearer muse-scoped-secret-20" },
     }),
     env20
   );
-  assert.equal(phase2Pending.status, 404, "Phase 2 write routes must stay unexposed during Phase 1 POC");
+  assert.equal(phase2ClaimEmpty.status, 200);
+  assert.equal((await phase2ClaimEmpty.json()).request, null);
+
+  const unknownCrawlRoute = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/arbitrary-sql", {
+      method: "POST",
+      headers: { Authorization: "Bearer muse-scoped-secret-20" },
+    }),
+    env20
+  );
+  assert.equal(unknownCrawlRoute.status, 404, "Arbitrary /api/crawl/* paths must return 404");
 
   env20.DB.failRegistry = true;
   assert.equal(
@@ -4817,6 +4920,287 @@ assert.equal(v3StartBtns.length, 6);
   const sig20 = await worker.fetch(new Request("https://example.workers.dev/api/crawl-queue/signal"), env20);
   assert.equal(sig20.status, 200);
   assert.deepEqual(await sig20.json(), { queued: false });
+}
+
+
+// 21. Muse Custom Connector Phase 2 (/api/crawl/claim, /progress, /complete, /fail):
+//     Authorization, Concurrent Single-Flight Claim, Progress Guard, Stale Lease, Retry, Outbox Recovery, Idempotency & Telegram Gate
+{
+  const tgCalls21 = [];
+  const prevFetch21 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.startsWith("https://api.telegram.org/")) {
+      tgCalls21.push({ url: sUrl, body: init.body ? JSON.parse(init.body) : {} });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 21000 + tgCalls21.length } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test 21: ${sUrl}`);
+  };
+
+  const env21 = {
+    APP_VIDEO_API_TOKEN: "app-admin-secret-21",
+    MUSE_APP_VIDEO_TOKEN: "muse-crawl-secret-21",
+    TELEGRAM_BOT_TOKEN_VIDEO: "bot21-token",
+    TELEGRAM_OWNER_ID: "999021",
+    DB: new MockD1Database(),
+  };
+  const hMuse21 = {
+    Authorization: "Bearer muse-crawl-secret-21",
+    "Content-Type": "application/json",
+  };
+  const hApp21 = {
+    Authorization: "Bearer app-admin-secret-21",
+    "Content-Type": "application/json",
+  };
+
+  try {
+    // Seed mixed queue: older non-Threads ('all', 'tiktok') + 2 Threads requests (one with requested_by_chat_id)
+    env21.DB.crawlRequests.push(
+      { id: "crw_21_all", platform: "all", keywords: "all_kw", requested_count: 10, status: "queued", attempts: 0, max_attempts: 3, created_at: "2026-11-27T13:00:00.000Z", updated_at: "2026-11-27T13:00:00.000Z" },
+      { id: "crw_21_tk", platform: "tiktok", keywords: "tk_kw", requested_count: 10, status: "queued", attempts: 0, max_attempts: 3, created_at: "2026-11-27T13:00:01.000Z", updated_at: "2026-11-27T13:00:01.000Z" },
+      { id: "crw_21_th1", platform: "threads", keywords: "th1_kw", requested_count: 20, status: "queued", attempts: 0, max_attempts: 3, requested_by_chat_id: "999021", created_at: "2026-11-27T13:00:02.000Z", updated_at: "2026-11-27T13:00:02.000Z" },
+      { id: "crw_21_th2", platform: "threads", keywords: "th2_kw", requested_count: 150, status: "queued", attempts: 0, max_attempts: 3, requested_by_chat_id: "999021", created_at: "2026-11-27T13:00:03.000Z", updated_at: "2026-11-27T13:00:03.000Z" }
+    );
+
+    // 21a: Authorization & Scope Isolation on Phase 2 endpoints
+    for (const p of ["/api/crawl/claim", "/api/crawl/progress", "/api/crawl/complete", "/api/crawl/fail"]) {
+      assert.equal((await worker.fetch(new Request(`https://example.workers.dev${p}`, { method: "POST", headers: hApp21, body: "{}" }), env21)).status, 401);
+      assert.equal((await worker.fetch(new Request(`https://example.workers.dev${p}`, { method: "POST", body: "{}" }), env21)).status, 401);
+      assert.equal((await worker.fetch(new Request(`https://example.workers.dev${p}`, { method: "GET", headers: hMuse21 }), env21)).status, 405);
+    }
+
+    // 21b: Concurrency + Single-Flight Claim (5 simultaneous calls all see candidate queued, ONLY 1 wins crw_21_th1)
+    let claimGateResolve;
+    let waitingCount = 0;
+    const claimGate = new Promise((r) => { claimGateResolve = r; });
+    env21.DB.onBeforeClaimUpdate = async () => {
+      waitingCount += 1;
+      if (waitingCount === 5) claimGateResolve();
+      await claimGate;
+    };
+    const claimCalls = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        worker.fetch(
+          new Request("https://example.workers.dev/api/crawl/claim", { method: "POST", headers: hMuse21, body: "{}" }),
+          env21
+        ).then((r) => r.json())
+      )
+    );
+    env21.DB.onBeforeClaimUpdate = null;
+
+    const winners = claimCalls.filter((c) => c.request !== null);
+    assert.equal(winners.length, 1, "Exact 1 caller must win atomic single-flight claim");
+    assert.equal(winners[0].request.id, "crw_21_th1", "Must pick oldest Threads request, ignoring all/tiktok");
+    assert.equal(winners[0].request.claimed_by, "muse-ai");
+    assert.equal(winners[0].request.attempt, 1);
+    const leaseMs = Date.parse(winners[0].request.lease_expires_at) - Date.parse(winners[0].request.claimed_at);
+    assert.ok(leaseMs >= 1790 * 1000 && leaseMs <= 1810 * 1000, "Default lease must be 30 minutes (1800s)");
+
+    // Single-flight blocks subsequent claim while crw_21_th1 is running
+    const blockedClaim = await (await worker.fetch(
+      new Request("https://example.workers.dev/api/crawl/claim", { method: "POST", headers: hMuse21, body: "{}" }),
+      env21
+    )).json();
+    assert.equal(blockedClaim.request, null);
+    assert.equal(blockedClaim.single_flight_blocked, true);
+
+    // 21c: Progress guard (wrong owner/attempt/non-threads -> 403/409; valid owner+attempt+lease -> 200 without Telegram)
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/progress", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({ request_id: "crw_21_all", claimed_by: "muse-ai", attempt: 1, counters: { scanned_count: 5 } }),
+      }), env21)).status,
+      403,
+      "MUSE_APP_VIDEO_TOKEN must not mutate non-threads requests"
+    );
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/progress", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({ request_id: "crw_21_th1", claimed_by: "rogue-agent", attempt: 1, counters: { scanned_count: 5 } }),
+      }), env21)).status,
+      409
+    );
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/progress", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({ request_id: "crw_21_th1", claimed_by: "muse-ai", attempt: 2, counters: { scanned_count: 5 } }),
+      }), env21)).status,
+      409
+    );
+    const progOk = await worker.fetch(new Request("https://example.workers.dev/api/crawl/progress", {
+      method: "POST", headers: hMuse21,
+      body: JSON.stringify({
+        request_id: "crw_21_th1",
+        claimed_by: "muse-ai",
+        attempt: 1,
+        run_id: "run_prog_21",
+        stage: "enriching_views",
+        message: "Đang quét 12/20 bài Threads",
+        counters: { scanned_count: 35, new_qualified_count: 12, duplicate_history_count: 15 },
+      }),
+    }), env21);
+    assert.equal(progOk.status, 200);
+    const progJson = await progOk.json();
+    assert.equal(progJson.progress_metrics.new_qualified_count, 12);
+    assert.equal(progJson.progress_metrics.scanned_count, 35);
+    assert.equal(tgCalls21.length, 0, "Progress updates must never send Telegram");
+
+    // 21d: Fail retry policy (attempt 1 < max_attempts -> queued) + Stale Lease guard + Exhausted attempts -> failed
+    const failRetry1 = await worker.fetch(new Request("https://example.workers.dev/api/crawl/fail", {
+      method: "POST", headers: hMuse21,
+      body: JSON.stringify({
+        request_id: "crw_21_th1",
+        claimed_by: "muse-ai",
+        attempt: 1,
+        error_message: "Temporary Playwright navigation timeout",
+        retryable: true,
+      }),
+    }), env21);
+    assert.equal(failRetry1.status, 200);
+    const fail1Json = await failRetry1.json();
+    assert.equal(fail1Json.status, "queued");
+    assert.equal(fail1Json.retried, true);
+    assert.equal(fail1Json.retries_remaining, 2);
+    assert.equal(tgCalls21.length, 0, "Retryable requeue must NOT notify failure on Telegram");
+    // Repeat fail with stale attempt 1 now rejected 409
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/fail", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({ request_id: "crw_21_th1", claimed_by: "muse-ai", attempt: 1, error_message: "Dup" }),
+      }), env21)).status,
+      409
+    );
+
+    // Re-claim -> gets attempt 2; expire lease -> progress/complete/fail MUST reject 409 & expireStaleLeases requeues it
+    const claim2 = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", { method: "POST", headers: hMuse21, body: "{}" }), env21)).json();
+    assert.equal(claim2.request.id, "crw_21_th1");
+    assert.equal(claim2.request.attempt, 2);
+
+    const th1Row = env21.DB.crawlRequests.find((c) => c.id === "crw_21_th1");
+    th1Row.lease_expires_at = new Date(Date.now() - 60 * 1000).toISOString();
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/progress", {
+        method: "POST", headers: hMuse21,
+        body: JSON.stringify({ request_id: "crw_21_th1", claimed_by: "muse-ai", attempt: 2, counters: { scanned_count: 1 } }),
+      }), env21)).status,
+      409,
+      "Expired lease must reject progress write with 409"
+    );
+    assert.equal(th1Row.status, "queued", "Expired lease write check invokes expireStaleLeases -> queued");
+
+    // Re-claim attempt 3 (final attempt) -> fail -> terminal 'failed' + sends Telegram ONCE + idempotent retry returns already_finalized
+    const claim3 = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", { method: "POST", headers: hMuse21, body: "{}" }), env21)).json();
+    assert.equal(claim3.request.attempt, 3);
+    const tgBeforeFail = tgCalls21.length;
+    const failTerm = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/fail", {
+      method: "POST", headers: hMuse21,
+      body: JSON.stringify({ request_id: "crw_21_th1", claimed_by: "muse-ai", attempt: 3, error_message: "Threads blocked account" }),
+    }), env21)).json();
+    assert.equal(failTerm.status, "failed");
+    assert.equal(failTerm.already_finalized, false);
+    assert.equal(tgCalls21.length - tgBeforeFail, 1, "Terminal failure must notify Telegram once");
+    const failIdemp = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/fail", {
+      method: "POST", headers: hMuse21,
+      body: JSON.stringify({ request_id: "crw_21_th1", claimed_by: "muse-ai", attempt: 3, error_message: "Threads blocked account" }),
+    }), env21)).json();
+    assert.equal(failIdemp.already_finalized, true);
+    assert.equal(tgCalls21.length - tgBeforeFail, 1, "Idempotent fail retry must NOT duplicate Telegram");
+
+    // 21e: Complete + Outbox Recovery + Signal/Claim Lock + Idempotency + Telegram Gate on crw_21_th2 (150 items)
+    const claimTh2 = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", { method: "POST", headers: hMuse21, body: "{}" }), env21)).json();
+    assert.equal(claimTh2.request.id, "crw_21_th2");
+    assert.equal(claimTh2.request.attempt, 1);
+
+    const items21 = Array.from({ length: 150 }, (_, i) => ({
+      platform: "threads",
+      post_id: `P21_${i}`,
+      canonical_url: `https://threads.net/@p21/post/P21_${i}`,
+      views: 15000 + i,
+      views_display: "15K",
+      views_precision: "rounded_display",
+      views_source: "threads_web_browser",
+      views_measured_at: "2026-11-27T14:20:00Z",
+      views_evidence_url: `https://threads.net/@p21/post/P21_${i}`,
+      likes: 100 + i,
+    }));
+
+    env21.DB.failRegistryOnSnapshotCallsRemaining = 101;
+    const compPayload21 = {
+      request_id: "crw_21_th2",
+      claimed_by: "muse-ai",
+      attempt: 1,
+      report_file_id: "drv_rpt_21",
+      result_summary: {
+        contract_version: "3.2",
+        run_id: "run_p2_21",
+        crawled_at: "2026-11-27T14:20:00Z",
+        run_status: "completed",
+        counters: { requested_count: 150, scanned_count: 180, new_qualified_count: 999 },
+      },
+      items: items21,
+    };
+
+    const tgBeforeComp = tgCalls21.length;
+    const failComp21 = await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST", headers: hMuse21, body: JSON.stringify(compPayload21),
+    }), env21);
+    assert.equal(failComp21.status, 503);
+    assert.equal((await failComp21.json()).recovery_pending, true);
+    assert.equal(tgCalls21.length - tgBeforeComp, 0, "MUST NOT send Telegram when registry_sync_status=error");
+    assert.equal(env21.DB.crawlRequests.find((c) => c.id === "crw_21_th2").notified_at ?? null, null);
+
+    // While crw_21_th2 has pending/error outbox, another queued Threads request MUST be blocked by both signal & claim
+    env21.DB.crawlRequests.push({
+      id: "crw_21_th3_wait",
+      platform: "threads",
+      keywords: "wait_kw",
+      requested_count: 10,
+      status: "queued",
+      attempts: 0,
+      max_attempts: 3,
+      created_at: "2026-11-27T14:21:00.000Z",
+      updated_at: "2026-11-27T14:21:00.000Z",
+    });
+    assert.deepEqual(await (await worker.fetch(new Request("https://example.workers.dev/api/crawl-queue/signal"), env21)).json(), { queued: false });
+    const blockedByOutboxClaim = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", { method: "POST", headers: hMuse21, body: "{}" }), env21)).json();
+    assert.equal(blockedByOutboxClaim.request, null);
+    assert.equal(blockedByOutboxClaim.reason, "registry_sync_pending");
+
+    // Recovery via POST /api/crawl/complete -> recovers outbox, syncs authoritative 150/150 counters, notifies Telegram ONCE!
+    const recComp21 = await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST", headers: hMuse21, body: JSON.stringify(compPayload21),
+    }), env21);
+    assert.equal(recComp21.status, 200);
+    const recJson21 = await recComp21.json();
+    assert.equal(recJson21.recovered_registry_sync, true);
+    assert.equal(recJson21.registry_sync_status, "ok");
+    assert.equal(recJson21.dedup_stats.new_qualified_count, 150);
+    assert.equal(recJson21.dedup_stats.total_processed, 150);
+    const th2SavedSum = JSON.parse(env21.DB.crawlRequests.find((c) => c.id === "crw_21_th2").result_summary_json);
+    assert.equal(th2SavedSum.counters.new_qualified_count, 150, "counters synced with authoritative D1 dedup_stats");
+    assert.equal(tgCalls21.length - tgBeforeComp, 1, "Telegram sent exactly once after recovery");
+    assert.equal(env21.DB.registryOutbox.length, 0);
+
+    // Next signal now unblocks for crw_21_th3_wait!
+    assert.deepEqual(await (await worker.fetch(new Request("https://example.workers.dev/api/crawl-queue/signal"), env21)).json(), { queued: true });
+
+    // Idempotent retry on crw_21_th2 -> already_finalized=true, no 2nd Telegram
+    const idempComp21 = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST", headers: hMuse21, body: JSON.stringify(compPayload21),
+    }), env21)).json();
+    assert.equal(idempComp21.already_finalized, true);
+    assert.equal(tgCalls21.length - tgBeforeComp, 1);
+
+    // Mismatched attempt/owner on finalized request rejected 409
+    assert.equal(
+      (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+        method: "POST", headers: hMuse21, body: JSON.stringify({ ...compPayload21, attempt: 2 }),
+      }), env21)).status,
+      409
+    );
+  } finally {
+    globalThis.fetch = prevFetch21;
+  }
 }
 
 console.log("WORKER_V2_CONTRACT_TESTS_OK");

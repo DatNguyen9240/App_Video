@@ -1431,6 +1431,16 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes) {
         summaryObj.updated_count = agg.updated_count;
         summaryObj.missing_views_count = agg.missing_views_count;
         summaryObj.unverified_count = agg.unverified_count;
+        if (summaryObj.counters && typeof summaryObj.counters === "object") {
+            summaryObj.counters.new_count = agg.new_count;
+            summaryObj.counters.new_qualified_count = agg.new_qualified_count;
+            summaryObj.counters.duplicate_history_count = agg.duplicate_history_count;
+            summaryObj.counters.duplicate_count = agg.duplicate_count;
+            summaryObj.counters.updated_metrics_count = agg.updated_metrics_count;
+            summaryObj.counters.updated_count = agg.updated_count;
+            summaryObj.counters.missing_views_count = agg.missing_views_count;
+            summaryObj.counters.unverified_count = agg.unverified_count;
+        }
     } else {
         summaryObj.new_count = summaryObj.new_count !== undefined ? summaryObj.new_count : agg.new_count;
         summaryObj.new_qualified_count = summaryObj.new_qualified_count !== undefined ? summaryObj.new_qualified_count : agg.new_qualified_count;
@@ -4054,340 +4064,27 @@ async function handleAppApi(request, env, url) {
     if (request.method === "POST" && path === "/api/app/crawl-requests/claim") {
         let body = {};
         try { body = await request.json(); } catch { body = {}; }
-        const workerId = String(body.worker_id || clientId || "muse-ai").slice(0, 64);
-        const leaseSec = Math.min(Math.max(Number(body.lease_seconds) || 1800, 60), 7200);
-        const now = new Date();
-        const nowIso = now.toISOString();
-        await setRuntimeState(env, "muse_last_poll_at", nowIso);
-        if (body.schedule_confirmed === true) {
-            await setRuntimeState(env, "muse_schedule_confirmed", "1");
-        }
-        await expireStaleLeases(env);
-
-        for (let attempt = 0; attempt < 2; attempt++) {
-            const candidate = await env.DB.prepare(`
-                SELECT * FROM crawl_requests WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1
-            `).first();
-            if (!candidate) return jsonResponse({ ok: true, request: null });
-
-            const leaseExpires = new Date(now.getTime() + leaseSec * 1000).toISOString();
-            const claimed = await env.DB.prepare(`
-                UPDATE crawl_requests
-                SET status = 'running', claimed_by = ?, claimed_at = ?, lease_expires_at = ?, attempts = attempts + 1, updated_at = ?
-                WHERE id = ? AND status = 'queued'
-            `).bind(workerId, nowIso, leaseExpires, nowIso, candidate.id).run();
-
-            if (claimed.meta.changes === 1) {
-                const updatedRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(candidate.id).first();
-                return jsonResponse({ ok: true, request: updatedRow });
-            }
-        }
-        return jsonResponse({ ok: true, request: null });
+        const claimRes = await claimNextCrawlRequestInD1(env, {
+            workerId: String(body.worker_id || clientId || "muse-ai").slice(0, 64),
+            leaseSeconds: body.lease_seconds,
+            scheduleConfirmed: body.schedule_confirmed === true,
+            threadsOnly: false,
+            singleFlight: false,
+        });
+        return jsonResponse(claimRes);
     }
 
     if (request.method === "POST" && path.startsWith("/api/app/crawl-requests/") && path.endsWith("/complete")) {
         const crawlId = path.slice("/api/app/crawl-requests/".length, -"/complete".length).trim();
         let body = {};
         try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
-        const nextStatus = body.status === "failed" ? "failed" : "completed";
-        const nowIso = new Date().toISOString();
-
-        const rawAttempt = body.attempt ?? body.attempts;
-        const parsedAttempt = Number(rawAttempt);
-        if (rawAttempt === undefined || rawAttempt === null || rawAttempt === "" || !Number.isInteger(parsedAttempt) || parsedAttempt < 1) {
-            return jsonResponse({ ok: false, error: "Missing or invalid required attempt field", conflict: false }, 400);
-        }
-        const callerOwner = String(body.claimed_by || body.worker_id || clientId || "").trim();
-        if (!callerOwner) {
-            return jsonResponse({ ok: false, error: "Missing crawl claim owner identity", conflict: false }, 400);
-        }
-
-        const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
-        if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
-
-        const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
-            ? { ...body.result_summary }
-            : {};
-        const bodyDedupItems = Array.isArray(bodySummaryObj.items)
-            ? bodySummaryObj.items
-            : (Array.isArray(body.items) ? body.items : null);
-
-        if (["completed", "failed", "cancelled"].includes(existing.status)) {
-            if (
-                (existing.claimed_by && callerOwner !== existing.claimed_by) ||
-                parsedAttempt !== Number(existing.attempts || 0) ||
-                existing.status !== nextStatus
-            ) {
-                return jsonResponse({ ok: false, error: "Crawl request already finalized by another worker/attempt", conflict: true }, 409);
-            }
-            let existingSummary = {};
-            try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
-            let totalOutboxCount = 0;
-            try {
-                const cntRow = await env.DB.prepare(`
-                    SELECT COUNT(*) AS cnt FROM registry_sync_outbox
-                    WHERE request_id = ?
-                `).bind(crawlId).first();
-                totalOutboxCount = Number(cntRow?.cnt || 0);
-            } catch {}
-
-            const needsRecovery =
-                existingSummary.registry_sync_status === "error" ||
-                existingSummary.registry_sync_status === "pending" ||
-                totalOutboxCount > 0;
-
-            if (needsRecovery) {
-                if (totalOutboxCount === 0) {
-                    // Re-read D1 fresh so a concurrent cron that finished & deleted outbox isn't double-enqueued
-                    const freshReq = await env.DB.prepare("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
-                        .bind(crawlId).first();
-                    let freshSum = existingSummary;
-                    try { freshSum = JSON.parse(freshReq?.result_summary_json || "{}"); } catch {}
-                    const freshCntRow = await env.DB.prepare(
-                        "SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?"
-                    ).bind(crawlId).first();
-                    const freshOutboxCount = Number(freshCntRow?.cnt || 0);
-                    if (
-                        freshOutboxCount === 0 &&
-                        freshSum.registry_sync_status !== "error" &&
-                        freshSum.registry_sync_status !== "pending"
-                    ) {
-                        return jsonResponse({
-                            ok: true,
-                            already_finalized: true,
-                            status: freshReq?.status || existing.status,
-                            dedup_stats: freshSum.dedup_stats || undefined,
-                        });
-                    }
-                    if (freshOutboxCount === 0) {
-                        const fallbackItems = bodyDedupItems && bodyDedupItems.length > 0
-                            ? bodyDedupItems
-                            : (Array.isArray(freshSum.items) ? freshSum.items : []);
-                        if (fallbackItems.length > 0) {
-                            await enqueueRecoveryOutboxForFinalizedRequest(
-                                env,
-                                crawlId,
-                                freshSum.run_id || bodySummaryObj.run_id || crawlId,
-                                freshSum.crawled_at || bodySummaryObj.crawled_at || freshSum.generated_at || null,
-                                fallbackItems,
-                                nowIso
-                            );
-                        }
-                    }
-                }
-                try {
-                    const drainRes = await drainRegistryOutboxForRequest(
-                        env,
-                        crawlId,
-                        existingSummary,
-                        existingSummary.crawled_at || existingSummary.generated_at || null
-                    );
-                    if (drainRes?.inProgress || !drainRes?.completed) {
-                        return jsonResponse(
-                            {
-                                ok: false,
-                                registry_sync_in_progress: true,
-                                completed_status: existing.status,
-                                recovery_pending: true,
-                                error: "Registry sync recovery is currently in progress by another worker",
-                            },
-                            503
-                        );
-                    }
-                    const recoveredStats = drainRes.dedup_stats || existingSummary.dedup_stats;
-                    const freshAfter = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
-                    if (
-                        freshAfter &&
-                        freshAfter.requested_by_chat_id &&
-                        !freshAfter.notified_at &&
-                        env.TELEGRAM_BOT_TOKEN_VIDEO &&
-                        !(await isRequestBlockedByPendingRegistrySync(env, freshAfter))
-                    ) {
-                        let notifySummary = existingSummary;
-                        try { notifySummary = JSON.parse(freshAfter.result_summary_json || "{}"); } catch {}
-                        const notifKey = resolveCanonicalNotificationKey({
-                            requestId: crawlId,
-                            runId: notifySummary.run_id || null,
-                            status: freshAfter.status,
-                        });
-                        const aliasKeys = [
-                            resolveCanonicalNotificationKey({ requestId: crawlId, status: freshAfter.status }),
-                            notifySummary.run_id ? resolveCanonicalNotificationKey({ runId: notifySummary.run_id, isCorrected: true }) : null,
-                        ].filter(Boolean);
-                        const pseudoReq = { ...freshAfter, updated_at: nowIso };
-                        const text = buildDirectD1CrawlNotificationText(pseudoReq, notifySummary);
-                        const recCount = resolveAuthoritativeSummaryRecCount(notifySummary);
-                        const delivery = await deliverWithUncertaintyGuard(
-                            env,
-                            notifKey,
-                            recCount,
-                            freshAfter.requested_by_chat_id,
-                            text,
-                            { usePrimaryMessage: true, aliasKeys, requestId: crawlId, replyMarkup: reportActionsInlineKeyboard(false) }
-                        );
-                        if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
-                            await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
-                                .bind(nowIso, crawlId).run();
-                        }
-                    }
-                    return jsonResponse({
-                        ok: true,
-                        already_finalized: false,
-                        recovered_registry_sync: true,
-                        status: existing.status,
-                        dedup_stats: recoveredStats,
-                    });
-                } catch (err) {
-                    return jsonResponse(
-                        {
-                            ok: false,
-                            registry_unavailable: true,
-                            completed_status: existing.status,
-                            recovery_pending: true,
-                            error: String(err?.message || "D1 registry unavailable"),
-                        },
-                        503
-                    );
-                }
-            }
-            return jsonResponse({ ok: true, already_finalized: true, status: existing.status });
-        }
-
-        if (existing.status !== "running") {
-            return jsonResponse({ ok: false, error: "Crawl lease expired or request is not running", conflict: true }, 409);
-        }
-        if (existing.claimed_by && callerOwner !== existing.claimed_by) {
-            return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
-        }
-        if (parsedAttempt !== Number(existing.attempts || 0)) {
-            return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
-        }
-        if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
-            await expireStaleLeases(env);
-            return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
-        }
-
-        const summaryObj = { ...bodySummaryObj };
-        const dedupSourceItems = bodyDedupItems;
-        if (dedupSourceItems && dedupSourceItems.length > 0) {
-            summaryObj.registry_sync_status = "pending";
-        }
-
-        // Atomic batch transaction: write durable registry_sync_outbox + finalize crawl_requests ONLY if active lease/owner/attempt hold
-        const outboxStmts = (dedupSourceItems && dedupSourceItems.length > 0)
-            ? await enqueueRegistryOutboxStatements(
-                env,
-                crawlId,
-                summaryObj.run_id || crawlId,
-                summaryObj.crawled_at || summaryObj.generated_at || null,
-                dedupSourceItems,
-                { callerOwner, parsedAttempt, nowIso },
-                nowIso
-            )
-            : [];
-        const updateReqStmt = env.DB.prepare(`
-            UPDATE crawl_requests
-            SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
-            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
-              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
-        `).bind(
-            nextStatus,
-            JSON.stringify(summaryObj),
-            body.report_file_id || null,
-            body.error_message || null,
-            nowIso,
+        return finalizeCrawlRequestCore(env, {
             crawlId,
-            callerOwner,
-            parsedAttempt,
-            nowIso
-        );
-
-        let upd = null;
-        if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
-            const batchResults = await env.DB.batch([...outboxStmts, updateReqStmt]);
-            upd = batchResults[batchResults.length - 1];
-        } else {
-            for (const st of outboxStmts) {
-                await st.run();
-            }
-            upd = await updateReqStmt.run();
-        }
-
-        if (Number(upd?.meta?.changes || 0) !== 1) {
-            return jsonResponse({ ok: false, error: "Crawl completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
-        }
-
-        if (dedupSourceItems && dedupSourceItems.length > 0) {
-            try {
-                const drainRes = await drainRegistryOutboxForRequest(
-                    env,
-                    crawlId,
-                    summaryObj,
-                    summaryObj.crawled_at || summaryObj.generated_at || null
-                );
-                if (drainRes?.inProgress || !drainRes?.completed) {
-                    return jsonResponse(
-                        {
-                            ok: false,
-                            registry_sync_in_progress: true,
-                            completed_status: nextStatus,
-                            recovery_pending: true,
-                            error: "Registry sync is currently in progress by another worker",
-                        },
-                        503
-                    );
-                }
-            } catch (err) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        registry_unavailable: true,
-                        completed_status: nextStatus,
-                        recovery_pending: true,
-                        error: String(err?.message || "D1 registry unavailable"),
-                    },
-                    503
-                );
-            }
-        }
-
-        if (
-            existing.requested_by_chat_id &&
-            !existing.notified_at &&
-            env.TELEGRAM_BOT_TOKEN_VIDEO &&
-            !(await isRequestBlockedByPendingRegistrySync(env, { id: crawlId, result_summary_json: JSON.stringify(summaryObj) }))
-        ) {
-            const summary = summaryObj;
-            const notifKey = resolveCanonicalNotificationKey({
-                requestId: crawlId,
-                runId: summary.run_id || null,
-                status: nextStatus,
-            });
-            const aliasKeys = [
-                resolveCanonicalNotificationKey({ requestId: crawlId, status: nextStatus }),
-                summary.run_id ? resolveCanonicalNotificationKey({ runId: summary.run_id, isCorrected: true }) : null,
-            ].filter(Boolean);
-            const pseudoReq = {
-                ...existing,
-                status: nextStatus,
-                error_message: body.error_message || existing.error_message,
-                updated_at: nowIso,
-            };
-            const text = buildDirectD1CrawlNotificationText(pseudoReq, summary);
-            const recCount = resolveAuthoritativeSummaryRecCount(summary);
-            const delivery = await deliverWithUncertaintyGuard(
-                env,
-                notifKey,
-                recCount,
-                existing.requested_by_chat_id,
-                text,
-                { usePrimaryMessage: true, aliasKeys, requestId: crawlId, replyMarkup: reportActionsInlineKeyboard(false) }
-            );
-            if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
-                await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL").bind(nowIso, crawlId).run();
-            }
-        }
-        return jsonResponse({ ok: true, already_finalized: false, status: nextStatus });
+            body,
+            defaultOwner: clientId,
+            forcedStatus: null,
+            requireThreads: false,
+        });
     }
 
     if (request.method === "POST" && path === "/api/app/crawl-schedule") {
@@ -5208,6 +4905,653 @@ function normalizeCrawlRegistryCheckItems(body) {
     return { items };
 }
 
+const MUSE_DEFAULT_CLAIM_OWNER = "muse-ai";
+const MUSE_DEFAULT_LEASE_SECONDS = 1800;
+
+async function claimNextCrawlRequestInD1(env, options = {}) {
+    const workerId = String(options.workerId || MUSE_DEFAULT_CLAIM_OWNER).trim().slice(0, 64) || MUSE_DEFAULT_CLAIM_OWNER;
+    const leaseSec = Math.min(Math.max(Number(options.leaseSeconds) || MUSE_DEFAULT_LEASE_SECONDS, 60), 7200);
+    const scheduleConfirmed = options.scheduleConfirmed === true;
+    const threadsOnly = Boolean(options.threadsOnly);
+    const singleFlight = Boolean(options.singleFlight);
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    await setRuntimeState(env, "muse_last_poll_at", nowIso);
+    if (scheduleConfirmed) {
+        await setRuntimeState(env, "muse_schedule_confirmed", "1");
+    }
+    await expireStaleLeases(env);
+
+    if (singleFlight) {
+        const activeRun = await env.DB.prepare(`
+            SELECT id FROM crawl_requests
+            WHERE status = 'running'
+              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+            LIMIT 1
+        `).bind(nowIso).first();
+        if (activeRun) {
+            return { ok: true, request: null, single_flight_blocked: true, reason: "active_crawl_in_progress" };
+        }
+        const pendingOutbox = await env.DB.prepare(`
+            SELECT id FROM registry_sync_outbox
+            WHERE status IN ('pending', 'error', 'processing', 'done')
+            LIMIT 1
+        `).first();
+        if (pendingOutbox) {
+            return { ok: true, request: null, single_flight_blocked: true, reason: "registry_sync_pending" };
+        }
+        const blockedCompleted = await env.DB.prepare(`
+            SELECT 1 AS blocked FROM (
+                SELECT result_summary_json FROM crawl_requests
+                WHERE status IN ('completed', 'failed')
+                ORDER BY created_at DESC LIMIT 50
+            ) r
+            WHERE r.result_summary_json IS NOT NULL
+              AND json_valid(r.result_summary_json) = 1
+              AND lower(COALESCE(json_extract(r.result_summary_json, '$.registry_sync_status'), '')) IN ('pending', 'error')
+            LIMIT 1
+        `).first();
+        if (blockedCompleted) {
+            return { ok: true, request: null, single_flight_blocked: true, reason: "registry_sync_pending" };
+        }
+    }
+
+    for (let retry = 0; retry < 2; retry++) {
+        const candidate = threadsOnly
+            ? await env.DB.prepare(`
+                SELECT * FROM crawl_requests
+                WHERE status = 'queued'
+                  AND lower(trim(platform)) = 'threads'
+                  AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+                ORDER BY created_at ASC LIMIT 1
+            `).first()
+            : await env.DB.prepare(`
+                SELECT * FROM crawl_requests WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1
+            `).first();
+
+        if (!candidate) {
+            return { ok: true, request: null };
+        }
+
+        const leaseExpires = new Date(now.getTime() + leaseSec * 1000).toISOString();
+        const claimed = (singleFlight || threadsOnly)
+            ? await env.DB.prepare(`
+                UPDATE crawl_requests
+                SET status = 'running', claimed_by = ?, claimed_at = ?, lease_expires_at = ?, attempts = attempts + 1, updated_at = ?
+                WHERE id = ?
+                  AND status = 'queued'
+                  AND lower(trim(platform)) = 'threads'
+                  AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM crawl_requests r_run
+                      WHERE r_run.status = 'running'
+                        AND (r_run.lease_expires_at IS NULL OR r_run.lease_expires_at >= ?)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM registry_sync_outbox
+                      WHERE status IN ('pending', 'error', 'processing', 'done')
+                  )
+            `).bind(workerId, nowIso, leaseExpires, nowIso, candidate.id, nowIso).run()
+            : await env.DB.prepare(`
+                UPDATE crawl_requests
+                SET status = 'running', claimed_by = ?, claimed_at = ?, lease_expires_at = ?, attempts = attempts + 1, updated_at = ?
+                WHERE id = ? AND status = 'queued'
+            `).bind(workerId, nowIso, leaseExpires, nowIso, candidate.id).run();
+
+        if (Number(claimed?.meta?.changes || 0) === 1) {
+            const updatedRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(candidate.id).first();
+            if (updatedRow) {
+                let parsedOpts = {};
+                try { parsedOpts = JSON.parse(updatedRow.options_json || "{}"); } catch {}
+                return {
+                    ok: true,
+                    request: {
+                        ...updatedRow,
+                        attempt: Number(updatedRow.attempts || 1),
+                        options: parsedOpts,
+                    },
+                };
+            }
+            return { ok: true, request: null };
+        }
+
+        if (singleFlight) {
+            const lostToActive = await env.DB.prepare(`
+                SELECT id FROM crawl_requests
+                WHERE status = 'running'
+                  AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+                LIMIT 1
+            `).bind(nowIso).first();
+            if (lostToActive) {
+                return { ok: true, request: null, single_flight_blocked: true, reason: "active_crawl_in_progress" };
+            }
+        }
+    }
+    return { ok: true, request: null };
+}
+
+function parseCrawlClaimInputs(crawlId, body, defaultOwner = "") {
+    const cleanId = String(crawlId || "").trim();
+    if (!cleanId) {
+        return { errorResponse: jsonResponse({ ok: false, error: "Missing crawl request ID", conflict: false }, 400) };
+    }
+    const rawAttempt = body?.attempt ?? body?.attempts;
+    const parsedAttempt = Number(rawAttempt);
+    if (rawAttempt === undefined || rawAttempt === null || rawAttempt === "" || !Number.isInteger(parsedAttempt) || parsedAttempt < 1) {
+        return { errorResponse: jsonResponse({ ok: false, error: "Missing or invalid required attempt field", conflict: false }, 400) };
+    }
+    if (body?.claimed_by !== undefined && !String(body.claimed_by || "").trim()) {
+        return { errorResponse: jsonResponse({ ok: false, error: "Invalid empty claimed_by field", conflict: false }, 400) };
+    }
+    const callerOwner = String(body?.claimed_by || body?.worker_id || defaultOwner || "").trim();
+    if (!callerOwner) {
+        return { errorResponse: jsonResponse({ ok: false, error: "Missing crawl claim owner identity", conflict: false }, 400) };
+    }
+    return { crawlId: cleanId, parsedAttempt, callerOwner };
+}
+
+function normalizeProgressMetricsPatch(existingSummary, body, reqRow, nowIso) {
+    const summaryObj = (existingSummary && typeof existingSummary === "object" && !Array.isArray(existingSummary))
+        ? { ...existingSummary }
+        : {};
+    const prevCounters = (summaryObj.counters && typeof summaryObj.counters === "object") ? { ...summaryObj.counters } : {};
+    const bodyCounters = (body.counters && typeof body.counters === "object") ? body.counters : {};
+
+    const intFields = [
+        "requested_count",
+        "scanned_count",
+        "unique_candidate_count",
+        "qualified_count",
+        "new_qualified_count",
+        "new_count",
+        "duplicate_history_count",
+        "duplicate_count",
+        "updated_metrics_count",
+        "updated_count",
+        "missing_views_count",
+        "unverified_count",
+        "similar_content_count",
+        "rejected_count",
+    ];
+    for (const k of intFields) {
+        const raw = bodyCounters[k] !== undefined ? bodyCounters[k] : body[k];
+        if (raw !== undefined && raw !== null && raw !== "") {
+            const n = Number(raw);
+            if (Number.isFinite(n) && n >= 0) {
+                prevCounters[k] = Math.trunc(n);
+            }
+        }
+    }
+    if (prevCounters.requested_count === undefined && reqRow?.requested_count) {
+        prevCounters.requested_count = Number(reqRow.requested_count);
+    }
+    const rawTarget = bodyCounters.target_achieved !== undefined ? bodyCounters.target_achieved : body.target_achieved;
+    if (typeof rawTarget === "boolean") {
+        prevCounters.target_achieved = rawTarget;
+    }
+    const rawStop = bodyCounters.stop_reason !== undefined ? bodyCounters.stop_reason : body.stop_reason;
+    if (typeof rawStop === "string" && rawStop.trim()) {
+        prevCounters.stop_reason = rawStop.trim().slice(0, 120);
+    }
+    summaryObj.counters = prevCounters;
+
+    if (typeof body.run_id === "string" && body.run_id.trim()) {
+        summaryObj.run_id = body.run_id.trim().slice(0, 128);
+    }
+    summaryObj.progress = {
+        stage: typeof body.stage === "string" ? body.stage.trim().slice(0, 80) : (summaryObj.progress?.stage || "running"),
+        message: typeof body.message === "string" ? body.message.trim().slice(0, 400) : (summaryObj.progress?.message || null),
+        updated_at: nowIso,
+    };
+    return summaryObj;
+}
+
+async function updateCrawlProgressInD1(env, { crawlId, body, defaultOwner = "", requireThreads = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner);
+    if (parsed.errorResponse) return parsed.errorResponse;
+    const { parsedAttempt, callerOwner } = parsed;
+    const cleanId = parsed.crawlId;
+
+    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
+        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
+    }
+    if (existing.status !== "running") {
+        return jsonResponse({ ok: false, error: "Crawl request is not running", conflict: true }, 409);
+    }
+    if (existing.claimed_by && callerOwner !== existing.claimed_by) {
+        return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+    }
+    if (parsedAttempt !== Number(existing.attempts || 0)) {
+        return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+    }
+    if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
+        await expireStaleLeases(env);
+        return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+    }
+
+    let existingSummary = {};
+    try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
+    const nowIso = new Date().toISOString();
+    const updatedSummary = normalizeProgressMetricsPatch(existingSummary, body, existing, nowIso);
+    const updatedSummaryJson = JSON.stringify(updatedSummary);
+
+    const upd = await env.DB.prepare(`
+        UPDATE crawl_requests
+        SET result_summary_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+    `).bind(updatedSummaryJson, nowIso, cleanId, callerOwner, parsedAttempt, nowIso).run();
+
+    if (Number(upd?.meta?.changes || 0) !== 1) {
+        return jsonResponse({ ok: false, error: "Crawl progress conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
+    }
+
+    return jsonResponse({
+        ok: true,
+        request_id: cleanId,
+        status: "running",
+        claimed_by: callerOwner,
+        attempt: parsedAttempt,
+        progress: updatedSummary.progress,
+        progress_metrics: computeCrawlRequestProgress({ ...existing, result_summary_json: updatedSummaryJson }),
+    });
+}
+
+async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "", forcedStatus = null, requireThreads = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner);
+    if (parsed.errorResponse) return parsed.errorResponse;
+    const { parsedAttempt, callerOwner } = parsed;
+    const cleanId = parsed.crawlId;
+
+    const nextStatus = forcedStatus || (body.status === "failed" ? "failed" : "completed");
+    const nowIso = new Date().toISOString();
+
+    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
+        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
+    }
+
+    const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
+        ? { ...body.result_summary }
+        : {};
+    const bodyDedupItems = Array.isArray(bodySummaryObj.items)
+        ? bodySummaryObj.items
+        : (Array.isArray(bodySummaryObj.records)
+            ? bodySummaryObj.records
+            : (Array.isArray(body.items)
+                ? body.items
+                : (Array.isArray(body.records) ? body.records : null)));
+
+    if (["completed", "failed", "cancelled"].includes(existing.status)) {
+        if (
+            (existing.claimed_by && callerOwner !== existing.claimed_by) ||
+            parsedAttempt !== Number(existing.attempts || 0) ||
+            existing.status !== nextStatus
+        ) {
+            return jsonResponse({ ok: false, error: "Crawl request already finalized by another worker/attempt", conflict: true }, 409);
+        }
+        let existingSummary = {};
+        try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
+        let totalOutboxCount = 0;
+        try {
+            const cntRow = await env.DB.prepare(`
+                SELECT COUNT(*) AS cnt FROM registry_sync_outbox
+                WHERE request_id = ?
+            `).bind(cleanId).first();
+            totalOutboxCount = Number(cntRow?.cnt || 0);
+        } catch {}
+
+        const needsRecovery =
+            existingSummary.registry_sync_status === "error" ||
+            existingSummary.registry_sync_status === "pending" ||
+            totalOutboxCount > 0;
+
+        if (needsRecovery) {
+            if (totalOutboxCount === 0) {
+                const freshReq = await env.DB.prepare("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
+                    .bind(cleanId).first();
+                let freshSum = existingSummary;
+                try { freshSum = JSON.parse(freshReq?.result_summary_json || "{}"); } catch {}
+                const freshCntRow = await env.DB.prepare(
+                    "SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?"
+                ).bind(cleanId).first();
+                const freshOutboxCount = Number(freshCntRow?.cnt || 0);
+                if (
+                    freshOutboxCount === 0 &&
+                    freshSum.registry_sync_status !== "error" &&
+                    freshSum.registry_sync_status !== "pending"
+                ) {
+                    return jsonResponse({
+                        ok: true,
+                        already_finalized: true,
+                        status: freshReq?.status || existing.status,
+                        registry_sync_status: freshSum.registry_sync_status || "ok",
+                        dedup_stats: freshSum.dedup_stats || undefined,
+                    });
+                }
+                if (freshOutboxCount === 0) {
+                    const fallbackItems = bodyDedupItems && bodyDedupItems.length > 0
+                        ? bodyDedupItems
+                        : (Array.isArray(freshSum.items) ? freshSum.items : []);
+                    if (fallbackItems.length > 0) {
+                        await enqueueRecoveryOutboxForFinalizedRequest(
+                            env,
+                            cleanId,
+                            freshSum.run_id || bodySummaryObj.run_id || cleanId,
+                            freshSum.crawled_at || bodySummaryObj.crawled_at || freshSum.generated_at || null,
+                            fallbackItems,
+                            nowIso
+                        );
+                    }
+                }
+            }
+            try {
+                const drainRes = await drainRegistryOutboxForRequest(
+                    env,
+                    cleanId,
+                    existingSummary,
+                    existingSummary.crawled_at || existingSummary.generated_at || null
+                );
+                if (drainRes?.inProgress || !drainRes?.completed) {
+                    return jsonResponse(
+                        {
+                            ok: false,
+                            registry_sync_in_progress: true,
+                            completed_status: existing.status,
+                            recovery_pending: true,
+                            error: "Registry sync recovery is currently in progress by another worker",
+                        },
+                        503
+                    );
+                }
+                const recoveredStats = drainRes.dedup_stats || existingSummary.dedup_stats;
+                const freshAfter = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+                if (
+                    freshAfter &&
+                    freshAfter.requested_by_chat_id &&
+                    !freshAfter.notified_at &&
+                    env.TELEGRAM_BOT_TOKEN_VIDEO &&
+                    !(await isRequestBlockedByPendingRegistrySync(env, freshAfter))
+                ) {
+                    let notifySummary = existingSummary;
+                    try { notifySummary = JSON.parse(freshAfter.result_summary_json || "{}"); } catch {}
+                    const notifKey = resolveCanonicalNotificationKey({
+                        requestId: cleanId,
+                        runId: notifySummary.run_id || null,
+                        status: freshAfter.status,
+                    });
+                    const aliasKeys = [
+                        resolveCanonicalNotificationKey({ requestId: cleanId, status: freshAfter.status }),
+                        notifySummary.run_id ? resolveCanonicalNotificationKey({ runId: notifySummary.run_id, isCorrected: true }) : null,
+                    ].filter(Boolean);
+                    const pseudoReq = { ...freshAfter, updated_at: nowIso };
+                    const text = buildDirectD1CrawlNotificationText(pseudoReq, notifySummary);
+                    const recCount = resolveAuthoritativeSummaryRecCount(notifySummary);
+                    const delivery = await deliverWithUncertaintyGuard(
+                        env,
+                        notifKey,
+                        recCount,
+                        freshAfter.requested_by_chat_id,
+                        text,
+                        { usePrimaryMessage: true, aliasKeys, requestId: cleanId, replyMarkup: reportActionsInlineKeyboard(false) }
+                    );
+                    if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+                        await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
+                            .bind(nowIso, cleanId).run();
+                    }
+                }
+                return jsonResponse({
+                    ok: true,
+                    already_finalized: false,
+                    recovered_registry_sync: true,
+                    status: existing.status,
+                    registry_sync_status: existingSummary.registry_sync_status || "ok",
+                    dedup_stats: recoveredStats,
+                });
+            } catch (err) {
+                return jsonResponse(
+                    {
+                        ok: false,
+                        registry_unavailable: true,
+                        completed_status: existing.status,
+                        recovery_pending: true,
+                        error: String(err?.message || "D1 registry unavailable"),
+                    },
+                    503
+                );
+            }
+        }
+        return jsonResponse({
+            ok: true,
+            already_finalized: true,
+            status: existing.status,
+            registry_sync_status: existingSummary.registry_sync_status || "ok",
+            dedup_stats: existingSummary.dedup_stats || undefined,
+        });
+    }
+
+    if (existing.status !== "running") {
+        return jsonResponse({ ok: false, error: "Crawl lease expired or request is not running", conflict: true }, 409);
+    }
+    if (existing.claimed_by && callerOwner !== existing.claimed_by) {
+        return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+    }
+    if (parsedAttempt !== Number(existing.attempts || 0)) {
+        return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+    }
+    if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
+        await expireStaleLeases(env);
+        return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+    }
+
+    const summaryObj = { ...bodySummaryObj };
+    const dedupSourceItems = bodyDedupItems;
+    if (dedupSourceItems && dedupSourceItems.length > 0) {
+        summaryObj.registry_sync_status = "pending";
+    }
+
+    const outboxStmts = (dedupSourceItems && dedupSourceItems.length > 0)
+        ? await enqueueRegistryOutboxStatements(
+            env,
+            cleanId,
+            summaryObj.run_id || cleanId,
+            summaryObj.crawled_at || summaryObj.generated_at || null,
+            dedupSourceItems,
+            { callerOwner, parsedAttempt, nowIso },
+            nowIso
+        )
+        : [];
+    const updateReqStmt = env.DB.prepare(`
+        UPDATE crawl_requests
+        SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
+        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+    `).bind(
+        nextStatus,
+        JSON.stringify(summaryObj),
+        body.report_file_id || null,
+        body.error_message || null,
+        nowIso,
+        cleanId,
+        callerOwner,
+        parsedAttempt,
+        nowIso
+    );
+
+    let upd = null;
+    if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
+        const batchResults = await env.DB.batch([...outboxStmts, updateReqStmt]);
+        upd = batchResults[batchResults.length - 1];
+    } else {
+        for (const st of outboxStmts) {
+            await st.run();
+        }
+        upd = await updateReqStmt.run();
+    }
+
+    if (Number(upd?.meta?.changes || 0) !== 1) {
+        return jsonResponse({ ok: false, error: "Crawl completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
+    }
+
+    if (dedupSourceItems && dedupSourceItems.length > 0) {
+        try {
+            const drainRes = await drainRegistryOutboxForRequest(
+                env,
+                cleanId,
+                summaryObj,
+                summaryObj.crawled_at || summaryObj.generated_at || null
+            );
+            if (drainRes?.inProgress || !drainRes?.completed) {
+                return jsonResponse(
+                    {
+                        ok: false,
+                        registry_sync_in_progress: true,
+                        completed_status: nextStatus,
+                        recovery_pending: true,
+                        error: "Registry sync is currently in progress by another worker",
+                    },
+                    503
+                );
+            }
+        } catch (err) {
+            return jsonResponse(
+                {
+                    ok: false,
+                    registry_unavailable: true,
+                    completed_status: nextStatus,
+                    recovery_pending: true,
+                    error: String(err?.message || "D1 registry unavailable"),
+                },
+                503
+            );
+        }
+    }
+
+    let telegramNotified = false;
+    if (
+        existing.requested_by_chat_id &&
+        !existing.notified_at &&
+        env.TELEGRAM_BOT_TOKEN_VIDEO &&
+        !(await isRequestBlockedByPendingRegistrySync(env, { id: cleanId, result_summary_json: JSON.stringify(summaryObj) }))
+    ) {
+        const summary = summaryObj;
+        const notifKey = resolveCanonicalNotificationKey({
+            requestId: cleanId,
+            runId: summary.run_id || null,
+            status: nextStatus,
+        });
+        const aliasKeys = [
+            resolveCanonicalNotificationKey({ requestId: cleanId, status: nextStatus }),
+            summary.run_id ? resolveCanonicalNotificationKey({ runId: summary.run_id, isCorrected: true }) : null,
+        ].filter(Boolean);
+        const pseudoReq = {
+            ...existing,
+            status: nextStatus,
+            error_message: body.error_message || existing.error_message,
+            updated_at: nowIso,
+        };
+        const text = buildDirectD1CrawlNotificationText(pseudoReq, summary);
+        const recCount = resolveAuthoritativeSummaryRecCount(summary);
+        const delivery = await deliverWithUncertaintyGuard(
+            env,
+            notifKey,
+            recCount,
+            existing.requested_by_chat_id,
+            text,
+            { usePrimaryMessage: true, aliasKeys, requestId: cleanId, replyMarkup: reportActionsInlineKeyboard(false) }
+        );
+        if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+            telegramNotified = true;
+            await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL").bind(nowIso, cleanId).run();
+        }
+    }
+    return jsonResponse({
+        ok: true,
+        already_finalized: false,
+        status: nextStatus,
+        registry_sync_status: summaryObj.registry_sync_status || "ok",
+        dedup_stats: summaryObj.dedup_stats || undefined,
+        telegram_notified: telegramNotified,
+    });
+}
+
+async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", requireThreads = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner);
+    if (parsed.errorResponse) return parsed.errorResponse;
+    const { parsedAttempt, callerOwner } = parsed;
+    const cleanId = parsed.crawlId;
+    const errMsg = String(body?.error_message || "Crawl execution failed").trim().slice(0, 1000) || "Crawl execution failed";
+
+    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
+        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
+    }
+
+    if (existing.status === "failed") {
+        return finalizeCrawlRequestCore(env, {
+            crawlId: cleanId,
+            body: { ...body, error_message: errMsg },
+            defaultOwner,
+            forcedStatus: "failed",
+            requireThreads,
+        });
+    }
+    if (existing.status !== "running") {
+        return jsonResponse({ ok: false, error: "Crawl request is no longer running", conflict: true }, 409);
+    }
+    if (existing.claimed_by && callerOwner !== existing.claimed_by) {
+        return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+    }
+    if (parsedAttempt !== Number(existing.attempts || 0)) {
+        return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+    }
+    if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
+        await expireStaleLeases(env);
+        return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+    }
+
+    const maxAttempts = Math.max(1, Number(existing.max_attempts || 3));
+    const allowRetry = body?.retryable !== false && parsedAttempt < maxAttempts;
+
+    if (!allowRetry) {
+        return finalizeCrawlRequestCore(env, {
+            crawlId: cleanId,
+            body: { ...body, error_message: errMsg },
+            defaultOwner,
+            forcedStatus: "failed",
+            requireThreads,
+        });
+    }
+
+    const nowIso = new Date().toISOString();
+    const upd = await env.DB.prepare(`
+        UPDATE crawl_requests
+        SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, error_message = ?, updated_at = ?
+        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+    `).bind(errMsg, nowIso, cleanId, callerOwner, parsedAttempt, nowIso).run();
+
+    if (Number(upd?.meta?.changes || 0) !== 1) {
+        return jsonResponse({ ok: false, error: "Crawl fail conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
+    }
+
+    return jsonResponse({
+        ok: true,
+        request_id: cleanId,
+        status: "queued",
+        retried: true,
+        attempts: parsedAttempt,
+        max_attempts: maxAttempts,
+        retries_remaining: Math.max(0, maxAttempts - parsedAttempt),
+        error_message: errMsg,
+    });
+}
+
 async function handleMuseCrawlApi(request, env, url) {
     if (!env.MUSE_APP_VIDEO_TOKEN) {
         return jsonResponse({ ok: false, error: "MUSE_APP_VIDEO_TOKEN is not configured" }, 503);
@@ -5246,7 +5590,7 @@ async function handleMuseCrawlApi(request, env, url) {
                 {
                     ok: false,
                     auth_scope: "muse_crawl",
-                    phase: "poc_phase_1_read_only",
+                    phase: "phase_2_active",
                     db_ok: dbOk,
                     registry_ready: regReady,
                     error: "D1 health check failed",
@@ -5257,9 +5601,9 @@ async function handleMuseCrawlApi(request, env, url) {
         return jsonResponse({
             ok: true,
             auth_scope: "muse_crawl",
-            phase: "poc_phase_1_read_only",
+            phase: "phase_2_active",
             worker: "app-video-scheduler",
-            version: "2.1.0",
+            version: "2.2.0",
             db_ok: true,
             registry_ready: true,
             registry_count: registryCount,
@@ -5288,6 +5632,79 @@ async function handleMuseCrawlApi(request, env, url) {
                 503
             );
         }
+    }
+
+    // 3. POST /api/crawl/claim (Threads only, single-flight, atomic claim, fixed muse-ai, 30-min lease)
+    if (path === "/api/crawl/claim") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        const rawText = await request.text();
+        if (rawText && rawText.trim()) {
+            try { body = JSON.parse(rawText); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+            if (!body || typeof body !== "object" || Array.isArray(body)) {
+                return jsonResponse({ ok: false, error: "Request body must be a JSON object" }, 400);
+            }
+        }
+        try {
+            const res = await claimNextCrawlRequestInD1(env, {
+                workerId: MUSE_DEFAULT_CLAIM_OWNER,
+                leaseSeconds: body.lease_seconds ?? MUSE_DEFAULT_LEASE_SECONDS,
+                scheduleConfirmed: body.schedule_confirmed === true,
+                threadsOnly: true,
+                singleFlight: true,
+            });
+            return jsonResponse(res);
+        } catch (err) {
+            return jsonResponse({ ok: false, error: String(err?.message || "D1 claim failed") }, 503);
+        }
+    }
+
+    // 4. POST /api/crawl/progress (guarded live progress update)
+    if (path === "/api/crawl/progress") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        return updateCrawlProgressInD1(env, {
+            crawlId: body.request_id,
+            body,
+            defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            requireThreads: true,
+        });
+    }
+
+    // 5. POST /api/crawl/complete (guarded completion + atomic outbox + V3.2 registry + Telegram gate)
+    if (path === "/api/crawl/complete") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        return finalizeCrawlRequestCore(env, {
+            crawlId: body.request_id,
+            body,
+            defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            forcedStatus: "completed",
+            requireThreads: true,
+        });
+    }
+
+    // 6. POST /api/crawl/fail (guarded failure + retry up to max_attempts or terminal fail + Telegram)
+    if (path === "/api/crawl/fail") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        return failCrawlRequestCore(env, {
+            crawlId: body.request_id,
+            body,
+            defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            requireThreads: true,
+        });
     }
 
     return jsonResponse({ ok: false, error: "Not found" }, 404);

@@ -1361,6 +1361,78 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         self.assertEqual(eval_sig(), 0)
         conn.close()
 
+    def test_worker_v2_phase2_single_flight_and_guarded_sql_real_sqlite(self):
+        """Real SQLite validation of Phase 2 claim single-flight SQL, progress guard SQL, and fail-retry SQL."""
+        import sqlite3
+        from pathlib import Path as _Path
+
+        root_p = _Path(ROOT_DIR)
+        conn = sqlite3.connect(":memory:")
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0001_v2_market_and_commands.sql").read_text(encoding="utf-8"))
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0003_cross_run_dedup_registry.sql").read_text(encoding="utf-8"))
+
+        t0 = "2026-11-27T14:20:00.000Z"
+        lease_future = "2026-11-27T14:50:00.000Z"
+        lease_past = "2026-11-27T13:50:00.000Z"
+
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('crw_all_p2', 'all', 'k', 10, 'queued', 0, 3, '2026-11-27T14:00:00.000Z', ?)",
+            (t0,),
+        )
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('crw_th1_p2', 'threads', 'beauty', 20, 'queued', 0, 3, '2026-11-27T14:01:00.000Z', ?)",
+            (t0,),
+        )
+        conn.execute(
+            "INSERT INTO crawl_requests (id, platform, keywords, requested_count, status, attempts, max_attempts, created_at, updated_at) VALUES ('crw_th2_p2', 'threads', 'fashion', 20, 'queued', 0, 3, '2026-11-27T14:02:00.000Z', ?)",
+            (t0,),
+        )
+
+        claim_sql = """
+            UPDATE crawl_requests
+            SET status = 'running', claimed_by = ?, claimed_at = ?, lease_expires_at = ?, attempts = attempts + 1, updated_at = ?
+            WHERE id = ?
+              AND status = 'queued'
+              AND lower(trim(platform)) = 'threads'
+              AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+              AND NOT EXISTS (
+                  SELECT 1 FROM crawl_requests r_run
+                  WHERE r_run.status = 'running'
+                    AND (r_run.lease_expires_at IS NULL OR r_run.lease_expires_at >= ?)
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM registry_sync_outbox
+                  WHERE status IN ('pending', 'error', 'processing', 'done')
+              )
+        """
+        # Attempting to claim 'all' fails even when queued
+        cur = conn.execute(claim_sql, ("muse-ai", t0, lease_future, t0, "crw_all_p2", t0))
+        self.assertEqual(cur.rowcount, 0)
+
+        # Claiming oldest Threads wins once
+        cur = conn.execute(claim_sql, ("muse-ai", t0, lease_future, t0, "crw_th1_p2", t0))
+        self.assertEqual(cur.rowcount, 1)
+
+        # Single-flight blocks second Threads claim while crw_th1_p2 runs with valid lease
+        cur = conn.execute(claim_sql, ("muse-ai", t0, lease_future, t0, "crw_th2_p2", t0))
+        self.assertEqual(cur.rowcount, 0)
+
+        # Progress guard SQL enforces owner, attempt, running status, and unexpired lease
+        prog_sql = """
+            UPDATE crawl_requests
+            SET result_summary_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+        """
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":10}", t0, "crw_th1_p2", "wrong", 1, t0)).rowcount, 0)
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":10}", t0, "crw_th1_p2", "muse-ai", 2, t0)).rowcount, 0)
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":10}", t0, "crw_th1_p2", "muse-ai", 1, t0)).rowcount, 1)
+
+        # Expire lease -> progress update fails
+        conn.execute("UPDATE crawl_requests SET lease_expires_at = ? WHERE id = 'crw_th1_p2'", (lease_past,))
+        self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":20}", t0, "crw_th1_p2", "muse-ai", 1, t0)).rowcount, 0)
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

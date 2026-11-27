@@ -1,6 +1,6 @@
 # Hướng dẫn SQL trực tiếp cho Muse trên Cloudflare D1 (Cloudflare Connector) — Data Contract V3.2
 
-Tài liệu này quy định **chính xác** bộ câu lệnh SQL mà Muse thực thi trực tiếp lên D1 (`app-video-db`) thông qua Cloudflare Connector — **không phụ thuộc hay giả định đi qua Worker HTTP API**.
+> **Cập nhật kiến trúc (Phase 2 Active):** Với Custom Connector `custom.app_video` (`MUSE_APP_VIDEO_TOKEN`), Muse gọi trực tiếp bộ API nghiệp vụ trên Worker theo tài liệu [MUSE_CUSTOM_CONNECTOR_API_SPEC.md](./MUSE_CUSTOM_CONNECTOR_API_SPEC.md) (`/api/crawl/health`, `/api/crawl/registry/check`, `/api/crawl/claim`, `/api/crawl/progress`, `/api/crawl/complete`, `/api/crawl/fail`). Worker là nơi duy nhất thực thi SQL xuống D1. Tài liệu dưới đây giữ lại làm đặc tả đối chiếu quy tắc V3.2 & câu lệnh SQL bên trong Worker.
 
 ---
 
