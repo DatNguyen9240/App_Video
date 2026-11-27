@@ -205,6 +205,9 @@ class MockD1Database {
         if (norm.includes("FROM market_post_registry")) {
           if (db.failRegistry) throw new Error("Simulated D1 registry outage");
         }
+        if (norm.startsWith("SELECT COUNT(*) AS cnt FROM market_post_registry")) {
+          return { cnt: db.postRegistry.size };
+        }
         if (norm.startsWith("SELECT * FROM market_post_registry WHERE dedup_key = ?")) {
           const row = db.postRegistry.get(this.args[0]);
           return row ? { ...row } : null;
@@ -4607,6 +4610,213 @@ assert.equal(v3StartBtns.length, 6);
   assert.equal(blockedRl.status, 429);
   assert.equal(blockedRl.headers.get("Retry-After") !== null, true);
   assert.equal(blockedRl.headers.get("Cache-Control"), "no-store");
+}
+
+
+// 20. Muse Custom Connector POC Phase 1 (Scoped MUSE_APP_VIDEO_TOKEN + Read-Only /api/crawl/*)
+{
+  const env20 = {
+    APP_VIDEO_API_TOKEN: "app-admin-secret-20",
+    MUSE_APP_VIDEO_TOKEN: "muse-scoped-secret-20",
+    DB: new MockD1Database(),
+  };
+
+  // Seed 2 registry records
+  env20.DB.postRegistry.set("threads:post:POC_SEED_1", {
+    dedup_key: "threads:post:POC_SEED_1",
+    platform: "threads",
+    post_id: "POC_SEED_1",
+    canonical_url: "https://threads.net/@seed/post/POC_SEED_1",
+    first_seen_at: "2026-11-25",
+    last_seen_at: "2026-11-25",
+    snapshot_count: 1,
+    latest_metrics_json: JSON.stringify({ likes: 140 }),
+  });
+  env20.DB.postRegistry.set("threads:post:POC_SEED_2", {
+    dedup_key: "threads:post:POC_SEED_2",
+    platform: "threads",
+    post_id: "POC_SEED_2",
+    canonical_url: "https://threads.net/@seed/post/POC_SEED_2",
+    first_seen_at: "2026-11-26",
+    last_seen_at: "2026-11-26",
+    snapshot_count: 2,
+    latest_metrics_json: JSON.stringify({ views: 50000 }),
+    latest_views_display: "50K",
+    latest_views_precision: "rounded_display",
+  });
+
+  // 20a: Fail closed if MUSE_APP_VIDEO_TOKEN is unconfigured (never falls back to APP_VIDEO_API_TOKEN!)
+  const envNoMuseTok = { APP_VIDEO_API_TOKEN: "app-admin-secret-20", DB: env20.DB };
+  const unconfHealth = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/health", {
+      headers: { Authorization: "Bearer app-admin-secret-20" },
+    }),
+    envNoMuseTok
+  );
+  assert.equal(unconfHealth.status, 503);
+
+  // 20b: Strict token isolation between APP_VIDEO_API_TOKEN and MUSE_APP_VIDEO_TOKEN
+  assert.equal(
+    (await worker.fetch(new Request("https://example.workers.dev/api/crawl/health"), env20)).status,
+    401
+  );
+  assert.equal(
+    (await worker.fetch(
+      new Request("https://example.workers.dev/api/crawl/health", {
+        headers: { Authorization: "Bearer app-admin-secret-20" },
+      }),
+      env20
+    )).status,
+    401,
+    "APP_VIDEO_API_TOKEN must NOT authenticate /api/crawl/*"
+  );
+  for (const appPath of [
+    "/api/app/health",
+    "/api/app/market/files",
+    "/api/app/crawl-requests",
+    "/api/app/market/dedup/check",
+  ]) {
+    const crossRes = await worker.fetch(
+      new Request(`https://example.workers.dev${appPath}`, {
+        headers: { Authorization: "Bearer muse-scoped-secret-20" },
+      }),
+      env20
+    );
+    assert.equal(crossRes.status, 401, `MUSE_APP_VIDEO_TOKEN MUST NOT access ${appPath}`);
+  }
+
+  // 20c: GET /api/crawl/health succeeds read-only with MUSE_APP_VIDEO_TOKEN; rejects POST
+  const writesBeforeHealth = env20.DB.writeOps;
+  const healthRes = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/health", {
+      headers: { Authorization: "Bearer muse-scoped-secret-20" },
+    }),
+    env20
+  );
+  assert.equal(healthRes.status, 200);
+  assert.equal(healthRes.headers.get("Cache-Control"), "no-store");
+  const healthJson = await healthRes.json();
+  assert.equal(healthJson.ok, true);
+  assert.equal(healthJson.auth_scope, "muse_crawl");
+  assert.equal(healthJson.db_ok, true);
+  assert.equal(healthJson.registry_ready, true);
+  assert.equal(healthJson.registry_count, 2);
+  assert.equal(env20.DB.writeOps - writesBeforeHealth, 0, "GET /api/crawl/health must be strictly read-only");
+
+  const healthPost = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/health", {
+      method: "POST",
+      headers: { Authorization: "Bearer muse-scoped-secret-20" },
+    }),
+    env20
+  );
+  assert.equal(healthPost.status, 405);
+  assert.equal(healthPost.headers.get("Allow"), "GET");
+
+  // 20d: POST /api/crawl/registry/check supports both {post_ids, canonical_urls, dedup_keys} & {items} read-only
+  const writesBeforeCheck = env20.DB.writeOps;
+  const regCheck1 = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/registry/check", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer muse-scoped-secret-20",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        platform: "threads",
+        post_ids: ["POC_SEED_1", "POC_UNSEEN_99"],
+        canonical_urls: ["https://threads.net/@seed/post/POC_SEED_2"],
+      }),
+    }),
+    env20
+  );
+  assert.equal(regCheck1.status, 200);
+  assert.equal(regCheck1.headers.get("Cache-Control"), "no-store");
+  const regCheck1Json = await regCheck1.json();
+  assert.equal(regCheck1Json.ok, true);
+  assert.equal(regCheck1Json.read_only, true);
+  assert.equal(regCheck1Json.existing_count, 2);
+  assert.equal(regCheck1Json.new_count, 1);
+  assert.equal(regCheck1Json.total_checked, 3);
+  assert.equal(env20.DB.writeOps - writesBeforeCheck, 0, "POST /api/crawl/registry/check must be strictly read-only");
+
+  // Also works with { items: [...] } format
+  const regCheck2 = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/registry/check", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer muse-scoped-secret-20",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        items: [{ platform: "threads", post_id: "POC_SEED_1" }],
+      }),
+    }),
+    env20
+  );
+  assert.equal(regCheck2.status, 200);
+  assert.equal((await regCheck2.json()).existing_count, 1);
+
+  // Rejects >100 items, GET method (405), unimplemented Phase 2 write routes (404), and fails closed 503 on D1 outage
+  const tooManyRes = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/registry/check", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer muse-scoped-secret-20",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ post_ids: Array.from({ length: 101 }, (_, i) => `K_${i}`) }),
+    }),
+    env20
+  );
+  assert.equal(tooManyRes.status, 400);
+
+  const checkGet = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/registry/check", {
+      headers: { Authorization: "Bearer muse-scoped-secret-20" },
+    }),
+    env20
+  );
+  assert.equal(checkGet.status, 405);
+
+  const phase2Pending = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer muse-scoped-secret-20" },
+    }),
+    env20
+  );
+  assert.equal(phase2Pending.status, 404, "Phase 2 write routes must stay unexposed during Phase 1 POC");
+
+  env20.DB.failRegistry = true;
+  assert.equal(
+    (await worker.fetch(
+      new Request("https://example.workers.dev/api/crawl/health", {
+        headers: { Authorization: "Bearer muse-scoped-secret-20" },
+      }),
+      env20
+    )).status,
+    503
+  );
+  const regErr = await worker.fetch(
+    new Request("https://example.workers.dev/api/crawl/registry/check", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer muse-scoped-secret-20",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ post_ids: ["POC_SEED_1"] }),
+    }),
+    env20
+  );
+  assert.equal(regErr.status, 503);
+  assert.equal((await regErr.json()).registry_unavailable, true);
+  env20.DB.failRegistry = false;
+
+  // Hook Signal remains unaffected (public boolean)
+  const sig20 = await worker.fetch(new Request("https://example.workers.dev/api/crawl-queue/signal"), env20);
+  assert.equal(sig20.status, 200);
+  assert.deepEqual(await sig20.json(), { queued: false });
 }
 
 console.log("WORKER_V2_CONTRACT_TESTS_OK");

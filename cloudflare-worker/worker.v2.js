@@ -5168,6 +5168,131 @@ async function handleTelegramUpdate(request, env) {
 // ─── Worker Entrypoint ───────────────────────────────────────────────────────
 
 
+// ─── Muse Custom Connector Scoped API (`/api/crawl/*`, Phase 1 Read-Only POC) ─
+
+const MUSE_REGISTRY_CHECK_MAX_ITEMS = 100;
+
+function normalizeCrawlRegistryCheckItems(body) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return { error: "Request body must be a JSON object" };
+    }
+    const defaultPlat = String(body.platform || "threads").toLowerCase().trim() || "threads";
+    if (Array.isArray(body.items)) {
+        if (body.items.length > MUSE_REGISTRY_CHECK_MAX_ITEMS) {
+            return { error: `Maximum ${MUSE_REGISTRY_CHECK_MAX_ITEMS} items allowed per request` };
+        }
+        return { items: body.items };
+    }
+
+    const items = [];
+    const dedupKeys = Array.isArray(body.dedup_keys) ? body.dedup_keys : [];
+    const canonicalUrls = Array.isArray(body.canonical_urls) ? body.canonical_urls : [];
+    const postIds = Array.isArray(body.post_ids) ? body.post_ids : [];
+
+    for (const k of dedupKeys) {
+        const s = String(k || "").trim();
+        if (s) items.push({ platform: defaultPlat, dedup_key: s });
+    }
+    for (const u of canonicalUrls) {
+        const s = String(u || "").trim();
+        if (s) items.push({ platform: defaultPlat, canonical_url: s });
+    }
+    for (const p of postIds) {
+        const s = String(p || "").trim();
+        if (s) items.push({ platform: defaultPlat, post_id: s });
+    }
+
+    if (items.length > MUSE_REGISTRY_CHECK_MAX_ITEMS) {
+        return { error: `Maximum ${MUSE_REGISTRY_CHECK_MAX_ITEMS} keys allowed per request` };
+    }
+    return { items };
+}
+
+async function handleMuseCrawlApi(request, env, url) {
+    if (!env.MUSE_APP_VIDEO_TOKEN) {
+        return jsonResponse({ ok: false, error: "MUSE_APP_VIDEO_TOKEN is not configured" }, 503);
+    }
+
+    const authHeader = request.headers.get("Authorization") || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+    if (!token || !timingSafeEqualStr(token, env.MUSE_APP_VIDEO_TOKEN)) {
+        return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+    }
+
+    const path = url.pathname;
+
+    // 1. GET /api/crawl/health (read-only connector & D1 verification)
+    if (path === "/api/crawl/health") {
+        if (request.method !== "GET") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "GET" });
+        }
+        let dbOk = false;
+        let regReady = false;
+        let registryCount = 0;
+        try {
+            const r = await env.DB.prepare("SELECT 1 AS ok").first();
+            dbOk = r?.ok === 1;
+            if (dbOk) {
+                const reg = await env.DB.prepare("SELECT COUNT(*) AS cnt FROM market_post_registry").first();
+                registryCount = Number(reg?.cnt || 0);
+                regReady = Number.isFinite(registryCount);
+            }
+        } catch {
+            dbOk = false;
+            regReady = false;
+        }
+        if (!dbOk || !regReady) {
+            return jsonResponse(
+                {
+                    ok: false,
+                    auth_scope: "muse_crawl",
+                    phase: "poc_phase_1_read_only",
+                    db_ok: dbOk,
+                    registry_ready: regReady,
+                    error: "D1 health check failed",
+                },
+                503
+            );
+        }
+        return jsonResponse({
+            ok: true,
+            auth_scope: "muse_crawl",
+            phase: "poc_phase_1_read_only",
+            worker: "app-video-scheduler",
+            version: "2.1.0",
+            db_ok: true,
+            registry_ready: true,
+            registry_count: registryCount,
+            contract_version: "3.2",
+            server_time: new Date().toISOString(),
+        });
+    }
+
+    // 2. POST /api/crawl/registry/check (read-only V3.2 dedup lookup reusing checkCrossRunDedupInD1)
+    if (path === "/api/crawl/registry/check") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        const normalized = normalizeCrawlRegistryCheckItems(body);
+        if (normalized.error) {
+            return jsonResponse({ ok: false, error: normalized.error }, 400);
+        }
+        try {
+            const res = await checkCrossRunDedupInD1(env, normalized.items);
+            return jsonResponse({ ok: true, read_only: true, ...res });
+        } catch (err) {
+            return jsonResponse(
+                { ok: false, registry_unavailable: true, error: String(err?.message || "D1 registry unavailable") },
+                503
+            );
+        }
+    }
+
+    return jsonResponse({ ok: false, error: "Not found" }, 404);
+}
+
 // ─── Muse Hook Signal Endpoint (Read-Only D1 Boolean Signal) ──────────────────
 
 const SIGNAL_RATE_WINDOW_MS = 60 * 1000;
@@ -5322,6 +5447,10 @@ export default {
 
         if (url.pathname === "/api/crawl-queue/signal") {
             return handleCrawlQueueSignal(request, env);
+        }
+
+        if (url.pathname.startsWith("/api/crawl/")) {
+            return handleMuseCrawlApi(request, env, url);
         }
 
         if (url.pathname.startsWith("/api/app/")) {
