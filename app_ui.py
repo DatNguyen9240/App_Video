@@ -68,9 +68,19 @@ from market_intelligence.crawl_strategy import (
     get_crawl_config_payload,
     validate_threads_strategy_options,
 )
+from creator_reup import (
+    CreatorReupStore,
+    CreatorDriveSyncService,
+    DEFAULT_CREATOR_FILTERS,
+    build_creator_crawl_prompt,
+    detect_platform_from_url,
+)
 
 _market_runtime_lock = threading.Lock()
 _market_runtime = None
+
+_creator_reup_runtime_lock = threading.Lock()
+_creator_reup_runtime = None
 
 
 def get_market_runtime(data_dir=None, client=None):
@@ -122,6 +132,44 @@ def reset_market_runtime_for_tests(data_dir=None, client=None):
                 pass
             _market_runtime = None
     return get_market_runtime(data_dir=data_dir, client=client)
+
+
+def get_creator_reup_runtime(data_dir=None, client=None):
+    """Initialize or return the isolated Creator Crawler & Batch Reup runtime."""
+    global _creator_reup_runtime
+    with _creator_reup_runtime_lock:
+        if _creator_reup_runtime is None:
+            store = CreatorReupStore(data_dir=data_dir)
+            cf_client = client or CloudflareBridgeClient(env_path=ENV_PATH)
+            try:
+                poll_interval = int(os.environ.get("CREATOR_REUP_SYNC_INTERVAL_SEC", "30"))
+            except ValueError:
+                poll_interval = 30
+            sync_service = CreatorDriveSyncService(
+                store=store,
+                client=cf_client,
+                default_interval_sec=poll_interval,
+            )
+            _creator_reup_runtime = {
+                "store": store,
+                "client": cf_client,
+                "sync_service": sync_service,
+            }
+        return _creator_reup_runtime
+
+
+def reset_creator_reup_runtime_for_tests(data_dir=None, client=None):
+    """Test helper to swap the Creator Reup runtime with an isolated temp dir/mock client."""
+    global _creator_reup_runtime
+    with _creator_reup_runtime_lock:
+        if _creator_reup_runtime is not None:
+            try:
+                _creator_reup_runtime["sync_service"].stop()
+                _creator_reup_runtime["store"].close()
+            except Exception:
+                pass
+            _creator_reup_runtime = None
+    return get_creator_reup_runtime(data_dir=data_dir, client=client)
 
 
 def _render_all_cards_helper(post, theme="light", enable_attached_image=None, platform=None):
@@ -4354,6 +4402,330 @@ HTML_TEMPLATE = """
 
     <!-- TAB 5: REUP & CRAWL LINK VIDEO STUDIO -->
     <main v-show="currentTab === 'reup'" class="flex-1 max-w-[1760px] w-full mx-auto px-4 sm:px-8 py-6 grid grid-cols-1 xl:grid-cols-12 gap-6">
+      <!-- TOP FULL-WIDTH: CREATOR CRAWLER & BATCH REUP (PHASE 1 — DOUYIN / BILIBILI) -->
+      <section class="xl:col-span-12 glass-panel rounded-2xl p-5 sm:p-6 space-y-5 border border-cyan-500/25">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+          <div>
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-user-astronaut text-cyan-400"></i>
+              <span>Creator Crawler &amp; Kho Video Reup (Douyin / Bilibili — Muse + Drive Sync)</span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">
+              Tách biệt hoàn toàn với Market Intelligence. Nhập link profile, tạo Prompt cho Muse, đồng bộ JSON từ Drive hoặc Import thủ công, duyệt quyền sử dụng &amp; chống trùng trước khi dựng video.
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 text-[11px]">
+            <span class="px-2.5 py-1 rounded-full bg-slate-900 border border-slate-700 text-slate-300">
+              Tổng: <strong class="text-white">{{ creatorCrawler.summary.total_videos || 0 }}</strong>
+            </span>
+            <span class="px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300">
+              Đạt lọc: <strong>{{ creatorCrawler.summary.passed_count || 0 }}</strong>
+            </span>
+            <span class="px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300">
+              Cần xác minh: <strong>{{ creatorCrawler.summary.needs_verification_count || 0 }}</strong>
+            </span>
+            <span class="px-2.5 py-1 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+              Đã duyệt quyền: <strong>{{ creatorCrawler.summary.approved_rights_count || 0 }}</strong>
+            </span>
+            <span class="px-2.5 py-1 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-300">
+              Đã Reup/Trùng: <strong>{{ creatorCrawler.summary.duplicate_count || 0 }}</strong>
+            </span>
+          </div>
+        </div>
+
+        <!-- Request & Prompt Generator Bar -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-center">
+          <select v-model="creatorCrawler.form.platform" class="lg:col-span-2 glass-input rounded-xl px-3 py-2.5 text-xs text-slate-200">
+            <option value="auto">🤖 Tự nhận diện URL</option>
+            <option value="douyin">🎵 Douyin Profile</option>
+            <option value="bilibili">📺 Bilibili Space</option>
+          </select>
+          <input v-model="creatorCrawler.form.profileUrl" type="text"
+            placeholder="Dán Profile URL (VD: https://www.douyin.com/user/MS4wLjAB... hoặc https://space.bilibili.com/12345)"
+            class="lg:col-span-5 glass-input rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50">
+          <div class="lg:col-span-2 flex items-center gap-1.5">
+            <span class="text-[11px] text-slate-400 shrink-0">Số bài:</span>
+            <input v-model.number="creatorCrawler.form.requestedCount" type="number" min="1" max="200"
+              class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white">
+          </div>
+          <button type="button" @click="createCreatorCrawlRequest" :disabled="creatorCrawler.isCreatingRequest"
+            class="lg:col-span-3 px-4 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white shadow-lg shadow-cyan-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50">
+            <i :class="creatorCrawler.isCreatingRequest ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-wand-magic-sparkles'"></i>
+            <span>{{ creatorCrawler.isCreatingRequest ? 'Đang tạo...' : 'Tạo Request &amp; Prompt Muse' }}</span>
+          </button>
+        </div>
+
+        <!-- Toolbar: Filters Drawer Toggle, Drive Sync, Manual Import -->
+        <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" @click="creatorCrawler.showFiltersConfig = !creatorCrawler.showFiltersConfig"
+              class="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 hover:border-cyan-500/40 text-slate-200 cursor-pointer flex items-center gap-1.5">
+              <i class="fa-solid fa-sliders text-cyan-400"></i>
+              <span>{{ creatorCrawler.showFiltersConfig ? 'Ẩn cấu hình bộ lọc' : 'Cấu hình bộ lọc Douyin / Bilibili' }}</span>
+            </button>
+            <button type="button" @click="creatorCrawler.showManualImport = !creatorCrawler.showManualImport"
+              class="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 hover:border-amber-500/40 text-amber-200 cursor-pointer flex items-center gap-1.5">
+              <i class="fa-solid fa-file-import text-amber-400"></i>
+              <span>{{ creatorCrawler.showManualImport ? 'Ẩn Import JSON' : 'Import JSON Thủ Công' }}</span>
+            </button>
+            <button type="button" @click="syncCreatorDriveNow" :disabled="creatorCrawler.isSyncing"
+              class="px-3 py-1.5 rounded-lg bg-emerald-900/50 border border-emerald-500/40 hover:bg-emerald-800/60 text-emerald-200 font-semibold cursor-pointer flex items-center gap-1.5 disabled:opacity-50">
+              <i :class="creatorCrawler.isSyncing ? 'fa-solid fa-rotate fa-spin' : 'fa-brands fa-google-drive'"></i>
+              <span>{{ creatorCrawler.isSyncing ? 'Đang đồng bộ Drive...' : 'Đồng Bộ Drive Ngay' }}</span>
+            </button>
+          </div>
+          <div class="text-[11px] text-slate-400 flex flex-wrap items-center gap-3">
+            <span v-if="creatorCrawler.summary.pending_requests > 0" class="text-amber-300 font-semibold">
+              <i class="fa-solid fa-clock fa-pulse mr-1"></i>Đang chờ Muse ({{ creatorCrawler.summary.pending_requests }} request) — tự đồng bộ 30s/lần
+            </span>
+            <span v-if="creatorCrawler.summary.last_sync_at">
+              Sync gần nhất: <strong class="text-slate-300">{{ formatCreatorDate(creatorCrawler.summary.last_sync_at) }}</strong> ({{ creatorCrawler.summary.last_sync_status || 'ok' }})
+            </span>
+          </div>
+        </div>
+
+        <!-- Expandable Filter Thresholds Config -->
+        <div v-if="creatorCrawler.showFiltersConfig" class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3 text-xs">
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="space-y-2">
+              <div class="font-bold text-rose-300">🎵 Douyin mặc định</div>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Likes &gt;=</span>
+                  <input v-model.number="creatorCrawler.filters.douyin.min_likes" type="number" min="0" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Ngoại lệ cũ Likes &gt;=</span>
+                  <input v-model.number="creatorCrawler.filters.douyin.old_video_exception_min_likes" type="number" min="0" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="font-bold text-sky-300">📺 Bilibili mặc định</div>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Views &gt;= (AND)</span>
+                  <input v-model.number="creatorCrawler.filters.bilibili.min_views" type="number" min="0" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Likes &gt;=</span>
+                  <input v-model.number="creatorCrawler.filters.bilibili.min_likes" type="number" min="0" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Ngoại lệ cũ Views &gt;= (OR)</span>
+                  <input v-model.number="creatorCrawler.filters.bilibili.old_video_exception_min_views" type="number" min="0" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Ngoại lệ cũ Likes &gt;=</span>
+                  <input v-model.number="creatorCrawler.filters.bilibili.old_video_exception_min_likes" type="number" min="0" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="font-bold text-emerald-300">⏱️ Chung (Thời lượng &amp; Độ mới)</div>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Thời lượng &lt; (giây)</span>
+                  <input v-model.number="creatorCrawler.filters.common.max_duration_seconds" type="number" min="1" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-slate-400">Trong vòng (ngày)</span>
+                  <input v-model.number="creatorCrawler.filters.common.max_age_days" type="number" min="1" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </label>
+              </div>
+              <label class="block">
+                <span class="text-[10px] text-slate-400">Drive Folder ID (tùy chọn cho prompt Muse)</span>
+                <input v-model="creatorCrawler.form.driveFolderId" type="text" placeholder="Để trống nếu dùng mặc định" class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs text-white">
+              </label>
+            </div>
+          </div>
+          <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" @click="resetCreatorFilterDefaults" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer">
+              Khôi phục mặc định
+            </button>
+            <button type="button" @click="reapplyCreatorFilters" class="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold cursor-pointer">
+              Áp dụng lại lọc lên kho hiện có
+            </button>
+          </div>
+        </div>
+
+        <!-- Active Muse Prompt Card -->
+        <div v-if="creatorCrawler.activePrompt" class="p-4 rounded-xl bg-indigo-950/35 border border-indigo-500/35 space-y-2 text-xs">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-bold text-indigo-300">Prompt Muse sẵn sàng</span>
+              <code class="px-2 py-0.5 rounded bg-slate-900 text-cyan-300 text-[11px]">{{ creatorCrawler.activePrompt.request_id }}</code>
+              <code class="px-2 py-0.5 rounded bg-slate-900 text-emerald-300 text-[11px]">{{ creatorCrawler.activePrompt.crawl_id }}</code>
+            </div>
+            <div class="flex items-center gap-2">
+              <button type="button" @click="copyCreatorPrompt" class="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold cursor-pointer">
+                📋 Copy Prompt Muse
+              </button>
+              <a :href="creatorCrawler.museWebUrl || 'https://muse.ai/'" target="_blank" class="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">
+                🌐 Mở Muse
+              </a>
+              <button type="button" @click="creatorCrawler.activePrompt = null" class="text-slate-400 hover:text-white px-2 py-1 cursor-pointer">✕</button>
+            </div>
+          </div>
+          <pre class="bg-slate-950/80 border border-slate-800 rounded-lg p-3 text-[11px] font-mono text-slate-200 whitespace-pre-wrap max-h-44 overflow-y-auto">{{ creatorCrawler.activePrompt.prompt_text }}</pre>
+        </div>
+
+        <!-- Manual JSON Import Drawer -->
+        <div v-if="creatorCrawler.showManualImport" class="p-4 rounded-xl bg-amber-950/20 border border-amber-500/35 space-y-2.5 text-xs">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="font-bold text-amber-300">Import JSON Thủ Công (Muse Schema v1 hoặc Discovery Sample)</span>
+            <div class="flex flex-wrap items-center gap-2">
+              <select v-model="creatorCrawler.manualImportRequestId" class="glass-input rounded-lg px-2.5 py-1 text-[11px] text-slate-200">
+                <option value="">Tự ghép theo request_id / profile_url trong JSON</option>
+                <option v-for="rq in creatorCrawler.requests" :key="rq.request_id" :value="rq.request_id">
+                  {{ rq.request_id }} ({{ rq.platform }})
+                </option>
+              </select>
+              <input type="file" accept=".json,application/json" @change="onCreatorJsonFileSelected"
+                class="text-[11px] text-slate-300 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:bg-slate-800 file:text-amber-300 file:cursor-pointer">
+            </div>
+          </div>
+          <textarea v-model="creatorCrawler.manualJsonText" rows="4"
+            placeholder="Hoặc dán trực tiếp nội dung JSON kết quả từ Muse vào đây..."
+            class="w-full glass-input rounded-lg px-3 py-2 text-[11px] font-mono text-slate-100 placeholder-slate-500"></textarea>
+          <div class="flex items-center justify-end gap-2">
+            <button type="button" @click="creatorCrawler.manualJsonText = ''" class="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 cursor-pointer">Xóa</button>
+            <button type="button" @click="importCreatorManualJson" :disabled="creatorCrawler.isImporting || !creatorCrawler.manualJsonText.trim()"
+              class="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold cursor-pointer">
+              {{ creatorCrawler.isImporting ? 'Đang xử lý...' : '📥 Nhập &amp; Lọc JSON' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Videos List Filter & Bulk Production Action Bar -->
+        <div class="p-3 rounded-xl bg-slate-900/75 border border-slate-800 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+          <div class="flex flex-wrap items-center gap-2">
+            <select v-model="creatorCrawler.query.platform" @change="loadCreatorCrawlerVideos" class="glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200">
+              <option value="all">Tất cả nền tảng</option>
+              <option value="douyin">Douyin</option>
+              <option value="bilibili">Bilibili</option>
+            </select>
+            <select v-model="creatorCrawler.query.creatorId" @change="loadCreatorCrawlerVideos" class="glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200 max-w-[180px]">
+              <option value="">Tất cả Creator</option>
+              <option v-for="p in creatorCrawler.profiles" :key="p.profile_key" :value="p.creator_id">
+                {{ p.creator_name || p.creator_id }} ({{ p.platform }})
+              </option>
+            </select>
+            <select v-model="creatorCrawler.query.filterStatus" @change="loadCreatorCrawlerVideos" class="glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200">
+              <option value="all">Tất cả trạng thái lọc</option>
+              <option value="passed">Đạt bộ lọc</option>
+              <option value="needs_verification">Cần xác minh</option>
+              <option value="filtered_out">Bị loại bởi bộ lọc</option>
+            </select>
+            <select v-model="creatorCrawler.query.rightsStatus" @change="loadCreatorCrawlerVideos" class="glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200">
+              <option value="all">Tất cả quyền sử dụng</option>
+              <option value="pending_review">Chờ duyệt quyền</option>
+              <option value="approved_for_reup">Đã duyệt Reup</option>
+              <option value="rejected">Từ chối</option>
+            </select>
+            <select v-model="creatorCrawler.query.sortBy" @change="loadCreatorCrawlerVideos" class="glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200">
+              <option value="likes_desc">Sắp xếp: Likes cao nhất</option>
+              <option value="views_desc">Sắp xếp: Views cao nhất</option>
+              <option value="recent_desc">Sắp xếp: Mới nhất</option>
+            </select>
+            <input v-model="creatorCrawler.query.search" @keyup.enter="loadCreatorCrawlerVideos" type="text"
+              placeholder="Tìm tiêu đề / creator / ID..."
+              class="glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 w-44">
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" @click="toggleSelectAllPassedCreatorVideos"
+              class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] cursor-pointer">
+              ☑️ Chọn đạt lọc ({{ creatorCrawler.selectedKeys.length }})
+            </button>
+            <button type="button" @click="bulkUpdateCreatorRights('approved_for_reup')" :disabled="creatorCrawler.selectedKeys.length === 0"
+              class="px-2.5 py-1.5 rounded-lg bg-emerald-700/80 hover:bg-emerald-600 disabled:opacity-40 text-white text-[11px] font-semibold cursor-pointer">
+              ✅ Duyệt Quyền
+            </button>
+            <button type="button" @click="bulkUpdateCreatorRights('rejected')" :disabled="creatorCrawler.selectedKeys.length === 0"
+              class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-800/70 disabled:opacity-40 text-rose-300 border border-slate-700 text-[11px] cursor-pointer">
+              ⛔ Từ Chối
+            </button>
+            <button type="button" @click="runSelectedCreatorVideos" :disabled="creatorCrawler.selectedKeys.length === 0 || pipelineState.is_running"
+              class="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-emerald-600 hover:brightness-110 disabled:opacity-40 text-white text-[11px] font-bold cursor-pointer">
+              🚀 Reup Video Đã Chọn ({{ creatorCrawler.selectedKeys.length }})
+            </button>
+          </div>
+        </div>
+
+        <!-- Creator Video Cards Grid -->
+        <div v-if="creatorCrawler.videos.length === 0" class="py-10 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-xl">
+          Chưa có video nào trong kho Creator Crawler. Tạo Request cho Muse, đồng bộ Drive hoặc Import JSON ở trên để bắt đầu.
+        </div>
+        <div v-else class="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-3 max-h-[540px] overflow-y-auto pr-1">
+          <div v-for="v in creatorCrawler.videos" :key="v.video_key"
+            :class="creatorCrawler.selectedKeys.includes(v.video_key) ? 'border-cyan-400/70 bg-cyan-950/20' : 'border-slate-800 bg-slate-900/80'"
+            class="p-3 rounded-xl border transition flex flex-col justify-between gap-2.5">
+            <div class="flex gap-3 items-start">
+              <input type="checkbox" :value="v.video_key" v-model="creatorCrawler.selectedKeys" class="mt-1 accent-cyan-400 cursor-pointer shrink-0">
+              <div class="w-24 h-16 rounded-lg bg-slate-800 overflow-hidden shrink-0 relative">
+                <img v-if="v.thumbnail" :src="v.thumbnail" referrerpolicy="no-referrer" class="w-full h-full object-cover" alt="">
+                <div v-else class="w-full h-full flex items-center justify-center text-slate-600 text-[10px]">{{ v.source_platform.toUpperCase() }}</div>
+                <span class="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[10px] text-white font-mono">
+                  {{ formatCreatorDuration(v.duration_seconds) }}
+                </span>
+              </div>
+              <div class="min-w-0 flex-1 space-y-1">
+                <div class="text-xs font-semibold text-white line-clamp-2">{{ v.title || ('Video ' + v.source_video_id) }}</div>
+                <div class="text-[10px] text-slate-400 flex flex-wrap items-center gap-1.5">
+                  <span class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 uppercase">{{ v.source_platform }}</span>
+                  <span class="truncate">{{ v.creator_name || v.creator_id }}</span>
+                  <span>•</span>
+                  <span>{{ formatCreatorDate(v.published_at_display || v.published_at) }}</span>
+                </div>
+                <div class="flex flex-wrap items-center gap-2 text-[10px] text-slate-300 font-mono">
+                  <span>❤️ {{ v.likes_display ? (v.likes_display + (v.likes === null ? ' (hiển thị)' : '')) : formatCreatorCount(v.likes) }}</span>
+                  <span>👁️ {{ v.views === null ? 'N/A' : formatCreatorCount(v.views) }}</span>
+                  <a :href="v.video_url" target="_blank" class="text-cyan-400 hover:underline ml-auto">Mở link ↗</a>
+                </div>
+              </div>
+            </div>
+
+            <!-- Status Badges + Inline Rights & Production Trigger -->
+            <div class="flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-slate-800/80 text-[10px]">
+              <div class="flex flex-wrap items-center gap-1">
+                <span v-if="v.filter_status === 'passed'" class="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 font-semibold">
+                  Đạt lọc{{ v.age_exception_applied ? ' (Ngoại lệ cũ)' : '' }}
+                </span>
+                <span v-else-if="v.filter_status === 'needs_verification'" :title="(v.verification_reasons || []).join(', ')"
+                  class="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/35 text-amber-300 font-semibold">
+                  Cần xác minh
+                </span>
+                <span v-else :title="(v.exclusion_reasons || []).join(', ')"
+                  class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400">
+                  Loại ({{ (v.exclusion_reasons || [])[0] || 'filter' }})
+                </span>
+
+                <span v-if="v.dedup_status !== 'new'" class="px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/35 text-rose-300 font-semibold">
+                  {{ v.dedup_status === 'duplicate_processed' ? 'Đã Reup' : 'Đang trong hàng đợi' }}
+                </span>
+              </div>
+
+              <div class="flex items-center gap-1.5">
+                <select :value="v.rights_status" @change="updateCreatorVideoRights(v.video_key, $event.target.value)"
+                  :class="v.rights_status === 'approved_for_reup' ? 'border-emerald-500/50 text-emerald-300' : (v.rights_status === 'rejected' ? 'border-rose-500/40 text-rose-300' : 'border-slate-700 text-slate-300')"
+                  class="glass-input rounded-lg px-2 py-0.5 text-[10px] bg-slate-950">
+                  <option value="pending_review">⏳ Chờ duyệt quyền</option>
+                  <option value="approved_for_reup">✅ Đã duyệt quyền</option>
+                  <option value="needs_verification">⚠️ Cần xác minh quyền</option>
+                  <option value="rejected">⛔ Từ chối quyền</option>
+                </select>
+                <button type="button" @click="runSingleCreatorVideo(v)"
+                  :disabled="pipelineState.is_running || v.rights_status !== 'approved_for_reup' || v.dedup_status !== 'new'"
+                  class="px-2 py-0.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-35 text-white font-semibold cursor-pointer">
+                  ▶ Reup 1 bài
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Left: Crawl Kênh / Playlist / Từ khóa -->
       <section class="xl:col-span-7 glass-panel rounded-2xl p-6 space-y-5 border border-rose-500/20">
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -4391,18 +4763,56 @@ HTML_TEMPLATE = """
         </div>
         <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
           <span>Mẹo: Có thể dán nguyên đoạn text chia sẻ copy từ app Douyin/Bilibili — hệ thống tự tách link sạch.</span>
-          <div class="flex items-center gap-2">
-            <span>Cookie trình duyệt (Douyin/Bilibili):</span>
+          <div class="flex flex-wrap items-center gap-2">
+            <span>Cookie (Douyin/Bilibili):</span>
             <select v-model="reup.browserCookies" class="glass-input rounded-lg px-2 py-1 text-[11px] text-slate-200">
-              <option value="">Không dùng / cookies.txt</option>
+              <option value="">Tự động (Cookie đã lưu / không dùng)</option>
+              <option value="manual">📋 Cookie nhập trực tiếp</option>
               <option value="chrome">Chrome</option>
               <option value="edge">Microsoft Edge</option>
             </select>
+            <button type="button" @click="reup.showCookieInput = !reup.showCookieInput"
+              :class="reup.cookieStatus.has_cookies ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-200' : 'bg-slate-800/90 border-slate-700 text-amber-200 hover:border-amber-500/50'"
+              class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold cursor-pointer transition">
+              📋 {{ reup.showCookieInput ? 'Ẩn ô nhập Cookie' : (reup.cookieStatus.has_cookies ? ('Cookie đã lưu (' + reup.cookieStatus.cookie_count + ')') : 'Nhập Cookie trực tiếp') }}
+            </button>
           </div>
         </div>
 
         <div v-if="reup.crawlError" class="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200">
           {{ reup.crawlError }}
+        </div>
+
+        <div v-if="reup.showCookieInput || reup.browserCookies === 'manual' || (reup.crawlError && /cookie/i.test(reup.crawlError))"
+          class="p-3.5 rounded-xl bg-slate-900/85 border border-amber-500/35 space-y-2.5 text-xs">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="font-semibold text-amber-200 flex items-center gap-2">
+              <i class="fa-solid fa-cookie-bite"></i>
+              <span>Nhập trực tiếp Cookie (không cần tìm hay tạo file cookies.txt)</span>
+            </div>
+            <span v-if="reup.cookieStatus.has_cookies"
+              class="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-[10px] font-semibold">
+              ✅ Đang có {{ reup.cookieStatus.cookie_count }} cookie ({{ (reup.cookieStatus.domains || []).join(', ') || 'sẵn sàng' }})
+            </span>
+          </div>
+          <textarea v-model="reup.customCookiesText" rows="3"
+            placeholder="Dán trực tiếp chuỗi Cookie (VD: ttwid=...; sessionid=...), JSON (Cookie-Editor) hoặc nội dung Netscape cookies.txt — bấm Lưu hoặc bấm thẳng Crawl/Reup..."
+            class="w-full glass-input rounded-lg px-3 py-2 text-[11px] font-mono text-slate-100 placeholder-slate-500"></textarea>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-[10px] text-slate-400">
+              Lấy nhanh: Mở Douyin/Bilibili trên Chrome → <kbd class="px-1 py-0.5 bg-slate-800 rounded">F12</kbd> → tab Network → chọn 1 request → copy giá trị dòng <code>cookie:</code> rồi dán vào đây.
+            </span>
+            <div class="flex items-center gap-2 shrink-0">
+              <button v-if="reup.cookieStatus.has_cookies" type="button" @click="clearReupCookies" :disabled="reup.isSavingCookies"
+                class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-rose-300 border border-slate-700 text-[11px] cursor-pointer">
+                🗑️ Xóa cookie đã lưu
+              </button>
+              <button type="button" @click="saveReupCookies" :disabled="reup.isSavingCookies || !reup.customCookiesText.trim()"
+                class="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-bold cursor-pointer">
+                {{ reup.isSavingCookies ? 'Đang lưu...' : '💾 Lưu Cookie dùng ngay' }}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div v-if="reup.crawledItems.length === 0" class="py-16 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-2xl">
@@ -4615,6 +5025,10 @@ HTML_TEMPLATE = """
           reup: {
             crawlPlatform: 'auto',
             browserCookies: '',
+            customCookiesText: '',
+            showCookieInput: false,
+            isSavingCookies: false,
+            cookieStatus: { has_cookies: false, cookie_count: 0, domains: [], source: null },
             crawlQuery: '',
             crawlLimit: 12,
             isCrawling: false,
@@ -4631,6 +5045,54 @@ HTML_TEMPLATE = """
             mirrorVideo: false,
             customPrompt: '',
             lastResults: []
+          },
+          creatorCrawler: {
+            summary: {
+              total_videos: 0,
+              passed_count: 0,
+              needs_verification_count: 0,
+              filtered_out_count: 0,
+              approved_rights_count: 0,
+              duplicate_count: 0,
+              pending_requests: 0,
+              last_sync_at: null,
+              last_sync_status: 'idle'
+            },
+            form: {
+              platform: 'auto',
+              profileUrl: '',
+              requestedCount: 20,
+              driveFolderId: ''
+            },
+            filters: {
+              douyin: { min_likes: 5000, old_video_exception_min_likes: 50000 },
+              bilibili: { min_views: 50000, min_likes: 5000, old_video_exception_min_views: 1000000, old_video_exception_min_likes: 50000 },
+              common: { max_duration_seconds: 300, max_age_days: 365 }
+            },
+            query: {
+              platform: 'all',
+              creatorId: '',
+              filterStatus: 'all',
+              rightsStatus: 'all',
+              sortBy: 'likes_desc',
+              search: ''
+            },
+            showFiltersConfig: false,
+            showManualImport: false,
+            isCreatingRequest: false,
+            isSyncing: false,
+            isImporting: false,
+            activePrompt: null,
+            museWebUrl: 'https://muse.ai/',
+            manualJsonText: '',
+            manualFileName: 'manual_import.json',
+            manualImportRequestId: '',
+            requests: [],
+            profiles: [],
+            videos: [],
+            jobs: [],
+            selectedKeys: [],
+            syncPollTimer: null
           },
           commentCountInput: 'auto',
           authorVoiceInput: 'nam_hai',
@@ -5005,6 +5467,12 @@ HTML_TEMPLATE = """
           } else {
             this.stopCrawlCenterPolling();
           }
+          if (newTab === 'reup') {
+            this.loadCreatorCrawlerAll();
+            this.startCreatorSyncPolling();
+          } else {
+            this.stopCreatorSyncPolling();
+          }
         }
       },
       mounted() {
@@ -5018,9 +5486,14 @@ HTML_TEMPLATE = """
         this.loadProxies();
         this.loadAvatarGallery();
         this.loadMarketDashboard();
+        this.loadReupCookieStatus();
+        this.loadCreatorCrawlerState();
         this.startStatusPolling();
         if (this.currentTab === 'market') {
           this.startCrawlCenterPolling();
+        }
+        if (this.currentTab === 'reup') {
+          this.startCreatorSyncPolling();
         }
       },
       beforeUnmount() {
@@ -5029,6 +5502,7 @@ HTML_TEMPLATE = """
           this.pollTimer = null;
         }
         this.stopCrawlCenterPolling();
+        this.stopCreatorSyncPolling();
       },
       methods: {
         async loadDailyTrendingTopics(force = false) {
@@ -6811,6 +7285,395 @@ HTML_TEMPLATE = """
             this.notify('Lỗi nghe thử giọng: ' + e, 'error');
           }
         },
+        buildCreatorFiltersPayload() {
+          const f = this.creatorCrawler.filters;
+          return {
+            douyin: {
+              min_likes: Number(f.douyin.min_likes || 0),
+              max_duration_seconds: Number(f.common.max_duration_seconds || 300),
+              max_age_days: Number(f.common.max_age_days || 365),
+              old_video_exception_min_likes: Number(f.douyin.old_video_exception_min_likes || 50000)
+            },
+            bilibili: {
+              min_views: Number(f.bilibili.min_views || 0),
+              min_likes: Number(f.bilibili.min_likes || 0),
+              max_duration_seconds: Number(f.common.max_duration_seconds || 300),
+              max_age_days: Number(f.common.max_age_days || 365),
+              old_video_exception_min_views: Number(f.bilibili.old_video_exception_min_views || 1000000),
+              old_video_exception_min_likes: Number(f.bilibili.old_video_exception_min_likes || 50000)
+            }
+          };
+        },
+        resetCreatorFilterDefaults() {
+          this.creatorCrawler.filters = {
+            douyin: { min_likes: 5000, old_video_exception_min_likes: 50000 },
+            bilibili: { min_views: 50000, min_likes: 5000, old_video_exception_min_views: 1000000, old_video_exception_min_likes: 50000 },
+            common: { max_duration_seconds: 300, max_age_days: 365 }
+          };
+        },
+        async loadCreatorCrawlerState() {
+          try {
+            const res = await fetch('/api/creator_reup/state');
+            const data = await res.json();
+            if (data.ok) {
+              this.creatorCrawler.summary = data.summary || this.creatorCrawler.summary;
+              this.creatorCrawler.requests = data.requests || [];
+              this.creatorCrawler.profiles = data.profiles || [];
+              this.creatorCrawler.jobs = data.jobs || [];
+              this.creatorCrawler.isSyncing = Boolean(data.is_syncing);
+              if (data.muse_web_url) this.creatorCrawler.museWebUrl = data.muse_web_url;
+            }
+          } catch (e) {}
+        },
+        async loadCreatorCrawlerVideos() {
+          try {
+            const q = this.creatorCrawler.query;
+            const params = new URLSearchParams({
+              platform: q.platform || 'all',
+              creator_id: q.creatorId || '',
+              filter_status: q.filterStatus || 'all',
+              rights_status: q.rightsStatus || 'all',
+              sort_by: q.sortBy || 'likes_desc',
+              search: q.search || ''
+            });
+            const res = await fetch('/api/creator_reup/videos?' + params.toString());
+            const data = await res.json();
+            if (data.ok) {
+              this.creatorCrawler.videos = data.videos || [];
+              if (data.summary) this.creatorCrawler.summary = data.summary;
+            }
+          } catch (e) {}
+        },
+        async loadCreatorCrawlerAll() {
+          await Promise.all([this.loadCreatorCrawlerState(), this.loadCreatorCrawlerVideos()]);
+        },
+        async createCreatorCrawlRequest() {
+          const url = (this.creatorCrawler.form.profileUrl || '').trim();
+          if (!url) {
+            this.notify('Vui lòng nhập Profile URL Douyin hoặc Bilibili.', 'error');
+            return;
+          }
+          this.creatorCrawler.isCreatingRequest = true;
+          try {
+            const res = await fetch('/api/creator_reup/requests', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                platform: this.creatorCrawler.form.platform,
+                profile_url: url,
+                requested_count: this.creatorCrawler.form.requestedCount,
+                drive_folder_id: (this.creatorCrawler.form.driveFolderId || '').trim() || null,
+                filters: this.buildCreatorFiltersPayload()
+              })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              this.creatorCrawler.activePrompt = data.request;
+              await this.loadCreatorCrawlerState();
+              this.notify(`✅ Đã tạo request ${data.request.request_id} & sinh Prompt cho Muse!`, 'success');
+            } else {
+              this.notify(data.error || 'Không tạo được request Creator.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi tạo request: ' + e, 'error');
+          } finally {
+            this.creatorCrawler.isCreatingRequest = false;
+          }
+        },
+        async copyCreatorPrompt() {
+          const txt = this.creatorCrawler.activePrompt?.prompt_text || '';
+          if (!txt) return;
+          await this.copyTextToClipboard(txt, '📋 Đã copy Prompt Muse (Creator Crawler)!');
+        },
+        async reapplyCreatorFilters() {
+          try {
+            const res = await fetch('/api/creator_reup/filters/reapply', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                platform: this.creatorCrawler.query.platform === 'all' ? null : this.creatorCrawler.query.platform,
+                filters: this.buildCreatorFiltersPayload()
+              })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              await this.loadCreatorCrawlerVideos();
+              this.notify(`🔄 Đã lọc lại ${data.updated} video (${data.passed} đạt chuẩn).`, 'success');
+            } else {
+              this.notify(data.error || 'Không áp dụng lại được bộ lọc.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi lọc lại: ' + e, 'error');
+          }
+        },
+        async syncCreatorDriveNow() {
+          this.creatorCrawler.isSyncing = true;
+          try {
+            const res = await fetch('/api/creator_reup/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ async: false })
+            });
+            const data = await res.json();
+            await this.loadCreatorCrawlerAll();
+            if (data.ok && data.sync_result && data.sync_result.status === 'completed') {
+              const sr = data.sync_result;
+              this.notify(`☁️ Drive Sync xong: +${sr.videos_inserted || 0} video mới (${sr.files_ingested || 0} file Creator).`, 'success');
+            } else {
+              this.notify((data.sync_result && data.sync_result.error_message) || data.error || 'Chưa đồng bộ được Drive.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi đồng bộ Drive Creator: ' + e, 'error');
+          } finally {
+            this.creatorCrawler.isSyncing = false;
+          }
+        },
+        startCreatorSyncPolling() {
+          if (this.creatorCrawler.syncPollTimer) return;
+          this.creatorCrawler.syncPollTimer = setInterval(async () => {
+            if (this.currentTab !== 'reup') return;
+            await this.loadCreatorCrawlerState();
+            if ((this.creatorCrawler.summary.pending_requests || 0) > 0 && !this.creatorCrawler.isSyncing) {
+              try {
+                await fetch('/api/creator_reup/sync', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ async: true })
+                });
+                await this.loadCreatorCrawlerVideos();
+              } catch (e) {}
+            }
+          }, 30000);
+        },
+        stopCreatorSyncPolling() {
+          if (this.creatorCrawler.syncPollTimer) {
+            clearInterval(this.creatorCrawler.syncPollTimer);
+            this.creatorCrawler.syncPollTimer = null;
+          }
+        },
+        onCreatorJsonFileSelected(ev) {
+          const f = ev?.target?.files?.[0];
+          if (!f) return;
+          this.creatorCrawler.manualFileName = f.name || 'manual_import.json';
+          const reader = new FileReader();
+          reader.onload = () => {
+            this.creatorCrawler.manualJsonText = String(reader.result || '');
+          };
+          reader.readAsText(f, 'utf-8');
+        },
+        async importCreatorManualJson() {
+          const txt = (this.creatorCrawler.manualJsonText || '').trim();
+          if (!txt) return;
+          this.creatorCrawler.isImporting = true;
+          try {
+            const res = await fetch('/api/creator_reup/import_json', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                json_text: txt,
+                file_name: this.creatorCrawler.manualFileName || 'manual_import.json',
+                request_id: this.creatorCrawler.manualImportRequestId || null,
+                filters: this.buildCreatorFiltersPayload()
+              })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              const r = data.import_result || {};
+              this.creatorCrawler.manualJsonText = '';
+              await this.loadCreatorCrawlerAll();
+              this.notify(`📥 Đã nhập ${r.valid_videos_count || 0} video (loại ${r.notes_excluded || 0} note, đạt lọc ${r.passed_count || 0}).`, 'success');
+            } else {
+              this.notify(data.error || 'Import JSON thất bại.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi Import JSON: ' + e, 'error');
+          } finally {
+            this.creatorCrawler.isImporting = false;
+          }
+        },
+        async updateCreatorVideoRights(videoKey, status) {
+          try {
+            const res = await fetch('/api/creator_reup/videos/rights', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ video_keys: [videoKey], rights_status: status })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              await this.loadCreatorCrawlerVideos();
+            } else {
+              this.notify(data.error || 'Không cập nhật được quyền sử dụng.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi cập nhật quyền: ' + e, 'error');
+          }
+        },
+        async bulkUpdateCreatorRights(status) {
+          if (this.creatorCrawler.selectedKeys.length === 0) return;
+          try {
+            const res = await fetch('/api/creator_reup/videos/rights', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                video_keys: this.creatorCrawler.selectedKeys,
+                rights_status: status
+              })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              await this.loadCreatorCrawlerVideos();
+              this.notify(`✅ Đã cập nhật quyền (${status}) cho ${data.updated} video.`, 'success');
+            } else {
+              this.notify(data.error || 'Không cập nhật được hàng loạt.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi cập nhật quyền hàng loạt: ' + e, 'error');
+          }
+        },
+        toggleSelectAllPassedCreatorVideos() {
+          const eligible = this.creatorCrawler.videos
+            .filter(v => v.passed_filter && v.dedup_status === 'new')
+            .map(v => v.video_key);
+          if (eligible.length > 0 && eligible.every(k => this.creatorCrawler.selectedKeys.includes(k))) {
+            this.creatorCrawler.selectedKeys = [];
+          } else {
+            this.creatorCrawler.selectedKeys = eligible;
+          }
+        },
+        async _dispatchCreatorReup(videoKeys) {
+          if (!videoKeys || videoKeys.length === 0) return;
+          try {
+            const res = await fetch('/api/creator_reup/run_selected', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                video_keys: videoKeys,
+                voice: this.reup.voice,
+                translation_mode: this.reup.translationMode,
+                frame_mode: this.reup.frameMode,
+                original_volume: this.reup.originalVolume,
+                mask_old_sub: this.reup.maskOldSub,
+                anti_reup: this.reup.antiReup,
+                mirror_video: this.reup.mirrorVideo,
+                custom_prompt: this.reup.customPrompt,
+                browser_cookies: (this.reup.customCookiesText || '').trim() ? 'manual' : this.reup.browserCookies,
+                custom_cookies: (this.reup.customCookiesText || '').trim(),
+                bgm_choice: this.reup.bgmChoice
+              })
+            });
+            const data = await res.json();
+            if (data.ok) {
+              this.creatorCrawler.selectedKeys = [];
+              this.currentTab = 'pipeline';
+              await this.loadCreatorCrawlerAll();
+              this.notify(`🚀 Đã khởi chạy Reup ${data.queued} video đã duyệt quyền!`, 'success');
+            } else {
+              this.notify(data.error || 'Bị chặn bởi kiểm tra quyền sử dụng hoặc chống trùng.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi chạy Reup Creator: ' + e, 'error');
+          }
+        },
+        async runSelectedCreatorVideos() {
+          await this._dispatchCreatorReup(this.creatorCrawler.selectedKeys.slice());
+        },
+        async runSingleCreatorVideo(videoObj) {
+          if (!videoObj || !videoObj.video_key) return;
+          await this._dispatchCreatorReup([videoObj.video_key]);
+        },
+        formatCreatorDuration(sec) {
+          if (sec === null || sec === undefined || sec === '') return '--:--';
+          const n = Math.max(0, Number(sec));
+          const m = Math.floor(n / 60);
+          const s = Math.floor(n % 60);
+          return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+        },
+        formatCreatorCount(val) {
+          if (val === null || val === undefined || val === '') return '0';
+          return Number(val).toLocaleString('en-US');
+        },
+        formatCreatorDate(val) {
+          if (!val) return 'Chưa rõ ngày';
+          return String(val).replace('T', ' ').slice(0, 16);
+        },
+        async loadReupCookieStatus() {
+          try {
+            const res = await fetch('/api/reup/cookies');
+            const data = await res.json();
+            if (data.success) {
+              this.reup.cookieStatus = {
+                has_cookies: Boolean(data.has_cookies),
+                cookie_count: Number(data.cookie_count || 0),
+                domains: Array.isArray(data.domains) ? data.domains : [],
+                source: data.source || null
+              };
+              if (data.has_cookies && !this.reup.browserCookies) {
+                this.reup.browserCookies = 'manual';
+              }
+            }
+          } catch (e) {}
+        },
+        async saveReupCookies() {
+          const raw = (this.reup.customCookiesText || '').trim();
+          if (!raw) {
+            this.notify('Vui lòng dán nội dung Cookie trước khi lưu.', 'error');
+            return;
+          }
+          this.reup.isSavingCookies = true;
+          try {
+            const res = await fetch('/api/reup/cookies', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                cookies_text: raw,
+                url: this.reup.crawlQuery,
+                platform: this.reup.crawlPlatform
+              })
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.reup.cookieStatus = {
+                has_cookies: true,
+                cookie_count: Number(data.cookie_count || 0),
+                domains: Array.isArray(data.domains) ? data.domains : [],
+                source: data.source || 'manual'
+              };
+              this.reup.browserCookies = 'manual';
+              this.reup.customCookiesText = '';
+              this.reup.crawlError = '';
+              this.notify(`✅ Đã lưu ${data.cookie_count || 0} cookie! Giờ có thể bấm Crawl hoặc Reup ngay.`, 'success');
+            } else {
+              this.notify(data.error || 'Không lưu được cookie.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi lưu cookie: ' + e, 'error');
+          } finally {
+            this.reup.isSavingCookies = false;
+          }
+        },
+        async clearReupCookies() {
+          this.reup.isSavingCookies = true;
+          try {
+            const res = await fetch('/api/reup/cookies', { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) {
+              this.reup.cookieStatus = {
+                has_cookies: Boolean(data.has_cookies),
+                cookie_count: Number(data.cookie_count || 0),
+                domains: Array.isArray(data.domains) ? data.domains : [],
+                source: data.source || null
+              };
+              if (this.reup.browserCookies === 'manual' && !data.has_cookies) {
+                this.reup.browserCookies = '';
+              }
+              this.notify('🗑️ Đã xóa cookie đã lưu.', 'info');
+            }
+          } catch (e) {
+            this.notify('Lỗi xóa cookie: ' + e, 'error');
+          } finally {
+            this.reup.isSavingCookies = false;
+          }
+        },
         async crawlReupLinks() {
           const q = (this.reup.crawlQuery || '').trim();
           if (!q) {
@@ -6820,6 +7683,7 @@ HTML_TEMPLATE = """
           this.reup.isCrawling = true;
           this.reup.crawlError = '';
           try {
+            const pastedCookies = (this.reup.customCookiesText || '').trim();
             const res = await fetch('/api/reup/crawl', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -6827,11 +7691,19 @@ HTML_TEMPLATE = """
                 query: q,
                 limit: this.reup.crawlLimit,
                 platform: this.reup.crawlPlatform,
-                browser_cookies: this.reup.browserCookies
+                browser_cookies: pastedCookies ? 'manual' : this.reup.browserCookies,
+                custom_cookies: pastedCookies
               })
             });
             const data = await res.json();
+            if (pastedCookies) {
+              await this.loadReupCookieStatus();
+            }
             if (data.success) {
+              if (pastedCookies) {
+                this.reup.customCookiesText = '';
+                this.reup.browserCookies = 'manual';
+              }
               this.reup.crawledItems = data.items || [];
               const firstKw = this.reup.crawledItems[0]?.search_keyword;
               const kwNote = (firstKw && firstKw !== q) ? ` (từ khóa: ${firstKw})` : '';
@@ -6881,7 +7753,8 @@ HTML_TEMPLATE = """
                 anti_reup: this.reup.antiReup,
                 mirror_video: this.reup.mirrorVideo,
                 custom_prompt: this.reup.customPrompt,
-                browser_cookies: this.reup.browserCookies,
+                browser_cookies: (this.reup.customCookiesText || '').trim() ? 'manual' : this.reup.browserCookies,
+                custom_cookies: (this.reup.customCookiesText || '').trim(),
                 bgm_choice: this.reup.bgmChoice
               })
             });
@@ -8319,6 +9192,30 @@ def api_voice_preview():
     return send_from_directory(preview_dir, cache_name, mimetype="audio/mpeg")
 
 
+@app.route("/api/reup/cookies", methods=["GET", "POST", "DELETE"])
+def api_reup_cookies():
+    """Quản lý cookie nhập trực tiếp cho Reup/Crawl (trả về metadata an toàn, không lộ giá trị cookie)."""
+    reup_mod = load_mod("reup_pipeline", "reup_pipeline.py")
+    if request.method == "GET":
+        return jsonify({"success": True, **reup_mod.get_manual_cookies_status()})
+    if request.method == "DELETE":
+        return jsonify({"success": True, **reup_mod.clear_manual_cookies()})
+
+    body = request.get_json(silent=True) or {}
+    cookies_text = str(body.get("cookies_text") or "")
+    target_url = str(body.get("url") or "")
+    platform_source = str(body.get("platform") or "")
+    try:
+        st = reup_mod.save_manual_cookies(
+            cookies_text,
+            target_url=target_url,
+            platform_source=platform_source,
+        )
+        return jsonify({"success": True, **st})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
 @app.route("/api/reup/crawl", methods=["POST"])
 def api_reup_crawl():
     """Crawl danh sách video từ link kênh/playlist/video hoặc từ khóa tìm kiếm (YT/Bilibili/Douyin)."""
@@ -8327,6 +9224,7 @@ def api_reup_crawl():
     limit = int(body.get("limit") or 12)
     platform_source = str(body.get("platform") or "auto")
     browser_cookies = str(body.get("browser_cookies") or "")
+    custom_cookies = str(body.get("custom_cookies") or "")
     if not query:
         return jsonify({"success": False, "error": "Thiếu link hoặc từ khóa cần crawl."}), 400
     try:
@@ -8336,6 +9234,7 @@ def api_reup_crawl():
             limit=limit,
             platform_source=platform_source,
             browser_cookies=browser_cookies,
+            custom_cookies=custom_cookies,
         )
         return jsonify({"success": True, "items": items})
     except Exception as e:
@@ -8362,6 +9261,7 @@ def api_reup_run():
     mirror_video = bool(body.get("mirror_video", False))
     custom_prompt = str(body.get("custom_prompt") or "")
     browser_cookies = str(body.get("browser_cookies") or "")
+    custom_cookies = str(body.get("custom_cookies") or "")
     bgm_choice = str(body.get("bgm_choice") or "random")
 
     def _reup_worker():
@@ -8385,6 +9285,7 @@ def api_reup_run():
                     custom_prompt=custom_prompt,
                     browser_cookies=browser_cookies,
                     bgm_choice=bgm_choice,
+                    custom_cookies=custom_cookies,
                 )
             if last_res:
                 tracker.finish_pipeline(
@@ -8402,6 +9303,278 @@ def api_reup_run():
     return jsonify({"success": True, "queued": len(urls)})
 
 
+@app.route("/api/creator_reup/state", methods=["GET"])
+def api_creator_reup_state():
+    """Trạng thái tổng quan của Creator Crawler (tách biệt hoàn toàn với Market Intelligence)."""
+    rt = get_creator_reup_runtime()
+    store = rt["store"]
+    return jsonify({
+        "ok": True,
+        "summary": store.get_summary(),
+        "default_filters": DEFAULT_CREATOR_FILTERS,
+        "requests": store.list_crawl_requests(limit=30),
+        "profiles": store.list_profiles(),
+        "raw_files": store.list_raw_files(limit=20),
+        "jobs": store.list_reup_jobs(limit=30),
+        "is_syncing": rt["sync_service"].is_syncing,
+        "muse_web_url": rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"),
+    })
+
+
+@app.route("/api/creator_reup/requests", methods=["POST"])
+def api_creator_reup_create_request():
+    """Tạo crawl request theo profile URL và sinh Prompt chuẩn cho Muse."""
+    body = request.get_json(silent=True) or {}
+    profile_url = str(body.get("profile_url") or "").strip()
+    platform = body.get("platform") or detect_platform_from_url(profile_url)
+    if str(platform or "").lower() == "auto":
+        platform = detect_platform_from_url(profile_url)
+    try:
+        requested_count = int(body.get("requested_count") if body.get("requested_count") is not None else 20)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "requested_count phải là số nguyên (1–200)."}), 400
+    if requested_count < 1 or requested_count > 200:
+        return jsonify({"ok": False, "error": "requested_count phải trong khoảng 1–200."}), 400
+
+    try:
+        spec = build_creator_crawl_prompt(
+            profile_url=profile_url,
+            platform=platform,
+            requested_count=requested_count,
+            filter_overrides=body.get("filters") if isinstance(body.get("filters"), dict) else None,
+            drive_folder_id=str(body.get("drive_folder_id") or "").strip() or None,
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    rt = get_creator_reup_runtime()
+    req = rt["store"].create_crawl_request(spec)
+    return jsonify({"ok": True, "request": req, "prompt_text": req["prompt_text"]})
+
+
+@app.route("/api/creator_reup/import_json", methods=["POST"])
+def api_creator_reup_import_json():
+    """Import JSON kết quả Creator Crawler thủ công (upload file hoặc paste JSON)."""
+    rt = get_creator_reup_runtime()
+    raw_text = ""
+    file_name = "manual_import.json"
+    request_id = None
+    crawl_id = None
+    filters = None
+    reference_time = None
+
+    if request.files and "file" in request.files:
+        fobj = request.files["file"]
+        file_name = fobj.filename or file_name
+        raw_text = fobj.read().decode("utf-8-sig", errors="replace")
+        request_id = str(request.form.get("request_id") or "").strip() or None
+        crawl_id = str(request.form.get("crawl_id") or "").strip() or None
+    else:
+        body = request.get_json(silent=True) or {}
+        if isinstance(body.get("payload"), dict):
+            raw_text = json.dumps(body["payload"], ensure_ascii=False)
+        else:
+            raw_text = str(body.get("json_text") or "")
+        file_name = str(body.get("file_name") or file_name).strip() or file_name
+        request_id = str(body.get("request_id") or "").strip() or None
+        crawl_id = str(body.get("crawl_id") or "").strip() or None
+        filters = body.get("filters") if isinstance(body.get("filters"), dict) else None
+        reference_time = body.get("reference_time")
+
+    try:
+        res = rt["sync_service"].import_json_text(
+            raw_text,
+            file_name=file_name,
+            request_id=request_id,
+            crawl_id=crawl_id,
+            filter_overrides=filters,
+            reference_time=reference_time,
+        )
+        return jsonify({"ok": True, "import_result": res, "summary": rt["store"].get_summary()})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.route("/api/creator_reup/sync", methods=["POST"])
+def api_creator_reup_sync():
+    """Đồng bộ JSON Creator Crawler từ Google Drive (chỉ đọc, lọc bỏ dữ liệu Market)."""
+    body = request.get_json(silent=True) or {}
+    rt = get_creator_reup_runtime()
+    if body.get("async"):
+        res = rt["sync_service"].trigger_async_sync(trigger_source="manual_ui_async")
+        return jsonify({"ok": True, **res, "summary": rt["store"].get_summary()})
+    res = rt["sync_service"].sync_now(trigger_source="manual_ui")
+    return jsonify({"ok": True, "sync_result": res, "summary": rt["store"].get_summary()})
+
+
+@app.route("/api/creator_reup/filters/reapply", methods=["POST"])
+def api_creator_reup_reapply_filters():
+    """Áp dụng lại ngưỡng lọc mới lên kho video Creator hiện tại mà không làm mất trạng thái quyền/chống trùng."""
+    body = request.get_json(silent=True) or {}
+    rt = get_creator_reup_runtime()
+    res = rt["store"].reapply_filters(
+        platform=body.get("platform"),
+        request_id=body.get("request_id"),
+        filter_overrides=body.get("filters") if isinstance(body.get("filters"), dict) else None,
+        reference_time=body.get("reference_time"),
+    )
+    return jsonify({"ok": True, **res, "summary": rt["store"].get_summary()})
+
+
+@app.route("/api/creator_reup/videos", methods=["GET"])
+def api_creator_reup_videos():
+    """Truy vấn danh sách video Creator với lọc & sắp xếp (likes/views/recent)."""
+    rt = get_creator_reup_runtime()
+    try:
+        limit = int(request.args.get("limit") or 200)
+    except ValueError:
+        limit = 200
+    videos = rt["store"].query_videos(
+        platform=request.args.get("platform"),
+        creator_id=request.args.get("creator_id"),
+        request_id=request.args.get("request_id"),
+        filter_status=request.args.get("filter_status"),
+        rights_status=request.args.get("rights_status"),
+        dedup_status=request.args.get("dedup_status"),
+        search=request.args.get("search"),
+        sort_by=request.args.get("sort_by") or "likes_desc",
+        limit=limit,
+    )
+    return jsonify({"ok": True, "videos": videos, "summary": rt["store"].get_summary()})
+
+
+@app.route("/api/creator_reup/videos/rights", methods=["POST"])
+def api_creator_reup_video_rights():
+    """Cập nhật trạng thái quyền sử dụng cho 1 hoặc nhiều video trước khi sản xuất."""
+    body = request.get_json(silent=True) or {}
+    video_keys = body.get("video_keys") or []
+    rights_status = str(body.get("rights_status") or "").strip()
+    rights_note = str(body.get("rights_note") or "").strip()
+    if not video_keys:
+        return jsonify({"ok": False, "error": "Thiếu danh sách video_keys."}), 400
+    rt = get_creator_reup_runtime()
+    try:
+        res = rt["store"].update_video_rights(
+            video_keys,
+            rights_status=rights_status,
+            rights_note=rights_note,
+        )
+        return jsonify({"ok": True, **res, "summary": rt["store"].get_summary()})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.route("/api/creator_reup/run_selected", methods=["POST"])
+def api_creator_reup_run_selected():
+    """Kiểm tra quyền sử dụng + chống trùng rồi chạy tuần tự qua Reup Pipeline hiện có."""
+    body = request.get_json(silent=True) or {}
+    if not body.get("sync_execution") and tracker.get_state().get("is_running"):
+        return jsonify({"ok": False, "error": "Hệ thống đang chạy một tiến trình render khác."}), 409
+
+    video_keys = [str(k).strip() for k in (body.get("video_keys") or []) if str(k).strip()]
+    if not video_keys:
+        return jsonify({"ok": False, "error": "Chưa chọn video nào để sản xuất Reup."}), 400
+
+    rt = get_creator_reup_runtime()
+    store = rt["store"]
+    ready_videos, blocked = store.check_videos_ready_for_production(video_keys)
+    if blocked:
+        has_dup = any(str(b.get("reason") or "").startswith("already_") for b in blocked)
+        status_code = 409 if has_dup and not any(
+            str(b.get("reason") or "").startswith("rights_not_approved") for b in blocked
+        ) else 400
+        reasons_desc = "; ".join(f"{b['video_key']}: {b['reason']}" for b in blocked)
+        return jsonify({
+            "ok": False,
+            "error": f"Video chưa đủ điều kiện quyền sử dụng hoặc bị trùng lặp ({reasons_desc}).",
+            "blocked": blocked,
+            "ready_count": len(ready_videos),
+        }), status_code
+
+    reup_cfg = {
+        "voice": str(body.get("voice") or "nam_hai"),
+        "translation_mode": str(body.get("translation_mode") or "viral"),
+        "frame_mode": str(body.get("frame_mode") or "blur_bg"),
+        "original_volume": float(body.get("original_volume") or 0.0),
+        "mask_old_sub": bool(body.get("mask_old_sub", True)),
+        "anti_reup": bool(body.get("anti_reup", True)),
+        "mirror_video": bool(body.get("mirror_video", False)),
+        "custom_prompt": str(body.get("custom_prompt") or ""),
+        "browser_cookies": str(body.get("browser_cookies") or ""),
+        "custom_cookies": str(body.get("custom_cookies") or ""),
+        "bgm_choice": str(body.get("bgm_choice") or "random"),
+    }
+
+    jobs = [store.create_reup_job(v, reup_cfg) for v in ready_videos]
+
+    def _creator_batch_worker():
+        tracker.reset()
+        tracker.log(f"🚀 Bắt đầu xử lý {len(jobs)} video Creator Reup đã duyệt quyền...")
+        reup_mod = load_mod("reup_pipeline", "reup_pipeline.py")
+        last_ok = None
+        failures = []
+        for idx, job in enumerate(jobs, 1):
+            job_id = job["job_id"]
+            try:
+                tracker.check_cancelled()
+                store.update_reup_job_status(job_id, status="running")
+                tracker.log(f"🎬 [{idx}/{len(jobs)}] Reup {job['video_key']}: {job['source_url']}")
+                res = reup_mod.run_reup_pipeline(
+                    source_url=job["source_url"],
+                    voice=reup_cfg["voice"],
+                    translation_mode=reup_cfg["translation_mode"],
+                    frame_mode=reup_cfg["frame_mode"],
+                    mask_old_sub=reup_cfg["mask_old_sub"],
+                    anti_reup=reup_cfg["anti_reup"],
+                    mirror_video=reup_cfg["mirror_video"],
+                    original_volume=reup_cfg["original_volume"],
+                    custom_prompt=reup_cfg["custom_prompt"],
+                    browser_cookies=reup_cfg["browser_cookies"],
+                    bgm_choice=reup_cfg["bgm_choice"],
+                    custom_cookies=reup_cfg["custom_cookies"],
+                )
+                last_ok = res
+                store.update_reup_job_status(
+                    job_id,
+                    status="completed",
+                    output_filename=res.get("video_filename"),
+                    output_path=res.get("video_path"),
+                    caption=res.get("caption", ""),
+                )
+            except Exception as exc:
+                if "PipelineCancelledError" in type(exc).__name__:
+                    store.update_reup_job_status(job_id, status="failed", error_message="Đã hủy bởi người dùng.")
+                    tracker.set_error("Đã ngắt quy trình Creator Reup theo yêu cầu.")
+                    return {"succeeded": 0 if last_ok is None else 1, "failures": failures, "cancelled": True}
+                err_txt = str(exc)
+                failures.append({"job_id": job_id, "video_key": job["video_key"], "error": err_txt})
+                store.update_reup_job_status(job_id, status="failed", error_message=err_txt)
+                tracker.log(f"⚠️ Lỗi ở {job['video_key']}, tiếp tục video kế tiếp: {err_txt}")
+
+        if last_ok:
+            tracker.finish_pipeline(
+                video_filename=last_ok["video_filename"],
+                caption=last_ok.get("caption", ""),
+                total_duration=last_ok.get("duration_sec", 0.0),
+            )
+        elif failures:
+            tracker.set_error(failures[0]["error"])
+        return {"succeeded": len(jobs) - len(failures), "failures": failures}
+
+    if body.get("sync_execution"):
+        exec_summary = _creator_batch_worker()
+        return jsonify({
+            "ok": exec_summary["succeeded"] > 0 and not exec_summary.get("cancelled"),
+            "queued": len(jobs),
+            "jobs": [store.get_summary()],
+            "job_records": store.list_reup_jobs(limit=len(jobs) + 5),
+            "execution": exec_summary,
+        })
+
+    threading.Thread(target=_creator_batch_worker, daemon=True).start()
+    return jsonify({"ok": True, "queued": len(jobs), "jobs": jobs})
+
+
 def start_studio(port=5000, auto_open=True):
     print("\n" + "╔" + "═" * 58 + "╗")
     print("║     🎬 THREADS VIDEO AUTOMATION STUDIO 2.0 (AI DIRECTOR)  ║")
@@ -8411,6 +9584,8 @@ def start_studio(port=5000, auto_open=True):
         rt = get_market_runtime()
         rt["sync_service"].start(sync_on_startup=True)
         rt["remote_poller"].start()
+        creator_rt = get_creator_reup_runtime()
+        creator_rt["sync_service"].start(sync_on_startup=False)
     if auto_open:
         threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{port}")).start()
     bind_host = os.environ.get("APP_VIDEO_HOST", "127.0.0.1").strip() or "127.0.0.1"

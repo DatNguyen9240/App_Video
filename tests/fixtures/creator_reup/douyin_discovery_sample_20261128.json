@@ -1,0 +1,157 @@
+{
+ "platform": "douyin",
+ "source": "douyin_web_ui",
+ "session": "user_logged_in",
+ "measured_at": "2026-11-28T18:06:00+07:00",
+ "notes": [
+  "Grid cung cap: video_id (qua modal_id/link), caption, likes dang hien thi lam tron (display), thumbnail. Grid KHONG co: views, comments, shares, ngay dang, thoi luong (chi thay khi hover).",
+  "Trang video cung cap: published_at, duration, likes/comments/shares/favorites dang hien thi.",
+  "Views: Douyin web khong hien thi cong khai trong luong nay -> null.",
+  "Grid tron ca video va bai do van (note) — phai phan loai type; /video/<id> cua note se redirect sang /note/<id>."
+ ],
+ "creators": [
+  {
+   "name": "央视新闻",
+   "douyin_id": "cctvnews",
+   "sec_uid": "MS4wLjABAAAAgq8cb7cn9ByhZbmx-XQDdRTvFzmJeBBXOUO4QflP96M",
+   "profile_url": "https://www.douyin.com/user/MS4wLjABAAAAgq8cb7cn9ByhZbmx-XQDdRTvFzmJeBBXOUO4QflP96M",
+   "followers_display": "1.9亿",
+   "works_display": "19.3K",
+   "grid_items_after_5_scrolls": 90,
+   "grid_sample": [
+    {
+     "caption": "“有希望我就要去做！”高三女生回应跪地十分钟心肺复苏救回同学…",
+     "likes_display": "76.5K"
+    },
+    {
+     "caption": "车上伤员右手大拇指骨头外露，司机街头喊停警车求助…",
+     "likes_display": "55.9K"
+    },
+    {
+     "caption": "巴基斯坦总理和国防军司令兼陆军参谋长同正在中国空间站执行任务的巴方航天员天地通话。#媒体原创",
+     "likes_display": "47.3K"
+    },
+    {
+     "caption": "歼-35A落地珠海，将首次静态展示！#媒体原创",
+     "likes_display": "320.7K"
+    },
+    {
+     "caption": "“学中文，去东北！”#鲁健访谈 专访美中贸易全国委员会会长谭森…",
+     "likes_display": "701.0K"
+    }
+   ],
+   "enriched_items": [
+    {
+     "video_id": "7713142637636668682",
+     "url": "https://www.douyin.com/video/7713142637636668682",
+     "type": "video",
+     "title": "“有希望我就要去做！”高三女生回应跪地十分钟心肺复苏救回同学，回想救人那一刻仍忍不住泪流满面：担心救不回她，当时很紧张，我希望她能活过来。@九派新闻 @直播荆门",
+     "published_at": "2026-11-28 15:53",
+     "duration_display": "00:39",
+     "likes_display": "77.4K",
+     "comments": 114,
+     "shares": 1727,
+     "favorites": 1625,
+     "views": null
+    }
+   ]
+  },
+  {
+   "name": "人民日报",
+   "douyin_id": "rmrbxmt",
+   "sec_uid": "MS4wLjABAAAA8U_l6rBzmy7bcy6xOJel4v0RzoR_wfAubGPeJimN__4",
+   "profile_url": "https://www.douyin.com/user/MS4wLjABAAAA8U_l6rBzmy7bcy6xOJel4v0RzoR_wfAubGPeJimN__4",
+   "followers_display": "2.0亿",
+   "works_display": "13.0K",
+   "grid_items_after_5_scrolls": 126,
+   "grid_sample": [
+    {
+     "caption": "男孩奋力奔跑赶公交，司机发现后放慢车速……网友：车慢了下来，心暖了起来！@贵州公交司机沈广",
+     "likes_display": null
+    },
+    {
+     "caption": "高三女孩回应跪地做心肺复苏救人：很紧张，担心救不回来，但只要有希望就要去做。陈予彤，为你点赞！@九派新闻",
+     "likes_display": "14.6K"
+    },
+    {
+     "caption": "耐千度高温，火海行动自如！消防侦察狗四足机器人1000℃高温作业技术突破。",
+     "likes_display": "192.5K"
+    },
+    {
+     "caption": "路口如何正确掉头？听听交警怎么说。@河南法治频道@郑州公安交管六大队",
+     "likes_display": "559.6K"
+    },
+    {
+     "caption": "“您的骑手正在灭火，请耐心等待！”外卖小哥送餐途中偶遇火情，上演“教科书式”处理。@在逃骑手🛵",
+     "likes_display": "854.4K"
+    }
+   ],
+   "enriched_items": [
+    {
+     "video_id": "7713173603738520859",
+     "url": "https://www.douyin.com/video/7713173603738520859",
+     "type": "video",
+     "title": "男孩奋力奔跑赶公交，司机发现后放慢车速……网友：车慢了下来，心暖了起来！@贵州公交司机沈广",
+     "published_at": "2026-11-28 17:53",
+     "duration_display": "00:31",
+     "likes": 2328,
+     "comments": 87,
+     "shares": 24,
+     "favorites": 42,
+     "views": null
+    }
+   ]
+  },
+  {
+   "name": "庆杨 (tài khoản kế nhiệm của 疯狂小杨哥 — tài khoản gốc đã注销)",
+   "douyin_id": "dxyg6182390",
+   "sec_uid": "MS4wLjABAAAArzJ-2s9BjEiV_m9JPq8NDuChJSURVVKAuNhXAI1Ye4uybm7DQfIgUf1UU0FgvUJs",
+   "profile_url": "https://www.douyin.com/user/MS4wLjABAAAArzJ-2s9BjEiV_m9JPq8NDuChJSURVVKAuNhXAI1Ye4uybm7DQfIgUf1UU0FgvUJs",
+   "followers_display": "63.5K",
+   "works_display": "4",
+   "grid_items_after_5_scrolls": 4,
+   "grid_sample": [
+    {
+     "caption": null,
+     "likes_display": "280.6K",
+     "tags": [
+      "置顶/pinned"
+     ]
+    },
+    {
+     "caption": null,
+     "likes_display": "351.8K"
+    },
+    {
+     "caption": null,
+     "likes_display": "312.5K",
+     "tags": [
+      "共创/co-creation"
+     ]
+    },
+    {
+     "caption": null,
+     "likes_display": "284.0K",
+     "tags": [
+      "共创/co-creation"
+     ]
+    }
+   ],
+   "enriched_items": [
+    {
+     "video_id": "7697195938004555953",
+     "url": "https://www.douyin.com/note/7697195938004555953",
+     "type": "note_image_text",
+     "title": null,
+     "published_at": "2026-10-16 16:31:24",
+     "duration_display": null,
+     "likes_display": "280.6K",
+     "comments": 36079,
+     "shares_display": "159.9K",
+     "favorites_display": "13.5K",
+     "views": null
+    }
+   ]
+  }
+ ]
+}

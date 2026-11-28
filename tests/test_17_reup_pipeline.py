@@ -175,6 +175,89 @@ class TestReupPipeline(unittest.TestCase):
                     r2.close()
                     self.assertEqual(mock_tts.call_count, 1)
 
+    def test_manual_cookie_normalization_and_flask_endpoints(self):
+        import http.cookiejar
+        import app_ui
+
+        os.environ["APP_VIDEO_DISABLE_BG_WORKERS"] = "1"
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_file = os.path.join(tmp, "reup_cookies.txt")
+            # 1) Raw header format -> Netscape loadable by MozillaCookieJar
+            ns_txt, meta = reup_mod.normalize_cookie_text_to_netscape(
+                "Cookie: ttwid=abc123; sessionid=sec999; odin_tt=xyz",
+                target_url="https://www.douyin.com/user/demo",
+            )
+            self.assertEqual(meta["format"], "header")
+            self.assertEqual(meta["cookie_count"], 3)
+            self.assertIn(".douyin.com", meta["domains"])
+            with open(cookie_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write(ns_txt)
+            jar = http.cookiejar.MozillaCookieJar(cookie_file)
+            jar.load(ignore_discard=True, ignore_expires=True)
+            self.assertEqual({c.name for c in jar}, {"ttwid", "sessionid", "odin_tt"})
+
+            # 2) JSON Cookie-Editor export format
+            ns_json, meta_json = reup_mod.normalize_cookie_text_to_netscape(
+                '[{"name":"SESSDATA","value":"bili_val","domain":".bilibili.com","path":"/","secure":true}]',
+                platform_source="bilibili",
+            )
+            self.assertEqual(meta_json["format"], "json")
+            self.assertEqual(meta_json["domains"], [".bilibili.com"])
+            self.assertIn("SESSDATA\tbili_val", ns_json)
+
+            # 3) Flask GET/POST/DELETE /api/reup/cookies + /api/reup/crawl custom_cookies passthrough + UI HTML hooks
+            client = app_ui.app.test_client()
+            with patch.object(app_ui, "load_mod", return_value=reup_mod):
+                with patch.object(reup_mod, "REUP_MANUAL_COOKIES_PATH", cookie_file):
+                    if os.path.exists(cookie_file):
+                        os.remove(cookie_file)
+
+                    # Invalid empty input -> HTTP 400
+                    bad_res = client.post("/api/reup/cookies", json={"cookies_text": "not_a_valid_cookie"})
+                    self.assertEqual(bad_res.status_code, 400)
+
+                    # Save header cookies -> 200 without leaking raw secret value in API response
+                    save_res = client.post(
+                        "/api/reup/cookies",
+                        json={"cookies_text": "ttwid=secret_tok_value; s_v_web_id=web123", "platform": "douyin"},
+                    )
+                    self.assertEqual(save_res.status_code, 200)
+                    save_json = save_res.get_json()
+                    self.assertTrue(save_json["has_cookies"])
+                    self.assertEqual(save_json["cookie_count"], 2)
+                    self.assertNotIn("secret_tok_value", json.dumps(save_json))
+
+                    get_res = client.get("/api/reup/cookies").get_json()
+                    self.assertTrue(get_res["has_cookies"])
+                    self.assertEqual(get_res["cookie_count"], 2)
+                    self.assertNotIn("secret_tok_value", json.dumps(get_res))
+
+                    # _build_ytdlp_auth_and_net_args uses saved manual cookies file without DPAPI Chrome dependency
+                    args = reup_mod._build_ytdlp_auth_and_net_args("https://www.douyin.com/user/123", browser_cookies="manual")
+                    self.assertIn("--cookies", args)
+                    self.assertIn(cookie_file, args)
+
+                    # /api/reup/crawl passes custom_cookies cleanly
+                    with patch.object(reup_mod, "crawl_video_links", return_value=[]) as mock_crawl:
+                        cr_res = client.post(
+                            "/api/reup/crawl",
+                            json={
+                                "query": "https://www.douyin.com/user/demo",
+                                "platform": "douyin",
+                                "browser_cookies": "manual",
+                                "custom_cookies": "ttwid=direct_val",
+                            },
+                        )
+                        self.assertEqual(cr_res.status_code, 200)
+                        self.assertEqual(mock_crawl.call_args.kwargs.get("custom_cookies"), "ttwid=direct_val")
+
+                    del_res = client.delete("/api/reup/cookies").get_json()
+                    self.assertFalse(del_res["has_cookies"])
+
+        html = app_ui.app.test_client().get("/").get_data(as_text=True)
+        for token in ("reup.customCookiesText", "saveReupCookies", "Nhập Cookie trực tiếp", "/api/reup/cookies"):
+            self.assertIn(token, html)
+
 
 if __name__ == "__main__":
     unittest.main()

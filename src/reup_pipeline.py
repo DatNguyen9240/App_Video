@@ -35,6 +35,7 @@ from pydub import AudioSegment
 
 REUP_WORK_DIR = os.path.join(BASE_DIR, "output", "reup_work")
 FINAL_DIR = os.path.join(BASE_DIR, "output", "final")
+REUP_MANUAL_COOKIES_PATH = os.path.join(BASE_DIR, "data", "reup_cookies.txt")
 
 _CACHED_ENCODER: Optional[str] = None
 
@@ -182,14 +183,252 @@ def normalize_video_url(raw_text: str) -> str:
     return url
 
 
-def _build_ytdlp_auth_and_net_args(url: str = "", browser_cookies: str = "") -> List[str]:
+def _infer_cookie_domain(target_url: str = "", platform_source: str = "") -> str:
+    """Infer default cookie domain from a target URL or selected platform."""
+    hint = f"{target_url or ''} {platform_source or ''}".lower()
+    if "bilibili" in hint or "b23.tv" in hint:
+        return ".bilibili.com"
+    if "tiktok" in hint:
+        return ".tiktok.com"
+    if "youtube" in hint or "youtu.be" in hint:
+        return ".youtube.com"
+    if "facebook" in hint or "fb.watch" in hint:
+        return ".facebook.com"
+    return ".douyin.com"
+
+
+def _format_netscape_line(
+    domain: str,
+    name: str,
+    value: str,
+    *,
+    path: str = "/",
+    secure: bool = True,
+    expires: Optional[int] = None,
+) -> str:
+    dom = (domain or ".douyin.com").strip()
+    include_sub = "TRUE" if dom.startswith(".") else "FALSE"
+    sec_flag = "TRUE" if secure else "FALSE"
+    exp_ts = int(expires) if (expires is not None and int(expires) > 0) else (int(time.time()) + 30 * 86400)
+    clean_path = (path or "/").strip() or "/"
+    clean_name = name.replace("\t", " ").replace("\r", "").replace("\n", "").strip()
+    clean_val = value.replace("\t", " ").replace("\r", "").replace("\n", "").strip()
+    return f"{dom}\t{include_sub}\t{clean_path}\t{sec_flag}\t{exp_ts}\t{clean_name}\t{clean_val}"
+
+
+def normalize_cookie_text_to_netscape(
+    raw_text: str,
+    target_url: str = "",
+    platform_source: str = "",
+):
+    """
+    Convert pasted cookie text (raw HTTP Cookie header, JSON Cookie-Editor export, or Netscape cookies.txt)
+    into standard Netscape cookies.txt format without writing/reading secrets outside caller control.
+    """
+    txt = (raw_text or "").strip()
+    if not txt:
+        raise ValueError("Nội dung cookie trống.")
+
+    default_domain = _infer_cookie_domain(target_url, platform_source)
+    default_exp = int(time.time()) + 30 * 86400
+    lines_out: List[str] = []
+    domains_found = set()
+    detected_format = "header"
+
+    stripped = txt.lstrip()
+    if stripped.startswith(("[", "{")):
+        try:
+            parsed = json.loads(stripped)
+            cookie_objs = parsed.get("cookies") if isinstance(parsed, dict) else parsed
+            if not isinstance(cookie_objs, list):
+                raise ValueError("JSON cookie phải là mảng danh sách cookie.")
+            detected_format = "json"
+            for obj in cookie_objs:
+                if not isinstance(obj, dict):
+                    continue
+                c_name = str(obj.get("name") or "").strip()
+                if not c_name or obj.get("value") is None:
+                    continue
+                c_val = str(obj.get("value"))
+                dom = str(obj.get("domain") or default_domain).strip() or default_domain
+                if not dom.startswith(".") and obj.get("hostOnly") is False:
+                    dom = f".{dom}"
+                exp_raw = obj.get("expirationDate") or obj.get("expiry") or obj.get("expires")
+                try:
+                    exp_int = int(float(exp_raw)) if exp_raw else default_exp
+                except (TypeError, ValueError):
+                    exp_int = default_exp
+                domains_found.add(dom)
+                lines_out.append(
+                    _format_netscape_line(
+                        dom,
+                        c_name,
+                        c_val,
+                        path=str(obj.get("path") or "/"),
+                        secure=bool(obj.get("secure", True)),
+                        expires=exp_int,
+                    )
+                )
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"JSON cookie không hợp lệ: {exc}") from exc
+    elif "\t" in txt:
+        detected_format = "netscape"
+        for raw_line in txt.splitlines():
+            s = raw_line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split("\t")
+            if len(parts) < 7:
+                continue
+            dom, include_sub, c_path, sec_flag, exp_str, c_name, c_val = parts[:7]
+            c_name = c_name.strip()
+            if not c_name:
+                continue
+            dom = dom.strip() or default_domain
+            try:
+                exp_int = int(float(exp_str)) if exp_str.strip() else default_exp
+                if exp_int <= 0:
+                    exp_int = default_exp
+            except ValueError:
+                exp_int = default_exp
+            domains_found.add(dom)
+            lines_out.append(
+                f"{dom}\t{include_sub.strip().upper() or 'TRUE'}\t{c_path.strip() or '/'}\t"
+                f"{sec_flag.strip().upper() or 'TRUE'}\t{exp_int}\t{c_name}\t{c_val.strip()}"
+            )
+    else:
+        header_body = re.sub(r"^(?:cookie\s*:\s*)", "", txt, flags=re.IGNORECASE).strip()
+        if (header_body.startswith('"') and header_body.endswith('"')) or (
+            header_body.startswith("'") and header_body.endswith("'")
+        ):
+            header_body = header_body[1:-1].strip()
+        skip_attrs = {"path", "domain", "expires", "max-age", "samesite"}
+        segments = re.split(r"[;\r\n]+", header_body)
+        for seg in segments:
+            part = seg.strip()
+            if not part or "=" not in part:
+                continue
+            c_name, c_val = part.split("=", 1)
+            c_name = c_name.strip()
+            if not c_name or c_name.lower() in skip_attrs:
+                continue
+            domains_found.add(default_domain)
+            lines_out.append(_format_netscape_line(default_domain, c_name, c_val.strip(), expires=default_exp))
+
+    if not lines_out:
+        raise ValueError(
+            "Không nhận diện được cookie hợp lệ (hỗ trợ chuỗi Cookie: a=b; c=d, JSON Cookie-Editor hoặc Netscape cookies.txt)."
+        )
+
+    netscape_body = "# Netscape HTTP Cookie File\n# Generated by App_Video Reup Direct Cookie Input\n" + "\n".join(lines_out) + "\n"
+    return netscape_body, {
+        "cookie_count": len(lines_out),
+        "domains": sorted(domains_found),
+        "format": detected_format,
+    }
+
+
+def _inspect_netscape_cookie_file(path: str) -> Optional[Dict]:
+    if not os.path.exists(path) or os.path.getsize(path) <= 10:
+        return None
+    count = 0
+    domains = set()
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                parts = s.split("\t")
+                if len(parts) >= 7 and parts[5].strip():
+                    count += 1
+                    domains.add(parts[0].strip())
+        mtime = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(path)))
+        return {
+            "cookie_count": count,
+            "domains": sorted(d for d in domains if d),
+            "updated_at": mtime,
+        }
+    except OSError:
+        return None
+
+
+def get_manual_cookies_status(cookies_path: Optional[str] = None) -> Dict:
+    """Return non-sensitive metadata for saved manual/root cookie files."""
+    target_path = cookies_path or REUP_MANUAL_COOKIES_PATH
+    manual_info = _inspect_netscape_cookie_file(target_path)
+    if manual_info:
+        return {"has_cookies": True, "source": "manual", **manual_info}
+    root_cookies = os.path.join(BASE_DIR, "cookies.txt")
+    root_info = _inspect_netscape_cookie_file(root_cookies)
+    if root_info:
+        return {"has_cookies": True, "source": "root_file", **root_info}
+    return {"has_cookies": False, "source": None, "cookie_count": 0, "domains": [], "updated_at": None}
+
+
+def save_manual_cookies(
+    raw_text: str,
+    target_url: str = "",
+    platform_source: str = "",
+    cookies_path: Optional[str] = None,
+) -> Dict:
+    """Validate, convert to Netscape format, and save pasted cookies on disk safely."""
+    target_path = cookies_path or REUP_MANUAL_COOKIES_PATH
+    netscape_text, meta = normalize_cookie_text_to_netscape(
+        raw_text,
+        target_url=target_url,
+        platform_source=platform_source,
+    )
+    os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+    with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(netscape_text)
+    st = get_manual_cookies_status(cookies_path=target_path)
+    return {**st, "format": meta["format"]}
+
+
+def clear_manual_cookies(cookies_path: Optional[str] = None) -> Dict:
+    """Delete saved manual cookie file if present and return updated status."""
+    target_path = cookies_path or REUP_MANUAL_COOKIES_PATH
+    if os.path.exists(target_path):
+        try:
+            os.remove(target_path)
+        except OSError:
+            pass
+    return get_manual_cookies_status(cookies_path=target_path)
+
+
+def _build_ytdlp_auth_and_net_args(
+    url: str = "",
+    browser_cookies: str = "",
+    custom_cookies: str = "",
+    platform_source: str = "",
+) -> List[str]:
     """Tạo args proxy, cookies, referer phù hợp cho Douyin / Bilibili / TikTok / YouTube."""
     args = []
-    cookies_file = os.path.join(BASE_DIR, "cookies.txt")
-    if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 10:
-        args.extend(["--cookies", cookies_file])
-    elif browser_cookies in ("chrome", "edge"):
-        args.extend(["--cookies-from-browser", browser_cookies])
+    if custom_cookies and custom_cookies.strip():
+        try:
+            save_manual_cookies(custom_cookies, target_url=url, platform_source=platform_source)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        args.extend(["--cookies", REUP_MANUAL_COOKIES_PATH])
+    else:
+        manual_exists = os.path.exists(REUP_MANUAL_COOKIES_PATH) and os.path.getsize(REUP_MANUAL_COOKIES_PATH) > 10
+        root_cookies = os.path.join(BASE_DIR, "cookies.txt")
+        root_exists = os.path.exists(root_cookies) and os.path.getsize(root_cookies) > 10
+        if browser_cookies == "manual":
+            if manual_exists:
+                args.extend(["--cookies", REUP_MANUAL_COOKIES_PATH])
+            elif root_exists:
+                args.extend(["--cookies", root_cookies])
+        elif browser_cookies in ("chrome", "edge"):
+            if root_exists:
+                args.extend(["--cookies", root_cookies])
+            else:
+                args.extend(["--cookies-from-browser", browser_cookies])
+        elif manual_exists:
+            args.extend(["--cookies", REUP_MANUAL_COOKIES_PATH])
+        elif root_exists:
+            args.extend(["--cookies", root_cookies])
 
     proxy_url = _get_proxy_url()
     if proxy_url:
@@ -320,6 +559,7 @@ def crawl_video_links(
     limit: int = 12,
     platform_source: str = "auto",
     browser_cookies: str = "",
+    custom_cookies: str = "",
 ) -> List[Dict]:
     """
     Crawl danh sách video từ URL kênh/playlist/video (YouTube, Douyin, Bilibili, TikTok, FB)
@@ -347,14 +587,22 @@ def crawl_video_links(
         "--no-warnings",
         "--ignore-errors",
         "--playlist-end", str(max(1, min(limit, 30))),
-    ] + _build_ytdlp_auth_and_net_args(target, browser_cookies=browser_cookies) + [target]
+    ] + _build_ytdlp_auth_and_net_args(
+        target,
+        browser_cookies=browser_cookies,
+        custom_cookies=custom_cookies,
+        platform_source=platform_source,
+    ) + [target]
 
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45)
         if not res.stdout or not res.stdout.strip():
             err_msg = (res.stderr or "").strip()
-            if "douyin.com" in target.lower():
-                raise RuntimeError("Douyin yêu cầu cookie đăng nhập để crawl/tải. Hãy bật 'Cookie trình duyệt (Chrome/Edge)' hoặc đặt file cookies.txt ở thư mục gốc.")
+            low_err = err_msg.lower()
+            if "douyin.com" in target.lower() or "dpapi" in low_err or "could not find" in low_err or "cookies" in low_err:
+                raise RuntimeError(
+                    "Douyin/trình duyệt chưa lấy được cookie hợp lệ. Hãy dán trực tiếp chuỗi Cookie vào ô 'Nhập Cookie trực tiếp' ngay bên dưới (không cần tìm file cookies.txt)."
+                )
             raise RuntimeError(err_msg or "Không lấy được dữ liệu từ link/từ khóa này.")
         data = json.loads(res.stdout)
     except json.JSONDecodeError as e:
@@ -397,7 +645,12 @@ def crawl_video_links(
     return results
 
 
-def download_video_from_url(url: str, work_dir: str, browser_cookies: str = "") -> str:
+def download_video_from_url(
+    url: str,
+    work_dir: str,
+    browser_cookies: str = "",
+    custom_cookies: str = "",
+) -> str:
     """
     Tải video từ link (YouTube/TikTok/Douyin/Bilibili/FB) về work_dir/source.mp4 qua yt-dlp.
     Ưu tiên codec H.264 (<=1080p) để tải nhanh/tương thích cao, stream tiến độ % lên tracker
@@ -433,7 +686,7 @@ def download_video_from_url(url: str, work_dir: str, browser_cookies: str = "") 
             "--retries", "2",
             "--ffmpeg-location", ffmpeg_exe,
             "-o", out_tpl,
-        ] + _build_ytdlp_auth_and_net_args(clean_url, browser_cookies=browser_cookies) + [clean_url]
+        ] + _build_ytdlp_auth_and_net_args(clean_url, browser_cookies=browser_cookies, custom_cookies=custom_cookies) + [clean_url]
 
         proc = subprocess.Popen(
             cmd,
@@ -1032,6 +1285,7 @@ def run_reup_pipeline(
     output_filename: str = "",
     browser_cookies: str = "",
     bgm_choice: str = "random",
+    custom_cookies: str = "",
 ) -> Dict:
     """Chạy trọn vẹn quy trình Reup 1 video từ URL và đồng bộ tiến trình vào pipeline_tracker."""
     job_slug = f"reup_{int(time.time())}"
@@ -1040,7 +1294,12 @@ def run_reup_pipeline(
     os.makedirs(FINAL_DIR, exist_ok=True)
 
     default_tracker.start_step("script", f"Đang tải video nguồn từ link: {source_url[:60]}...", percent=8)
-    source_video = download_video_from_url(source_url, work_dir, browser_cookies=browser_cookies)
+    source_video = download_video_from_url(
+        source_url,
+        work_dir,
+        browser_cookies=browser_cookies,
+        custom_cookies=custom_cookies,
+    )
     vinfo = probe_video_info(source_video)
     dur_sec = vinfo.get("duration") or 0.0
 

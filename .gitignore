@@ -6,6 +6,8 @@ config/*.db
 !.env.example
 *.pem
 *.key
+cookies.txt
+*.cookies.txt
 *credentials*.json
 *service_account*.json
 
