@@ -1832,23 +1832,34 @@ class TestDataContractV33AndSafeMetricRepair(unittest.TestCase):
             d.update(over)
             return d
 
-        # High views with 0 likes (0 !== null) qualifies in Very Hot / Hot; Emerging qualifies via comments >= 5
-        self.assertTrue(assess_v33_quality(_base(trend_tier="very_hot", views_count=55000, likes_count=0))["quality_qualified"])
-        self.assertTrue(assess_v33_quality(_base(trend_tier="hot", views_count=12000, likes_count=0))["quality_qualified"])
-        q_em_ok = assess_v33_quality(_base(trend_tier="emerging", views_count=1200, likes_count=0, comments_count=6, shares_count=0, reposts_count=0))
-        self.assertTrue(q_em_ok["quality_qualified"])
-        self.assertEqual(q_em_ok["quality_tier_basis"], "emerging")
+        # Hot & Very Hot Only (Policy 3.3-hot-only-20261128):
+        # High views with 0 likes (0 !== null) qualifies in Very Hot / Hot; Emerging / 23v-0l / Watchlist NEVER qualify!
+        q_vh = assess_v33_quality(_base(trend_tier="very_hot", views_count=55000, likes_count=0))
+        self.assertTrue(q_vh["quality_qualified"])
+        self.assertEqual(q_vh["quality_tier_basis"], "very_hot")
+        q_hot = assess_v33_quality(_base(trend_tier="hot", views_count=12000, likes_count=0))
+        self.assertTrue(q_hot["quality_qualified"])
+        self.assertEqual(q_hot["quality_tier_basis"], "hot")
+        q_hot_by_likes = assess_v33_quality(_base(trend_tier="emerging", views_count=900, likes_count=320))
+        self.assertTrue(q_hot_by_likes["quality_qualified"])
+        self.assertEqual(q_hot_by_likes["quality_tier_basis"], "hot")
 
-        # Emerging failing secondary engagement gate becomes watchlist & excluded from quality target
-        q_em_low = assess_v33_quality(_base(trend_tier="emerging", views_count=1500, likes_count=5, comments_count=1, shares_count=0, reposts_count=0))
-        self.assertFalse(q_em_low["quality_qualified"])
-        self.assertTrue(q_em_low["is_watchlist"])
+        # Emerging & 23 views / 0 likes & Watchlist ALL fail Hot-only gate (even if mislabeled as hot/very_hot)
+        q_em_ok = assess_v33_quality(_base(trend_tier="very_hot", views_count=1200, likes_count=0, comments_count=6, shares_count=0, reposts_count=0))
+        self.assertFalse(q_em_ok["quality_qualified"])
+        self.assertEqual(q_em_ok["quality_tier_basis"], "below_hot")
+        self.assertEqual(q_em_ok["quality_exclusion_reason"], "below_hot_threshold")
+        self.assertFalse(q_em_ok["is_watchlist"])
 
-        # Explicit Watchlist NEVER qualifies
+        q_23v = assess_v33_quality(_base(trend_tier="hot", views_count=23, likes_count=0, comments_count=0, shares_count=0, reposts_count=0))
+        self.assertFalse(q_23v["quality_qualified"])
+        self.assertEqual(q_23v["quality_tier_basis"], "below_hot")
+        self.assertEqual(q_23v["quality_exclusion_reason"], "below_hot_threshold")
+
         q_wl = assess_v33_quality(_base(trend_tier="watchlist", views_count=450, likes_count=12))
         self.assertFalse(q_wl["quality_qualified"])
-        self.assertTrue(q_wl["is_watchlist"])
-        self.assertEqual(q_wl["quality_exclusion_reason"], "watchlist_excluded")
+        self.assertFalse(q_wl["is_watchlist"])
+        self.assertEqual(q_wl["quality_exclusion_reason"], "below_hot_threshold")
 
         # Traffic Content qualifies WITHOUT buyer_intent / affiliate
         q_tf = assess_v33_quality(_base(
@@ -2009,31 +2020,91 @@ class TestDataContractV33AndSafeMetricRepair(unittest.TestCase):
         self.store.ingest_raw_file("fid_ms1", "threads_trend_crw_bundle_100_s1.json", json.dumps(s1_payload).encode("utf-8"), modified_time="2026-11-28T06:11:00Z")
         self.store.ingest_raw_file("fid_ms2", "threads_trend_crw_bundle_100_s2.json", json.dumps(s2_payload).encode("utf-8"), modified_time="2026-11-28T07:11:00Z")
 
-        # Individual session runs preserved point-in-time
+        # Individual session runs preserved point-in-time; below-Hot (MS_W1 with 20 likes / 400 views) is audit-only and NOT in market_items!
         runs = self.store.list_crawl_runs(limit=10)
         run_map = {r["run_key"]: r for r in runs}
         self.assertTrue(run_map["crw_bundle_100_s1"]["is_checkpoint"])
         self.assertEqual(run_map["crw_bundle_100_s1"]["quality_qualified_count"], 2)
-        self.assertEqual(run_map["crw_bundle_100_s1"]["watchlist_count"], 1)
+        self.assertEqual(run_map["crw_bundle_100_s1"]["watchlist_count"], 0)
+        self.assertEqual(run_map["crw_bundle_100_s1"]["below_hot_count"], 1)
         self.assertFalse(run_map["crw_bundle_100_s2"]["is_checkpoint"])
         self.assertEqual(run_map["crw_bundle_100_s2"]["quality_qualified_count"], 1)
 
-        # Request bundle deduplicates MS_1 across s1/s2 and yields exact totals
+        # Request bundle deduplicates MS_1 across s1/s2 and yields exact Hot & Very Hot totals
         bundles = self.store.list_request_bundles(limit=10)
         b0 = next(b for b in bundles if b["request_id"] == "crw_bundle_100")
         self.assertEqual(b0["run_key"], "req_bundle:crw_bundle_100")
         self.assertEqual(b0["session_count"], 2)
         self.assertEqual(b0["quality_qualified_count"], 3)
-        self.assertEqual(b0["watchlist_count"], 1)
+        self.assertEqual(b0["watchlist_count"], 0)
         self.assertEqual(b0["traffic_content_count"], 1)
         self.assertTrue(b0["target_achieved"])
 
+        all_bundle_items = self.store.query_items(run_key="req_bundle:crw_bundle_100", limit=50)
+        self.assertEqual({x["post_id"] for x in all_bundle_items["items"]}, {"MS_1", "MS_2", "MS_TF1"})
+        self.assertNotIn("MS_W1", {x["post_id"] for x in all_bundle_items["items"]})
+
         q_only = self.store.query_items(run_key="req_bundle:crw_bundle_100", quality_filter="quality_only", limit=50)
         self.assertEqual({x["post_id"] for x in q_only["items"]}, {"MS_1", "MS_2", "MS_TF1"})
-        w_only = self.store.query_items(run_key="req_bundle:crw_bundle_100", quality_filter="watchlist_only", limit=50)
-        self.assertEqual([x["post_id"] for x in w_only["items"]], ["MS_W1"])
         tf_only = self.store.query_items(run_key="req_bundle:crw_bundle_100", quality_filter="traffic_content", limit=50)
         self.assertEqual([x["post_id"] for x in tf_only["items"]], ["MS_TF1"])
+
+        # Below-Hot post (MS_W1) is stored ONLY in minimal audit diagnostics, NEVER in research corpus
+        diag = self.store.get_run_audit_diagnostics(run_id="crw_bundle_100_s1")
+        self.assertEqual(diag["below_hot_count"], 1)
+        self.assertIn("MS_W1", [x["post_id"] for x in diag["items"]])
+        stats_s1 = self.store.get_stats(run_key="crw_bundle_100_s1", platform="threads")
+        self.assertEqual(stats_s1["technical_diagnostics"]["below_hot_count"], 1)
+        self.assertEqual(stats_s1["technical_diagnostics"]["items"][0]["views"], 450)
+        self.assertEqual(stats_s1["technical_diagnostics"]["items"][0]["likes"], 12)
+
+        # V3.3 strict exclusion check: 23 views / 0 likes post is NOT saved to market_items & legacy V3.2 stays intact
+        legacy_v32 = {
+            "contract_version": "3.2",
+            "run_id": "run_legacy_v32_keep",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T08:00:00Z",
+            "records": [{
+                "post_id": "LEG_EM_V32",
+                "post_url": "https://threads.net/@old/post/LEG_EM_V32",
+                "author_handle": "@old",
+                "views": 2500,
+                "likes": 45,
+                "views_display": "2.5K",
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-27T08:00:00Z",
+                "views_evidence_url": "https://threads.net/@old/post/LEG_EM_V32",
+                "classification": "NEW",
+                "tier": "emerging",
+            }],
+        }
+        v33_low = {
+            "contract_version": "3.3",
+            "quality_policy_version": "3.3-hot-only-20261128",
+            "run_id": "run_v33_23views",
+            "platform": "threads",
+            "crawled_at": "2026-11-28T09:00:00Z",
+            "records": [{
+                "post_id": "V33_23V",
+                "post_url": "https://threads.net/@small/post/V33_23V",
+                "author_handle": "@small",
+                "views": 23,
+                "likes": 0,
+                "views_display": "23",
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-28T09:00:00Z",
+                "views_evidence_url": "https://threads.net/@small/post/V33_23V",
+                "classification": "NEW",
+                "tier": "hot",  # mislabeled by agent
+            }],
+        }
+        self.store.ingest_raw_file("fid_leg32", "threads_legacy_keep.json", json.dumps(legacy_v32).encode("utf-8"), modified_time="2026-11-27T08:00:00Z")
+        self.store.ingest_raw_file("fid_v33_23", "threads_v33_23.json", json.dumps(v33_low).encode("utf-8"), modified_time="2026-11-28T09:00:00Z")
+        self.assertEqual([x["post_id"] for x in self.store.query_items(run_key="run_legacy_v32_keep")["items"]], ["LEG_EM_V32"])
+        self.assertEqual(self.store.query_items(run_key="run_v33_23views")["items"], [])
+        self.assertEqual(self.store.get_run_audit_diagnostics("run_v33_23views")["below_hot_count"], 1)
 
 
 if __name__ == "__main__":

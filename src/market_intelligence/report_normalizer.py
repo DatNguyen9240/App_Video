@@ -299,6 +299,7 @@ def normalize_muse_report(
         "new_qualified_count": counters.get("new_qualified_count"),
         "quality_qualified_count": quality_qualified_count,
         "watchlist_count": watchlist_count,
+        "below_hot_count": counters.get("below_hot_count") if counters.get("below_hot_count") is not None else s1.get("below_hot_count"),
         "traffic_content_count": traffic_content_count,
         "qualified_count": (
             quality_qualified_count

@@ -8,26 +8,26 @@ from typing import Any, Dict, List, Optional, Tuple
 THREADS_CONTRACT_V32 = "3.2"
 THREADS_CONTRACT_V33 = "3.3"
 THREADS_SKILL_NAME = "threads_crawl"
-THREADS_SKILL_VERSION = "1.0"
-THREADS_QUALITY_POLICY_VERSION = "3.3-a-20261128"
+THREADS_SKILL_VERSION = "1.1"
+THREADS_QUALITY_POLICY_VERSION = "3.3-hot-only-20261128"
 THREADS_DEFAULT_LEASE_MINUTES_V33 = 60
-THREADS_LEASE_OPTIONS_MINUTES = (30, 60, 120)
 THREADS_MAX_LEASE_RENEWALS_PER_SESSION = 2
 THREADS_LEASE_RENEW_INCREMENT_MINUTES = 30
 
 THREADS_QUALITY_POLICY_SPEC: Dict[str, Any] = {
     "policy_version": THREADS_QUALITY_POLICY_VERSION,
+    "policy_mode": "hot_and_very_hot_only",
     "target_metric": "quality_qualified_count",
     "legacy_target_metric": "new_qualified_count",
+    "emerging_counted_toward_target": False,
     "watchlist_counted_toward_target": False,
+    "qualified_tiers": ["very_hot", "hot"],
     "traffic_content_requires_buyer_intent_or_affiliate": False,
     "requires_verified_views": True,
     "requires_verified_likes": True,
     "tiers": {
         "very_hot": "views >= 50000 OR likes >= 1000",
         "hot": "views >= 10000 OR likes >= 300",
-        "emerging": "views >= 1000 AND (likes >= 20 OR comments >= 5 OR (shares + reposts) >= 10)",
-        "watchlist": "Verified views + likes below Emerging floor (excluded from V3.3 target)",
     },
 }
 
@@ -69,7 +69,7 @@ THREADS_CRAWL_MODES: List[Dict[str, Any]] = [
         "label": "Theo dõi xu hướng thị trường",
         "enabled": True,
         "requires_contract_update": False,
-        "summary": "Theo dõi xu hướng mới nổi, slang, hành vi tiêu dùng & vòng đời trend sớm",
+        "summary": "Theo dõi xu hướng mới đạt chuẩn Hot / Very Hot, slang & hành vi tiêu dùng",
     },
     {
         "id": "traffic_content",
@@ -266,10 +266,11 @@ def get_crawl_config_payload(helper_compatibility: Optional[Dict[str, Any]] = No
         "skill_version": THREADS_SKILL_VERSION,
         "quality_policy_version": THREADS_QUALITY_POLICY_VERSION,
         "quality_policy": THREADS_QUALITY_POLICY_SPEC,
+        "hot_only": True,
+        "qualified_tiers": ["very_hot", "hot"],
         "default_mode": "balanced",
         "default_lookback_hours": THREADS_DEFAULT_LOOKBACK_HOURS,
-        "default_lease_minutes": THREADS_DEFAULT_LEASE_MINUTES_V33,
-        "lease_options_minutes": list(THREADS_LEASE_OPTIONS_MINUTES),
+        "internal_lease_minutes": THREADS_DEFAULT_LEASE_MINUTES_V33,
         "max_lease_renewals_per_session": THREADS_MAX_LEASE_RENEWALS_PER_SESSION,
         "lease_renew_minutes": THREADS_LEASE_RENEW_INCREMENT_MINUTES,
         "helper_compatibility": helper_compatibility,

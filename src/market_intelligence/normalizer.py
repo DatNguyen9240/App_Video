@@ -1065,31 +1065,16 @@ def assess_v33_quality(
 
     views = int(norm_item.get("views_count") or 0)
     likes_i = int(likes)
-    comments_i = int(norm_item.get("comments_count") or 0)
-    shares_i = int(norm_item.get("shares_count") or 0)
-    reposts_i = int(norm_item.get("reposts_count") or 0)
-
     if views >= 50000 or likes_i >= 1000:
         tier_basis = "very_hot"
     elif views >= 10000 or likes_i >= 300:
         tier_basis = "hot"
-    elif views >= 1000 and (likes_i >= 20 or comments_i >= 5 or (shares_i + reposts_i) >= 10):
-        tier_basis = "emerging"
     else:
         return {
             "quality_qualified": False,
-            "quality_tier_basis": "watchlist",
-            "quality_exclusion_reason": "watchlist_excluded",
-            "is_watchlist": True,
-            "traffic_content": is_traffic,
-        }
-
-    if (norm_item.get("trend_tier") or "").lower() == "watchlist":
-        return {
-            "quality_qualified": False,
-            "quality_tier_basis": "watchlist",
-            "quality_exclusion_reason": "watchlist_excluded",
-            "is_watchlist": True,
+            "quality_tier_basis": "below_hot",
+            "quality_exclusion_reason": "below_hot_threshold",
+            "is_watchlist": False,
             "traffic_content": is_traffic,
         }
 

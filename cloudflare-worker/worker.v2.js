@@ -299,19 +299,20 @@ const THREADS_STRATEGY_VERSION = "3.3 (sửa đổi 28/11/2026)";
 const THREADS_CONTRACT_V32 = "3.2";
 const THREADS_CONTRACT_V33 = "3.3";
 const THREADS_SKILL_NAME = "threads_crawl";
-const THREADS_SKILL_VERSION = "1.0";
-const THREADS_QUALITY_POLICY_VERSION = "3.3-a-20261128";
+const THREADS_SKILL_VERSION = "1.1";
+const THREADS_QUALITY_POLICY_VERSION = "3.3-hot-only-20261128";
 const THREADS_QUALITY_POLICY_SPEC = Object.freeze({
     version: THREADS_QUALITY_POLICY_VERSION,
-    option: "A",
+    policy_mode: "hot_and_very_hot_only",
     target_metric: "quality_qualified_count",
     legacy_counter_preserved: "new_qualified_count",
+    emerging_counted: false,
     watchlist_counted: false,
     watchlist_exception_enabled: false,
+    qualified_tiers: ["very_hot", "hot"],
     thresholds: {
         very_hot: { views_gte: 50000, likes_gte: 1000, logic: "OR" },
         hot: { views_gte: 10000, likes_gte: 300, logic: "OR" },
-        emerging: { views_gte: 1000, likes_gte: 20, comments_gte: 5, shares_plus_reposts_gte: 10, logic: "views_gte AND (any secondary)" },
     },
     required_classification: "NEW",
     required_metrics: ["views", "likes"],
@@ -378,8 +379,8 @@ const THREADS_CRAWL_MODES = {
         label: "Theo dõi xu hướng thị trường",
         enabled: true,
         requires_contract_update: false,
-        summary: "Theo dõi xu hướng mới nổi, slang, hành vi tiêu dùng & vòng đời trend sớm",
-        priority_note: "Ưu tiên tín hiệu mới nổi (Emerging -> Hot), slang mới, hành vi dịch chuyển & format lan rộng.",
+        summary: "Theo dõi xu hướng mới đạt chuẩn Hot / Very Hot, slang & format lan rộng",
+        priority_note: "Ưu tiên tín hiệu mới đạt ngưỡng Hot / Very Hot, slang mới, hành vi dịch chuyển & format lan rộng.",
         discovery_note: "Threads Trends/Explore + chủ đề đã chọn, chú ý độ mới & mật độ creator hưởng ứng.",
         analysis_note: "Định vị vòng đời xu hướng (mới nổi / đang bùng / bão hòa) & hành động đón đầu.",
         discovery_seeds: ["trend mới", "dạo này rộ", "ai cũng nói", "mới nổi", "xu hướng mới"],
@@ -646,10 +647,11 @@ function getPublicCrawlConfig(helperCompatibility = null) {
         skill_version: THREADS_SKILL_VERSION,
         quality_policy_version: THREADS_QUALITY_POLICY_VERSION,
         quality_policy: THREADS_QUALITY_POLICY_SPEC,
+        hot_only: true,
+        qualified_tiers: ["very_hot", "hot"],
         default_mode: "balanced",
         default_lookback_hours: THREADS_DEFAULT_LOOKBACK_HOURS,
-        default_lease_minutes: 60,
-        lease_options_minutes: [30, 60, 120],
+        internal_lease_minutes: 60,
         max_lease_renewals_per_session: MUSE_MAX_LEASE_RENEWALS_PER_SESSION,
         lease_renew_minutes: Math.round(MUSE_LEASE_RENEW_INCREMENT_SECONDS / 60),
         helper_compatibility: helperCompatibility || null,
@@ -731,11 +733,6 @@ function buildMuseManualPrompt(reqRow) {
         const kwLine = keywords || "Mặc định theo chủ đề & mode";
         const cfg = getThreadsStrategyConfig(reqRow, { strict: false });
         const modeObj = cfg._modeObj;
-        const { lease_seconds: leaseSeconds, lease_minutes: leaseMinutes, is_custom_duration: isCustomDuration } = cfg;
-        const reserveMinutes = Math.max(10, Math.ceil(leaseMinutes * 0.2));
-        const claimBodyNote = isCustomDuration
-            ? ` (lease ${leaseMinutes}p/${leaseSeconds}s, "lease_seconds":${leaseSeconds})`
-            : "";
         const topicPrompt = buildThreadsTopicPromptLines(cfg, keywords);
         const topicsCompact = cfg.topics.length >= THREADS_TOPIC_PRESETS.length
             ? `ALL(${cfg.topics.length})`
@@ -745,7 +742,6 @@ function buildMuseManualPrompt(reqRow) {
         const sessionSeq = Math.max(0, Number.parseInt(reqRow?.session_seq, 10) || 0);
         const accQuality = Math.max(0, Number.parseInt(reqRow?.accumulated_quality_count, 10) || 0);
         const accNewQualified = Math.max(0, Number.parseInt(reqRow?.accumulated_new_qualified_count, 10) || 0);
-        const accWatchlist = Math.max(0, Number.parseInt(reqRow?.accumulated_watchlist_count, 10) || 0);
         let checkpointObj = null;
         if (typeof reqRow?.checkpoint_json === "string" && reqRow.checkpoint_json.trim()) {
             try { checkpointObj = JSON.parse(reqRow.checkpoint_json); } catch {}
@@ -756,101 +752,51 @@ function buildMuseManualPrompt(reqRow) {
         const nextSessionSeq = sessionSeq + 1;
         const progressSoFar = contractInfo.isV33 ? accQuality : accNewQualified;
         const remainingTarget = Math.max(0, targetCount - progressSoFar);
+        const ex = cfg.exclusions;
+        const exclSummary = `vn_only=${Boolean(ex.vn_only)}, exclude_celebrity=${Boolean(ex.exclude_celebrity)}, exclude_fandom=${Boolean(ex.exclude_fandom)}, exclude_pure_ads=${Boolean(ex.exclude_pure_ads)}`;
+        const cursorStr = checkpointObj?.cursor
+            ? (typeof checkpointObj.cursor === "string" ? checkpointObj.cursor : JSON.stringify(checkpointObj.cursor))
+            : null;
+        const resumeLines = isResume
+            ? [
+                `Resume & Tiến độ: Session #${nextSessionSeq} | Đã đạt ${progressSoFar}/${targetCount} (còn thiếu ${remainingTarget}) | Dừng trước: ${execPhase || "paused"}${pauseReason ? ` (${pauseReason})` : ""}`,
+                checkpointObj?.note ? `Checkpoint Note: ${checkpointObj.note}` : null,
+                cursorStr ? `Resume Cursor: ${cursorStr}` : null,
+                `Lưu ý resume: Giữ nguyên Request ID ${reqId}, tiếp tục phần còn thiếu, không tạo request mới và không trùng bài đã thu thập.`,
+            ].filter(Boolean)
+            : [];
 
         if (contractInfo.isV33) {
-            const ex = cfg.exclusions;
-            const resumeBlock = isResume
-                ? [
-                    ``,
-                    `[TIẾP TỤC PHIÊN CRAWL • SESSION #${nextSessionSeq}]`,
-                    `- Tiến độ tích lũy hiện tại: ${accQuality}/${targetCount} bài đạt chuẩn V3.3 (còn thiếu ${remainingTarget} bài mới đạt chất lượng; hợp lệ V3.2=${accNewQualified}, Watchlist=${accWatchlist}).`,
-                    `- Trạng thái dừng trước: ${execPhase || "paused"}${pauseReason ? ` (lý do: ${pauseReason})` : ""} | Session trước: #${sessionSeq}.`,
-                    checkpointObj?.note ? `- Ghi chú checkpoint trước: ${checkpointObj.note}` : null,
-                    checkpointObj?.cursor ? `- Resume cursor/trạng thái: ${typeof checkpointObj.cursor === "string" ? checkpointObj.cursor : JSON.stringify(checkpointObj.cursor)}` : null,
-                    `- Bỏ qua toàn bộ bài đã thu thập ở các session trước (server tự lọc theo crawl_request_quality_items & Registry). Không tạo request mới.`,
-                ].filter(Boolean)
-                : [];
-
             return [
-                `${isResume ? "TIẾP TỤC " : ""}Crawl Threads V3.3 (${ex.vn_only ? "VN Only" : "Ưu tiên VN"}) • Request ID: ${reqId}`,
-                `Skill bắt buộc: Nạp ${THREADS_SKILL_NAME} v${cfg.skill_version} (Quality Policy ${cfg.quality_policy_version} • Strategy ${THREADS_STRATEGY_VERSION} • Contract ${contractVersion})`,
-                `Platform: threads | Mode: ${modeObj.id} (${modeObj.label}) | Lookback: ${cfg.lookback_label}`,
-                `Topics: ${topicPrompt.topicHeader} (${topicsCompact}) | Keywords: ${kwLine}`,
-                `Exclusions: vn_only=${Boolean(ex.vn_only)}, exclude_celebrity=${Boolean(ex.exclude_celebrity)}, exclude_fandom=${Boolean(ex.exclude_fandom)}, exclude_pure_ads=${Boolean(ex.exclude_pure_ads)}`,
-                `Target Metric: quality_qualified_count | Requested Target: ${targetCount} bài đạt chất lượng V3.3${isResume ? ` (còn thiếu ${remainingTarget})` : ""}`,
-                `Session Lease: ${leaseMinutes} phút (${leaseSeconds}s) | Dự trữ đóng phiên: max(10p, 20% lease) ≈ ${reserveMinutes}p | Gia hạn: tối đa ${MUSE_MAX_LEASE_RENEWALS_PER_SESSION} lần × ${Math.round(MUSE_LEASE_RENEW_INCREMENT_SECONDS / 60)}p qua /api/crawl/lease/renew khi còn tiến độ thật (KHÔNG giới hạn tổng thời gian toàn request).`,
-                ...resumeBlock,
-                ``,
-                `I. THỰC THI THEO SKILL (${THREADS_SKILL_NAME} v${cfg.skill_version})`,
-                `- Nạp đầy đủ quy trình Discovery, Xác minh Cloud Browser (@toilaai267 + threads-cli), Phân tầng V3.3, Anti-hallucination (0 !== null), Traffic Content & Multi-session từ THREADS_CRAWL_SKILL v${cfg.skill_version}.`,
-                topicPrompt.keywordGuidance,
-                `- Nhắc nhanh chuẩn V3.3 (${cfg.quality_policy_version}): Bắt buộc xác minh cả views + likes; Very Hot (views>=50000 || likes>=1000); Hot (views>=10000 || likes>=300); Emerging (views>=1000 && (likes>=20 || comments>=5 || shares+reposts>=10)); Watchlist KHÔNG tính vào mục tiêu; Traffic Content không cần ép Buyer Intent/Affiliate.`,
-                ``,
-                `II. CUSTOM CONNECTOR & MULTI-SESSION WORKFLOW`,
-                `1. Claim${isResume ? " lại" : ""}: POST /api/crawl/claim {"request_id":"${reqId}","claimed_by":"muse-ai"${isCustomDuration ? `,"lease_seconds":${leaseSeconds}` : ""}}${claimBodyNote} — server cấp session_seq=${nextSessionSeq}. Không fallback sang request khác.`,
-                `2. Dedup trước khi chấm: POST /api/crawl/registry/check với candidate keys.`,
-                `3. Tiến độ định kỳ: POST /api/crawl/progress {"request_id":"${reqId}","session_seq":<session_seq>,"claimed_by":"muse-ai",...}.`,
-                `4. Gia hạn lease (nếu cần & đang có tiến độ mới): POST /api/crawl/lease/renew {"request_id":"${reqId}","session_seq":<session_seq>,"claimed_by":"muse-ai"} (tối đa 2 lần × 30p/phiên).`,
-                `5. Hết ngân sách phiên / CAPTCHA / rate limit mà CHƯA đủ ${targetCount} bài chất lượng:`,
-                `   - Lưu file checkpoint lên Drive với is_checkpoint=true, session_seq, run_status="paused" (KHÔNG đặt là final completed).`,
-                `   - Gọi POST /api/crawl/checkpoint {"request_id":"${reqId}","session_seq":<session_seq>,"claimed_by":"muse-ai","pause_reason":"session_budget_reached|captcha_blocked|rate_limited","items":[...],"checkpoint":{...}} để đồng bộ Registry xong rồi nhả phiên an toàn (KHÔNG gọi /complete khi chỉ hết phiên!).`,
-                `6. Khi đủ quality_qualified_count >= ${targetCount} hoặc nguồn cạn thực sự (source_exhausted / no_qualifying_posts):`,
-                `   - Lưu Data JSON & Report JSON/MD lên Drive với contract_version="3.3", quality_policy_version="${cfg.quality_policy_version}", skill_version="${cfg.skill_version}", run_id, request_id="${reqId}", session_seq, is_checkpoint=false.`,
-                `   - Gọi POST /api/crawl/complete với items & metrics đầy đủ (hoặc POST /api/crawl/fail nếu lỗi nguồn thật sự). Không bật Hook, không Scheduled Task, không SQL trực tiếp.`,
+                `${isResume ? "TIẾP TỤC " : ""}Crawl Threads • Request ID: ${reqId}`,
+                `Skill: Nạp ${THREADS_SKILL_NAME} v${cfg.skill_version} (Policy ${cfg.quality_policy_version} • Hot & Very Hot only)`,
+                `Crawl Mode: ${modeObj.id} (${modeObj.label})`,
+                `Topics: ${topicPrompt.topicHeader} (${topicsCompact})`,
+                `Keywords: ${kwLine}`,
+                `Lookback: ${cfg.lookback_label} (lookback_hours=${cfg.lookback_hours})`,
+                `Exclusions: ${exclSummary}`,
+                `Requested Quality Count: ${targetCount} bài mới Hot/Very Hot (metric: quality_qualified_count)${isResume ? ` | Còn thiếu: ${remainingTarget}` : ""}`,
+                ...resumeLines,
+                `Contract & API Spec (${contractVersion}):`,
+                `- Claim: POST /api/crawl/claim {"request_id":"${reqId}","claimed_by":"muse-ai"} (lease nội bộ; gia hạn qua POST /api/crawl/lease/renew khi còn tiến độ thật).`,
+                `- Thực thi: POST /api/crawl/registry/check | POST /api/crawl/progress | Checkpoint (is_checkpoint=true, chưa đủ hoặc gặp CAPTCHA/rate_limit): POST /api/crawl/checkpoint | Hoàn tất cuối (is_checkpoint=false): POST /api/crawl/complete.`,
+                `- Không bật Hook, Scheduled Task hoặc AI polling; không lưu bài dưới Hot vào kho nghiên cứu.`,
             ].join("\n");
         }
 
-        const timeRuleLine = cfg.lookback_hours === 168
-            ? "Mở rộng tối đa 7 ngày (168h; ưu tiên 24 giờ gần nhất -> 48 giờ trước)."
-            : (cfg.lookback_hours === 72
-                ? "Mở rộng tối đa 72h (ưu tiên 24 giờ gần nhất -> 48 giờ -> 72h)."
-                : (cfg.lookback_hours === 48
-                    ? "Phạm vi 48h (ưu tiên 24 giờ gần nhất -> tối đa 48 giờ)."
-                    : "Ưu tiên 24 giờ gần nhất (tối đa 48 giờ nếu thiếu bài)."));
-
-        const ex = cfg.exclusions;
-        const filterParts = [
-            ex.exclude_celebrity
-                ? "Hạn chế người nổi tiếng, ca sĩ, thương hiệu lớn (không loại user thường chỉ nhắc tên)"
-                : "Linh hoạt người nổi tiếng",
-            ex.exclude_fandom ? "hạn chế fandom" : "mở fandom",
-            ex.exclude_pure_ads ? "hạn chế quảng cáo đơn thuần (Không loại cứng người bán hoặc thương hiệu nhỏ)" : "không loại cứng người bán hoặc thương hiệu nhỏ",
-        ];
-        const marketLine = ex.vn_only ? "chỉ thu thập thị trường Việt Nam" : "ưu tiên Việt Nam";
-
         return [
-            `Crawl Threads (${marketLine}) • Request ID: ${reqId}`,
-            `Platform: threads | Mode: ${modeObj.id} (${modeObj.label}) | Lookback: ${cfg.lookback_label}`,
-            `Topics: ${topicPrompt.topicHeader} | Keywords: ${kwLine}`,
-            `Requested Count: ${targetCount} bài mới đạt chuẩn | Strategy Version: ${THREADS_STRATEGY_VERSION} | Contract Version: ${contractVersion}`,
-            `Thời lượng lease: ${leaseMinutes} phút (${leaseSeconds}s; dự trữ max(10 phút, 20% lease) ≈ ${reserveMinutes}p)`,
-            ``,
-            `I. CLAIM`,
-            `- Kiểm tra @toilaai267, Cloud Browser, threads-cli, Custom Connector; hết hạn -> đăng nhập lại trước khi claim.`,
-            `- POST /api/crawl/claim {"request_id":"${reqId}"}${claimBodyNote}. Không fallback sang request khác.`,
-            ``,
-            `II. CHIẾN LƯỢC (${modeObj.label.toUpperCase()})`,
-            `- Crawl Strategy 3.3 (workspace & Drive). ${timeRuleLine}`,
-            `- Ưu tiên: ${modeObj.priority_note}`,
-            `- Discovery: ${modeObj.discovery_note} Mở rộng tìm kiếm ngoài trends chính thức.`,
-            topicPrompt.keywordGuidance,
-            `- Lọc: Ưu tiên viral tự nhiên từ người dùng bình thường, creator nhỏ. ${filterParts.join("; ")}.`,
-            `- Chống trùng POST /api/crawl/registry/check; mở rộng nguồn tìm kiếm nếu chưa đạt mục tiêu, không hạ chuẩn.`,
-            ``,
-            `III. XÁC MINH & PHÂN TẦNG`,
-            `- Cloud Browser @toilaai267 + threads-cli: Bắt buộc xác minh cả views và likes; không bỏ qua bước đo views chỉ vì likes thấp.`,
-            `- 5 trường chứng cứ views theo V3.2 (views_display, views_precision, views_source="threads_web_browser", views_measured_at, views_evidence_url).`,
-            `- Phân biệt rõ số 0 với null; loại thiếu views/likes; không đặt sàn views hoặc likes cho Watchlist. Không dừng giữa chừng nếu còn ứng viên phù hợp.`,
-            `- Very Hot: ≥ 1.000 likes hoặc ≥ 50.000 views. Hot: ≥ 300 likes hoặc ≥ 10.000 views. Emerging: V3.2. Watchlist: đủ views+likes. Unverified: thiếu XM. Rejected: loại.`,
-            `- Bổ sung: Followers của tác giả (followers), Views/followers, Natural Viral (natural_viral), Buyer Intent (buyer_intent), nguyên nhân viral và khả năng ứng dụng Affiliate. ${modeObj.analysis_note}`,
-            `- Đo lại bài lịch sử có tiềm năng tăng trưởng (Growth Tracking), không tính vào số bài mới. Không thu thập toàn bài Watchlist chỉ để đạt mục tiêu.`,
-            ``,
-            `IV. TIẾN ĐỘ, DRIVE & HOÀN TẤT`,
-            `- POST /api/crawl/progress (request_id="${reqId}", claimed_by="muse-ai", attempt, run_id, counters). Tuân thủ ngân sách lease. Không tự gia hạn.`,
-            `- Lưu run_id (Run-centric UI): AI_WORKSPACE/01_Market_Data/Threads/threads_trend_<YYYYMMDD>_<HHmm>.json, Reports/trend_report_<YYYYMMDD>_<HHmm>.json, Reports/trend_report_<YYYYMMDD>_<HHmm>.md.`,
-            `- Metadata: request_id="${reqId}", run_id, attempt, claimed_by="muse-ai", platform="threads", contract_version="3.2", strategy_version="${THREADS_STRATEGY_VERSION}", crawl_mode="${modeObj.id}", topics=${topicsCompact}, lookback_hours=${cfg.lookback_hours}, snapshot tương tác tại thời điểm crawl.`,
-            `- Báo cáo riêng: Very Hot, Hot, Emerging, Watchlist, Natural Viral, Buyer Intent, Growth Tracking (9_growth_tracking), trùng, chưa XM, loại.`,
-            `- POST /api/crawl/complete (items: [] nếu no_qualifying_posts V3.2) hoặc POST /api/crawl/fail. Không bật Hook, không tạo Scheduled Task, không ghi SQL trực tiếp. Báo cáo đồng bộ Registry và trạng thái Telegram Notification.`,
+            `${isResume ? "TIẾP TỤC " : ""}Crawl Threads • Request ID: ${reqId}`,
+            `Skill: Nạp ${THREADS_SKILL_NAME} v${THREADS_SKILL_VERSION} (chỉ thu thập Hot >= 10K views/300 likes & Very Hot >= 50K views/1K likes)`,
+            `Crawl Mode: ${modeObj.id} (${modeObj.label})`,
+            `Topics: ${topicPrompt.topicHeader} (${topicsCompact})`,
+            `Keywords: ${kwLine}`,
+            `Lookback: ${cfg.lookback_label} (lookback_hours=${cfg.lookback_hours})`,
+            `Exclusions: ${exclSummary}`,
+            `Requested Quality Count: ${targetCount} bài mới đạt chuẩn (Hot & Very Hot only; không thu thập dưới Hot)`,
+            ...resumeLines,
+            `Contract & API Spec (${contractVersion}):`,
+            `- Claim: POST /api/crawl/claim {"request_id":"${reqId}","claimed_by":"muse-ai"} | Dedup: POST /api/crawl/registry/check | Progress: POST /api/crawl/progress | Hoàn tất: POST /api/crawl/complete (hoặc /api/crawl/fail).`,
+            `- Lưu AI_WORKSPACE/01_Market_Data/Threads/threads_trend_<YYYYMMDD>_<HHmm>.json & Reports/trend_report_<YYYYMMDD>_<HHmm>.json với request_id="${reqId}", run_id, contract_version="3.2", strategy_version="${THREADS_STRATEGY_VERSION}", crawl_mode="${modeObj.id}", topics=${topicsCompact}, lookback_hours=${cfg.lookback_hours}. Không bật Hook/Scheduled Task/AI polling.`,
         ].join("\n");
     }
 
@@ -1830,11 +1776,8 @@ function isTrafficContentItem(rawItem) {
 
 function classifyQuantitativeV33Tier(metrics) {
     const m = metrics || {};
-    const views = Number(m.views);
-    const likes = Number(m.likes);
-    const comments = Number(m.comments ?? 0);
-    const shares = Number(m.shares ?? 0);
-    const reposts = Number(m.reposts ?? 0);
+    const views = (m.views === null || m.views === undefined || m.views === "") ? NaN : Number(m.views);
+    const likes = (m.likes === null || m.likes === undefined || m.likes === "") ? NaN : Number(m.likes);
     if (!Number.isFinite(views) || views < 0 || !Number.isFinite(likes) || likes < 0) {
         return { tier: "unverified", qualified: false, reason: "unverified_views_or_likes" };
     }
@@ -1844,10 +1787,7 @@ function classifyQuantitativeV33Tier(metrics) {
     if (views >= 10000 || likes >= 300) {
         return { tier: "hot", qualified: true, reason: null };
     }
-    if (views >= 1000 && (likes >= 20 || comments >= 5 || (shares + reposts) >= 10)) {
-        return { tier: "emerging", qualified: true, reason: null };
-    }
-    return { tier: "watchlist", qualified: false, reason: "below_emerging_threshold" };
+    return { tier: "below_hot", qualified: false, reason: "below_hot_threshold" };
 }
 
 function assessV33QualityInWorker(rawItem, meta, reqContext = null) {
@@ -2029,20 +1969,9 @@ function assessV33QualityInWorker(rawItem, meta, reqContext = null) {
     if (!quant.qualified) {
         return {
             quality_qualified: false,
-            quality_tier_basis: "watchlist",
-            quality_exclusion_reason: "watchlist_excluded",
-            is_watchlist: true,
-            is_traffic_content: isTraffic,
-            traffic_content: isTraffic,
-            reported_tier: reportedTier,
-        };
-    }
-    if (reportedTier === "watchlist") {
-        return {
-            quality_qualified: false,
-            quality_tier_basis: "watchlist",
-            quality_exclusion_reason: "watchlist_excluded",
-            is_watchlist: true,
+            quality_tier_basis: quant.tier || "below_hot",
+            quality_exclusion_reason: quant.reason || "below_hot_threshold",
+            is_watchlist: false,
             is_traffic_content: isTraffic,
             traffic_content: isTraffic,
             reported_tier: reportedTier,
@@ -3655,13 +3584,11 @@ function formatStructuredReportSummary(d, fileName, isCorr, metaInput = null, op
     // 2. 🔥 Trend thị trường
     const marketBullets = [];
     if (effStatus === "completed" || effStatus === "partial" || effStatus === "no_qualifying_posts" || !meta.rawRunStatus) {
-        if (meta.isV3 && (meta.tiers.very_hot || meta.tiers.hot || meta.tiers.emerging || meta.tiers.watchlist)) {
-            pushUniqueBullet(
-                marketBullets,
-                `📊 Phân tầng: Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist}`,
-                seen,
-                160
-            );
+        if (meta.isV3 && (meta.tiers.very_hot || meta.tiers.hot || (!meta.isV33 && (meta.tiers.emerging || meta.tiers.watchlist)))) {
+            const tierStr = (!meta.isV33 && (meta.tiers.emerging || meta.tiers.watchlist))
+                ? `Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist}`
+                : `Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot}`;
+            pushUniqueBullet(marketBullets, `📊 Phân tầng: ${tierStr}`, seen, 160);
         }
         for (const seg of parsedSummary.market) {
             pushUniqueBullet(marketBullets, seg, seen, 220);
@@ -6739,10 +6666,18 @@ async function buildAnalysisReportBundle(env) {
         summaryText = formatStructuredReportSummary(museData, reportFileName, isCorr, meta, { appStatusTag });
 
         if (meta.isV3) {
+            const isV33Report = Boolean(meta.isV33 || String(museData.contract_version || "").startsWith("3.3"));
+            const verLabel = isV33Report ? "V3.3 (Hot & Very Hot)" : (meta.isV32 ? "V3.2" : "V3.1");
+            const tierLine = isV33Report
+                ? `• Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Chưa XM ${meta.unverified}`
+                : `• Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`;
+            const qualLabel = isV33Report
+                ? `Đạt chuẩn V3.3 ${meta.qualityQualifiedCount ?? meta.newQualifiedCount ?? meta.qualified ?? "N/A"} | Dưới Hot/Loại ${meta.rejected ?? "N/A"}`
+                : `Mới đạt chuẩn ${meta.newQualifiedCount ?? meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}`;
             const detailParts = [
-                `📄 BÁO CÁO CHI TIẾT ${meta.isV32 ? "V3.2" : "V3.1"}: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`,
+                `📄 BÁO CÁO CHI TIẾT ${verLabel}: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`,
                 `📊 Chất lượng crawl\n• File: ${reportFileName}\n• run_status: ${meta.rawRunStatus || "—"} | technical_status: ${meta.rawTechStatus || "—"} | data_quality_status: ${meta.rawDqStatus || "—"}${meta.stopReason ? `\n• stop_reason: ${meta.stopReason} | target_achieved: ${meta.targetAchieved}` : ""}`,
-                `📊 Sàng lọc & Phân tầng\n• Quét ${meta.scanned ?? "N/A"} | Duy nhất ${meta.uniqueCandidates ?? "N/A"} | Mới đạt chuẩn ${meta.newQualifiedCount ?? meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}${meta.crossVerified !== null ? ` | Web: ${meta.crossVerified}` : ""}\n• Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`
+                `📊 Sàng lọc & Phân tầng\n• Quét ${meta.scanned ?? "N/A"} | Duy nhất ${meta.uniqueCandidates ?? "N/A"} | ${qualLabel}${meta.crossVerified !== null ? ` | Web: ${meta.crossVerified}` : ""}\n${tierLine}`
             ];
             if (meta.trends.length) {
                 detailParts.push(
@@ -7052,7 +6987,7 @@ async function buildCrawlCenterMenu(env) {
 
     const text =
         "🕷️ CRAWL DỮ LIỆU — MANUAL PROMPT TRIGGER\n━━━━━━━━━━━━━━━━━━━━\n" +
-        `• Threads Contract hiện hành: ${compat.v33_ready ? "V3.3 (Skill threads_crawl v1.0 • Multi-session)" : "V3.2 (Kiểm tra Muse Helper để bật V3.3)"}.\n` +
+        `• Threads Contract hiện hành: ${compat.v33_ready ? "V3.3 (Skill threads_crawl v1.1 • Hot & Very Hot • Multi-session)" : "V3.2 (Kiểm tra Muse Helper để bật V3.3)"}.\n` +
         "• Chọn nền tảng để tạo request D1 và nhận Prompt copy gửi sang Muse (desktop không cần bật).\n" +
         "• Yêu cầu giữ trạng thái CHỜ GỬI PROMPT / TẠM DỪNG cho đến khi Muse claim đúng Request ID.\n\n" +
         (summaryLines.length ? `Gần đây:\n${summaryLines.join("\n")}` : "Chưa có yêu cầu nào.");
@@ -7075,7 +7010,7 @@ function buildTelegramPromptResponse(env, reqRow, { deduplicated = false } = {})
     const reqCount = Number(reqRow?.requested_count || 50);
     const sessNum = Number(reqRow?.session_seq || 0);
     const stratPart = plat === "threads"
-        ? ` | Str:<code>3.3</code> | Mode:<code>${escapeTelegramHtml(cfg.crawl_mode)}</code> | ${escapeTelegramHtml(cfg.lookback_hours + "h")} | Chủ đề:<b>${escapeTelegramHtml(topicSummary)}</b> | Lease:<b>${leaseInfo.leaseMinutes}p</b>`
+        ? ` | Str:<code>3.3</code> | Mode:<code>${escapeTelegramHtml(cfg.crawl_mode)}</code> | ${escapeTelegramHtml(cfg.lookback_hours + "h")} | Chủ đề:<b>${escapeTelegramHtml(topicSummary)}</b>`
         : "";
     const progressPart = isResume ? ` | Tiến độ:<b>${accQual}/${reqCount}</b> (S${sessNum + 1})` : "";
     const titleHeader = isResume
@@ -7121,14 +7056,14 @@ function buildTelegramCrawlConfigView(reqRow) {
         ? (cfg.topics.length >= THREADS_TOPIC_PRESETS.length ? `Tất cả ${cfg.topics.length} chủ đề` : cfg.topic_labels.join(", "))
         : "Chưa giới hạn chủ đề (theo mode)";
     const text =
-        `🎯 TÙY CHỈNH CHIẾN LƯỢC THREADS (Strategy 3.3)\n━━━━━━━━━━━━━━━━━━━━\n` +
+        `🎯 TÙY CHỈNH CHIẾN LƯỢC THREADS (Strategy 3.3 • Hot & Very Hot)\n━━━━━━━━━━━━━━━━━━━━\n` +
         `• Request ID: ${reqId}\n` +
         `• Mode hiện tại: ${cfg.crawl_mode_label} (${cfg.crawl_mode})\n` +
         `• Chủ đề: ${topicLabel}\n` +
         `• Thời gian bài: ${cfg.lookback_label}\n` +
-        `• Lease: ${cfg.lease_minutes} phút\n\n` +
+        `• Chính sách: Hot & Very Hot Only (V3.3 • Skill v${THREADS_SKILL_VERSION})\n\n` +
         `Chọn nhanh Mode hoặc nhóm Chủ đề bên dưới để cập nhật request đang chờ (chỉ áp dụng khi status=queued):\n` +
-        `ℹ️ growth_tracking chưa bật vì chờ nâng cấp Data Contract V3.2 & danh sách mục tiêu D1.`;
+        `ℹ️ Chạy đa phiên đến khi đạt mục tiêu bài Hot/Very Hot mới. growth_tracking chưa bật vì đang chờ nâng cấp danh sách mục tiêu D1.`;
     const modeMark = (id) => (cfg.crawl_mode === id ? "✓ " : "");
     const kb = {
         inline_keyboard: [

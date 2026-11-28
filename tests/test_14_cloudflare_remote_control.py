@@ -1610,15 +1610,22 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
             "Đang đồng bộ",
             "Hoàn tất",
             "platform: 'threads'",
-            "lease_minutes: 30",
+            "Hot &amp; Very Hot Only",
             "Crawl Strategy 3.3",
-            "60 phút",
-            "120 phút",
+            "24h (tối đa 48h)",
             "getMarketSyncSignature",
             "getCrawlDisplayState",
             "Hook đã tắt — chế độ Manual Prompt Trigger",
         ]:
             self.assertIn(token, html)
+        for removed in (
+            "crawlRequestForm.lease_minutes",
+            "⏱️ 30 phút",
+            "⏱️ 60 phút",
+            "⏱️ 120 phút",
+            "Watchlist (loại khỏi target)",
+        ):
+            self.assertNotIn(removed, html)
 
         create_resp = flask_client.post(
             "/api/remote/crawl_requests",
@@ -1695,10 +1702,12 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         self.assertEqual(res_res.status_code, 200)
         self.assertIn(req_id, res_res.get_json()["resume_prompt"])
 
-        # HTML includes new V3.3 UI hooks & quality filter pills (and wraps Crawl Center controls without overflow)
+        # HTML includes new V3.3 Hot & Very Hot UI hooks & quality filter pills (and wraps Crawl Center controls without overflow)
         html = flask_client.get("/").get_data(as_text=True)
-        for token in ["Xác nhận Helper V3.3", "Chất lượng V3.3", "quality_only", "watchlist_only", "traffic_content"]:
+        for token in ["Xác nhận Helper V3.3", "quality_only", "traffic_content", "Chẩn đoán kỹ thuật", "technical_diagnostics", "🔥 Very Hot", "⚡ Hot"]:
             self.assertIn(token, html)
+        for absent_tok in ["watchlist_only", "🌱 Emerging (", "👀 Watchlist ("]:
+            self.assertNotIn(absent_tok, html)
         self.assertNotIn("flex flex-wrap xl:flex-nowrap items-center gap-2", html)
 
         # runs_catalog exposes bundles alongside individual runs
@@ -1944,7 +1953,7 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         self.assertEqual(good_cmp["summary"]["total_likes_delta"], 510)
         self.assertEqual(good_cmp["summary"]["total_views_delta"], 21000)
 
-        # Rendered HTML contains Run-centric controls, 7 Run Tabs & Crawl Center wide button
+        # Rendered HTML contains Run-centric controls, 5 research Run Tabs + collapsible Chẩn đoán kỹ thuật, and NO duration/watchlist filters
         html = flask_client.get("/").get_data(as_text=True)
         for marker in (
             "Theo lượt crawl",
@@ -1953,16 +1962,23 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
             "Tổng quan lượt crawl",
             "Bài mới đạt chuẩn",
             "Bài cập nhật tương tác",
-            "Bài trùng lịch sử",
-            "Bài chưa xác minh",
-            "Bài bị loại",
+            "🔁 Bài trùng lịch sử",
             "Báo cáo phân tích",
+            "Chẩn đoán kỹ thuật",
             "formatRatioMetric",
             "activePlatformActivity",
             "userPinnedRunKey",
             "Tạo & Copy Prompt",
         ):
             self.assertIn(marker, html)
+        for absent in (
+            "❓ Bài chưa xác minh",
+            "🚫 Bài bị loại",
+            "watchlist_only",
+            "crawlRequestForm.lease_minutes",
+            "30/60/120 phút",
+        ):
+            self.assertNotIn(absent, html)
 
     def test_run_centric_v33_special_filter_and_growth_tracking_api(self):
         app_ui.reset_market_runtime_for_tests(data_dir=self.tmp_dir.name, client=self.client)

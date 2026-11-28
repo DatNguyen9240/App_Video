@@ -379,6 +379,7 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("raw_drive_files", "watchlist_count", "INTEGER")
         self._add_column_if_missing("raw_drive_files", "traffic_content_count", "INTEGER")
         self._add_column_if_missing("raw_drive_files", "quality_policy_version", "TEXT")
+        self._add_column_if_missing("raw_drive_files", "below_hot_count", "INTEGER")
 
         self._conn.execute(
             """
@@ -418,6 +419,30 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("market_item_snapshots", "source_priority", "INTEGER DEFAULT 1")
         self._add_column_if_missing("market_item_snapshots", "is_corrected", "INTEGER DEFAULT 0")
 
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_crawl_audit_items (
+                id TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                run_id TEXT,
+                request_id TEXT,
+                dedup_key TEXT,
+                platform TEXT,
+                post_id TEXT,
+                canonical_url TEXT,
+                classification TEXT,
+                trend_tier TEXT,
+                quality_exclusion_reason TEXT,
+                views_count INTEGER,
+                likes_count INTEGER,
+                comments_count INTEGER,
+                is_v33 INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                UNIQUE(file_id, dedup_key)
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_items_run ON market_crawl_audit_items(run_id, file_id);")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_run_id ON market_item_snapshots(run_id, platform);")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_raw_file ON market_item_snapshots(raw_file_id, platform);")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_files_run_id ON raw_drive_files(run_id);")
@@ -754,6 +779,113 @@ class MarketIntelligenceStore:
             )
             self._conn.commit()
 
+    def _record_audit_item_v33(
+        self,
+        *,
+        file_id: str,
+        run_id: Optional[str],
+        request_id: Optional[str],
+        item: Dict[str, Any],
+        q_item: Dict[str, Any],
+        now_iso: str,
+    ) -> None:
+        """Persist minimal audit/dedup metadata only for V3.3 below-Hot/unverified/rejected items (never into market_items)."""
+        audit_id = str(uuid.uuid4())
+        self._conn.execute(
+            """
+            INSERT INTO market_crawl_audit_items (
+                id, file_id, run_id, request_id, dedup_key, platform, post_id, canonical_url,
+                classification, trend_tier, quality_exclusion_reason, views_count, likes_count, comments_count,
+                is_v33, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(file_id, dedup_key) DO UPDATE SET
+                run_id = COALESCE(excluded.run_id, market_crawl_audit_items.run_id),
+                classification = excluded.classification,
+                trend_tier = excluded.trend_tier,
+                quality_exclusion_reason = excluded.quality_exclusion_reason,
+                views_count = excluded.views_count,
+                likes_count = excluded.likes_count,
+                comments_count = excluded.comments_count
+            """,
+            (
+                audit_id,
+                file_id,
+                run_id,
+                request_id,
+                item.get("dedup_key"),
+                item.get("platform"),
+                item.get("post_id"),
+                item.get("canonical_url") or item.get("url"),
+                str(item.get("classification") or "").upper() or None,
+                q_item.get("quality_tier_basis") or item.get("trend_tier"),
+                q_item.get("quality_exclusion_reason"),
+                item.get("views_count"),
+                item.get("likes_count"),
+                item.get("comments_count"),
+                now_iso,
+            ),
+        )
+
+    def get_run_audit_diagnostics(
+        self,
+        raw_file_ids: Optional[Any] = None,
+        run_id: Optional[str] = None,
+        run_ids: Optional[List[str]] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Return minimal technical audit diagnostics (below-Hot, unverified, rejected) for a run or bundle."""
+        single_key = str(raw_file_ids).strip() if isinstance(raw_file_ids, str) else ""
+        fids = [] if isinstance(raw_file_ids, str) else [str(f).strip() for f in (raw_file_ids or []) if str(f or "").strip()]
+        rids = [str(r).strip() for r in (run_ids or ([run_id] if run_id else [])) if str(r or "").strip()]
+        clauses: List[str] = []
+        params: List[Any] = []
+        if single_key and not rids:
+            clauses.append("(file_id = ? OR run_id = ?)")
+            params.extend([single_key, single_key])
+        elif fids:
+            clauses.append(f"file_id IN ({','.join('?' for _ in fids)})")
+            params.extend(fids)
+        elif rids:
+            clauses.append(f"run_id IN ({','.join('?' for _ in rids)})")
+            params.extend(rids)
+        else:
+            return {"total": 0, "below_hot_count": 0, "unverified_count": 0, "rejected_count": 0, "items": []}
+
+        where_sql = f"WHERE {' AND '.join(clauses)}"
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT file_id, run_id, dedup_key, platform, post_id, canonical_url, canonical_url AS url,
+                       classification, trend_tier, quality_exclusion_reason,
+                       views_count, views_count AS views,
+                       likes_count, likes_count AS likes,
+                       comments_count, created_at
+                FROM market_crawl_audit_items
+                {where_sql}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (*params, max(1, min(int(limit), 200))),
+            ).fetchall()
+            cnt_row = self._conn.execute(
+                f"""
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN COALESCE(classification, '') = 'REJECTED' THEN 1 ELSE 0 END) AS rejected_cnt,
+                       SUM(CASE WHEN COALESCE(classification, '') != 'REJECTED' AND (classification = 'UNVERIFIED' OR trend_tier = 'unverified') THEN 1 ELSE 0 END) AS unverified_cnt,
+                       SUM(CASE WHEN COALESCE(classification, '') NOT IN ('REJECTED', 'UNVERIFIED') AND COALESCE(trend_tier, '') != 'unverified' THEN 1 ELSE 0 END) AS below_hot_cnt
+                FROM market_crawl_audit_items
+                {where_sql}
+                """,
+                tuple(params),
+            ).fetchone()
+        return {
+            "total": int((cnt_row["total"] or 0) if cnt_row else 0),
+            "below_hot_count": int((cnt_row["below_hot_cnt"] or 0) if cnt_row else 0),
+            "unverified_count": int((cnt_row["unverified_cnt"] or 0) if cnt_row else 0),
+            "rejected_count": int((cnt_row["rejected_cnt"] or 0) if cnt_row else 0),
+            "items": [dict(r) for r in rows],
+        }
+
     def ingest_raw_file(
         self,
         file_id: str,
@@ -960,6 +1092,13 @@ class MarketIntelligenceStore:
             )
         )
 
+        raw_is_v33 = bool(
+            str(self._clean_run_str(envelope.get("contract_version")) or "").startswith("3.3")
+            or str(raw_quality_policy_version or "").startswith("3.3")
+        )
+        below_hot_count = 0
+        unverified_audit_count = 0
+        rejected_audit_count = 0
         inserted = 0
         updated = 0
         deduped = 0
@@ -1143,6 +1282,38 @@ class MarketIntelligenceStore:
                     )
                     snap_at = measured_at or ""
                     effective_run_id = item.get("run_id") or envelope.get("run_id")
+
+                    if raw_is_v33:
+                        q_v33 = assess_v33_quality(item, envelope=envelope)
+                        cls_v33 = str(item.get("classification") or "").upper()
+                        existing_tier = str(existing["trend_tier"] or "").lower() if existing else ""
+                        allow_research_corpus = (
+                            (cls_v33 in ("", "NEW") and q_v33["quality_qualified"])
+                            or (
+                                existing is not None
+                                and cls_v33 in ("UPDATED_METRICS", "DUPLICATE_HISTORY")
+                                and (q_v33.get("quality_tier_basis") in ("very_hot", "hot") or existing_tier in ("very_hot", "hot"))
+                            )
+                        )
+                        if not allow_research_corpus:
+                            self._record_audit_item_v33(
+                                file_id=file_id,
+                                run_id=effective_run_id,
+                                request_id=envelope.get("request_id"),
+                                item=item,
+                                q_item=q_v33,
+                                now_iso=now_iso,
+                            )
+                            if cls_v33 == "REJECTED":
+                                rejected_audit_count += 1
+                            elif q_v33.get("quality_tier_basis") == "unverified" or cls_v33 == "UNVERIFIED":
+                                unverified_audit_count += 1
+                            else:
+                                below_hot_count += 1
+                            deduped += 1
+                            continue
+                        if q_v33["quality_qualified"]:
+                            item["trend_tier"] = q_v33["quality_tier_basis"]
 
                     if not existing:
                         item_uuid = str(uuid.uuid4())
@@ -1772,7 +1943,7 @@ class MarketIntelligenceStore:
                     SET new_count = ?, new_qualified_count = ?, duplicate_count = ?, updated_count = ?,
                         missing_views_count = ?, scanned_count = ?, rejected_count = ?,
                         unique_candidate_count = ?, unverified_count = ?, stop_reason = ?, target_achieved = ?,
-                        quality_qualified_count = ?, watchlist_count = ?, traffic_content_count = ?
+                        quality_qualified_count = ?, watchlist_count = ?, traffic_content_count = ?, below_hot_count = ?
                     WHERE file_id = ?
                     """,
                     (
@@ -1782,14 +1953,15 @@ class MarketIntelligenceStore:
                         v32_c.get("updated_metrics_count") if v32_c.get("updated_metrics_count") is not None else engagement_updated_count,
                         v32_c.get("missing_views_count") if v32_c.get("missing_views_count") is not None else missing_views_count,
                         scanned_count,
-                        rejected_count,
+                        rejected_count or rejected_audit_count,
                         v32_c.get("unique_candidate_count"),
-                        v32_c.get("unverified_count"),
+                        v32_c.get("unverified_count") if v32_c.get("unverified_count") is not None else (unverified_audit_count if raw_is_v33 else None),
                         v32_c.get("stop_reason"),
                         (1 if v32_c.get("target_achieved") else 0) if v32_c.get("target_achieved") is not None else None,
                         v32_c.get("quality_qualified_count") if v32_c.get("quality_qualified_count") is not None else quality_qualified_count,
                         v32_c.get("watchlist_count") if v32_c.get("watchlist_count") is not None else watchlist_count,
                         v32_c.get("traffic_content_count") if v32_c.get("traffic_content_count") is not None else traffic_content_count,
+                        below_hot_count,
                         file_id,
                     ),
                 )
@@ -1820,11 +1992,12 @@ class MarketIntelligenceStore:
             "quality_qualified_count": quality_qualified_count,
             "watchlist_count": watchlist_count,
             "traffic_content_count": traffic_content_count,
+            "below_hot_count": below_hot_count,
             "duplicate_count": duplicate_count,
             "engagement_updated_count": engagement_updated_count,
             "missing_views_count": missing_views_count,
             "scanned_count": scanned_count,
-            "rejected_count": rejected_count,
+            "rejected_count": rejected_count or rejected_audit_count,
             "v32_counters": v32_c,
             "registry_items": batch_registry_items,
         }
@@ -2691,6 +2864,12 @@ class MarketIntelligenceStore:
                     }
 
             scoped_act = dict(by_platform_activity.get(plat_scope) or _init_act())
+            audit_diag = self.get_run_audit_diagnostics(
+                raw_file_ids=[str(f["file_id"]) for f in grp["data_files"]],
+                run_id=grp["run_id"],
+                run_ids=grp.get("run_ids"),
+                limit=50,
+            )
             return {
                 "total_items": total_items,
                 "total_snapshots": len(all_snaps),
@@ -2721,6 +2900,7 @@ class MarketIntelligenceStore:
                 "run_key": grp["run_key"],
                 "run_id": grp["run_id"],
                 "run_summary": run_summary,
+                "technical_diagnostics": audit_diag,
             }
 
         with self._lock:
@@ -4184,6 +4364,16 @@ class MarketIntelligenceStore:
 
         # If snapshots weren't in sync with raw counters (e.g., empty partial upload), fall back to counters safely
         is_bundle = bool(grp.get("is_request_bundle"))
+        audit_diag_grp = self.get_run_audit_diagnostics(
+            raw_file_ids=raw_fids,
+            run_id=grp["run_id"],
+            run_ids=grp.get("run_ids"),
+            limit=50,
+        )
+        below_hot_sum_files = sum(int(f.get("below_hot_count") or 0) for f in matching_data_files)
+        unverified_sum_files = sum(int(f.get("unverified_count") or 0) for f in matching_data_files)
+        rejected_sum_files = sum(int(f.get("rejected_count") or 0) for f in matching_data_files)
+        below_hot_count = max(int(audit_diag_grp.get("below_hot_count") or 0), below_hot_sum_files)
         new_qualified_count = (
             int(df_counters["new_qualified_count"])
             if not is_bundle and use_envelope_counters and df_counters.get("new_qualified_count") is not None and len(effective_snaps) == 0
@@ -4217,12 +4407,12 @@ class MarketIntelligenceStore:
         unverified_count = (
             int(df_counters["unverified_count"])
             if not is_bundle and use_envelope_counters and df_counters.get("unverified_count") is not None and len(effective_snaps) == 0
-            else unverified_snap
+            else max(unverified_snap, int(audit_diag_grp.get("unverified_count") or 0), unverified_sum_files if is_bundle or int(audit_diag_grp.get("total") or 0) > 0 else 0)
         )
         rejected_count = (
             int(df_counters["rejected_count"])
             if not is_bundle and use_envelope_counters and df_counters.get("rejected_count") is not None and len(effective_snaps) == 0
-            else rejected_snap
+            else max(rejected_snap, int(audit_diag_grp.get("rejected_count") or 0), rejected_sum_files if is_bundle or int(audit_diag_grp.get("total") or 0) > 0 else 0)
         )
 
         # Effective counts match snapshots on all items cleanly
@@ -4417,6 +4607,7 @@ class MarketIntelligenceStore:
             "schema_versions": schema_versions,
             "strategy_version": strategy_version,
             "contract_version": contract_version,
+            "is_v33": bool(str(contract_version or "").startswith("3.3") or str(quality_policy_version or "").startswith("3.3")),
             "skill_version": skill_version,
             "quality_policy_version": quality_policy_version,
             "target_metric": target_metric_val,
@@ -4441,6 +4632,7 @@ class MarketIntelligenceStore:
             "qualified_count": qualified_total,
             "quality_qualified_count": quality_qualified_count,
             "watchlist_count": watchlist_count,
+            "below_hot_count": below_hot_count,
             "traffic_content_count": traffic_content_count,
             "updated_metrics_count": updated_metrics_count,
             "duplicate_history_count": duplicate_history_count,

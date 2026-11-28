@@ -6293,65 +6293,32 @@ assert.equal(v3StartBtns.length, 6);
 
     const assertThreadsStrategy33Prompt = (promptText, expectedReqId, expectedKw = null, expectedCount = null) => {
       const requiredPatterns = [
+        /Crawl Threads/,
         new RegExp(`Request ID: ${expectedReqId}`),
-        /Platform: threads/,
-        expectedCount !== null ? new RegExp(`Requested Count: ${expectedCount} bài mới đạt chuẩn`) : /Requested Count: \d+ bài mới đạt chuẩn/,
-        /Strategy Version: 3\.3 \(sửa đổi 28\/11\/2026\)/,
-        /Contract Version: 3\.2/,
-        /@toilaai267/,
-        /Cloud Browser/,
-        /threads-cli/,
-        /Custom Connector/,
-        /đăng nhập lại trước khi claim/,
-        new RegExp(`POST /api/crawl/claim[\\s\\S]*\\{"request_id":"${expectedReqId}"\\}`),
-        /Không fallback sang request khác/,
-        /max\(10 phút, 20% lease\)/,
-        /Crawl Strategy 3\.3/,
-        /Việt Nam/,
-        /24 giờ gần nhất.*48 giờ/,
-        /Mở rộng tìm kiếm ngoài trends chính thức/,
-        /viral tự nhiên từ người dùng bình thường, creator nhỏ/i,
-        /Hạn chế người nổi tiếng, ca sĩ, thương hiệu lớn/i,
-        /Không loại cứng người bán hoặc thương hiệu nhỏ/i,
+        /Skill: Nạp threads_crawl v1\.1 \(chỉ thu thập Hot >= 10K views\/300 likes & Very Hot >= 50K views\/1K likes\)/,
+        /Crawl Mode: /,
+        /Topics: /,
+        /Lookback: /,
+        /Exclusions: /,
+        expectedCount !== null
+          ? new RegExp(`Requested Quality Count: ${expectedCount} bài mới đạt chuẩn \\(Hot & Very Hot only`)
+          : /Requested Quality Count: \d+ bài mới đạt chuẩn \(Hot & Very Hot only/,
+        /Contract & API Spec \(/,
+        new RegExp(`POST /api/crawl/claim \\{"request_id":"${expectedReqId}","claimed_by":"muse-ai"\\}`),
         /POST \/api\/crawl\/registry\/check/,
-        /Mở rộng nguồn tìm kiếm nếu chưa đạt mục tiêu/i,
-        /Bắt buộc xác minh cả views và likes/,
-        /Không bỏ qua bước đo views chỉ vì likes thấp/i,
-        /5 trường chứng cứ views theo V3\.2/,
-        /Phân biệt rõ số 0 với null/,
-        /Không đặt sàn views hoặc likes.*Watchlist/i,
-        /Không dừng giữa chừng nếu còn ứng viên phù hợp/,
-        /Very Hot: ≥ 1\.000 likes hoặc ≥ 50\.000 views/,
-        /Hot: ≥ 300 likes hoặc ≥ 10\.000 views/,
-        /Emerging:/,
-        /Watchlist:/,
-        /Unverified:/,
-        /Rejected:/,
-        /Followers của tác giả/,
-        /Views\/followers/,
-        /Natural Viral \(natural_viral\)/,
-        /Buyer Intent \(buyer_intent\)/,
-        /Nguyên nhân viral và khả năng ứng dụng Affiliate/i,
-        /Đo lại (?:các )?bài lịch sử có tiềm năng tăng trưởng.*không tính vào số bài mới/i,
-        /Không thu thập toàn bài Watchlist chỉ để đạt mục tiêu/i,
         /POST \/api\/crawl\/progress/,
-        /Tuân thủ ngân sách lease\. Không tự gia hạn/,
-        /run_id.*Run-centric UI/,
+        /POST \/api\/crawl\/complete/,
         /Threads\/threads_trend_<YYYYMMDD>_<HHmm>\.json/,
         /Reports\/trend_report_<YYYYMMDD>_<HHmm>\.json/,
-        /Reports\/trend_report_<YYYYMMDD>_<HHmm>\.md/,
+        new RegExp(`request_id="${expectedReqId}"`),
         /strategy_version="3\.3 \(sửa đổi 28\/11\/2026\)"/,
-        /snapshot tương tác tại thời điểm crawl/,
-        /Growth Tracking \(9_growth_tracking\)/,
-        /POST \/api\/crawl\/complete/,
-        /POST \/api\/crawl\/fail/,
-        /Không bật Hook, không tạo Scheduled Task, không ghi SQL trực tiếp/,
-        /đồng bộ Registry và trạng thái Telegram Notification/,
+        /Không bật Hook\/Scheduled Task\/AI polling/,
       ];
       for (const pat of requiredPatterns) {
         assert.match(promptText, pat, `Prompt missing expected Strategy 3.3 requirement: ${pat}`);
       }
-      assert.doesNotMatch(promptText, /6–10 phút/);
+      assert.doesNotMatch(promptText, /6–10 phút|Watchlist:|Emerging:/);
+      assert.ok(promptText.length <= 1800, `Lean prompt should stay concise, got ${promptText.length} chars`);
       if (expectedKw) assert.ok(promptText.includes(expectedKw));
     };
 
@@ -6440,7 +6407,7 @@ assert.equal(v3StartBtns.length, 6);
     assert.ok(tgPromptMsg, "Telegram /request_crawl should output Manual Prompt");
     assert.ok(tgPromptMsg.body.text.length <= 4096, `Telegram message exceeded 4096 chars: ${tgPromptMsg.body.text.length}`);
     assert.ok(tgPromptMsg.body.text.trim().endsWith("</pre>"), "Telegram HTML must cleanly close </pre>");
-    assert.match(tgPromptMsg.body.text, /<pre>[\s\S]*Strategy Version: 3\.3 \(sửa đổi 28\/11\/2026\)[\s\S]*Contract Version: 3\.2[\s\S]*<\/pre>/);
+    assert.match(tgPromptMsg.body.text, /<pre>[\s\S]*threads_crawl v1\.1[\s\S]*Contract &amp; API Spec \(3\.2\):[\s\S]*strategy_version="3\.3 \(sửa đổi 28\/11\/2026\)"[\s\S]*<\/pre>/);
     const museBtn = tgPromptMsg.body.reply_markup.inline_keyboard.flat().find(b => b.url === "https://muse.ai/");
     assert.ok(museBtn, "Telegram response must include Mở Muse button");
     const reqThreads2 = Array.from(env23.DB.crawlRequests.values()).find(r => r.keywords === "retinol");
@@ -7029,8 +6996,7 @@ assert.equal(v3StartBtns.length, 6);
     assert.notEqual(reqDur90.request.id, reqDurDefault.request.id);
     assert.equal(reqDur90.request.lease_seconds, 5400);
     assert.equal(reqDur90.request.lease_minutes, 90);
-    assert.match(reqDur90.manual_prompt, /Thời lượng lease: 90 phút \(5400s/);
-    assert.match(reqDur90.manual_prompt, /≈ 18p\b/);
+    assert.doesNotMatch(reqDur90.manual_prompt, /Thời lượng lease:/i);
     assertThreadsStrategy33Prompt(reqDur90.manual_prompt, reqDur90.request.id, "gia dung thong minh", 20);
 
     // Oversized lease_seconds clamps strictly to Worker 7200s (120 phút) safety cap
@@ -7087,7 +7053,7 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(JSON.parse(tg60Req.options_json).lease_seconds, 3600);
     const tg60Msg = tgCalls[tgCalls.length - 1];
     assert.ok(tg60Msg.body.text.length <= 4096);
-    assert.match(tg60Msg.body.text, /Thời lượng lease: 60 phút/);
+    assert.doesNotMatch(tg60Msg.body.text, /Thời lượng lease:/i);
     assert.match(tg60Msg.body.text, /<\/pre>$/);
 
     // 23F: Crawl Strategy 3.3 Mode + 24-Topic Presets + Lookback + Exclusions + growth_tracking gate + Telegram quick customization
@@ -7189,18 +7155,18 @@ assert.equal(v3StartBtns.length, 6);
       assert.equal(mkJson.request.crawl_mode, mc.mode);
       assert.equal(mkJson.request.lookback_hours, mc.lookback_hours);
       if (mc.exclusions?.exclude_celebrity === false) {
-        assert.match(mkJson.manual_prompt, /Linh hoạt người nổi tiếng/);
-        assert.match(mkJson.manual_prompt, /Strategy Version: 3\.3 \(sửa đổi 28\/11\/2026\)/);
-        assert.match(mkJson.manual_prompt, /Contract Version: 3\.2/);
-        assert.match(mkJson.manual_prompt, /@toilaai267/);
+        assert.match(mkJson.manual_prompt, /exclude_celebrity=false/);
+        assert.match(mkJson.manual_prompt, /threads_crawl v1\.1/);
+        assert.match(mkJson.manual_prompt, /strategy_version="3\.3 \(sửa đổi 28\/11\/2026\)"/);
+        assert.match(mkJson.manual_prompt, /Contract & API Spec \(3\.2\)/);
         assert.match(mkJson.manual_prompt, /POST \/api\/crawl\/complete/);
       } else {
         assertThreadsStrategy33Prompt(mkJson.manual_prompt, mkJson.request.id, mc.keywords || null, 20);
       }
-      assert.match(mkJson.manual_prompt, mc.expectPat);
+      assert.match(mkJson.manual_prompt, new RegExp(`Crawl Mode: ${mc.mode}`));
       assert.match(mkJson.manual_prompt, new RegExp(`crawl_mode="${mc.mode}"`));
       assert.match(mkJson.manual_prompt, new RegExp(`lookback_hours=${mc.lookback_hours}`));
-      assert.ok(mkJson.manual_prompt.length <= 3850, `Prompt for ${mc.mode} (${mkJson.manual_prompt.length} chars) must stay comfortably under Telegram cap`);
+      assert.ok(mkJson.manual_prompt.length <= 1800, `Lean prompt for ${mc.mode} (${mkJson.manual_prompt.length} chars) must stay concise`);
 
       // Telegram copy prompt for every mode (even all 24 topics) stays <= 4096 HTML & preserves exact text
       const tgCbBefore = tgCalls.length;
@@ -7241,7 +7207,7 @@ assert.equal(v3StartBtns.length, 6);
     )).json();
     assert.equal(replayAff.request.crawl_mode, "affiliate");
     assert.deepEqual(replayAff.request.topics, ["deals_vouchers", "home_living"]);
-    assert.match(replayAff.manual_prompt, /chuyển đổi giỏ hàng Affiliate/);
+    assert.match(replayAff.manual_prompt, /Crawl Mode: affiliate.*Affiliate/);
 
     // Telegram /request_crawl supports mode=..., topics=..., lookback=..., 60m + keywords
     const tgModeRes = await worker.fetch(
@@ -7380,7 +7346,10 @@ function makeV33Env() {
   assert.equal(cfgBefore.config.helper_compatibility.v33_compatible, false);
   assert.equal(cfgBefore.config.contract_version, "3.3");
   assert.equal(cfgBefore.config.legacy_contract_version, "3.2");
-  assert.equal(cfgBefore.config.default_lease_minutes, 60);
+  assert.equal(cfgBefore.config.hot_only, true);
+  assert.deepEqual(cfgBefore.config.qualified_tiers, ["very_hot", "hot"]);
+  assert.equal(cfgBefore.config.internal_lease_minutes, 60);
+  assert.equal(cfgBefore.config.lease_options_minutes, undefined);
 
   const blocked33Res = await worker.fetch(
     new Request("https://worker.example/api/app/crawl-requests", {
@@ -7469,16 +7438,18 @@ function makeV33Env() {
   )).json();
   assert.equal(req33Res.ok, true, JSON.stringify(req33Res));
   assert.equal(req33Res.request.contract_version, "3.3");
-  assert.equal(req33Res.request.skill_version, "1.0");
-  assert.equal(req33Res.request.quality_policy_version, "3.3-a-20261128");
+  assert.equal(req33Res.request.skill_version, "1.1");
+  assert.equal(req33Res.request.quality_policy_version, "3.3-hot-only-20261128");
   assert.equal(req33Res.request.target_metric, "quality_qualified_count");
   assert.equal(req33Res.request.lease_minutes, 60);
-  assert.match(req33Res.manual_prompt, /THREADS_CRAWL_SKILL/);
-  assert.match(req33Res.manual_prompt, /Contract 3\.3/);
+  assert.match(req33Res.manual_prompt, /threads_crawl v1\.1/);
+  assert.match(req33Res.manual_prompt, /3\.3-hot-only-20261128/);
+  assert.match(req33Res.manual_prompt, /Hot & Very Hot only/);
+  assert.match(req33Res.manual_prompt, /Contract & API Spec \(3\.3\)/);
   assert.match(req33Res.manual_prompt, /\/api\/crawl\/checkpoint/);
-  assert.match(req33Res.manual_prompt, /12p/);
+  assert.doesNotMatch(req33Res.manual_prompt, /Thời lượng lease|30 \/ 60 \/ 120|Watchlist:/i);
 
-  // 3. Server-side quality gate catches hallucinated flags & honors 0 != null & traffic_content
+  // 3. Server-side Hot & Very Hot quality gate catches hallucinated flags & honors 0 != null & traffic_content
   const claim24 = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/claim", {
       method: "POST",
@@ -7498,22 +7469,23 @@ function makeV33Env() {
       metrics: { views: 450, likes: 12, comments: 2, shares: 0, reposts: 0 },
       quality_qualified: true,
     }),
-    // #2 Emerging failing secondary gate (1500 views, 0 likes, 1 comment, 0 shares) -> rejected
+    // #2 23 views / 0 likes mislabeled hot -> REJECTED from target & never counts!
     makeV33ThreadsItem(2, {
-      trend_tier: "emerging",
-      views: 1500,
-      views_display: "1.5K",
-      metrics: { views: 1500, likes: 0, comments: 1, shares: 0, reposts: 0 },
+      trend_tier: "hot",
+      views: 23,
+      views_display: "23",
+      metrics: { views: 23, likes: 0, comments: 0, shares: 0, reposts: 0 },
       quality_qualified: true,
     }),
-    // #3 Emerging PASSES with likes=0 (0 !== null) AND comments=6 -> QUALIFIED
+    // #3 Emerging (1800 views, 0 likes, 6 comments) -> REJECTED under Hot & Very Hot Only!
     makeV33ThreadsItem(3, {
       trend_tier: "emerging",
       views: 1800,
       views_display: "1.8K",
       metrics: { views: 1800, likes: 0, comments: 6, shares: 0, reposts: 0 },
+      quality_qualified: true,
     }),
-    // #4 Missing likes (null) -> rejected from V3.3 quality target even with high views
+    // #4 Missing likes (null) -> rejected even with high views
     makeV33ThreadsItem(4, {
       trend_tier: "very_hot",
       views: 65000,
@@ -7521,8 +7493,15 @@ function makeV33Env() {
       metrics: { views: 65000, likes: null, comments: 25 },
       quality_qualified: true,
     }),
-    // #5 Traffic Content without buyer_intent -> QUALIFIED under Option A
+    // #5 Hot (12000 views, 0 verified likes) -> QUALIFIED (1)
     makeV33ThreadsItem(5, {
+      trend_tier: "hot",
+      views: 12000,
+      views_display: "12K",
+      metrics: { views: 12000, likes: 0, comments: 4, shares: 0, reposts: 0 },
+    }),
+    // #6 Traffic Content in Very Hot without buyer_intent -> QUALIFIED (2)
+    makeV33ThreadsItem(6, {
       trend_tier: "very_hot",
       views: 72000,
       views_display: "72K",
@@ -7533,7 +7512,7 @@ function makeV33Env() {
     }),
   ];
 
-  // Trying /complete early with only 2/4 true quality items MUST fail (400) unless stop_reason='source_exhausted'
+  // Trying /complete early with only 2/4 true Hot/Very Hot quality items MUST fail (400)
   const earlyFailRes = await worker.fetch(
     new Request("https://worker.example/api/crawl/complete", {
       method: "POST",
@@ -7544,7 +7523,7 @@ function makeV33Env() {
         session_seq: 1,
         run_id: "threads_v33_grade_s1",
         crawled_at: "2026-11-28T07:10:00Z",
-        counters: { requested_count: 4, scanned_count: 5, new_qualified_count: 5, quality_qualified_count: 5 },
+        counters: { requested_count: 4, scanned_count: 6, new_qualified_count: 6, quality_qualified_count: 6 },
         items: itemsToGrade,
       }),
     }),
@@ -7554,7 +7533,7 @@ function makeV33Env() {
   const earlyJson = await earlyFailRes.json();
   assert.equal(earlyJson.projected_quality_count, 2);
 
-  // Checkpoint saves the 2 valid quality posts + 1 watchlist safely!
+  // Checkpoint saves the 2 valid Hot/Very Hot quality posts (0 watchlist) safely!
   const cp24 = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/checkpoint", {
       method: "POST",
@@ -7566,7 +7545,7 @@ function makeV33Env() {
         pause_reason: "session_budget_reached",
         run_id: "threads_v33_grade_s1",
         crawled_at: "2026-11-28T07:15:00Z",
-        counters: { requested_count: 4, scanned_count: 5, new_qualified_count: 5, quality_qualified_count: 5 },
+        counters: { requested_count: 4, scanned_count: 6, new_qualified_count: 6, quality_qualified_count: 6 },
         items: itemsToGrade,
       }),
     }),
@@ -7574,7 +7553,7 @@ function makeV33Env() {
   )).json();
   assert.equal(cp24.ok, true);
   assert.equal(cp24.accumulated_quality_count, 2);
-  assert.equal(cp24.accumulated_watchlist_count, 2);
+  assert.equal(cp24.accumulated_watchlist_count, 0);
   assert.equal(cp24.remaining_target, 2);
 }
 
@@ -7743,8 +7722,12 @@ function makeV33Env() {
     );
     assert.equal(rejTime.status, 400);
 
-    // 3. Session 1 Checkpoint: 40 quality items -> paused, 40/100, NO Telegram sent
-    const s1Items = Array.from({ length: 40 }, (_, i) => makeV33ThreadsItem(i + 1));
+    // 3. Session 1 Checkpoint: 37 quality items (+ below-Hot noise excluded) -> paused, 37/100, NO Telegram sent
+    const s1Items = [
+      ...Array.from({ length: 37 }, (_, i) => makeV33ThreadsItem(i + 1)),
+      makeV33ThreadsItem(9901, { trend_tier: "hot", views: 23, metrics: { views: 23, likes: 0, comments: 0 }, quality_qualified: true }),
+      makeV33ThreadsItem(9902, { trend_tier: "emerging", views: 1800, metrics: { views: 1800, likes: 25, comments: 6 }, quality_qualified: true }),
+    ];
     const cp1 = await (await worker.fetch(
       new Request("https://worker.example/api/crawl/checkpoint", {
         method: "POST",
@@ -7763,9 +7746,9 @@ function makeV33Env() {
     )).json();
     assert.equal(cp1.ok, true);
     assert.equal(cp1.execution_phase, "paused");
-    assert.equal(cp1.accumulated_quality_count, 40);
-    assert.equal(cp1.remaining_target, 60);
-    assert.match(cp1.resume_prompt, /40\/100/);
+    assert.equal(cp1.accumulated_quality_count, 37);
+    assert.equal(cp1.remaining_target, 63);
+    assert.match(cp1.resume_prompt, /37\/100/);
     assert.equal(telegramCount, 0);
 
     // Idempotent replay of Session 1 checkpoint returns ok without doubling
@@ -7785,9 +7768,9 @@ function makeV33Env() {
       env25
     )).json();
     assert.equal(cp1Replay.idempotent_replay, true);
-    assert.equal(cp1Replay.accumulated_quality_count, 40);
+    assert.equal(cp1Replay.accumulated_quality_count, 37);
 
-    // 4. Session 2 Claim + stale Session 1 rejected + cross-session dedup (5 overlap + 35 new = 75 total)
+    // 4. Session 2 Claim + stale Session 1 rejected + cross-session dedup (5 overlap + 31 new = 68/100 total)
     const c2 = await (await worker.fetch(
       new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
       env25
@@ -7807,7 +7790,7 @@ function makeV33Env() {
 
     const s2Items = [
       ...Array.from({ length: 5 }, (_, i) => makeV33ThreadsItem(i + 1)),
-      ...Array.from({ length: 35 }, (_, i) => makeV33ThreadsItem(41 + i)),
+      ...Array.from({ length: 31 }, (_, i) => makeV33ThreadsItem(38 + i)),
     ];
     const cp2 = await (await worker.fetch(
       new Request("https://worker.example/api/crawl/checkpoint", {
@@ -7825,10 +7808,10 @@ function makeV33Env() {
       }),
       env25
     )).json();
-    assert.equal(cp2.accumulated_quality_count, 75);
-    assert.equal(cp2.remaining_target, 25);
+    assert.equal(cp2.accumulated_quality_count, 68);
+    assert.equal(cp2.remaining_target, 32);
 
-    // 5. Session 3 Claim -> expires -> recovers into Session 4 (error_attempts=1) -> final 25 items complete 100/100!
+    // 5. Session 3 Claim -> lease expires at 68/100 -> stays paused/recoverable (NEVER completed) -> recovers into Session 4 (error_attempts=1) -> final 32 items complete 100/100 (37 + 31 + 32)!
     const c3 = await (await worker.fetch(
       new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
       env25
@@ -7836,6 +7819,15 @@ function makeV33Env() {
     assert.equal(c3.request.session_seq, 3);
     const dbRow3 = env25.DB.crawlRequests.find((r) => r.id === reqId);
     dbRow3.lease_expires_at = "2020-01-01T00:00:00.000Z";
+    const pausedList = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", { headers: appHeaders }),
+      env25
+    )).json();
+    const expiredAt68 = pausedList.items.find((r) => r.id === reqId);
+    assert.equal(expiredAt68.status, "queued");
+    assert.equal(expiredAt68.execution_phase, "paused");
+    assert.equal(expiredAt68.accumulated_quality_count, 68);
+    assert.equal(telegramCount, 0);
 
     const c4 = await (await worker.fetch(
       new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
@@ -7844,7 +7836,7 @@ function makeV33Env() {
     assert.equal(c4.request.session_seq, 4);
     assert.equal(c4.request.error_attempts, 1);
 
-    const s4Items = Array.from({ length: 25 }, (_, i) => makeV33ThreadsItem(76 + i));
+    const s4Items = Array.from({ length: 32 }, (_, i) => makeV33ThreadsItem(69 + i));
     const fin = await (await worker.fetch(
       new Request("https://worker.example/api/crawl/complete", {
         method: "POST",
@@ -7856,7 +7848,7 @@ function makeV33Env() {
           run_id: `${reqId}_s4`,
           crawled_at: "2026-11-28T09:15:00Z",
           stop_reason: "target_achieved",
-          counters: { requested_count: 100, scanned_count: 40, new_qualified_count: 25, quality_qualified_count: 25, target_achieved: true },
+          counters: { requested_count: 100, scanned_count: 45, new_qualified_count: 32, quality_qualified_count: 32, target_achieved: true },
           items: s4Items,
         }),
       }),
@@ -7865,6 +7857,8 @@ function makeV33Env() {
     assert.equal(fin.ok, true);
     assert.equal(fin.status, "completed");
     assert.equal(fin.accumulated_quality_count, 100);
+    const qualRows = Array.from(env25.DB.requestQualityItems.values()).filter((q) => q.request_id === reqId && q.quality_qualified === 1);
+    assert.equal(qualRows.length, 100);
     assert.equal(fin.telegram_notified, true);
     assert.equal(telegramCount, 1);
 
