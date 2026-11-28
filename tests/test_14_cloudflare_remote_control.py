@@ -202,6 +202,7 @@ class MockCloudflareTransportClient(CloudflareBridgeClient):
             "platform": platform,
             "keywords": keywords,
             "requested_count": requested_count,
+            "options": dict(options or {}),
             "poll_profile": poll_profile or getattr(self, "poll_profile", "production_6h"),
             "expected_pickup_at": "2026-11-26T20:00:00Z",
             "status": "queued",
@@ -1525,6 +1526,10 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
             "Đang đồng bộ",
             "Hoàn tất",
             "platform: 'threads'",
+            "lease_minutes: 30",
+            "Crawl Strategy 3.3",
+            "60 phút",
+            "120 phút",
             "getMarketSyncSignature",
             "getCrawlDisplayState",
             "Hook đã tắt — chế độ Manual Prompt Trigger",
@@ -1552,6 +1557,21 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
             self.assertTrue(p_json["ok"])
             self.assertEqual(p_json["manual_prompt"], first_prompt)
             self.assertEqual(len(self.client.mock_crawl_requests), 1)
+
+        # Invalid Threads lease duration rejected with 400
+        bad_dur = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 10, "lease_minutes": 999, "keywords": "test"},
+        )
+        self.assertEqual(bad_dur.status_code, 400)
+
+        # Valid Threads duration (60 phút -> 3600s) forwarded cleanly inside options
+        dur_resp = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 15, "lease_minutes": 60, "keywords": "skincare"},
+        )
+        self.assertEqual(dur_resp.status_code, 200)
+        self.assertEqual(self.client.mock_crawl_requests[-1]["options"].get("lease_seconds"), 3600)
 
     def test_desktop_auto_sync_triggers_on_metrics_only_change_and_debounces(self):
         initial_post = {
@@ -1665,8 +1685,9 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         deadline = time.monotonic() + 5.0
         new_stats = None
         while time.monotonic() < deadline:
-            new_stats = flask_client.get("/api/market/status").get_json()["stats"]
-            if new_stats["engagement_completeness"]["with_views"] == 1:
+            st_body = flask_client.get("/api/market/status").get_json()
+            new_stats = st_body["stats"]
+            if (not st_body.get("is_syncing")) and new_stats["engagement_completeness"]["with_views"] == 1:
                 break
             time.sleep(0.05)
 

@@ -238,6 +238,55 @@ function deriveCrawlRequestDisplayState(reqRow, parsedSummary = null, hasActiveO
     };
 }
 
+const MUSE_DEFAULT_CLAIM_OWNER = "muse-ai";
+const MUSE_DEFAULT_LEASE_SECONDS = 1800;
+const MUSE_MIN_LEASE_SECONDS = 60;
+const MUSE_MAX_LEASE_SECONDS = 7200;
+const THREADS_STRATEGY_VERSION = "3.3 (sửa đổi 28/11/2026)";
+
+function parseRequestOptionsJson(reqRow) {
+    if (!reqRow || typeof reqRow !== "object") return {};
+    if (reqRow.options && typeof reqRow.options === "object" && !Array.isArray(reqRow.options)) {
+        return { ...reqRow.options };
+    }
+    if (typeof reqRow.options_json === "string" && reqRow.options_json.trim()) {
+        try {
+            const parsed = JSON.parse(reqRow.options_json);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+        } catch {}
+    }
+    return {};
+}
+
+function normalizeThreadsLeaseSeconds(rawOptions = null, fallbackSeconds = MUSE_DEFAULT_LEASE_SECONDS) {
+    if (!rawOptions || typeof rawOptions !== "object") return fallbackSeconds;
+    let rawSec = null;
+    if (rawOptions.lease_seconds !== undefined && rawOptions.lease_seconds !== null && rawOptions.lease_seconds !== "") {
+        rawSec = Number(rawOptions.lease_seconds);
+    } else {
+        const rawMin = rawOptions.lease_minutes ?? rawOptions.duration_minutes ?? rawOptions.crawl_duration_minutes;
+        if (rawMin !== undefined && rawMin !== null && rawMin !== "") {
+            rawSec = Number(rawMin) * 60;
+        }
+    }
+    if (!Number.isFinite(rawSec) || rawSec <= 0) return fallbackSeconds;
+    return Math.min(Math.max(Math.round(rawSec), MUSE_MIN_LEASE_SECONDS), MUSE_MAX_LEASE_SECONDS);
+}
+
+function getRequestLeaseInfo(reqRow) {
+    const plat = String(reqRow?.platform || "threads").trim().toLowerCase() || "threads";
+    const opts = parseRequestOptionsJson(reqRow);
+    const leaseSeconds = plat === "threads"
+        ? normalizeThreadsLeaseSeconds(opts, MUSE_DEFAULT_LEASE_SECONDS)
+        : MUSE_DEFAULT_LEASE_SECONDS;
+    const leaseMinutes = Math.max(1, Math.round(leaseSeconds / 60));
+    return {
+        leaseSeconds,
+        leaseMinutes,
+        isCustomDuration: plat === "threads" && leaseSeconds !== MUSE_DEFAULT_LEASE_SECONDS,
+    };
+}
+
 function getRequestContractVersion(platform) {
     const plat = String(platform || "threads").trim().toLowerCase();
     if (plat === "threads") return "3.2";
@@ -250,30 +299,64 @@ function buildMuseManualPrompt(reqRow) {
     const plat = String(reqRow?.platform || "threads").trim().toLowerCase() || "threads";
     const targetCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || 50);
     const keywords = String(reqRow?.keywords || "").trim();
-    const kwLine = keywords || "(mặc định theo cấu hình ngành hàng / xu hướng hiện hành)";
     const contractVersion = getRequestContractVersion(plat);
 
     if (plat === "threads") {
+        const kwLine = keywords || "Mặc định theo cấu hình ngành hàng / xu hướng hiện hành";
+        const { leaseSeconds, leaseMinutes, isCustomDuration } = getRequestLeaseInfo(reqRow);
+        const reserveMinutes = Math.max(10, Math.ceil(leaseMinutes * 0.2));
+        const claimBodyNote = isCustomDuration
+            ? ` (lease ${leaseMinutes} phút/${leaseSeconds}s; tùy chọn "lease_seconds":${leaseSeconds}, không tự gia hạn)`
+            : "";
         return [
-            `Thực hiện crawl Threads, mục tiêu ${targetCount} bài mới đạt chuẩn.`,
+            `Thực hiện crawl thị trường Threads Việt Nam.`,
+            ``,
             `Request ID: ${reqId}`,
             `Platform: threads`,
-            `Requested Count: ${targetCount}`,
+            `Requested Count: ${targetCount} bài mới đạt chuẩn`,
             `Keywords: ${kwLine}`,
+            `Strategy Version: ${THREADS_STRATEGY_VERSION}`,
             `Contract Version: ${contractVersion}`,
+            `Thời lượng lease: ${leaseMinutes} phút (${leaseSeconds}s; dự trữ max(10 phút, 20% lease) ≈ ${reserveMinutes}p)`,
             ``,
-            `Hướng dẫn thực thi bắt buộc:`,
-            `1. Claim đúng Request ID qua Custom Connector (custom.app_video): gọi POST /api/crawl/claim với {"request_id": "${reqId}"}. Tuyệt đối KHÔNG claim hoặc fallback sang request khác nếu request này không ở trạng thái queued; lưu lại attempt và dự trữ tối thiểu max(10 phút, 20% lease) trước lease_expires_at.`,
-            `2. Áp dụng Data Contract V3.2 và dùng Cloud Browser (trình duyệt thật) để xác minh views + đủ 5 trường chứng cứ (views_display, views_precision, views_source="threads_web_browser", views_measured_at, views_evidence_url).`,
-            `3. Chống trùng xuyên lượt với D1 Registry qua POST /api/crawl/registry/check.`,
-            `4. Cập nhật tiến độ thực tế định kỳ qua POST /api/crawl/progress (request_id="${reqId}", claimed_by="muse-ai", attempt, run_id, counters).`,
-            `5. Lưu ĐỦ CẶP 2 file JSON lên Google Drive (AI_WORKSPACE/01_Market_Data/):`,
-            `   - Data JSON: Threads/threads_trend_<YYYYMMDD>_<HHmm>.json (chứa mảng items/records)`,
-            `   - Report JSON: Reports/trend_report_<YYYYMMDD>_<HHmm>.json (kèm .md nếu có)`,
-            `   Cả 2 file phải ghi cùng request_id="${reqId}", run_id, attempt, claimed_by="muse-ai", platform="threads", contract_version="3.2" và counters nhất quán.`,
-            `6. Hoàn tất request qua POST /api/crawl/complete (kèm items/records, result_summary, report_file_id; được phép items: [] nếu no_qualifying_posts hợp lệ V3.2) hoặc POST /api/crawl/fail nếu gặp lỗi.`
+            `I. KIỂM TRA VÀ CLAIM REQUEST`,
+            `- Kiểm tra phiên Threads Web @toilaai267, Cloud Browser, threads-cli, Custom Connector; hết hạn thì yêu cầu đăng nhập lại trước khi claim.`,
+            `- Claim qua POST /api/crawl/claim với body {"request_id":"${reqId}"}${claimBodyNote}. Không fallback sang request khác.`,
+            `- Lưu attempt, claimed_by, lease_expires_at; dự trữ tối thiểu max(10 phút, 20% lease).`,
+            ``,
+            `II. CHIẾN LƯỢC THU THẬP`,
+            `- Áp dụng Crawl Strategy 3.3 (workspace & Drive). Ưu tiên Việt Nam, bài trong 24 giờ gần nhất (tối đa 48 giờ).`,
+            `- Mở rộng tìm kiếm ngoài trends chính thức: đời sống, review, mua sắm, săn deal, trải nghiệm, nhu cầu khách hàng, sản phẩm, mẹo, format sáng tạo.`,
+            `- Ưu tiên viral tự nhiên từ người dùng bình thường, creator nhỏ; hạn chế người nổi tiếng, ca sĩ, thương hiệu lớn, quảng cáo đơn thuần; không loại cứng người bán hoặc thương hiệu nhỏ có giá trị nghiên cứu.`,
+            `- Chống trùng qua POST /api/crawl/registry/check; mở rộng nguồn tìm kiếm nếu chưa đạt mục tiêu.`,
+            ``,
+            `III. XÁC MINH DỮ LIỆU`,
+            `- Dùng Cloud Browser đã đăng nhập @toilaai267, kết hợp threads-cli.`,
+            `- Bắt buộc xác minh cả views và likes cho mọi ứng viên phù hợp; không bỏ qua bước đo views chỉ vì likes thấp.`,
+            `- Thu thập 5 trường chứng cứ views theo V3.2 (views_display, views_precision, views_source="threads_web_browser", views_measured_at, views_evidence_url).`,
+            `- Phân biệt rõ số 0 với null; loại bài thiếu views/likes khỏi đạt chuẩn; không đặt sàn views hoặc likes (sàn tương tác) cho Watchlist.`,
+            `- Không dừng giữa chừng nếu còn ứng viên phù hợp trong đợt đang xác minh và đủ ngân sách thời gian.`,
+            ``,
+            `IV. PHÂN TẦNG VÀ PHÂN TÍCH`,
+            `- Very Hot: ≥ 1.000 likes hoặc ≥ 50.000 views. Hot: ≥ 300 likes hoặc ≥ 10.000 views. Emerging: theo V3.2 hiện hành. Watchlist: đủ views & likes, không đặt sàn tương tác. Unverified: thiếu xác minh. Rejected: không phù hợp.`,
+            `- Bổ sung nếu đủ dữ liệu: Followers của tác giả (author_followers/followers), Views/followers (views_to_followers_ratio), Natural Viral (natural_viral), Buyer Intent (buyer_intent), engagement/views, hook/format/cấu trúc, nguyên nhân viral và khả năng ứng dụng Affiliate, tốc độ tăng trưởng.`,
+            `- Đo lại bài lịch sử có tiềm năng tăng trưởng (Growth Tracking), không tính vào số bài mới. Ưu tiên chất lượng & đa dạng; không thu thập toàn bài Watchlist chỉ để đạt mục tiêu.`,
+            ``,
+            `V. CẬP NHẬT TIẾN ĐỘ`,
+            `- Gọi POST /api/crawl/progress định kỳ (request_id="${reqId}", claimed_by="muse-ai", attempt, run_id, counters). Tuân thủ ngân sách lease. Không tự gia hạn hoặc bỏ qua giới hạn.`,
+            ``,
+            `VI. LƯU KẾT QUẢ`,
+            `- Tạo run_id duy nhất, lưu kết quả riêng theo run_id (Run-centric UI) tại AI_WORKSPACE/01_Market_Data/: Threads/threads_trend_<YYYYMMDD>_<HHmm>.json, Reports/trend_report_<YYYYMMDD>_<HHmm>.json, Reports/trend_report_<YYYYMMDD>_<HHmm>.md.`,
+            `- Data & Report JSON thống nhất request_id="${reqId}", run_id, attempt, claimed_by="muse-ai", platform="threads", contract_version="3.2", strategy_version="${THREADS_STRATEGY_VERSION}", counters & snapshot tương tác tại thời điểm crawl.`,
+            `- Báo cáo riêng: Very Hot, Hot, Emerging, Watchlist, Natural Viral, Buyer Intent, Growth Tracking (9_growth_tracking), bài trùng, chưa xác minh, bị loại.`,
+            ``,
+            `VII. HOÀN TẤT`,
+            `- Gọi POST /api/crawl/complete (items/records, result_summary, report_file_id; hỗ trợ items: [] nếu no_qualifying_posts V3.2) hoặc POST /api/crawl/fail nếu lỗi.`,
+            `- Không bật Hook, không tạo Scheduled Task, không ghi SQL trực tiếp. Báo cáo đồng bộ Registry và trạng thái Telegram Notification.`,
         ].join("\n");
     }
+
+    const kwLine = keywords || "(mặc định theo cấu hình ngành hàng / xu hướng hiện hành)";
 
     if (plat === "tiktok" || plat === "shopee") {
         const platTitle = plat === "tiktok" ? "TikTok" : "Shopee";
@@ -313,6 +396,7 @@ function buildMuseManualPrompt(reqRow) {
 
 function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
     if (!reqRow || typeof reqRow !== "object") return reqRow;
+    const plat = String(reqRow.platform || "threads").trim().toLowerCase();
     const hasOutbox = Boolean(activeOutboxReqIds && activeOutboxReqIds.has(reqRow.id));
     let parsedSummary = null;
     if (typeof reqRow.result_summary_json === "string" && reqRow.result_summary_json.trim()) {
@@ -321,9 +405,13 @@ function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
         parsedSummary = reqRow.result_summary;
     }
     const displayState = deriveCrawlRequestDisplayState(reqRow, parsedSummary, hasOutbox);
+    const leaseInfo = getRequestLeaseInfo(reqRow);
     return {
         ...reqRow,
         contract_version: getRequestContractVersion(reqRow.platform),
+        strategy_version: plat === "threads" ? THREADS_STRATEGY_VERSION : null,
+        lease_seconds: leaseInfo.leaseSeconds,
+        lease_minutes: leaseInfo.leaseMinutes,
         display_status: displayState.display_status,
         display_status_label: displayState.display_status_label,
         reconcile_status: displayState.reconcile_status,
@@ -4331,6 +4419,20 @@ async function createCrawlRequestInD1(env, {
     }
     const cleanKeywords = String(keywords || "").trim().slice(0, 300);
     const count = Math.min(Math.max(Number.parseInt(requestedCount, 10) || 50, 1), 500);
+    const cleanOptions = (options && typeof options === "object" && !Array.isArray(options)) ? { ...options } : {};
+    let requestedLeaseSec = MUSE_DEFAULT_LEASE_SECONDS;
+    if (plat === "threads") {
+        const hasCustomLease =
+            cleanOptions.lease_seconds !== undefined ||
+            cleanOptions.lease_minutes !== undefined ||
+            cleanOptions.duration_minutes !== undefined ||
+            cleanOptions.crawl_duration_minutes !== undefined;
+        requestedLeaseSec = normalizeThreadsLeaseSeconds(cleanOptions, MUSE_DEFAULT_LEASE_SECONDS);
+        if (hasCustomLease) {
+            cleanOptions.lease_seconds = requestedLeaseSec;
+            cleanOptions.lease_minutes = Math.round(requestedLeaseSec / 60);
+        }
+    }
     await expireStaleLeases(env);
 
     // 1. Check explicit dedupToken
@@ -4341,12 +4443,16 @@ async function createCrawlRequestInD1(env, {
         if (byToken) return { deduplicated: true, request: byToken };
     }
 
-    // 2. Active-queue deduplication for identical platform + keywords + count
-    const existingActive = await env.DB.prepare(`
+    // 2. Active-queue deduplication for identical platform + keywords + count (+ lease duration for threads)
+    const activeCandidatesRes = await env.DB.prepare(`
         SELECT * FROM crawl_requests
         WHERE platform = ? AND lower(trim(keywords)) = ? AND requested_count = ? AND status IN ('queued', 'running')
-        ORDER BY created_at DESC LIMIT 1
-    `).bind(plat, cleanKeywords.toLowerCase(), count).first();
+        ORDER BY created_at DESC LIMIT 10
+    `).bind(plat, cleanKeywords.toLowerCase(), count).all();
+    const existingActive = (activeCandidatesRes?.results || []).find((row) => {
+        if (plat !== "threads") return true;
+        return getRequestLeaseInfo(row).leaseSeconds === requestedLeaseSec;
+    }) || null;
     if (existingActive) {
         return { deduplicated: true, request: existingActive };
     }
@@ -4366,7 +4472,7 @@ async function createCrawlRequestInD1(env, {
         plat,
         cleanKeywords,
         count,
-        JSON.stringify(options || {}),
+        JSON.stringify(cleanOptions),
         dedupToken,
         eta.poll_profile,
         eta.expected_pickup_at,
@@ -5261,13 +5367,17 @@ async function buildCrawlCenterMenu(env) {
 function buildTelegramPromptResponse(env, reqRow, { deduplicated = false } = {}) {
     const promptText = buildMuseManualPrompt(reqRow);
     const ds = deriveCrawlRequestDisplayState(reqRow);
-    const header =
-        `📝 <b>${deduplicated ? "ĐÃ CÓ YÊU CẦU TƯƠNG TỰ ĐANG CHỜ (DÙNG LẠI)" : "ĐÃ TẠO REQUEST CRAWL VÀO D1"}</b>\n` +
-        `• Mã Request ID: <code>${escapeTelegramHtml(reqRow.id)}</code>\n` +
-        `• Nền tảng: <b>${escapeTelegramHtml(String(reqRow.platform || "").toUpperCase())}</b> | Mục tiêu: <b>${Number(reqRow.requested_count || 50)}</b>\n` +
-        `• Trạng thái: ${escapeTelegramHtml(ds.display_status_label)} | Contract: <code>${escapeTelegramHtml(getRequestContractVersion(reqRow.platform))}</code>\n` +
-        `<i>Chạm để copy đoạn Prompt bên dưới và dán gửi Muse:</i>\n` +
-        `<pre>${escapeTelegramHtml(promptText)}</pre>`;
+    const plat = String(reqRow?.platform || "").trim().toLowerCase();
+    const leaseInfo = getRequestLeaseInfo(reqRow);
+    const stratPart = plat === "threads" ? ` | Strategy: <code>3.3</code> | Lease: <b>${leaseInfo.leaseMinutes}p</b>` : "";
+    const metaHeader =
+        `📝 <b>${deduplicated ? "DÙNG LẠI REQUEST CRAWL D1" : "ĐÃ TẠO REQUEST CRAWL D1"}</b> • <code>${escapeTelegramHtml(reqRow.id)}</code>\n` +
+        `<b>${escapeTelegramHtml(plat.toUpperCase())}</b> | Mục tiêu: <b>${Number(reqRow.requested_count || 50)}</b>${stratPart} | Contract: <code>${escapeTelegramHtml(getRequestContractVersion(reqRow.platform))}</code> | ${escapeTelegramHtml(ds.display_status_label)}\n`;
+    const escapedPrompt = escapeTelegramHtml(promptText);
+    const wrappedHtml = `${metaHeader}<pre>${escapedPrompt}</pre>`;
+    const header = wrappedHtml.length <= 4096
+        ? wrappedHtml
+        : `<pre>${escapedPrompt.slice(0, 4080)}</pre>`;
     const kb = {
         inline_keyboard: [
             [
@@ -5648,15 +5758,28 @@ async function handleTelegramUpdate(request, env) {
         const plat = (parts[1] || "").toLowerCase();
         const maybeCount = Number.parseInt(parts[2], 10);
         const count = Number.isFinite(maybeCount) ? maybeCount : 50;
-        const keywords = (Number.isFinite(maybeCount) ? parts.slice(3) : parts.slice(2)).join(" ").trim();
+        const restParts = Number.isFinite(maybeCount) ? parts.slice(3) : parts.slice(2);
+        const reqOptions = {};
+        if (plat === "threads" && restParts.length > 0) {
+            const durMatch = String(restParts[0] || "").trim().match(/^(\d{1,3})\s*(?:m|min|phut|p)$/i);
+            if (durMatch) {
+                const durMin = Number.parseInt(durMatch[1], 10);
+                if (durMin >= 1 && durMin <= 120) {
+                    reqOptions.lease_seconds = durMin * 60;
+                    restParts.shift();
+                }
+            }
+        }
+        const keywords = restParts.join(" ").trim();
         if (!ALLOWED_CRAWL_PLATFORMS.has(plat)) {
-            reply = "Cú pháp: /request_crawl <threads|tiktok|shopee|all> [số_lượng] [từ_khóa]";
+            reply = "Cú pháp: /request_crawl <threads|tiktok|shopee|all> [số_lượng] [30m|60m|90m|120m] [từ_khóa]";
             markup = homeOnlyInlineKeyboard();
         } else {
             const res = await createCrawlRequestInD1(env, {
                 platform: plat,
                 keywords,
                 requestedCount: count,
+                options: reqOptions,
                 chatId: String(chatId),
                 source: "telegram",
                 dedupToken: `tg_crw_msg_${msg.message_id}`
@@ -5732,12 +5855,12 @@ function normalizeCrawlRegistryCheckItems(body) {
     return { items };
 }
 
-const MUSE_DEFAULT_CLAIM_OWNER = "muse-ai";
-const MUSE_DEFAULT_LEASE_SECONDS = 1800;
-
 async function claimNextCrawlRequestInD1(env, options = {}) {
     const workerId = String(options.workerId || MUSE_DEFAULT_CLAIM_OWNER).trim().slice(0, 64) || MUSE_DEFAULT_CLAIM_OWNER;
-    const leaseSec = Math.min(Math.max(Number(options.leaseSeconds) || MUSE_DEFAULT_LEASE_SECONDS, 60), 7200);
+    const hasExplicitLease = options.leaseSeconds !== undefined && options.leaseSeconds !== null && options.leaseSeconds !== "";
+    const explicitLeaseSec = hasExplicitLease
+        ? Math.min(Math.max(Number(options.leaseSeconds) || MUSE_DEFAULT_LEASE_SECONDS, MUSE_MIN_LEASE_SECONDS), MUSE_MAX_LEASE_SECONDS)
+        : null;
     const scheduleConfirmed = options.scheduleConfirmed === true;
     const threadsOnly = Boolean(options.threadsOnly);
     const singleFlight = Boolean(options.singleFlight);
@@ -5851,7 +5974,13 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
             return { ok: true, request: null };
         }
 
-        const leaseExpires = new Date(now.getTime() + leaseSec * 1000).toISOString();
+        const candidatePlat = String(candidate.platform || "").trim().toLowerCase();
+        const candidateLeaseSec = explicitLeaseSec !== null
+            ? explicitLeaseSec
+            : (candidatePlat === "threads"
+                ? normalizeThreadsLeaseSeconds(parseRequestOptionsJson(candidate), MUSE_DEFAULT_LEASE_SECONDS)
+                : MUSE_DEFAULT_LEASE_SECONDS);
+        const leaseExpires = new Date(now.getTime() + candidateLeaseSec * 1000).toISOString();
         const claimed = (singleFlight || threadsOnly)
             ? await env.DB.prepare(`
                 UPDATE crawl_requests
@@ -6690,7 +6819,7 @@ async function handleMuseCrawlApi(request, env, url) {
         try {
             const res = await claimNextCrawlRequestInD1(env, {
                 workerId: MUSE_DEFAULT_CLAIM_OWNER,
-                leaseSeconds: body.lease_seconds ?? MUSE_DEFAULT_LEASE_SECONDS,
+                leaseSeconds: (body.lease_seconds !== undefined && body.lease_seconds !== null) ? body.lease_seconds : null,
                 scheduleConfirmed: body.schedule_confirmed === true,
                 threadsOnly: true,
                 singleFlight: true,

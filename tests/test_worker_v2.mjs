@@ -413,6 +413,22 @@ class MockD1Database {
             results: db.notifications.filter((n) => n.status === "delivery_uncertain"),
           };
         }
+        if (norm.includes("FROM crawl_requests WHERE platform = ? AND lower(trim(keywords)) = ?")) {
+          const [plat, kw, cnt] = this.args;
+          return {
+            results: db.crawlRequests
+              .filter(
+                (c) =>
+                  c.platform === plat &&
+                  String(c.keywords || "").trim().toLowerCase() === kw &&
+                  c.requested_count === cnt &&
+                  ["queued", "running"].includes(c.status)
+              )
+              .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+              .slice(0, 10)
+              .map((c) => ({ ...c })),
+          };
+        }
         if (norm.includes("FROM crawl_requests WHERE status IN ('queued', 'running')")) {
           return {
             results: db.crawlRequests
@@ -5841,14 +5857,85 @@ assert.equal(v3StartBtns.length, 6);
     const reqThreads1 = createThreadsResp.request;
     assert.equal(reqThreads1.display_status, "waiting_prompt");
     assert.equal(reqThreads1.display_status_label, "Chờ gửi prompt");
+    assert.equal(reqThreads1.strategy_version, "3.3 (sửa đổi 28/11/2026)");
     assert.equal(reqThreads1.contract_version, "3.2");
+    assert.equal(reqThreads1.lease_minutes, 30);
+    assert.equal(reqThreads1.lease_seconds, 1800);
     assert.equal(reqThreads1.muse_web_url, "https://muse.ai/");
-    assert.match(reqThreads1.manual_prompt, new RegExp(`Request ID: ${reqThreads1.id}`));
-    assert.match(reqThreads1.manual_prompt, /Contract Version: 3\.2/);
-    assert.match(reqThreads1.manual_prompt, /POST \/api\/crawl\/claim/);
-    assert.match(reqThreads1.manual_prompt, /max\(10 phút, 20% lease\)/);
-    assert.doesNotMatch(reqThreads1.manual_prompt, /6–10 phút/);
-    assert.match(reqThreads1.manual_prompt, /serum vitamin c/);
+
+    const assertThreadsStrategy33Prompt = (promptText, expectedReqId, expectedKw = null, expectedCount = null) => {
+      const requiredPatterns = [
+        new RegExp(`Request ID: ${expectedReqId}`),
+        /Platform: threads/,
+        expectedCount !== null ? new RegExp(`Requested Count: ${expectedCount} bài mới đạt chuẩn`) : /Requested Count: \d+ bài mới đạt chuẩn/,
+        /Strategy Version: 3\.3 \(sửa đổi 28\/11\/2026\)/,
+        /Contract Version: 3\.2/,
+        /@toilaai267/,
+        /Cloud Browser/,
+        /threads-cli/,
+        /Custom Connector/,
+        /đăng nhập lại trước khi claim/,
+        new RegExp(`POST /api/crawl/claim[\\s\\S]*\\{"request_id":"${expectedReqId}"\\}`),
+        /Không fallback sang request khác/,
+        /max\(10 phút, 20% lease\)/,
+        /Crawl Strategy 3\.3/,
+        /Việt Nam/,
+        /24 giờ gần nhất.*48 giờ/,
+        /Mở rộng tìm kiếm ngoài trends chính thức/,
+        /viral tự nhiên từ người dùng bình thường, creator nhỏ/i,
+        /Hạn chế người nổi tiếng, ca sĩ, thương hiệu lớn/i,
+        /Không loại cứng người bán hoặc thương hiệu nhỏ/i,
+        /POST \/api\/crawl\/registry\/check/,
+        /Mở rộng nguồn tìm kiếm nếu chưa đạt mục tiêu/i,
+        /Bắt buộc xác minh cả views và likes/,
+        /Không bỏ qua bước đo views chỉ vì likes thấp/i,
+        /5 trường chứng cứ views theo V3\.2/,
+        /Phân biệt rõ số 0 với null/,
+        /Không đặt sàn views hoặc likes.*Watchlist/i,
+        /Không dừng giữa chừng nếu còn ứng viên phù hợp/,
+        /Very Hot: ≥ 1\.000 likes hoặc ≥ 50\.000 views/,
+        /Hot: ≥ 300 likes hoặc ≥ 10\.000 views/,
+        /Emerging:/,
+        /Watchlist:/,
+        /Unverified:/,
+        /Rejected:/,
+        /Followers của tác giả/,
+        /Views\/followers/,
+        /Natural Viral \(natural_viral\)/,
+        /Buyer Intent \(buyer_intent\)/,
+        /Nguyên nhân viral và khả năng ứng dụng Affiliate/i,
+        /Đo lại (?:các )?bài lịch sử có tiềm năng tăng trưởng.*không tính vào số bài mới/i,
+        /Không thu thập toàn bài Watchlist chỉ để đạt mục tiêu/i,
+        /POST \/api\/crawl\/progress/,
+        /Tuân thủ ngân sách lease\. Không tự gia hạn/,
+        /run_id.*Run-centric UI/,
+        /Threads\/threads_trend_<YYYYMMDD>_<HHmm>\.json/,
+        /Reports\/trend_report_<YYYYMMDD>_<HHmm>\.json/,
+        /Reports\/trend_report_<YYYYMMDD>_<HHmm>\.md/,
+        /strategy_version="3\.3 \(sửa đổi 28\/11\/2026\)"/,
+        /snapshot tương tác tại thời điểm crawl/,
+        /Growth Tracking \(9_growth_tracking\)/,
+        /POST \/api\/crawl\/complete/,
+        /POST \/api\/crawl\/fail/,
+        /Không bật Hook, không tạo Scheduled Task, không ghi SQL trực tiếp/,
+        /đồng bộ Registry và trạng thái Telegram Notification/,
+      ];
+      for (const pat of requiredPatterns) {
+        assert.match(promptText, pat, `Prompt missing expected Strategy 3.3 requirement: ${pat}`);
+      }
+      assert.doesNotMatch(promptText, /6–10 phút/);
+      if (expectedKw) assert.ok(promptText.includes(expectedKw));
+    };
+
+    assertThreadsStrategy33Prompt(reqThreads1.manual_prompt, reqThreads1.id, "serum vitamin c", 10);
+
+    // Listing endpoint also returns unified Strategy 3.3 prompt
+    const listReqsResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", { headers: appHeaders }),
+      env23
+    )).json();
+    const listedReq1 = listReqsResp.items.find(r => r.id === reqThreads1.id);
+    assert.equal(listedReq1.manual_prompt, reqThreads1.manual_prompt);
 
     // Copy lại Prompt endpoint returns exact prompt without creating extra D1 requests
     const countBeforeCopy = countReqs();
@@ -5923,11 +6010,26 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(tgReqRes.status, 200);
     const tgPromptMsg = tgCalls.find(c => String(c.body?.text || "").includes("Request ID:"));
     assert.ok(tgPromptMsg, "Telegram /request_crawl should output Manual Prompt");
-    assert.match(tgPromptMsg.body.text, /<pre>[\s\S]*Contract Version: 3\.2[\s\S]*<\/pre>/);
+    assert.ok(tgPromptMsg.body.text.length <= 4096, `Telegram message exceeded 4096 chars: ${tgPromptMsg.body.text.length}`);
+    assert.ok(tgPromptMsg.body.text.trim().endsWith("</pre>"), "Telegram HTML must cleanly close </pre>");
+    assert.match(tgPromptMsg.body.text, /<pre>[\s\S]*Strategy Version: 3\.3 \(sửa đổi 28\/11\/2026\)[\s\S]*Contract Version: 3\.2[\s\S]*<\/pre>/);
     const museBtn = tgPromptMsg.body.reply_markup.inline_keyboard.flat().find(b => b.url === "https://muse.ai/");
     assert.ok(museBtn, "Telegram response must include Mở Muse button");
     const reqThreads2 = Array.from(env23.DB.crawlRequests.values()).find(r => r.keywords === "retinol");
     assert.ok(reqThreads2, "Telegram should create second threads request");
+
+    // Verify Telegram copy callback returns IDENTICAL Strategy 3.3 prompt as App_Video prompt endpoint
+    const appSidePromptRes = await (await worker.fetch(
+      new Request(`https://worker.example/api/app/crawl-requests/${reqThreads2.id}/prompt`, { headers: appHeaders }),
+      env23
+    )).json();
+    assertThreadsStrategy33Prompt(appSidePromptRes.manual_prompt, reqThreads2.id, "retinol", 12);
+    const unescapedTgPre = tgPromptMsg.body.text
+      .match(/<pre>([\s\S]*)<\/pre>/)[1]
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&");
+    assert.equal(unescapedTgPre, appSidePromptRes.manual_prompt);
 
     // Re-fetching prompt via Telegram callback does NOT create new request
     const countBeforeTgPrompt = countReqs();
@@ -6010,6 +6112,7 @@ assert.equal(v3StartBtns.length, 6);
 
     // 23C: Drive Listener Reconciliation (Cron) — waiting_pair, validation_failed, stale attempt, valid pair, concurrency race
     const tgCountBeforeReconcile = tgCalls.length;
+    const relIso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
     const validDrivePost = {
       platform: "threads",
       post_id: "P_DRV_23_1",
@@ -6024,9 +6127,9 @@ assert.equal(v3StartBtns.length, 6);
       views_display: "15.2K",
       views_precision: "exact_badge",
       views_source: "threads_web_browser",
-      views_measured_at: "2026-11-28T03:00:00Z",
+      views_measured_at: relIso(-60_000),
       views_evidence_url: "https://www.threads.com/@brand.vn/post/P_DRV_23_1",
-      posted_at: "2026-11-28T01:00:00Z",
+      posted_at: relIso(-7200_000),
       classification: "NEW",
     };
     const buildV32Report = (reqId, runId, attempt, qualifiedCount = 1) => ({
@@ -6036,8 +6139,8 @@ assert.equal(v3StartBtns.length, 6);
       attempt,
       claimed_by: "muse-ai",
       platform: "threads",
-      crawled_at: "2026-11-28T03:05:00Z",
-      generated_at: "2026-11-28T03:05:00Z",
+      crawled_at: relIso(-30_000),
+      generated_at: relIso(-30_000),
       run_status: qualifiedCount > 0 ? "completed" : "no_qualifying_posts",
       stop_reason: qualifiedCount > 0 ? "target_reached" : "no_qualifying_posts",
       counters: {
@@ -6061,7 +6164,7 @@ assert.equal(v3StartBtns.length, 6);
 
     // Subcase 1: Data JSON alone (no Report JSON) -> waiting_pair, NOT completed, 0 registry writes, 0 Telegram
     driveFilesByFolder.threads = [
-      { id: "drv_data_only", name: "threads_trend_20261128_1000.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:05:00Z" },
+      { id: "drv_data_only", name: "threads_trend_20261128_1000.json", mimeType: "application/json", modifiedTime: relIso(1000) },
     ];
     driveFilesByFolder.reports = [];
     drivePayloadById = {
@@ -6100,12 +6203,12 @@ assert.equal(v3StartBtns.length, 6);
       env23
     );
     driveFilesByFolder.threads = [
-      { id: "drv_d_queued", name: "threads_trend_20261128_1001.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
-      { id: "drv_d_cancel", name: "threads_trend_20261128_1002.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
+      { id: "drv_d_queued", name: "threads_trend_20261128_1001.json", mimeType: "application/json", modifiedTime: relIso(2000) },
+      { id: "drv_d_cancel", name: "threads_trend_20261128_1002.json", mimeType: "application/json", modifiedTime: relIso(2000) },
     ];
     driveFilesByFolder.reports = [
-      { id: "drv_r_queued", name: "trend_report_20261128_1001.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
-      { id: "drv_r_cancel", name: "trend_report_20261128_1002.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
+      { id: "drv_r_queued", name: "trend_report_20261128_1001.json", mimeType: "application/json", modifiedTime: relIso(2000) },
+      { id: "drv_r_cancel", name: "trend_report_20261128_1002.json", mimeType: "application/json", modifiedTime: relIso(2000) },
     ];
     drivePayloadById = {
       drv_d_queued: { contract_version: "3.2", request_id: reqThreads1.id, run_id: "run_unclaimed", attempt: 1, claimed_by: "muse-ai", platform: "threads", items: [validDrivePost] },
@@ -6122,10 +6225,10 @@ assert.equal(v3StartBtns.length, 6);
     // Subcase 3: Stale attempt=1 artifact when reqThreads2 is on attempt=2 -> stale_attempt_rejected
     findReq(reqThreads2.id).attempts = 2;
     driveFilesByFolder.threads = [
-      { id: "drv_d_stale", name: "threads_trend_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
+      { id: "drv_d_stale", name: "threads_trend_20261128_1003.json", mimeType: "application/json", modifiedTime: relIso(3000) },
     ];
     driveFilesByFolder.reports = [
-      { id: "drv_r_stale", name: "trend_report_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
+      { id: "drv_r_stale", name: "trend_report_20261128_1003.json", mimeType: "application/json", modifiedTime: relIso(3000) },
     ];
     drivePayloadById = {
       drv_d_stale: { contract_version: "3.2", request_id: reqThreads2.id, run_id: "run_drv_23", attempt: 1, claimed_by: "muse-ai", platform: "threads", counters: { scanned_count: 1, new_qualified_count: 1 }, items: [validDrivePost] },
@@ -6139,12 +6242,12 @@ assert.equal(v3StartBtns.length, 6);
 
     // Subcase 4: Valid attempt=2 Data+Report pair -> reconciles to completed + syncs Registry + sends Telegram ONCE
     driveFilesByFolder.threads = [
-      { id: "drv_d_stale", name: "threads_trend_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
-      { id: "drv_d_ok", name: "threads_trend_20261128_1008.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:08:00Z" },
+      { id: "drv_d_stale", name: "threads_trend_20261128_1003.json", mimeType: "application/json", modifiedTime: relIso(3000) },
+      { id: "drv_d_ok", name: "threads_trend_20261128_1008.json", mimeType: "application/json", modifiedTime: relIso(4000) },
     ];
     driveFilesByFolder.reports = [
-      { id: "drv_r_stale", name: "trend_report_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
-      { id: "drv_r_ok", name: "trend_report_20261128_1008.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:08:00Z" },
+      { id: "drv_r_stale", name: "trend_report_20261128_1003.json", mimeType: "application/json", modifiedTime: relIso(3000) },
+      { id: "drv_r_ok", name: "trend_report_20261128_1008.json", mimeType: "application/json", modifiedTime: relIso(4000) },
     ];
     drivePayloadById.drv_d_ok = {
       contract_version: "3.2",
@@ -6191,10 +6294,10 @@ assert.equal(v3StartBtns.length, 6);
       views_evidence_url: "https://www.threads.com/@race.vn/post/P_RACE_23",
     };
     driveFilesByFolder.threads = [
-      { id: "drv_d_race", name: "threads_trend_20261128_1015.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:15:00Z" },
+      { id: "drv_d_race", name: "threads_trend_20261128_1015.json", mimeType: "application/json", modifiedTime: relIso(5000) },
     ];
     driveFilesByFolder.reports = [
-      { id: "drv_r_race", name: "trend_report_20261128_1015.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:15:00Z" },
+      { id: "drv_r_race", name: "trend_report_20261128_1015.json", mimeType: "application/json", modifiedTime: relIso(5000) },
     ];
     drivePayloadById = {
       drv_d_race: {
@@ -6465,6 +6568,99 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(compZeroJson.status, "completed");
     assert.equal(compZeroJson.registry_sync_status, "ok");
     assert.equal(compZeroJson.telegram_notified, true);
+
+    // 23E: Safe optional Threads lease duration (App_Video + Telegram + POST /api/crawl/claim stored options + clamping)
+    const reqDurDefault = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 20, keywords: "gia dung thong minh" }),
+      }),
+      env23
+    )).json();
+    assert.equal(reqDurDefault.ok, true);
+    assert.equal(reqDurDefault.request.lease_seconds, 1800);
+    assert.equal(reqDurDefault.request.lease_minutes, 30);
+
+    // Request with 90m duration MUST NOT deduplicate onto queued 30m request and MUST store 5400s
+    const reqDur90 = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({
+          platform: "threads",
+          requested_count: 20,
+          keywords: "gia dung thong minh",
+          options: { lease_seconds: 5400 },
+        }),
+      }),
+      env23
+    )).json();
+    assert.equal(reqDur90.ok, true);
+    assert.equal(reqDur90.deduplicated, false);
+    assert.notEqual(reqDur90.request.id, reqDurDefault.request.id);
+    assert.equal(reqDur90.request.lease_seconds, 5400);
+    assert.equal(reqDur90.request.lease_minutes, 90);
+    assert.match(reqDur90.manual_prompt, /Thời lượng lease: 90 phút \(5400s/);
+    assert.match(reqDur90.manual_prompt, /≈ 18p\b/);
+    assertThreadsStrategy33Prompt(reqDur90.manual_prompt, reqDur90.request.id, "gia dung thong minh", 20);
+
+    // Oversized lease_seconds clamps strictly to Worker 7200s (120 phút) safety cap
+    const reqDurClamped = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({
+          platform: "threads",
+          requested_count: 25,
+          keywords: "clamp cap test",
+          options: { lease_seconds: 99999 },
+        }),
+      }),
+      env23
+    )).json();
+    assert.equal(reqDurClamped.request.lease_seconds, 7200);
+    assert.equal(reqDurClamped.request.lease_minutes, 120);
+
+    // Claiming by {"request_id": reqDur90.id} WITHOUT passing lease_seconds grants stored 5400s (~90m) lease automatically
+    const claimBeforeMs = Date.now();
+    const claim90 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqDur90.request.id }),
+      }),
+      env23
+    )).json();
+    assert.equal(claim90.ok, true);
+    const leaseDeltaSec = Math.round((Date.parse(claim90.request.lease_expires_at) - claimBeforeMs) / 1000);
+    assert.ok(leaseDeltaSec >= 5390 && leaseDeltaSec <= 5410, `Expected ~5400s lease, got ${leaseDeltaSec}s`);
+
+    // Telegram /request_crawl optional duration token e.g. 60m + keywords works safely and stays <= 4096 chars
+    const tg60Res = await worker.fetch(
+      new Request("https://worker.example/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-sec-23" },
+        body: JSON.stringify({
+          update_id: 2390,
+          message: {
+            message_id: 91,
+            from: { id: 99887766 },
+            chat: { id: 99887766, type: "private" },
+            text: "/request_crawl threads 20 60m my pham binh dan",
+          },
+        }),
+      }),
+      env23
+    );
+    assert.equal(tg60Res.status, 200);
+    const tg60Req = Array.from(env23.DB.crawlRequests.values()).find(r => r.keywords === "my pham binh dan");
+    assert.ok(tg60Req, "Telegram /request_crawl should strip optional 60m token into lease option");
+    assert.equal(JSON.parse(tg60Req.options_json).lease_seconds, 3600);
+    const tg60Msg = tgCalls[tgCalls.length - 1];
+    assert.ok(tg60Msg.body.text.length <= 4096);
+    assert.match(tg60Msg.body.text, /Thời lượng lease: 60 phút/);
+    assert.match(tg60Msg.body.text, /<\/pre>$/);
   } finally {
     globalThis.fetch = prevFetch23;
   }

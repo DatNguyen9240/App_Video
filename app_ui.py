@@ -3073,8 +3073,8 @@ HTML_TEMPLATE = """
 
             <div class="space-y-2">
               <div class="flex flex-wrap xl:flex-nowrap items-center gap-2">
-                <select v-model="crawlRequestForm.platform" class="w-full sm:w-32 shrink-0 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
-                  <option value="threads">Threads (V3.2)</option>
+                <select v-model="crawlRequestForm.platform" class="w-full sm:w-36 shrink-0 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="threads">Threads (Str 3.3 / V3.2)</option>
                   <option value="tiktok">TikTok (V2)</option>
                   <option value="shopee">Shopee (V2)</option>
                   <option value="all">Tất cả (All)</option>
@@ -3085,6 +3085,15 @@ HTML_TEMPLATE = """
                     class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs font-mono bg-slate-800 text-slate-100">
                   <span class="text-[10px] text-slate-400 shrink-0">bài</span>
                 </div>
+                <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lease_minutes"
+                  title="Tùy chọn thời lượng lease an toàn (30–120 phút) cho Threads Strategy 3.3 — ưu tiên chất lượng"
+                  class="w-full sm:w-32 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option :value="30">⏱️ 30 phút</option>
+                  <option :value="45">⏱️ 45 phút</option>
+                  <option :value="60">⏱️ 60 phút</option>
+                  <option :value="90">⏱️ 90 phút</option>
+                  <option :value="120">⏱️ 120 phút</option>
+                </select>
                 <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa / ngách sản phẩm..."
                   class="flex-1 min-w-[120px] glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
                 <button @click="submitCrawlRequest"
@@ -3102,7 +3111,10 @@ HTML_TEMPLATE = """
                     {{ preset }}
                   </button>
                 </div>
-                <span v-if="crawlRequestForm.platform !== 'threads'" class="text-amber-300/90">
+                <span v-if="crawlRequestForm.platform === 'threads'" class="text-indigo-300/90">
+                  🧭 Crawl Strategy 3.3 + Contract V3.2 • Lease an toàn 30–120 phút (mặc định 30p, không tự gia hạn).
+                </span>
+                <span v-else class="text-amber-300/90">
                   ℹ️ {{ crawlRequestForm.platform.toUpperCase() }} CHƯA hỗ trợ tự động hoàn tất request đầy đủ (Completion API /api/crawl/* chỉ hỗ trợ Threads V3.2); chỉ dùng Drive Sync.
                 </span>
               </div>
@@ -3113,7 +3125,9 @@ HTML_TEMPLATE = """
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="font-bold text-indigo-300">📋 Prompt cho Muse</span>
                   <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-amber-300">{{ activePromptInfo.request_id }}</span>
+                  <span v-if="activePromptInfo.strategy_version" class="px-1.5 py-0.5 rounded bg-slate-900 border border-indigo-700/70 font-mono text-[10px] text-indigo-300">Strategy: 3.3</span>
                   <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-emerald-300">Contract: {{ activePromptInfo.contract_version }}</span>
+                  <span v-if="activePromptInfo.platform === 'threads' && activePromptInfo.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-sky-300">Lease: {{ activePromptInfo.lease_minutes }}p</span>
                 </div>
                 <div class="flex items-center gap-1.5">
                   <button @click="copyTextToClipboard(activePromptInfo.manual_prompt, '📋 Đã copy Prompt gửi Muse!')"
@@ -3139,6 +3153,7 @@ HTML_TEMPLATE = """
                     <div class="flex items-center gap-2 flex-wrap">
                       <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
                       <span class="font-mono text-[11px] text-slate-200 font-semibold">Mục tiêu: {{ crw.requested_count || 50 }} bài</span>
+                      <span v-if="crw.platform === 'threads' && crw.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-sky-300 font-mono text-[10px] border border-slate-700">⏱️ {{ crw.lease_minutes }}p</span>
                       <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
                         :class="getCrawlDisplayState(crw).badgeClass">
                         {{ getCrawlDisplayState(crw).label }}
@@ -4251,7 +4266,7 @@ HTML_TEMPLATE = """
           selectedMarketDetail: null,
           isTestingConnection: false,
           marketConnectionNotice: null,
-          crawlRequestForm: { platform: 'threads', requested_count: 50, keywords: '' },
+          crawlRequestForm: { platform: 'threads', requested_count: 50, lease_minutes: 30, keywords: '' },
           crawlRequests: [],
           activePromptInfo: null,
           museWebUrl: 'https://muse.ai/',
@@ -5850,25 +5865,35 @@ HTML_TEMPLATE = """
             return;
           }
           try {
+            const plat = this.crawlRequestForm.platform || 'threads';
+            const parsedLeaseMin = Math.min(Math.max(Number.parseInt(this.crawlRequestForm.lease_minutes, 10) || 30, 1), 120);
+            const payloadBody = {
+              platform: plat,
+              requested_count: parsedCount,
+              keywords: this.crawlRequestForm.keywords || '',
+              poll_profile: this.crawlScheduleProfile,
+            };
+            if (plat === 'threads') {
+              payloadBody.lease_minutes = parsedLeaseMin;
+              payloadBody.options = { lease_seconds: parsedLeaseMin * 60 };
+            }
             const res = await fetch('/api/remote/crawl_requests', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                platform: this.crawlRequestForm.platform || 'threads',
-                requested_count: parsedCount,
-                keywords: this.crawlRequestForm.keywords || '',
-                poll_profile: this.crawlScheduleProfile
-              })
+              body: JSON.stringify(payloadBody)
             });
             const data = await res.json();
             if (data.ok) {
               if (data.muse_web_url) this.museWebUrl = data.muse_web_url;
               const promptText = data.manual_prompt || data.request?.manual_prompt || '';
               if (promptText) {
+                const effPlat = data.request?.platform || plat;
                 this.activePromptInfo = {
                   request_id: data.request?.id || '',
-                  platform: data.request?.platform || this.crawlRequestForm.platform || 'threads',
-                  contract_version: data.request?.contract_version || ((data.request?.platform || 'threads') === 'threads' ? '3.2' : 'v2'),
+                  platform: effPlat,
+                  strategy_version: data.request?.strategy_version || (effPlat === 'threads' ? '3.3 (sửa đổi 28/11/2026)' : null),
+                  contract_version: data.request?.contract_version || (effPlat === 'threads' ? '3.2' : 'v2'),
+                  lease_minutes: data.request?.lease_minutes || (effPlat === 'threads' ? parsedLeaseMin : null),
                   manual_prompt: promptText,
                 };
                 await this.copyTextToClipboard(
@@ -5912,7 +5937,9 @@ HTML_TEMPLATE = """
             this.activePromptInfo = {
               request_id: reqObj.id,
               platform: reqObj.platform,
+              strategy_version: reqObj.strategy_version || (reqObj.platform === 'threads' ? '3.3 (sửa đổi 28/11/2026)' : null),
               contract_version: reqObj.contract_version || (reqObj.platform === 'threads' ? '3.2' : 'v2'),
+              lease_minutes: reqObj.lease_minutes || null,
               manual_prompt: promptText,
             };
             await this.copyTextToClipboard(promptText, `📋 Đã copy lại Prompt của ${reqObj.id} (không tạo request mới).`);
@@ -7163,13 +7190,31 @@ def api_remote_crawl_requests():
                 return jsonify({"ok": False, "error": "requested_count phải là số nguyên (1–500)"}), 400
             if req_count < 1 or req_count > 500:
                 return jsonify({"ok": False, "error": "requested_count phải trong khoảng 1–500"}), 400
+            plat = str(body.get("platform", "")).lower().strip()
+            opts = dict(body.get("options")) if isinstance(body.get("options"), dict) else {}
+            if plat == "threads":
+                raw_lm = body.get("lease_minutes")
+                if raw_lm is not None and raw_lm != "":
+                    try:
+                        lm_int = int(raw_lm)
+                    except (TypeError, ValueError):
+                        return jsonify({"ok": False, "error": "lease_minutes phải là số nguyên (1–120 phút)"}), 400
+                    if lm_int < 1 or lm_int > 120:
+                        return jsonify({"ok": False, "error": "lease_minutes phải trong khoảng 1–120 phút"}), 400
+                    opts["lease_seconds"] = lm_int * 60
+                elif "lease_seconds" in opts and opts["lease_seconds"] is not None:
+                    try:
+                        ls_int = int(opts["lease_seconds"])
+                    except (TypeError, ValueError):
+                        return jsonify({"ok": False, "error": "options.lease_seconds phải là số nguyên (60–7200 giây)"}), 400
+                    opts["lease_seconds"] = max(60, min(ls_int, 7200))
             res = rt["client"].create_crawl_request(
-                platform=str(body.get("platform", "")).lower().strip(),
+                platform=plat,
                 keywords=str(body.get("keywords", "")).strip(),
                 requested_count=req_count,
                 poll_profile=body.get("poll_profile"),
                 dedup_token=body.get("dedup_token"),
-                options=body.get("options") if isinstance(body.get("options"), dict) else {},
+                options=opts,
             )
             if isinstance(res, dict):
                 res.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
