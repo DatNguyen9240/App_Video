@@ -9,10 +9,12 @@ Handles:
   - Optional local JSON file ingestion using the identical deduplication pipeline
 """
 
+import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .cloudflare_client import CloudflareBridgeClient
 from .normalizer import is_archive_path
@@ -41,7 +43,10 @@ class MarketSyncService:
 
         self._sync_lock = threading.Lock()
         self._state_lock = threading.Lock()
+        self._auto_trigger_lock = threading.Lock()
         self._is_syncing = False
+        self._last_auto_trigger_ts = 0.0
+        self._seen_completed_markers: Dict[str, str] = {}
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._bg_thread: Optional[threading.Thread] = None
@@ -116,6 +121,103 @@ class MarketSyncService:
         )
         t.start()
         return {"started": True, "already_running": False}
+
+    def maybe_trigger_sync_for_crawl_requests(
+        self,
+        crawl_items: Any,
+        *,
+        debounce_sec: float = 12.0,
+    ) -> Dict[str, Any]:
+        """Auto-trigger single-flight debounced background sync when Worker reports newly completed crawl artifacts."""
+        if not isinstance(crawl_items, list) or not crawl_items:
+            return {"triggered": False, "reason": "no_items"}
+        if not self.client.is_configured():
+            return {"triggered": False, "reason": "unconfigured"}
+
+        with self._auto_trigger_lock:
+            now_mono = time.monotonic()
+            if self.is_syncing:
+                return {"triggered": False, "reason": "already_syncing"}
+            if self._last_auto_trigger_ts > 0.0 and (now_mono - self._last_auto_trigger_ts) < max(0.0, float(debounce_sec)):
+                return {"triggered": False, "reason": "debounced"}
+
+            last_sync_at = str(self.store.get_state("last_sync_at") or "").strip()
+            last_sync_ts = 0.0
+            if last_sync_at:
+                try:
+                    last_sync_ts = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    last_sync_ts = 0.0
+
+            known_synced_fids = set()
+            try:
+                for rf in self.store.list_raw_files(limit=200, include_archived=True):
+                    if rf.get("status") == "synced" and rf.get("file_id"):
+                        known_synced_fids.add(str(rf["file_id"]))
+            except Exception:
+                pass
+
+            candidate_updates: Dict[str, str] = {}
+            for req in crawl_items:
+                if not isinstance(req, dict):
+                    continue
+                if str(req.get("status") or "").lower() != "completed":
+                    continue
+                req_id = str(req.get("id") or "").strip()
+                if not req_id:
+                    continue
+                summary = {}
+                raw_sum = req.get("result_summary_json")
+                if isinstance(raw_sum, str) and raw_sum.strip():
+                    try:
+                        summary = json.loads(raw_sum)
+                    except Exception:
+                        summary = {}
+                elif isinstance(req.get("result_summary"), dict):
+                    summary = req.get("result_summary") or {}
+
+                reg_status = str(summary.get("registry_sync_status") or "").lower().strip()
+                if reg_status in ("pending", "error"):
+                    continue
+
+                rep_fid = str(req.get("report_file_id") or "").strip()
+                data_fid = str((summary.get("drive_reconcile") or {}).get("data_file_id") or "").strip()
+                upd_at = str(req.get("updated_at") or "").strip()
+                run_id = str(summary.get("run_id") or "").strip()
+                if not (rep_fid or run_id):
+                    continue
+
+                marker = f"{upd_at}|{rep_fid}|{data_fid}|{run_id}|{reg_status}"
+                if self._seen_completed_markers.get(req_id) == marker:
+                    continue
+
+                needs_file_sync = bool(
+                    (rep_fid and rep_fid not in known_synced_fids)
+                    or (data_fid and data_fid not in known_synced_fids)
+                )
+                newer_than_sync = False
+                if upd_at:
+                    try:
+                        req_ts = datetime.fromisoformat(upd_at.replace("Z", "+00:00")).timestamp()
+                        if last_sync_ts <= 0.0 or req_ts > last_sync_ts:
+                            newer_than_sync = True
+                    except Exception:
+                        newer_than_sync = not bool(last_sync_at)
+
+                if needs_file_sync or newer_than_sync:
+                    candidate_updates[req_id] = marker
+
+            if not candidate_updates:
+                return {"triggered": False, "reason": "up_to_date"}
+
+            self._seen_completed_markers.update(candidate_updates)
+            self._last_auto_trigger_ts = now_mono
+            sync_res = self.trigger_async_sync(trigger_source="auto_crawl_result")
+            return {
+                "triggered": bool(sync_res.get("started")),
+                "reason": "started" if sync_res.get("started") else "already_syncing",
+                "matched_request_ids": sorted(candidate_updates.keys()),
+            }
 
     def sync_now(
         self,

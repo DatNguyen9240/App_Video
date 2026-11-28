@@ -74,11 +74,14 @@ Toàn bộ SQL, Atomic Claim, Lease, Durable Outbox (`registry_sync_outbox`), Da
 
 ### 2.4. `POST /api/crawl/claim` (Atomic Claim + Single-Flight, Lease 30 phút)
 - **Headers:** `Authorization: Bearer <token>`, `Content-Type: application/json`
-- **Request Body:** `{}` *(hoặc tùy chọn `{"lease_seconds": 1800}`; `claimed_by` cố định phía Worker là `"muse-ai"`).*
+- **Request Body:** `{"request_id": "crw_..."}` *(Khuyến nghị truyền tường minh `request_id` từ Manual Prompt để tránh claim nhầm request khác; có thể truyền `{}` để fallback FIFO request Threads cũ nhất khi không chỉ định ID. `claimed_by` cố định phía Worker là `"muse-ai"`, tùy chọn `lease_seconds` mặc định `1800`).*
 - **Quy tắc server:**
   1. Tự động chạy `expireStaleLeases` trước khi claim.
-  2. **Single-flight:** Nếu đang có request nào `status = 'running'` còn lease, hoặc còn `registry_sync_outbox` / `registry_sync_status IN ('pending', 'error')`, Worker trả `request: null` (`single_flight_blocked: true`).
-  3. Chỉ nhận request có `platform = 'threads'`, `status = 'queued'`, `attempts < max_attempts` (cũ nhất trước). Bỏ qua `all`, `tiktok`, `shopee`.
+  2. **Strict Targeted Claim (`request_id`):** Khi caller truyền `request_id`:
+     - Tuyệt đối **không fallback** sang request khác trong hàng đợi.
+     - `404` nếu không tồn tại; `403` nếu không phải `platform = 'threads'`; `409 Conflict` nếu request không ở `queued` hoặc đã hết `max_attempts`.
+  3. **Single-flight:** Nếu đang có request nào `status = 'running'` còn lease, hoặc còn `registry_sync_outbox` / `registry_sync_status IN ('pending', 'error')`, Worker trả `request: null` (`single_flight_blocked: true`).
+  4. Chỉ nhận request có `platform = 'threads'`, `status = 'queued'`, `attempts < max_attempts`. Bỏ qua `all`, `tiktok`, `shopee`.
 - **Response `200` khi nhận được việc:**
   ```json
   {
@@ -90,6 +93,10 @@ Toàn bộ SQL, Atomic Claim, Lease, Durable Outbox (`registry_sync_outbox`), Da
       "requested_count": 20,
       "options": {},
       "status": "running",
+      "display_status": "crawling",
+      "display_status_label": "Đang crawl",
+      "requested_by_source": "app_video",
+      "requested_by_chat_id": null,
       "claimed_by": "muse-ai",
       "claimed_at": "2026-11-27T07:30:00.000Z",
       "lease_expires_at": "2026-11-27T08:00:00.000Z",
@@ -218,11 +225,11 @@ Toàn bộ SQL, Atomic Claim, Lease, Durable Outbox (`registry_sync_outbox`), Da
 
 ---
 
-## 3. Luồng thực thi chuẩn cho Helper của Muse (`custom.app_video`)
+## 3. Luồng thực thi chuẩn cho Helper của Muse (`custom.app_video` & Manual Prompt Trigger)
 
-1. `claim = POST /api/crawl/claim` với body `{}`. Nếu `claim.request == null` → thoát lặng lẽ.
-2. Lưu `request_id = claim.request.id`, `attempt = claim.request.attempt`, `claimed_by = claim.request.claimed_by` (`"muse-ai"`), ngân sách thời gian dừng trước `lease_expires_at` ít nhất 6 phút (`20%` lease 30 phút).
+1. `claim = POST /api/crawl/claim` với body `{"request_id": "<request_id_trong_prompt>"}` (hoặc `{}` khi poll không chỉ định). Nếu `claim.request == null` hoặc HTTP `409`/`404` → báo rõ trạng thái và **không tự lấy request khác**.
+2. Lưu `request_id = claim.request.id`, `attempt = claim.request.attempt`, `claimed_by = claim.request.claimed_by` (`"muse-ai"`), `requested_by_source = claim.request.requested_by_source`, ngân sách thời gian dừng trước `lease_expires_at` ít nhất 6–10 phút.
 3. Trước khi crawl / ghi kết quả mới: gọi `POST /api/crawl/registry/check` (batch `<= 100`). Nếu `503` → gọi `POST /api/crawl/fail` (`retryable: true`) và dừng.
 4. Trong khi crawl: gọi định kỳ `POST /api/crawl/progress` với `scanned_count`, `new_qualified_count`...
-5. Khi xong: ghi file Drive bằng `request_id`/`run_id`, rồi gọi `POST /api/crawl/complete` kèm `items` & `result_summary`. Nếu gặp HTTP `503` (`recovery_pending: true`), retry cùng payload (Worker Cron `*/5` cũng tự phục hồi).
+5. Khi xong: ghi **đủ cặp 2 file** lên Google Drive (`Threads/threads_trend_*.json` + `Reports/trend_report_*.json`) cùng có đủ `request_id`, `run_id`, `attempt`, `claimed_by: "muse-ai"`, `platform: "threads"`, `contract_version: "3.2"`, rồi gọi `POST /api/crawl/complete` kèm `items` & `result_summary`. Nếu gặp HTTP `503` (`recovery_pending: true`), retry cùng payload (Worker Cron `*/5` cũng tự phục hồi và đối soát Drive an toàn khi đủ cặp Data + Report khớp `(request_id, run_id, attempt)`).
 6. Khi lỗi: gọi `POST /api/crawl/fail` (`retryable: true` cho lỗi tạm thời, `false` cho lỗi vĩnh viễn).

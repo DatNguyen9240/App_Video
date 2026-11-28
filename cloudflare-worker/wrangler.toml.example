@@ -9,6 +9,8 @@ GOOGLE_DRIVE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g"
 # - "production_6h" (default: 6 hours combining scheduled crawl + crawl_requests queue check)
 # - "test_5m" (limited testing only: 5 minutes)
 MUSE_POLL_PROFILE = "production_6h"
+# Default Muse web URL for Manual Prompt Trigger ("Mở Muse" button)
+MUSE_WEB_URL = "https://muse.ai/"
 # Optional direct override for 01_Market_Data folder ID
 # MARKET_DATA_FOLDER_ID = ""
 # Optional legacy fallback folder ID
