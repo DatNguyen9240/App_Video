@@ -50,6 +50,44 @@ class TestRealImageSearch(unittest.TestCase):
         is_graphic = img_search_mod.is_logo_or_graphic(im_solid)
         self.assertTrue(is_graphic)
 
+    def test_search_bing_images_async_fallback_parsing(self):
+        """Bing async endpoint parsing extracts valid image URLs and filters blacklist."""
+        from unittest.mock import patch, MagicMock
+        fake_html = (
+            '&quot;murl&quot;:&quot;https://example.com/real-photo.jpg&quot; '
+            '&quot;murl&quot;:&quot;https://www.shutterstock.com/watermarked.jpg&quot; '
+            '&quot;murl&quot;:&quot;https://shopee.vn/review-item.jpg&quot;'
+        ).encode("utf-8")
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.read.return_value = fake_html
+        with patch.object(img_search_mod, "_urlopen", return_value=mock_resp):
+            urls_strict = img_search_mod.search_bing_images("car wash", limit=5, allow_ecommerce=False)
+            self.assertEqual(urls_strict, ["https://example.com/real-photo.jpg"])
+            urls_ecom = img_search_mod.search_bing_images("cọ rửa xe", limit=5, allow_ecommerce=True)
+            self.assertEqual(
+                urls_ecom,
+                ["https://example.com/real-photo.jpg", "https://shopee.vn/review-item.jpg"],
+            )
+
+    def test_search_openverse_images_parsing(self):
+        """Openverse API parser filters blacklisted/svg URLs and keeps real photos."""
+        import json
+        from unittest.mock import patch, MagicMock
+        payload = json.dumps({
+            "results": [
+                {"url": "https://live.staticflickr.com/123/photo.jpg"},
+                {"url": "https://example.com/icon.svg"},
+                {"url": "https://img.freepik.com/vector.jpg"},
+            ]
+        }).encode("utf-8")
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.read.return_value = payload
+        with patch.object(img_search_mod, "_urlopen", return_value=mock_resp):
+            urls = img_search_mod.search_openverse_images("office sofa", limit=5)
+            self.assertEqual(urls, ["https://live.staticflickr.com/123/photo.jpg"])
+
 
 if __name__ == "__main__":
     unittest.main()

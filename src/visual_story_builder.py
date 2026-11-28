@@ -540,13 +540,43 @@ def render_visual_documentary_video(
         abs_check = spath if (spath and os.path.isabs(spath)) else (os.path.join(BASE_DIR, spath) if spath else "")
         en_q = (sc.get("search_query_en") or "").strip()
 
+        def _build_diverse_shot_queries(tag: str) -> list:
+            """Sinh bộ từ khóa khác góc nhìn cho từng shot con (a/b/c) để tránh lặp ảnh."""
+            scene_text = (sc.get("text") or "").strip()
+            badge_text = (sc.get("badge") or "").strip()
+            if tag == "a":
+                qs = [q for q in [en_q, f"{story_title} {badge_text}".strip(), scene_text[:80]] if q]
+                return qs
+            elif tag == "b":
+                # Shot B: lấy bối cảnh / vật chứng / góc nhìn khác từ lời dẫn cảnh thay vì lặp lại y hệt en_q
+                qs = []
+                if scene_text:
+                    try:
+                        from real_image_search import generate_wikimedia_visual_queries
+                        qs.extend(generate_wikimedia_visual_queries(scene_text, context=f"{story_title} - {badge_text}"))
+                    except Exception:
+                        pass
+                if en_q:
+                    qs.extend([f"{en_q} location", f"{en_q} crowd"])
+                if badge_text:
+                    qs.append(f"{story_title} {badge_text}".strip())
+                return [q for q in qs if q]
+            else:
+                # Shot C: góc rộng / tư liệu báo chí / địa danh liên quan
+                qs = []
+                if en_q:
+                    qs.extend([f"{en_q} building", f"{en_q} newspaper"])
+                if story_title:
+                    qs.append(f"{story_title} {badge_text}".strip())
+                return [q for q in qs if q]
+
         def _fetch_or_fallback_image(tag: str, extra_queries: list, reuse_path: str = "") -> tuple:
             fetched_img = ""
             if extra_queries:
                 try:
                     from real_image_search import search_and_download_real_image
                     scene_out_img = os.path.join(temp_dir, f"scene_web_{idx}_{tag}.jpg")
-                    scene_ctx = f"{story_title}: {sc.get('text', '')[:120]}"
+                    scene_ctx = f"{story_title} ({sc.get('badge', '')}): {sc.get('text', '')[:160]}"
                     fetched_img = search_and_download_real_image(
                         queries=extra_queries,
                         category="general_life",
@@ -565,10 +595,6 @@ def render_visual_documentary_video(
                 return fetched_img, "image"
             if reuse_path and os.path.exists(reuse_path):
                 return reuse_path, "image"
-            # Nếu vẫn chưa có ảnh mới cho cảnh này, ưu tiên dùng lại ảnh thật đã xác thực của cảnh khác trong cùng câu chuyện thay vì slide chữ
-            for prev_img in used_scene_imgs:
-                if prev_img and os.path.exists(prev_img) and os.path.splitext(prev_img)[1].lower() in (".jpg", ".jpeg", ".png", ".webp"):
-                    return prev_img, "image"
             fallback_img = os.path.join(temp_dir, f"scene_slide_{idx}_{tag}.jpg")
             create_cinematic_scene_slide(sc.get("badge", ""), story_title, sc.get("text", ""), fallback_img)
             return fallback_img, "image"
@@ -582,7 +608,7 @@ def render_visual_documentary_video(
             elif ext in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"):
                 stype = "video"
         else:
-            q_list_a = [en_q] if en_q else [q for q in [f"{story_title} {sc.get('badge', '')}".strip(), sc.get("text", "")[:60]] if q]
+            q_list_a = _build_diverse_shot_queries("a")
             if stype == "video" and en_q:
                 try:
                     from real_image_search import search_and_download_real_video
@@ -608,9 +634,9 @@ def render_visual_documentary_video(
             dur_a = round(sdur * 0.31, 2)
             dur_b = round(sdur * 0.37, 2)
             dur_c = round(sdur - dur_a - dur_b, 2)
-            q_list_b = [q for q in [f"{en_q} photo", f"{en_q} portrait"] if en_q] or [f"{story_title} photo", sc.get("badge", "")]
+            q_list_b = _build_diverse_shot_queries("b")
             spath_b, _ = _fetch_or_fallback_image("b", q_list_b, reuse_path=spath)
-            q_list_c = [q for q in [f"{en_q} historical", f"{story_title} archive"] if en_q] or [f"{story_title} archive"]
+            q_list_c = _build_diverse_shot_queries("c")
             spath_c, _ = _fetch_or_fallback_image("c", q_list_c, reuse_path=spath_b)
             render_shots.append({"scene_idx": idx, "type": "image", "path": spath, "dur": dur_a, "badge": sc.get("badge", ""), "sfx": sc.get("sfx", "none"), "show_badge": True})
             render_shots.append({"scene_idx": idx, "type": "image", "path": spath_b, "dur": dur_b, "badge": "", "sfx": "none", "show_badge": False})
@@ -618,7 +644,7 @@ def render_visual_documentary_video(
         elif stype == "image" and sdur >= 4.2:
             dur_a = round(sdur * 0.43, 2)
             dur_b = round(sdur - dur_a, 2)
-            q_list_b = [q for q in [f"{en_q} photo", f"{en_q} portrait"] if en_q] or [f"{story_title} photo", sc.get("badge", "")]
+            q_list_b = _build_diverse_shot_queries("b")
             spath_b, _ = _fetch_or_fallback_image("b", q_list_b, reuse_path=spath)
             render_shots.append({"scene_idx": idx, "type": "image", "path": spath, "dur": dur_a, "badge": sc.get("badge", ""), "sfx": sc.get("sfx", "none"), "show_badge": True})
             render_shots.append({"scene_idx": idx, "type": "image", "path": spath_b, "dur": dur_b, "badge": "", "sfx": "none", "show_badge": False})

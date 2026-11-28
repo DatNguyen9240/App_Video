@@ -48,11 +48,12 @@ BLACKLIST_QUERY_WORDS = [
 BLACKLIST_URL_PATTERNS = [
     "pollinations", "shutterstock", "gettyimages", "alamy", "dreamstime", "depositphotos",
     "vector", "clipart", "istockphoto", "123rf", "canva", "freepik", "watermark", "stock-photo",
+    "ftcdn.net", "stockcake", "adobe.com/stock",
     "i.ytimg.com", "youtube.com", "funny_fail", "funny-fails", "maxresdefault", "hqdefault", "sddefault",
     "logo", "icon", "badge", "schematic", "diagram", "component", "catalog",
     "dealeraccelerate", "carfax", "autotrader", "volocars", "classiccars", "cars.com",
     "scribdassets", "tailieuhay", "kenhgiaovien", "loigiaihay", "vietjack", "hoc247",
-    "wixmp", "deviantart", "vecteezy", "dreamstime", "123rf"
+    "wixmp", "deviantart", "vecteezy"
 ]
 
 
@@ -142,12 +143,13 @@ def verify_image_with_gemini(image_path: str, query: str, fail_open: bool = True
             im_copy.thumbnail((512, 512))
 
         prompt = (
-            f"Scene topic: {query}\n"
-            "Does this image accurately depict a real photo, portrait, or historical scene matching this topic? "
-            "Reply NO if it is a textbook cover, book/PDF page scan, exam sheet, cartoon/anime, unrelated meme, or completely off-topic. "
-            "Reply strictly with one word: YES or NO."
+            f"Story/Scene context: {query}\n"
+            "Evaluate if this image is a real-life photograph, authentic documentary/historical photo, or real product/scene photo that genuinely matches the specific situation, object, or person described above.\n"
+            "Score from 1 to 10 (10 = exact match to the situation/object/person; 1 = off-topic or bad).\n"
+            "Give score <= 3 if it is: a textbook/book cover, PDF/document page scan, exam sheet, cartoon/anime, AI-generated plastic look, brand logo, blank map/flag when a real scene is needed, or an unrelated generic object/car/building.\n"
+            "Reply strictly in format: SCORE: <number> | YES or NO"
         )
-        models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+        models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
         for key in keys[:3]:
             client = genai.Client(api_key=key)
             for m in models:
@@ -156,8 +158,14 @@ def verify_image_with_gemini(image_path: str, query: str, fail_open: bool = True
                         model=m,
                         contents=[im_copy, prompt]
                     )
-                    ans = res.text.strip().upper()
-                    return ans.startswith("YES")
+                    raw_text = getattr(res, "text", None)
+                    if not raw_text:
+                        continue
+                    ans = raw_text.strip().upper()
+                    score_m = re.search(r"SCORE\s*:\s*(\d+)", ans)
+                    if score_m:
+                        return int(score_m.group(1)) >= 6
+                    return "YES" in ans and "NO" not in ans.split("YES")[0]
                 except Exception:
                     continue
         return fail_open
@@ -296,8 +304,8 @@ def normalize_query_terms(term: str) -> List[str]:
     return variants
 
 
-def search_bing_images(query: str, limit: int = 8) -> List[str]:
-    """Tìm ảnh từ Bing Image Search với cơ chế lọc nghiêm ngặt."""
+def search_bing_images(query: str, limit: int = 8, allow_ecommerce: bool = False) -> List[str]:
+    """Tìm ảnh từ Bing Image Search (ưu tiên endpoint async trả về đầy đủ murl) với cơ chế lọc nghiêm ngặt."""
     is_en = all(ord(ch) < 128 for ch in query)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -306,23 +314,68 @@ def search_bing_images(query: str, limit: int = 8) -> List[str]:
     }
     encoded = urllib.parse.quote(query)
     mkt_param = "&cc=US&mkt=en-US&setlang=en" if is_en else ""
-    search_url = f"https://www.bing.com/images/search?q={encoded}&FORM=HDRSC2{mkt_param}"
-    req = urllib.request.Request(search_url, headers=headers)
-    vn_book_junk = (".vn/", "sach", "baitap", "giaokhoa", "tienganh", "tiki", "shopee", "lazada", "fahasa", "nxbgd")
+    candidate_endpoints = [
+        f"https://www.bing.com/images/async?q={encoded}&first=1&count={max(20, limit * 3)}&adlt=moderate{mkt_param}",
+        f"https://www.bing.com/images/search?q={encoded}&FORM=HDRSC2{mkt_param}",
+    ]
+    vn_book_junk = (".vn/", "sach", "baitap", "giaokhoa", "tienganh", "fahasa", "nxbgd")
+    ecom_domains = ("shopee", "lazada", "tiki")
+    clean_urls = []
+    seen = set()
+
+    for search_url in candidate_endpoints:
+        req = urllib.request.Request(search_url, headers=headers)
+        try:
+            with _urlopen(req, timeout=7) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+            murls = re.findall(r'&quot;murl&quot;:&quot;(http[^&]+)&quot;', html)
+            if not murls:
+                murls = re.findall(r'"murl":"(http[^"]+)"', html)
+            for u in murls[:max(16, limit * 3)]:
+                dec = urllib.parse.unquote(u)
+                dec_low = dec.lower()
+                if dec in seen:
+                    continue
+                if any(bad in dec_low for bad in BLACKLIST_URL_PATTERNS):
+                    continue
+                if not allow_ecommerce and any(ec in dec_low for ec in ecom_domains):
+                    continue
+                if is_en and any(j in dec_low for j in vn_book_junk):
+                    continue
+                seen.add(dec)
+                clean_urls.append(dec)
+                if len(clean_urls) >= limit:
+                    return clean_urls
+            if clean_urls:
+                return clean_urls
+        except Exception:
+            continue
+    return clean_urls
+
+
+def search_openverse_images(query: str, limit: int = 8) -> List[str]:
+    """Tìm ảnh chụp đời thực miễn phí bản quyền từ Openverse API (Flickr, Wikimedia, thư viện ảnh CC)."""
+    headers = {"User-Agent": "ThreadsVideoBot/2.0 (multimedia@app.local)"}
+    encoded = urllib.parse.quote(query)
+    url = f"https://api.openverse.org/v1/images/?q={encoded}&page_size={max(12, limit * 2)}&mature=false"
+    req = urllib.request.Request(url, headers=headers)
     try:
-        with _urlopen(req, timeout=6) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-        murls = re.findall(r'&quot;murl&quot;:&quot;(http[^&]+)&quot;', html)
-        clean_urls = []
-        for u in murls[:limit * 2]:
-            dec = urllib.parse.unquote(u)
-            dec_low = dec.lower()
-            if any(bad in dec_low for bad in BLACKLIST_URL_PATTERNS):
+        with _urlopen(req, timeout=7) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        urls = []
+        seen = set()
+        for item in data.get("results", []):
+            u = item.get("url") or item.get("thumbnail")
+            if not u or u in seen:
                 continue
-            if is_en and any(j in dec_low for j in vn_book_junk):
+            u_low = u.lower()
+            if ".svg" in u_low or any(bad in u_low for bad in BLACKLIST_URL_PATTERNS):
                 continue
-            clean_urls.append(dec)
-        return clean_urls
+            seen.add(u)
+            urls.append(u)
+            if len(urls) >= limit:
+                break
+        return urls
     except Exception:
         return []
 
@@ -395,10 +448,11 @@ def search_and_download_real_image(
     exclude_urls: set = None,
     exclude_hashes: set = None,
     topic_context: str = "",
+    prefer_lifestyle: bool = False,
 ) -> str:
     """
     Tìm kiếm ảnh thật trên web theo ngữ cảnh chính xác và lưu về máy.
-    Hỗ trợ đa nguồn (Wikimedia -> Bing) và tự động lọc bỏ logo/ảnh rác bằng Gemini Vision.
+    Hỗ trợ đa nguồn (Wikipedia / Wikimedia / Bing Async / Openverse) và tự động lọc bỏ logo/ảnh rác bằng Gemini Vision.
     """
     os.makedirs(OUT_DIR, exist_ok=True)
     if not output_path:
@@ -443,6 +497,16 @@ def search_and_download_real_image(
     en_queries = [q for q in expanded_queries if is_ascii_en(q)]
     vn_queries = [q for q in expanded_queries if not is_ascii_en(q)]
 
+    # Tự động thêm biến thể rút gọn 2-3 từ nếu query quá dài (4+ từ) để tránh trả về 0 kết quả
+    broad_en = []
+    for q in en_queries:
+        words = q.split()
+        if len(words) >= 4:
+            short_q = " ".join(words[:3])
+            if short_q not in en_queries and short_q not in broad_en:
+                broad_en.append(short_q)
+    en_queries.extend(broad_en)
+
     # 1. Tự động sinh từ khóa tiếng Anh chuẩn Wikimedia nếu chưa có từ khóa tiếng Anh
     if not en_queries:
         gen_en = generate_wikimedia_visual_queries(context_str, context=context_str)
@@ -450,44 +514,86 @@ def search_and_download_real_image(
             if ge and ge not in en_queries:
                 en_queries.append(ge)
 
-    # 2a. Ưu tiên ảnh đại diện chính xác từ Wikipedia tiếng Anh (chuẩn nhân vật/sự kiện)
-    for q in en_queries[:2]:
-        print(f"  🔍 [Wikipedia] Tìm ảnh chính xác: '{q}'...")
-        wp_candidates = search_wikipedia_images(q, limit=4)
-        for cand in wp_candidates:
+    def _try_candidates(candidates: List[str], source_label: str, vision_fail_open: bool = True) -> str:
+        for cand in candidates:
             if exclude_urls is not None and cand in exclude_urls:
                 continue
-            if download_and_validate_image(cand, output_path, target_width, target_height, query_context=context_str, exclude_hashes=exclude_hashes):
+            if download_and_validate_image(
+                cand,
+                output_path,
+                target_width,
+                target_height,
+                query_context=context_str,
+                exclude_hashes=exclude_hashes,
+                vision_fail_open=vision_fail_open,
+            ):
                 if exclude_urls is not None:
                     exclude_urls.add(cand)
-                print(f"  📸 [ẢNH THẬT CHUẨN XÁC WIKIPEDIA]: {os.path.basename(output_path)} ({target_width}x{target_height})")
+                print(f"  📸 [ẢNH THẬT CHUẨN XÁC {source_label}]: {os.path.basename(output_path)} ({target_width}x{target_height})")
                 return output_path
+        return ""
 
-    # 2b. Wikimedia Commons với từ khóa tiếng Anh
-    for q in en_queries:
-        print(f"  🔍 [Wikimedia Commons] Tìm ảnh tư liệu thực tế: '{q}'...")
-        wiki_candidates = search_wikimedia_images(q, limit=8)
-        for cand in wiki_candidates:
-            if exclude_urls is not None and cand in exclude_urls:
-                continue
-            if download_and_validate_image(cand, output_path, target_width, target_height, query_context=context_str, exclude_hashes=exclude_hashes):
-                if exclude_urls is not None:
-                    exclude_urls.add(cand)
-                print(f"  📸 [ẢNH THẬT CHUẨN XÁC WIKIMEDIA]: {os.path.basename(output_path)} ({target_width}x{target_height})")
-                return output_path
+    is_lifestyle = prefer_lifestyle or (category != "general_life")
 
-    # 3. Tìm trên Bing Images với từ khóa tiếng Anh trước, rồi mới tới tiếng Việt (bắt buộc Vision xác nhận YES)
-    for q in en_queries + vn_queries:
-        print(f"  🔍 [Bing Web] Tìm ảnh tư liệu thực tế: '{q}'...")
-        bing_candidates = search_bing_images(q, limit=8)
-        for cand in bing_candidates:
-            if exclude_urls is not None and cand in exclude_urls:
-                continue
-            if download_and_validate_image(cand, output_path, target_width, target_height, query_context=context_str, exclude_hashes=exclude_hashes, vision_fail_open=False):
-                if exclude_urls is not None:
-                    exclude_urls.add(cand)
-                print(f"  📸 [ẢNH THẬT CHUẨN XÁC BING]: {os.path.basename(output_path)} ({target_width}x{target_height})")
-                return output_path
+    if is_lifestyle:
+        # Luồng đời sống / Threads / Review đồ vật: ưu tiên Bing Async (EN + VN) & Openverse trước
+        for q in vn_queries + en_queries:
+            print(f"  🔍 [Bing Web] Tìm ảnh đời thực: '{q}'...")
+            res = _try_candidates(search_bing_images(q, limit=10, allow_ecommerce=not is_ascii_en(q)), "BING", vision_fail_open=False)
+            if res:
+                return res
+
+        for q in en_queries:
+            print(f"  🔍 [Openverse] Tìm ảnh đời thực CC: '{q}'...")
+            res = _try_candidates(search_openverse_images(q, limit=8), "OPENVERSE", vision_fail_open=False)
+            if res:
+                return res
+
+        for q in en_queries:
+            print(f"  🔍 [Wikimedia Commons] Tìm ảnh tư liệu: '{q}'...")
+            res = _try_candidates(search_wikimedia_images(q, limit=8), "WIKIMEDIA", vision_fail_open=True)
+            if res:
+                return res
+    else:
+        # Luồng Documentary / True Story: Wikipedia -> Bing Async -> Wikimedia -> Openverse
+        for q in en_queries[:2]:
+            print(f"  🔍 [Wikipedia] Tìm ảnh chính xác: '{q}'...")
+            res = _try_candidates(search_wikipedia_images(q, limit=5), "WIKIPEDIA", vision_fail_open=True)
+            if res:
+                return res
+
+        for q in en_queries:
+            print(f"  🔍 [Wikimedia Commons] Tìm ảnh tư liệu thực tế: '{q}'...")
+            res = _try_candidates(search_wikimedia_images(q, limit=8), "WIKIMEDIA", vision_fail_open=True)
+            if res:
+                return res
+
+        for q in en_queries + vn_queries:
+            print(f"  🔍 [Bing Web] Tìm ảnh tư liệu thực tế: '{q}'...")
+            res = _try_candidates(search_bing_images(q, limit=10, allow_ecommerce=False), "BING", vision_fail_open=False)
+            if res:
+                return res
+
+        for q in en_queries:
+            print(f"  🔍 [Openverse] Tìm ảnh tư liệu CC: '{q}'...")
+            res = _try_candidates(search_openverse_images(q, limit=8), "OPENVERSE", vision_fail_open=False)
+            if res:
+                return res
+
+    # 3B. Vòng cứu hộ thông minh: nếu tất cả từ khóa ban đầu không ra ảnh khớp, nhờ Gemini sinh 3 từ khóa bối cảnh rộng hơn
+    if topic_context:
+        rescue_queries = [q for q in generate_wikimedia_visual_queries(context_str, context=context_str) if q not in en_queries]
+        for rq in rescue_queries[:3]:
+            print(f"  🔍 [Rescue Search] Mở rộng từ khóa bối cảnh: '{rq}'...")
+            res = _try_candidates(search_bing_images(rq, limit=8), "BING-RESCUE", vision_fail_open=False)
+            if res:
+                return res
+            res = _try_candidates(search_openverse_images(rq, limit=6), "OPENVERSE-RESCUE", vision_fail_open=False)
+            if res:
+                return res
+            res = _try_candidates(search_wikimedia_images(rq, limit=6), "WIKIMEDIA-RESCUE", vision_fail_open=True)
+            if res:
+                return res
 
     # 4. Dự phòng ảnh thật chất lượng cao từ kho assets theo phân loại ngữ cảnh nếu web không có
     if fallback_to_category:

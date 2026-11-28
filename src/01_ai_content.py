@@ -397,7 +397,7 @@ def generate_story_with_gemini(
             f"  + CẢNH 1 (HOOK 3 GIÂY ĐẦU): Lời dẫn NGẮN GỌN dưới 14 từ, đánh thẳng vào nghịch lý hoặc kết quả gây sốc (cấm mở bài kiểu sách giáo khoa như 'Tháng X năm Y...').\n"
             f"  + CẢNH 2-5: Viết ngắn gọn, kịch tính, dồn dập (16-26 từ/cảnh), câu văn trực diện như người kể chuyện TikTok/YouTube Shorts.\n"
             f"  + Mỗi cảnh có 'badge': nhãn in hoa ngắn gọn 2-3 từ (vd: 'TOULON 1942', 'LỆNH KÍCH NỔ').\n"
-            f"  + 'search_query_en': CHỈ dùng 2 đến 4 từ khóa tiếng Anh CỤ THỂ về nhân vật/địa điểm/đồ vật có thật (vd: 'Jean de Laborde', 'Panzer IV Toulon', 'French battleship Dunkerque', 'Toulon harbor 1942'). CẤM dùng tính từ trừu tượng như 'exploding', 'shocking', 'secret', 'dramatic' vì sẽ tìm ra ảnh rác.\n"
+            f"  + 'search_query_en': CHỈ dùng 2 đến 4 từ khóa tiếng Anh CỤ THỂ về nhân vật/địa điểm/đồ vật có thật (vd: 'Jean de Laborde', 'Panzer IV Toulon', 'French battleship Dunkerque', 'Toulon harbor 1942'). BẮT BUỘC 5 cảnh phải có 5 từ khóa KHÁC NHAU (đa dạng: nhân vật, địa điểm, vật chứng, bối cảnh đám đông/cơ quan, hậu quả) — CẤM lặp lại cùng một từ khóa hoặc dùng tính từ trừu tượng như 'exploding', 'shocking', 'secret', 'dramatic'.\n"
             f"  + 'narration': lời dẫn chuyện lôi cuốn bằng tiếng Việt do giọng đọc AI đọc.\n"
             f"  + 'sfx': âm thanh kịch tính phù hợp ('tension_riser', 'ting', 'sub_drop', 'boom', 'water_splash', 'applause', 'scratch').\n"
             f"- TƯ LIỆU QUỐC TẾ: Điền 'documentary_query' là từ khóa tiếng Anh chính xác để tra cứu tư liệu gốc.\n"
@@ -612,12 +612,17 @@ def generate_story_with_gemini(
     try:
         from src.real_image_search import search_and_download_real_image
         search_terms = [t for t in [illus_prompt, illus_vn, topic] if t]
+        post_content_txt = data.get("post", {}).get("content", "") if isinstance(data.get("post"), dict) else ""
+        post_caption_txt = data.get("post", {}).get("illustration_caption", "") if isinstance(data.get("post"), dict) else ""
+        story_ctx = f"{data.get('video_title', '')}. {post_content_txt[:160]}. {post_caption_txt}".strip(" .")
         illus_path = search_and_download_real_image(
             queries=search_terms,
             category=illus_cat,
             target_width=940,
             target_height=620,
-            fallback_to_category=True
+            fallback_to_category=True,
+            topic_context=story_ctx,
+            prefer_lifestyle=True,
         )
     except Exception as e:
         print(f"  ⚠️ Lỗi khi tìm ảnh thật trực tuyến ({e})")
