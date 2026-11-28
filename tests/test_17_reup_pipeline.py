@@ -152,6 +152,29 @@ class TestReupPipeline(unittest.TestCase):
             mixed = AudioSegment.from_wav(out_wav)
             self.assertEqual(len(mixed), 10000)
 
+    def test_voice_preview_endpoint_returns_cached_mp3(self):
+        os.environ["APP_VIDEO_DISABLE_BG_WORKERS"] = "1"
+        import app_ui
+        client = app_ui.app.test_client()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(app_ui, "AUDIO_DIR", tmp):
+                def _fake_tts(text, output_path, voice="nam_hai", rate="+15%"):
+                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                    with open(output_path, "wb") as f:
+                        f.write(b"ID3" + b"\x00" * 2048)
+                    return output_path
+
+                with patch.object(app_ui.tts_mod, "text_to_speech", side_effect=_fake_tts) as mock_tts:
+                    r1 = client.get("/api/voice_preview?voice=nam_hai&rate=%2B15%25")
+                    self.assertEqual(r1.status_code, 200)
+                    r1.close()
+                    self.assertEqual(mock_tts.call_count, 1)
+                    # Lần 2 phải dùng cache, không gọi lại TTS
+                    r2 = client.get("/api/voice_preview?voice=nam_hai&rate=%2B15%25")
+                    self.assertEqual(r2.status_code, 200)
+                    r2.close()
+                    self.assertEqual(mock_tts.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

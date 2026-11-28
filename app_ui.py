@@ -607,14 +607,22 @@ HTML_TEMPLATE = """
                   <i class="fa-solid fa-microphone-lines text-pink-400"></i>
                   <span>Giọng đọc dẫn chuyện chính:</span>
                 </label>
-                <select v-model="authorVoiceInput" @change="settings.voice = authorVoiceInput" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                  <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Ấm áp, rõ nét - Khuyên dùng)</option>
-                  <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh (Hồ sơ, Phóng sự)</option>
-                  <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm (Tự nhiên, cuốn hút)</option>
-                  <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén (Threads, Cà khịa nhanh)</option>
-                  <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động (Vui tươi, Gen Z)</option>
-                  <option value="gtts">🤖 Chị Google (Chỉ dùng cho meme robot)</option>
-                </select>
+                <div class="flex items-center gap-2">
+                  <select v-model="authorVoiceInput" @change="settings.voice = authorVoiceInput" class="flex-1 glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Ấm áp, rõ nét - Khuyên dùng)</option>
+                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh (Hồ sơ, Phóng sự)</option>
+                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm (Tự nhiên, cuốn hút)</option>
+                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén (Threads, Cà khịa nhanh)</option>
+                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động (Vui tươi, Gen Z)</option>
+                    <option value="gtts">🤖 Chị Google (Chỉ dùng cho meme robot)</option>
+                  </select>
+                  <button type="button" @click="previewVoice(authorVoiceInput, settings.rate, 'author')"
+                    title="Nghe thử giọng đọc này"
+                    class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-pink-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer flex items-center gap-1">
+                    <i :class="previewingVoiceKey === 'author' ? 'fa-solid fa-spinner fa-spin text-pink-400' : 'fa-solid fa-volume-high text-pink-400'"></i>
+                    <span class="hidden sm:inline">Thử</span>
+                  </button>
+                </div>
                 <span class="text-xs text-slate-400 block">Sử dụng k2-fsa/OmniVoice AI (hỗ trợ Voice Cloning từ thư mục assets/voices/)</span>
               </div>
             </div>
@@ -712,14 +720,21 @@ HTML_TEMPLATE = """
                 <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
                   <i class="fa-solid fa-microphone text-pink-400"></i> Giọng đọc bài chính:
                 </label>
-                <select v-model="post.voice_id" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
-                  <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
-                  <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
-                  <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
-                  <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
-                  <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
-                  <option value="gtts">🤖 Chị Google (Meme robot)</option>
-                </select>
+                <div class="flex items-center gap-1.5">
+                  <select v-model="post.voice_id" class="flex-1 glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
+                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
+                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                    <option value="gtts">🤖 Chị Google (Meme robot)</option>
+                  </select>
+                  <button type="button" @click="previewVoice(post.voice_id, settings.rate, 'post')"
+                    title="Nghe thử giọng bài chính"
+                    class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-pink-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer">
+                    <i :class="previewingVoiceKey === 'post' ? 'fa-solid fa-spinner fa-spin text-pink-400' : 'fa-solid fa-volume-high text-pink-400'"></i>
+                  </button>
+                </div>
               </div>
 
               <div class="space-y-1">
@@ -926,14 +941,21 @@ HTML_TEMPLATE = """
 
                 <div>
                   <label class="text-xs font-semibold text-slate-400 block mb-1">Giọng đọc:</label>
-                  <select v-model="cmt.voice_id" class="w-full glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
-                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
-                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
-                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
-                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
-                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
-                    <option value="gtts">🤖 Chị Google (Robot meme)</option>
-                  </select>
+                  <div class="flex items-center gap-1.5">
+                    <select v-model="cmt.voice_id" class="flex-1 glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
+                      <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                      <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
+                      <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                      <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                      <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                      <option value="gtts">🤖 Chị Google (Robot meme)</option>
+                    </select>
+                    <button type="button" @click="previewVoice(cmt.voice_id, settings.rate, 'cmt_' + idx)"
+                      title="Nghe thử giọng comment"
+                      class="px-2 py-1.5 rounded-xl bg-slate-800 hover:bg-pink-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer">
+                      <i :class="previewingVoiceKey === 'cmt_' + idx ? 'fa-solid fa-spinner fa-spin text-pink-400' : 'fa-solid fa-volume-high text-pink-400'"></i>
+                    </button>
+                  </div>
                 </div>
 
                 <div>
@@ -1310,14 +1332,21 @@ HTML_TEMPLATE = """
                   <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                     <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc chính:
                   </label>
-                  <select v-model="settings.voice" @change="authorVoiceInput = settings.voice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Khuyên dùng)</option>
-                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
-                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
-                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
-                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
-                    <option value="gtts">🤖 Chị Google (Meme robot)</option>
-                  </select>
+                  <div class="flex items-center gap-1.5">
+                    <select v-model="settings.voice" @change="authorVoiceInput = settings.voice" class="flex-1 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+                      <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Khuyên dùng)</option>
+                      <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                      <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                      <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                      <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                      <option value="gtts">🤖 Chị Google (Meme robot)</option>
+                    </select>
+                    <button type="button" @click="previewVoice(settings.voice, settings.rate, 'settings')"
+                      title="Nghe thử giọng chính"
+                      class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-emerald-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer">
+                      <i :class="previewingVoiceKey === 'settings' ? 'fa-solid fa-spinner fa-spin text-emerald-400' : 'fa-solid fa-volume-high text-emerald-400'"></i>
+                    </button>
+                  </div>
                 </div>
 
                 <!-- Tốc độ đọc -->
@@ -1921,7 +1950,7 @@ HTML_TEMPLATE = """
                   <span>Vai: {{ rkey }}</span>
                   <span class="text-[11px] text-slate-400 font-mono">{{ r.rate }} • {{ r.pitch }}</span>
                 </div>
-                <div class="grid grid-cols-3 gap-2">
+                <div class="grid grid-cols-4 gap-2">
                   <select v-model="r.voice" class="col-span-2 glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200">
                     <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
                     <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm</option>
@@ -1931,6 +1960,11 @@ HTML_TEMPLATE = """
                     <option value="gtts">🤖 Chị Google (Meme)</option>
                   </select>
                   <input v-model="r.rate" type="text" placeholder="+10%" class="glass-input rounded-lg p-1.5 text-xs font-mono text-center">
+                  <button type="button" @click="previewVoice(r.voice, r.rate || '+15%', 'role_' + rkey)"
+                    title="Nghe thử giọng vai này"
+                    class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/80 border border-slate-700 text-xs text-slate-200 transition cursor-pointer flex items-center justify-center">
+                    <i :class="previewingVoiceKey === 'role_' + rkey ? 'fa-solid fa-spinner fa-spin text-indigo-400' : 'fa-solid fa-volume-high text-indigo-400'"></i>
+                  </button>
                 </div>
               </div>
             </div>
@@ -4337,14 +4371,22 @@ HTML_TEMPLATE = """
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-[11px] font-semibold text-slate-400 mb-1">Giọng đọc AI (OmniVoice)</label>
-            <select v-model="reup.voice" class="w-full glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
-              <option value="nam_hai">🔥 Nam Hài Hước</option>
-              <option value="nu_cakhia">🌸 Nữ Cà Khịa</option>
-              <option value="nam_tram_hai">🎙️ Nam Trầm Hài</option>
-              <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh</option>
-              <option value="nam_minh">🇻🇳 Nam Minh Chuẩn</option>
-              <option value="hoai_my">🌸 Hoài My Chuẩn</option>
-            </select>
+            <div class="flex items-center gap-1.5">
+              <select v-model="reup.voice" class="flex-1 glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
+                <option value="nam_hai">🔥 Nam Hài Hước</option>
+                <option value="nu_cakhia">🌸 Nữ Cà Khịa</option>
+                <option value="nam_tram_hai">🎙️ Nam Trầm Hài</option>
+                <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh</option>
+                <option value="nam_minh">🇻🇳 Nam Minh Chuẩn</option>
+                <option value="hoai_my">🌸 Hoài My Chuẩn</option>
+              </select>
+              <button type="button" @click="previewVoice(reup.voice, '+15%', 'reup')"
+                title="Nghe thử giọng Reup"
+                class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-amber-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer flex items-center gap-1">
+                <i :class="previewingVoiceKey === 'reup' ? 'fa-solid fa-spinner fa-spin text-amber-400' : 'fa-solid fa-volume-high text-amber-400'"></i>
+                <span class="hidden sm:inline">Thử</span>
+              </button>
+            </div>
           </div>
           <div>
             <label class="block text-[11px] font-semibold text-slate-400 mb-1">Phong cách dịch / viết lại</label>
@@ -4367,6 +4409,12 @@ HTML_TEMPLATE = """
               <option :value="0.0">🔇 0% (Tắt hẳn chống bản quyền)</option>
               <option :value="0.15">🔉 15% (Giữ tiếng nền nhẹ)</option>
               <option :value="0.3">🔊 30% (Tiếng nền rõ)</option>
+            </select>
+          </div>
+          <div class="col-span-2">
+            <label class="block text-[11px] font-semibold text-slate-400 mb-1">Nhạc nền Reup (Auto Ducking khi đọc)</label>
+            <select v-model="reup.bgmChoice" class="w-full glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
+              <option v-for="b in bgmList" :key="b.id" :value="b.id">{{ b.name }}</option>
             </select>
           </div>
         </div>
@@ -4491,6 +4539,7 @@ HTML_TEMPLATE = """
             translationMode: 'viral',
             frameMode: 'blur_bg',
             originalVolume: 0.0,
+            bgmChoice: 'random',
             maskOldSub: true,
             antiReup: true,
             mirrorVideo: false,
@@ -4499,6 +4548,8 @@ HTML_TEMPLATE = """
           },
           commentCountInput: 'auto',
           authorVoiceInput: 'nam_hai',
+          previewingVoiceKey: '',
+          voicePreviewAudio: null,
           isGeneratingScript: false,
           isCrawlingTrending: false,
           previewMode: 'cards',
@@ -6558,6 +6609,35 @@ HTML_TEMPLATE = """
               }
             } catch (e) {}
           },
+        async previewVoice(voiceId, rate = '+15%', key = '') {
+          try {
+            if (this.voicePreviewAudio) {
+              this.voicePreviewAudio.pause();
+              this.voicePreviewAudio = null;
+            }
+            if (this.previewingVoiceKey === key && key) {
+              this.previewingVoiceKey = '';
+              return;
+            }
+            this.previewingVoiceKey = key || voiceId || 'preview';
+            const url = `/api/voice_preview?voice=${encodeURIComponent(voiceId || 'nam_hai')}&rate=${encodeURIComponent(rate || '+15%')}&t=${Date.now()}`;
+            const audio = new Audio(url);
+            this.voicePreviewAudio = audio;
+            audio.onended = () => {
+              this.previewingVoiceKey = '';
+              this.voicePreviewAudio = null;
+            };
+            audio.onerror = () => {
+              this.previewingVoiceKey = '';
+              this.voicePreviewAudio = null;
+              this.notify('Không phát được âm thanh nghe thử giọng này.', 'error');
+            };
+            await audio.play();
+          } catch (e) {
+            this.previewingVoiceKey = '';
+            this.notify('Lỗi nghe thử giọng: ' + e, 'error');
+          }
+        },
         async crawlReupLinks() {
           const q = (this.reup.crawlQuery || '').trim();
           if (!q) {
@@ -6628,7 +6708,8 @@ HTML_TEMPLATE = """
                 anti_reup: this.reup.antiReup,
                 mirror_video: this.reup.mirrorVideo,
                 custom_prompt: this.reup.customPrompt,
-                browser_cookies: this.reup.browserCookies
+                browser_cookies: this.reup.browserCookies,
+                bgm_choice: this.reup.bgmChoice
               })
             });
             const data = await res.json();
@@ -7836,13 +7917,6 @@ def api_market_runs_catalog():
 
 @app.route("/api/market/runs/compare", methods=["GET"])
 def api_market_runs_compare():
-    rt = get_market_runtime()
-    base_run_key = (request.args.get("base_run_key") or "").strip()
-    target_run_key = (request.args.get("target_run_key") or "").strip()
-    platform = request.args.get("platform", "all")
-    if not base_run_key or not target_run_key:
-        return jsonify({"ok": False, "error": "Cần chọn đủ 2 lượt crawl để so sánh (base_run_key và target_run_key)."}), 400
-    res = rt["store"].compare_crawl_runs(base_run_key, target_run_key, platform=platform)
     if not res.get("ok"):
         return jsonify(res), 400
     return jsonify(res)
@@ -7960,6 +8034,34 @@ def api_remote_crawl_schedule():
         return jsonify({"ok": False, "error": str(e)}), 502
 
 
+@app.route("/api/voice_preview", methods=["GET"])
+def api_voice_preview():
+    """Tổng hợp (có cache) và trả về file MP3 ngắn để nghe thử từng giọng OmniVoice/gTTS."""
+    voice = (request.args.get("voice") or "nam_hai").strip()
+    rate = (request.args.get("rate") or "+15%").strip()
+    safe_voice = re.sub(r"[^a-zA-Z0-9_-]", "", voice) or "nam_hai"
+    safe_rate = re.sub(r"[^a-zA-Z0-9_+-]", "", rate) or "p15"
+    preview_dir = os.path.join(AUDIO_DIR, "voice_previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    cache_name = f"preview_{safe_voice}_{safe_rate}.mp3"
+    cache_path = os.path.join(preview_dir, cache_name)
+
+    if not os.path.exists(cache_path) or os.path.getsize(cache_path) < 1000:
+        sample_texts = {
+            "nam_hai": "Xin chào, đây là giọng nam kể chuyện hài hước và tự nhiên.",
+            "nam_tram_hai": "Chào bạn, đây là giọng nam trầm điện ảnh cho phim tư liệu.",
+            "hoai_my": "Xin chào, đây là giọng nữ truyền cảm và tự nhiên.",
+            "nu_cakhia": "Ơ kìa, đây là giọng nữ sắc bén chuẩn bài Threads đây nhé.",
+            "nu_nhinhanh": "Hi bạn ơi, đây là giọng nữ vui tươi năng động nè!",
+            "nam_minh": "Xin chào, đây là giọng nam chuẩn nghiêm túc và rõ nét.",
+            "gtts": "Xin chào, đây là giọng chị Google huyền thoại.",
+        }
+        sample = sample_texts.get(voice, "Xin chào, đây là mẫu giọng đọc thử nghiệm của Studio.")
+        tts_mod.text_to_speech(text=sample, output_path=cache_path, voice=voice, rate=rate)
+
+    return send_from_directory(preview_dir, cache_name, mimetype="audio/mpeg")
+
+
 @app.route("/api/reup/crawl", methods=["POST"])
 def api_reup_crawl():
     """Crawl danh sách video từ link kênh/playlist/video hoặc từ khóa tìm kiếm (YT/Bilibili/Douyin)."""
@@ -8003,6 +8105,7 @@ def api_reup_run():
     mirror_video = bool(body.get("mirror_video", False))
     custom_prompt = str(body.get("custom_prompt") or "")
     browser_cookies = str(body.get("browser_cookies") or "")
+    bgm_choice = str(body.get("bgm_choice") or "random")
 
     def _reup_worker():
         tracker.reset()
@@ -8024,6 +8127,7 @@ def api_reup_run():
                     original_volume=original_volume,
                     custom_prompt=custom_prompt,
                     browser_cookies=browser_cookies,
+                    bgm_choice=bgm_choice,
                 )
             if last_res:
                 tracker.finish_pipeline(

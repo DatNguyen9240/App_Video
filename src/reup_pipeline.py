@@ -695,13 +695,15 @@ def mix_reup_audio(
     output_wav: str,
     video_duration_ms: int,
     original_volume: float = 0.0,
-    bgm_volume: float = 0.08,
-    ducking_db: float = -12.0,
+    bgm_volume: float = 0.15,
+    ducking_db: float = -10.0,
+    bgm_choice: str = "random",
 ) -> str:
     """
-    Mix âm thanh gốc + nhạc nền BGM + giọng đọc OmniVoice với Audio Ducking mượt
+    Mix âm thanh gốc + nhạc nền BGM (assets/bgm) + giọng đọc OmniVoice với Audio Ducking mượt
     (gộp khoảng lặng < 2.5s, crossfade 300ms/500ms).
     """
+    import random
     max_tts_end = max((s["end_ms"] for s in segments), default=0)
     total_ms = max(video_duration_ms, max_tts_end + 300, 1000)
 
@@ -713,14 +715,25 @@ def mix_reup_audio(
     else:
         orig = AudioSegment.silent(duration=total_ms)
 
-    # Tìm BGM có sẵn trong assets/music hoặc examples nếu có
+    # Tìm BGM từ assets/bgm (hoặc assets/music nếu có)
     bgm = None
-    music_dir = os.path.join(BASE_DIR, "assets", "music")
-    if os.path.isdir(music_dir) and bgm_volume > 0:
-        mp3s = [os.path.join(music_dir, fn) for fn in os.listdir(music_dir) if fn.lower().endswith((".mp3", ".wav"))]
-        if mp3s:
+    if bgm_choice != "none" and bgm_volume > 0:
+        bgm_file = ""
+        for folder in (os.path.join(BASE_DIR, "assets", "bgm"), os.path.join(BASE_DIR, "assets", "music")):
+            if not os.path.isdir(folder):
+                continue
+            if bgm_choice and bgm_choice not in ("random", "auto"):
+                cand = os.path.join(folder, bgm_choice)
+                if os.path.isfile(cand):
+                    bgm_file = cand
+                    break
+            files = [os.path.join(folder, fn) for fn in sorted(os.listdir(folder)) if fn.lower().endswith((".mp3", ".wav", ".m4a"))]
+            if files:
+                bgm_file = random.choice(files)
+                break
+        if bgm_file:
             try:
-                bgm_raw = _load_audio_via_ffmpeg(mp3s[0], os.path.join(os.path.dirname(output_wav), "bgm_pcm.wav"))
+                bgm_raw = _load_audio_via_ffmpeg(bgm_file, os.path.join(os.path.dirname(output_wav), "bgm_pcm.wav"))
                 if len(bgm_raw) < total_ms:
                     bgm_raw = bgm_raw * ((total_ms // len(bgm_raw)) + 1)
                 bgm = bgm_raw[:total_ms] + (20 * math.log10(max(0.01, bgm_volume)))
@@ -1018,6 +1031,7 @@ def run_reup_pipeline(
     custom_prompt: str = "",
     output_filename: str = "",
     browser_cookies: str = "",
+    bgm_choice: str = "random",
 ) -> Dict:
     """Chạy trọn vẹn quy trình Reup 1 video từ URL và đồng bộ tiến trình vào pipeline_tracker."""
     job_slug = f"reup_{int(time.time())}"
@@ -1055,6 +1069,7 @@ def run_reup_pipeline(
         mixed_wav,
         video_duration_ms=int(dur_sec * 1000),
         original_volume=original_volume,
+        bgm_choice=bgm_choice,
     )
     ass_path = os.path.join(work_dir, "reup_subs.ass")
     write_reup_ass_subtitles(enriched_segs, ass_path, video_title=script_data.get("video_title", ""))
