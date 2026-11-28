@@ -15,6 +15,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from .crawl_strategy import THREADS_QUALITY_POLICY_VERSION, THREADS_SKILL_VERSION
+
 
 SUPPORTED_PLATFORMS = {"threads", "tiktok", "shopee"}
 NON_CRAWL_ROLES = {
@@ -424,6 +426,91 @@ def build_dedup_key(
     return f"{plat}:hash:{digest}"
 
 
+def extract_canonical_metrics(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract canonical interaction & commerce metrics checking BOTH `item["metrics"]` and top-level
+    fields with uniform precedence while strictly distinguishing 0 from None.
+    """
+    if not isinstance(item, dict):
+        return {}
+    metrics_dict = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+
+    def _pick_metric_int(*keys: str) -> Optional[int]:
+        for k in keys:
+            if k in metrics_dict:
+                parsed = _clean_int(metrics_dict.get(k))
+                if parsed is not None:
+                    return parsed
+            if k in item:
+                parsed = _clean_int(item.get(k))
+                if parsed is not None:
+                    return parsed
+        return None
+
+    def _pick_metric_float(*keys: str) -> Optional[float]:
+        for k in keys:
+            if k in metrics_dict:
+                parsed = _clean_float(metrics_dict.get(k))
+                if parsed is not None:
+                    return parsed
+            if k in item:
+                parsed = _clean_float(item.get(k))
+                if parsed is not None:
+                    return parsed
+        return None
+
+    def _pick_metric_raw(*keys: str) -> Any:
+        for k in keys:
+            val = metrics_dict.get(k)
+            if val is not None and val != "":
+                return val
+            val_top = item.get(k)
+            if val_top is not None and val_top != "":
+                return val_top
+        return None
+
+    likes_count = _pick_metric_int("likes", "likes_count")
+    comments_count = _pick_metric_int("comments", "comment_count", "comments_count", "replies_or_comments_count")
+    shares_count = _pick_metric_int("shares", "shares_count")
+    reposts_count = _pick_metric_int("reposts", "reposts_count", "repost_count")
+    quotes_count = _pick_metric_int("quotes", "quotes_count", "quote_count")
+    views_count = _pick_metric_int("views", "views_count", "play_count")
+    price = _pick_metric_float("price_vnd", "price")
+    sold_count = _pick_metric_int("sold_count", "sold", "historical_sold")
+    rating = _pick_metric_float("rating", "rating_star")
+    raw_views_val = _pick_metric_raw("views", "play_count", "views_count")
+
+    compact = {
+        k: v
+        for k, v in {
+            "likes": likes_count,
+            "comments": comments_count,
+            "reposts": reposts_count,
+            "quotes": quotes_count,
+            "shares": shares_count,
+            "views": views_count,
+            "price": price,
+            "sold": sold_count,
+            "rating": rating,
+        }.items()
+        if v is not None
+    }
+    return {
+        "likes_count": likes_count,
+        "comments_count": comments_count,
+        "shares_count": shares_count,
+        "reposts_count": reposts_count,
+        "quotes_count": quotes_count,
+        "views_count": views_count,
+        "price": price,
+        "sold_count": sold_count,
+        "rating": rating,
+        "raw_views_val": raw_views_val,
+        "metrics_dict": metrics_dict,
+        "compact": compact,
+    }
+
+
 def normalize_record(
     item: Dict[str, Any],
     envelope: Optional[Dict[str, Any]] = None,
@@ -543,37 +630,31 @@ def normalize_record(
     )
     language = _clean_str(item.get("language"))
 
-    likes_count = _clean_int(item.get("likes") if "likes" in item else item.get("likes_count"))
-    comments_count = _clean_int(
-        item.get("comment_count")
-        if "comment_count" in item
-        else (item.get("replies_or_comments_count") if "replies_or_comments_count" in item else item.get("comments_count"))
-    )
-    shares_count = _clean_int(item.get("shares") if "shares" in item else item.get("shares_count"))
-    reposts_count = _clean_int(item.get("reposts") if "reposts" in item else item.get("repost_count"))
-    quotes_count = _clean_int(item.get("quotes") if "quotes" in item else item.get("quote_count"))
-    views_count = _clean_int(item.get("views") if "views" in item else (item.get("play_count") if "play_count" in item else item.get("views_count")))
-    price = _clean_float(item.get("price_vnd") if "price_vnd" in item else item.get("price"))
-    sold_count = _clean_int(
-        item.get("sold_count")
-        if "sold_count" in item
-        else (item.get("sold") if "sold" in item else item.get("historical_sold"))
-    )
-    rating = _clean_float(item.get("rating") if "rating" in item else item.get("rating_star"))
+    canon = extract_canonical_metrics(item)
+    metrics_dict = canon.get("metrics_dict") or {}
+    likes_count = canon.get("likes_count")
+    comments_count = canon.get("comments_count")
+    shares_count = canon.get("shares_count")
+    reposts_count = canon.get("reposts_count")
+    quotes_count = canon.get("quotes_count")
+    views_count = canon.get("views_count")
+    price = canon.get("price")
+    sold_count = canon.get("sold_count")
+    rating = canon.get("rating")
 
-    # Data Contract V3.2 views, identity, shares/reposts & classification metadata
-    raw_views_val = item.get("views") if "views" in item else (item.get("play_count") if "play_count" in item else item.get("views_count"))
-    views_display = _clean_str(item.get("views_display"))
+    # Data Contract V3.2/V3.3 views, identity, shares/reposts & classification metadata
+    raw_views_val = canon.get("raw_views_val")
+    views_display = _clean_str(item.get("views_display") or metrics_dict.get("views_display"))
     if not views_display and isinstance(raw_views_val, str) and re.search(r"[kKmMbB]", raw_views_val):
         views_display = raw_views_val.strip()
-    views_precision = _clean_str(item.get("views_precision"))
+    views_precision = _clean_str(item.get("views_precision") or metrics_dict.get("views_precision"))
     if views_precision:
         views_precision = views_precision.lower()
     elif views_display and views_count is None:
         views_precision = "rounded_display"
-    views_source = _clean_str(item.get("views_source"))
-    views_measured_at = _clean_str(item.get("views_measured_at"))
-    views_evidence_url = _clean_str(item.get("views_evidence_url"))
+    views_source = _clean_str(item.get("views_source") or metrics_dict.get("views_source"))
+    views_measured_at = _clean_str(item.get("views_measured_at") or metrics_dict.get("views_measured_at"))
+    views_evidence_url = _clean_str(item.get("views_evidence_url") or metrics_dict.get("views_evidence_url"))
     classification = _clean_str(item.get("classification"))
     if classification:
         classification = classification.upper()
@@ -776,6 +857,12 @@ def normalize_record(
     if "buyer_intent" in item and item.get("buyer_intent") is not None:
         raw_bi = item.get("buyer_intent")
         extra_meta["buyer_intent"] = bool(raw_bi) if isinstance(raw_bi, bool) else raw_bi
+    if item.get("buyer_intent_signals") is not None:
+        extra_meta["buyer_intent_signals"] = item.get("buyer_intent_signals")
+    if item.get("traffic_content") is not None or item.get("is_traffic_content") is not None:
+        extra_meta["traffic_content"] = bool(item.get("traffic_content") if item.get("traffic_content") is not None else item.get("is_traffic_content"))
+    if item.get("traffic_analysis") is not None:
+        extra_meta["traffic_analysis"] = item.get("traffic_analysis")
     if extra_meta.get("theme") and not extra_meta.get("theme_tags"):
         extra_meta["theme_tags"] = [str(extra_meta["theme"]).strip()]
     if trend_tier and "trend_tier" not in extra_meta:
@@ -810,7 +897,7 @@ def normalize_record(
         frame_start_at=_clean_str(item.get("frame_start_at")),
     )
 
-    return {
+    normalized_out = {
         "dedup_key": dedup_key,
         "platform": platform,
         "external_id": external_id,
@@ -870,14 +957,157 @@ def normalize_record(
         "raw_item_index": item_index,
         "raw_payload_json": json.dumps(item, ensure_ascii=False),
     }
+    q_res = assess_v33_quality(normalized_out, raw_item=item, envelope=envelope)
+    extra_meta["quality_qualified"] = q_res["quality_qualified"]
+    extra_meta["quality_tier_basis"] = q_res["quality_tier_basis"]
+    if q_res["quality_exclusion_reason"]:
+        extra_meta["quality_exclusion_reason"] = q_res["quality_exclusion_reason"]
+    extra_meta["is_watchlist"] = q_res["is_watchlist"]
+    extra_meta["traffic_content"] = q_res["traffic_content"]
+    if extra_meta.get("contract_version") and str(extra_meta["contract_version"]).startswith("3.3"):
+        extra_meta.setdefault("quality_policy_version", THREADS_QUALITY_POLICY_VERSION)
+        extra_meta.setdefault("skill_version", THREADS_SKILL_VERSION)
+    normalized_out["quality_qualified"] = q_res["quality_qualified"]
+    normalized_out["quality_tier_basis"] = q_res["quality_tier_basis"]
+    normalized_out["quality_exclusion_reason"] = q_res["quality_exclusion_reason"]
+    normalized_out["is_watchlist"] = q_res["is_watchlist"]
+    normalized_out["traffic_content"] = q_res["traffic_content"]
+    return normalized_out
+
+
+def assess_v33_quality(
+    norm_item: Dict[str, Any],
+    raw_item: Optional[Dict[str, Any]] = None,
+    envelope: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Server-side authoritative Data Contract V3.3 quality assessment from verified metrics."""
+    raw = raw_item if isinstance(raw_item, dict) else norm_item
+    extra = norm_item.get("extra_meta") if isinstance(norm_item.get("extra_meta"), dict) else {}
+    c_type = str(raw.get("content_type") or raw.get("category") or norm_item.get("trend_group") or "").strip().lower()
+    is_traffic = bool(
+        raw.get("traffic_content") is True
+        or raw.get("is_traffic_content") is True
+        or extra.get("traffic_content") is True
+        or c_type in ("traffic_content", "traffic")
+    )
+
+    cls = str(norm_item.get("classification") or raw.get("classification") or "").strip().upper()
+    if cls == "REJECTED" or str(norm_item.get("data_quality") or "").lower() == "rejected":
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": "rejected",
+            "quality_exclusion_reason": str(raw.get("quality_exclusion_reason") or raw.get("rejected_reason") or "rejected"),
+            "is_watchlist": False,
+            "traffic_content": is_traffic,
+        }
+    if cls in ("DUPLICATE_HISTORY", "UPDATED_METRICS"):
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": norm_item.get("trend_tier") or cls.lower(),
+            "quality_exclusion_reason": cls.lower(),
+            "is_watchlist": False,
+            "traffic_content": is_traffic,
+        }
+    if not is_valid_v32_views_provenance(norm_item):
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": "unverified",
+            "quality_exclusion_reason": "unverified_views",
+            "is_watchlist": False,
+            "traffic_content": is_traffic,
+        }
+    likes = norm_item.get("likes_count")
+    if likes is None or isinstance(likes, bool) or int(likes) < 0 or raw.get("likes_verified") is False:
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": "unverified",
+            "quality_exclusion_reason": "unverified_likes",
+            "is_watchlist": False,
+            "traffic_content": is_traffic,
+        }
+    if (norm_item.get("trend_tier") or "").lower() == "unverified" or cls == "UNVERIFIED" or (norm_item.get("verification_status") or "").lower() == "unverified":
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": "unverified",
+            "quality_exclusion_reason": "unverified_status",
+            "is_watchlist": False,
+            "traffic_content": is_traffic,
+        }
+    if raw.get("in_request_scope") is False or raw.get("is_in_scope") is False or raw.get("scope_match") is False:
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": norm_item.get("trend_tier") or "out_of_scope",
+            "quality_exclusion_reason": str(raw.get("quality_exclusion_reason") or raw.get("scope_exclusion_reason") or "out_of_scope"),
+            "is_watchlist": False,
+            "traffic_content": is_traffic,
+        }
+
+    # Traffic Content does NOT require buyer_intent or affiliate
+    has_content = raw.get("content_analysis_ok") is not False and bool(
+        is_traffic
+        or norm_item.get("text_content")
+        or norm_item.get("title")
+        or norm_item.get("summary_vi")
+        or raw.get("viral_reason")
+        or isinstance(raw.get("viral_analysis"), dict)
+        or raw.get("traffic_analysis") is not None
+        or raw.get("buyer_intent") is not None
+        or raw.get("natural_viral") is not None
+    )
+    if not has_content:
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": norm_item.get("trend_tier") or "unqualified",
+            "quality_exclusion_reason": "missing_content_analysis",
+            "is_watchlist": False,
+            "traffic_content": is_traffic,
+        }
+
+    views = int(norm_item.get("views_count") or 0)
+    likes_i = int(likes)
+    comments_i = int(norm_item.get("comments_count") or 0)
+    shares_i = int(norm_item.get("shares_count") or 0)
+    reposts_i = int(norm_item.get("reposts_count") or 0)
+
+    if views >= 50000 or likes_i >= 1000:
+        tier_basis = "very_hot"
+    elif views >= 10000 or likes_i >= 300:
+        tier_basis = "hot"
+    elif views >= 1000 and (likes_i >= 20 or comments_i >= 5 or (shares_i + reposts_i) >= 10):
+        tier_basis = "emerging"
+    else:
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": "watchlist",
+            "quality_exclusion_reason": "watchlist_excluded",
+            "is_watchlist": True,
+            "traffic_content": is_traffic,
+        }
+
+    if (norm_item.get("trend_tier") or "").lower() == "watchlist":
+        return {
+            "quality_qualified": False,
+            "quality_tier_basis": "watchlist",
+            "quality_exclusion_reason": "watchlist_excluded",
+            "is_watchlist": True,
+            "traffic_content": is_traffic,
+        }
+
+    return {
+        "quality_qualified": True,
+        "quality_tier_basis": tier_basis,
+        "quality_exclusion_reason": None,
+        "is_watchlist": False,
+        "traffic_content": is_traffic,
+    }
 
 
 def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) -> Dict[str, Any]:
     """
-    Extract canonical Data Contract V3.2 root/screening counters strictly without fabricating absent operands.
+    Extract canonical Data Contract V3.2 / V3.3 root/screening counters strictly without fabricating absent operands.
     Verifies reconciliation:
       unique_candidate_count == new_qualified_count + unverified_count + duplicate_history_count + updated_metrics_count + rejected_count
-    (`similar_content_count` is tracked outside the reconciliation sum).
+    (`similar_content_count` and `watchlist_count` subset are tracked accurately without mutating V3.2 semantics).
     """
     if not isinstance(raw_obj, dict):
         return {}
@@ -891,6 +1121,15 @@ def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) 
     )
     if not isinstance(s1, dict):
         s1 = {}
+    s2 = sections.get("2_tier_distribution") or raw_obj.get("section_2_tier_distribution") or {}
+    if not isinstance(s2, dict):
+        s2 = {}
+    tiers = s2.get("tiers") if isinstance(s2.get("tiers"), dict) else {}
+    special = (
+        raw_obj.get("special_counts")
+        if isinstance(raw_obj.get("special_counts"), dict)
+        else (s2.get("special_counts") if isinstance(s2.get("special_counts"), dict) else {})
+    )
     req_ctx = raw_obj.get("request_context") if isinstance(raw_obj.get("request_context"), dict) else {}
 
     def pick_int(*vals: Any) -> Optional[int]:
@@ -909,6 +1148,23 @@ def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) 
         s1.get("new_qualified_count"),
         s1.get("qualified_count") if legacy_fallback_qualified else None,
         s1.get("qualified_posts") if legacy_fallback_qualified else None,
+    )
+    quality_qualified_count = pick_int(
+        c.get("quality_qualified_count"),
+        raw_obj.get("quality_qualified_count"),
+        s1.get("quality_qualified_count"),
+    )
+    watchlist_count = pick_int(
+        c.get("watchlist_count"),
+        raw_obj.get("watchlist_count"),
+        s1.get("watchlist_count"),
+        tiers.get("watchlist"),
+    )
+    traffic_content_count = pick_int(
+        c.get("traffic_content_count"),
+        raw_obj.get("traffic_content_count"),
+        s1.get("traffic_content_count"),
+        special.get("traffic_content"),
     )
     duplicate_current_run_count = pick_int(c.get("duplicate_current_run_count"), s1.get("duplicate_current_run_count"))
     if duplicate_current_run_count is None and scanned_count is not None and unique_candidate_count is not None:
@@ -935,8 +1191,14 @@ def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) 
         s1.get("rejected"),
     )
 
+    cv = str(raw_obj.get("contract_version") or raw_obj.get("schema_version") or "").strip()
+    is_v33 = bool(cv.startswith("3.3") or raw_obj.get("quality_policy_version") or quality_qualified_count is not None)
+    target_metric = _clean_str(c.get("target_metric") or raw_obj.get("target_metric") or ("quality_qualified_count" if is_v33 else "new_qualified_count"))
+
     if "target_achieved" in c and isinstance(c.get("target_achieved"), bool):
         target_achieved: Optional[bool] = bool(c["target_achieved"])
+    elif is_v33 and quality_qualified_count is not None and requested_count is not None:
+        target_achieved = bool(quality_qualified_count >= requested_count)
     elif new_qualified_count is not None and requested_count is not None:
         target_achieved = bool(new_qualified_count >= requested_count)
     else:
@@ -972,6 +1234,10 @@ def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) 
         "unique_candidate_count": unique_candidate_count,
         "new_count": new_count,
         "new_qualified_count": new_qualified_count,
+        "quality_qualified_count": quality_qualified_count,
+        "watchlist_count": watchlist_count,
+        "traffic_content_count": traffic_content_count,
+        "target_metric": target_metric,
         "duplicate_current_run_count": duplicate_current_run_count,
         "duplicate_history_count": duplicate_history_count,
         "updated_metrics_count": updated_metrics_count,

@@ -5,6 +5,32 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 
+THREADS_CONTRACT_V32 = "3.2"
+THREADS_CONTRACT_V33 = "3.3"
+THREADS_SKILL_NAME = "threads_crawl"
+THREADS_SKILL_VERSION = "1.0"
+THREADS_QUALITY_POLICY_VERSION = "3.3-a-20261128"
+THREADS_DEFAULT_LEASE_MINUTES_V33 = 60
+THREADS_LEASE_OPTIONS_MINUTES = (30, 60, 120)
+THREADS_MAX_LEASE_RENEWALS_PER_SESSION = 2
+THREADS_LEASE_RENEW_INCREMENT_MINUTES = 30
+
+THREADS_QUALITY_POLICY_SPEC: Dict[str, Any] = {
+    "policy_version": THREADS_QUALITY_POLICY_VERSION,
+    "target_metric": "quality_qualified_count",
+    "legacy_target_metric": "new_qualified_count",
+    "watchlist_counted_toward_target": False,
+    "traffic_content_requires_buyer_intent_or_affiliate": False,
+    "requires_verified_views": True,
+    "requires_verified_likes": True,
+    "tiers": {
+        "very_hot": "views >= 50000 OR likes >= 1000",
+        "hot": "views >= 10000 OR likes >= 300",
+        "emerging": "views >= 1000 AND (likes >= 20 OR comments >= 5 OR (shares + reposts) >= 10)",
+        "watchlist": "Verified views + likes below Emerging floor (excluded from V3.3 target)",
+    },
+}
+
 THREADS_STRATEGY_VERSION = "3.3 (sửa đổi 28/11/2026)"
 THREADS_DEFAULT_LOOKBACK_HOURS = 24
 THREADS_ALLOWED_LOOKBACK_HOURS = (24, 48, 72, 168)
@@ -230,13 +256,23 @@ def validate_threads_strategy_options(raw_body: Dict[str, Any], opts: Dict[str, 
     return out
 
 
-def get_crawl_config_payload() -> Dict[str, Any]:
+def get_crawl_config_payload(helper_compatibility: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return canonical config dictionary for Crawl Center UI & `/api/remote/crawl_config`."""
     return {
         "strategy_version": THREADS_STRATEGY_VERSION,
-        "contract_version": "3.2",
+        "contract_version": THREADS_CONTRACT_V33,
+        "legacy_contract_version": THREADS_CONTRACT_V32,
+        "skill_name": THREADS_SKILL_NAME,
+        "skill_version": THREADS_SKILL_VERSION,
+        "quality_policy_version": THREADS_QUALITY_POLICY_VERSION,
+        "quality_policy": THREADS_QUALITY_POLICY_SPEC,
         "default_mode": "balanced",
         "default_lookback_hours": THREADS_DEFAULT_LOOKBACK_HOURS,
+        "default_lease_minutes": THREADS_DEFAULT_LEASE_MINUTES_V33,
+        "lease_options_minutes": list(THREADS_LEASE_OPTIONS_MINUTES),
+        "max_lease_renewals_per_session": THREADS_MAX_LEASE_RENEWALS_PER_SESSION,
+        "lease_renew_minutes": THREADS_LEASE_RENEW_INCREMENT_MINUTES,
+        "helper_compatibility": helper_compatibility,
         "modes": THREADS_CRAWL_MODES,
         "topics": THREADS_TOPIC_PRESETS,
         "lookback_options": [
@@ -246,5 +282,4 @@ def get_crawl_config_payload() -> Dict[str, Any]:
             {"hours": 168, "label": "7 ngày / 168h (mở rộng rõ ràng)"},
         ],
         "exclusion_defaults": dict(THREADS_EXCLUSION_DEFAULTS),
-        "lease_options_minutes": [30, 60, 120],
     }

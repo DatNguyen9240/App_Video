@@ -20,6 +20,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .normalizer import (
     NON_CRAWL_ROLES,
+    assess_v33_quality,
+    extract_canonical_metrics,
     extract_v32_counters,
     is_archive_path,
     is_valid_v32_views_provenance,
@@ -31,6 +33,8 @@ from .report_normalizer import (
     normalize_muse_report,
 )
 from .crawl_strategy import (
+    THREADS_QUALITY_POLICY_VERSION,
+    THREADS_SKILL_VERSION,
     get_mode_label as _get_crawl_mode_label,
     normalize_topics_list as _normalize_crawl_topics,
 )
@@ -75,6 +79,12 @@ class MarketIntelligenceStore:
             self._init_schema()
             self._cleanup_orphaned_running_syncs()
         self._ensure_run_centric_backfill()
+        if not self.get_state("metrics_cache_repaired_v1"):
+            try:
+                rep_summary = self.repair_cached_metrics_from_raw_payloads()
+                self.set_state("metrics_cache_repaired_v1", json.dumps(rep_summary))
+            except Exception:
+                pass
 
     def close(self):
         with self._lock:
@@ -363,6 +373,12 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("raw_drive_files", "topics_json", "TEXT")
         self._add_column_if_missing("raw_drive_files", "keywords", "TEXT")
         self._add_column_if_missing("raw_drive_files", "lookback_hours", "INTEGER")
+        self._add_column_if_missing("raw_drive_files", "session_seq", "INTEGER")
+        self._add_column_if_missing("raw_drive_files", "is_checkpoint", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("raw_drive_files", "quality_qualified_count", "INTEGER")
+        self._add_column_if_missing("raw_drive_files", "watchlist_count", "INTEGER")
+        self._add_column_if_missing("raw_drive_files", "traffic_content_count", "INTEGER")
+        self._add_column_if_missing("raw_drive_files", "quality_policy_version", "TEXT")
 
         self._conn.execute(
             """
@@ -380,6 +396,17 @@ class MarketIntelligenceStore:
             )
             """
         )
+        self._add_column_if_missing("crawl_request_metadata_cache", "contract_version", "TEXT")
+        self._add_column_if_missing("crawl_request_metadata_cache", "skill_version", "TEXT")
+        self._add_column_if_missing("crawl_request_metadata_cache", "quality_policy_version", "TEXT")
+        self._add_column_if_missing("crawl_request_metadata_cache", "target_metric", "TEXT")
+        self._add_column_if_missing("crawl_request_metadata_cache", "execution_phase", "TEXT")
+        self._add_column_if_missing("crawl_request_metadata_cache", "pause_reason", "TEXT")
+        self._add_column_if_missing("crawl_request_metadata_cache", "session_seq", "INTEGER")
+        self._add_column_if_missing("crawl_request_metadata_cache", "lease_renew_count", "INTEGER")
+        self._add_column_if_missing("crawl_request_metadata_cache", "accumulated_quality_count", "INTEGER")
+        self._add_column_if_missing("crawl_request_metadata_cache", "accumulated_new_qualified_count", "INTEGER")
+        self._add_column_if_missing("crawl_request_metadata_cache", "accumulated_watchlist_count", "INTEGER")
 
         self._add_column_if_missing("market_item_snapshots", "trend_tier", "TEXT")
         self._add_column_if_missing("market_item_snapshots", "trend_group", "TEXT")
@@ -410,6 +437,165 @@ class MarketIntelligenceStore:
             (now_iso,),
         )
         self._conn.commit()
+
+    def repair_cached_metrics_from_raw_payloads(self, force: bool = False) -> Dict[str, Any]:
+        """
+        Repair NULL/missing cached metric columns (e.g., likes_count=0 read from metrics.likes)
+        strictly from stored raw_payload_json / raw Drive archives.
+        NEVER alters raw_payload_json, timestamps, classifications, trend_tier, verification_status, or reports.
+        """
+        items_scanned = 0
+        items_repaired = 0
+        likes_repaired = 0
+        snapshots_repaired = 0
+        file_raw_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+        def _load_raw_file_items(fid: str) -> List[Dict[str, Any]]:
+            if fid in file_raw_cache:
+                return file_raw_cache[fid]
+            row = self._conn.execute(
+                "SELECT raw_path, file_name, folder_path FROM raw_drive_files WHERE file_id = ?",
+                (fid,),
+            ).fetchone()
+            items_list: List[Dict[str, Any]] = []
+            if row and row["raw_path"] and os.path.exists(row["raw_path"]):
+                try:
+                    with open(row["raw_path"], "rb") as rf:
+                        raw_obj = json.loads(rf.read().decode("utf-8"))
+                    norm = normalize_payload(raw_obj, file_name=row["file_name"], folder_path=row["folder_path"])
+                    items_list = norm.get("items") or []
+                except Exception:
+                    items_list = []
+            file_raw_cache[fid] = items_list
+            return items_list
+
+        metric_cols = (
+            ("likes_count", "likes"),
+            ("comments_count", "comments"),
+            ("shares_count", "shares"),
+            ("reposts_count", "reposts"),
+            ("quotes_count", "quotes"),
+            ("views_count", "views"),
+            ("price", "price"),
+            ("sold_count", "sold"),
+            ("rating", "rating"),
+        )
+        snap_metric_cols = (
+            "likes_count",
+            "comments_count",
+            "shares_count",
+            "reposts_count",
+            "quotes_count",
+            "views_count",
+            "price",
+            "sold_count",
+        )
+
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, dedup_key, raw_file_id, raw_payload_json,
+                       likes_count, comments_count, shares_count, reposts_count, quotes_count,
+                       views_count, price, sold_count, rating, metrics_json
+                FROM market_items
+                WHERE raw_payload_json IS NOT NULL AND raw_payload_json != ''
+                """
+            ).fetchall()
+
+            for r in rows:
+                items_scanned += 1
+                try:
+                    raw_obj = json.loads(r["raw_payload_json"])
+                except Exception:
+                    continue
+                if not isinstance(raw_obj, dict):
+                    continue
+                canon = extract_canonical_metrics(raw_obj)
+                if not canon:
+                    continue
+
+                updates: Dict[str, Any] = {}
+                try:
+                    cur_metrics = json.loads(r["metrics_json"] or "{}")
+                    if not isinstance(cur_metrics, dict):
+                        cur_metrics = {}
+                except Exception:
+                    cur_metrics = {}
+                metrics_dirty = False
+
+                for col_name, compact_key in metric_cols:
+                    canon_val = canon.get(col_name)
+                    if canon_val is None:
+                        continue
+                    cur_val = r[col_name]
+                    if cur_val is None or (force and cur_val != canon_val):
+                        updates[col_name] = canon_val
+                        if col_name == "likes_count" and cur_val is None:
+                            likes_repaired += 1
+                    if compact_key not in cur_metrics or cur_metrics.get(compact_key) is None:
+                        cur_metrics[compact_key] = canon_val
+                        metrics_dirty = True
+
+                if updates or metrics_dirty:
+                    if metrics_dirty:
+                        updates["metrics_json"] = json.dumps(cur_metrics, ensure_ascii=False)
+                    if updates:
+                        set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+                        vals = list(updates.values()) + [r["id"]]
+                        self._conn.execute(f"UPDATE market_items SET {set_clause} WHERE id = ?", vals)
+                        items_repaired += 1
+
+            snap_rows = self._conn.execute(
+                """
+                SELECT s.id, s.item_id, s.dedup_key, s.raw_file_id,
+                       s.likes_count, s.comments_count, s.shares_count, s.reposts_count, s.quotes_count,
+                       s.views_count, s.price, s.sold_count,
+                       m.raw_file_id AS item_raw_file_id, m.raw_payload_json AS item_raw_payload_json
+                FROM market_item_snapshots s
+                JOIN market_items m ON m.id = s.item_id
+                WHERE s.likes_count IS NULL OR s.views_count IS NULL OR s.comments_count IS NULL
+                   OR s.shares_count IS NULL OR s.reposts_count IS NULL OR s.quotes_count IS NULL
+                """
+            ).fetchall()
+
+            for sr in snap_rows:
+                canon_snap: Optional[Dict[str, Any]] = None
+                s_fid = sr["raw_file_id"]
+                if s_fid and s_fid != sr["item_raw_file_id"]:
+                    for cand in _load_raw_file_items(str(s_fid)):
+                        if cand.get("dedup_key") == sr["dedup_key"]:
+                            canon_snap = cand
+                            break
+                if canon_snap is None and (not s_fid or s_fid == sr["item_raw_file_id"]) and sr["item_raw_payload_json"]:
+                    try:
+                        raw_obj = json.loads(sr["item_raw_payload_json"])
+                        if isinstance(raw_obj, dict):
+                            canon_snap = extract_canonical_metrics(raw_obj)
+                    except Exception:
+                        canon_snap = None
+                if not canon_snap:
+                    continue
+
+                s_updates: Dict[str, Any] = {}
+                for scol in snap_metric_cols:
+                    val = canon_snap.get(scol)
+                    if sr[scol] is None and val is not None:
+                        s_updates[scol] = val
+                if s_updates:
+                    set_clause = ", ".join(f"{k} = ?" for k in s_updates.keys())
+                    self._conn.execute(
+                        f"UPDATE market_item_snapshots SET {set_clause} WHERE id = ?",
+                        list(s_updates.values()) + [sr["id"]],
+                    )
+                    snapshots_repaired += 1
+
+            self._conn.commit()
+        return {
+            "items_scanned": items_scanned,
+            "items_repaired": items_repaired,
+            "likes_repaired": likes_repaired,
+            "snapshots_repaired": snapshots_repaired,
+        }
 
     # ─── Sync State KV Helpers ─────────────────────────────────────────────────
 
@@ -663,12 +849,41 @@ class MarketIntelligenceStore:
         except (TypeError, ValueError):
             raw_lookback_int = None
 
+        raw_session_seq_val = (
+            envelope.get("session_seq")
+            if envelope.get("session_seq") is not None
+            else (req_ctx.get("session_seq") if req_ctx.get("session_seq") is not None else src_run_ctx.get("session_seq"))
+        )
+        try:
+            raw_session_seq = int(raw_session_seq_val) if raw_session_seq_val is not None and not isinstance(raw_session_seq_val, bool) else None
+        except (TypeError, ValueError):
+            raw_session_seq = None
+        raw_is_checkpoint = 1 if (
+            envelope.get("is_checkpoint")
+            or req_ctx.get("is_checkpoint")
+            or src_run_ctx.get("is_checkpoint")
+            or (isinstance(raw_obj, dict) and (raw_obj.get("is_checkpoint") or raw_obj.get("checkpoint")))
+        ) else 0
+        raw_quality_policy_version = self._clean_run_str(
+            envelope.get("quality_policy_version")
+            or (raw_obj.get("quality_policy_version") if isinstance(raw_obj, dict) else None)
+        )
+        raw_skill_version = self._clean_run_str(
+            envelope.get("skill_version")
+            or (raw_obj.get("skill_version") if isinstance(raw_obj, dict) else None)
+        )
+
         run_meta = {
             "platform": envelope.get("platform") or ("threads" if str(file_name or "").lower().startswith(("threads_trend", "trend_report")) else None),
             "run_id": envelope.get("run_id"),
             "request_id": envelope.get("request_id"),
             "strategy_version": envelope.get("strategy_version"),
             "contract_version": envelope.get("contract_version"),
+            "skill_version": raw_skill_version,
+            "quality_policy_version": raw_quality_policy_version,
+            "session_seq": raw_session_seq,
+            "is_checkpoint": bool(raw_is_checkpoint),
+            "target_metric": envelope.get("target_metric") or (raw_obj.get("target_metric") if isinstance(raw_obj, dict) else None),
             "crawl_mode": raw_crawl_mode,
             "topics": norm_topic_ids if raw_topics_raw is not None else None,
             "keywords": raw_keywords_meta,
@@ -750,6 +965,9 @@ class MarketIntelligenceStore:
         deduped = 0
         new_count = 0
         new_qualified_count = 0
+        quality_qualified_count = 0
+        watchlist_count = 0
+        traffic_content_count = 0
         duplicate_count = 0
         engagement_updated_count = 0
         missing_views_count = 0
@@ -767,8 +985,8 @@ class MarketIntelligenceStore:
                      file_role, is_corrected, corrects_file, corrects_report, run_status, technical_status, data_quality_status,
                      business_usable_records, run_meta_json, request_id, run_id, platform, crawl_time,
                      requested_count, duplicate_current_run_count, strategy_version, contract_version, special_counts_json,
-                     crawl_mode, topics_json, keywords, lookback_hours)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     crawl_mode, topics_json, keywords, lookback_hours, session_seq, is_checkpoint, quality_policy_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_id) DO UPDATE SET
                         file_name = excluded.file_name,
                         folder_path = excluded.folder_path,
@@ -803,6 +1021,9 @@ class MarketIntelligenceStore:
                         topics_json = COALESCE(excluded.topics_json, raw_drive_files.topics_json),
                         keywords = COALESCE(excluded.keywords, raw_drive_files.keywords),
                         lookback_hours = COALESCE(excluded.lookback_hours, raw_drive_files.lookback_hours),
+                        session_seq = COALESCE(excluded.session_seq, raw_drive_files.session_seq),
+                        is_checkpoint = MAX(COALESCE(excluded.is_checkpoint, 0), COALESCE(raw_drive_files.is_checkpoint, 0)),
+                        quality_policy_version = COALESCE(excluded.quality_policy_version, raw_drive_files.quality_policy_version),
                         is_archived = 0,
                         archived_at = NULL
                     """,
@@ -839,6 +1060,9 @@ class MarketIntelligenceStore:
                         json.dumps(norm_topic_ids, ensure_ascii=False) if raw_topics_raw is not None else None,
                         raw_keywords_meta,
                         raw_lookback_int,
+                        raw_session_seq,
+                        raw_is_checkpoint,
+                        raw_quality_policy_version,
                     ),
                 )
 
@@ -1044,6 +1268,13 @@ class MarketIntelligenceStore:
                         new_count += 1
                         if self._is_item_qualified_v32(item):
                             new_qualified_count += 1
+                        q_item = assess_v33_quality(item)
+                        if q_item["quality_qualified"]:
+                            quality_qualified_count += 1
+                        if q_item["is_watchlist"]:
+                            watchlist_count += 1
+                        if q_item["traffic_content"]:
+                            traffic_content_count += 1
                         batch_registry_items.append({
                             "dedup_key": item["dedup_key"],
                             "platform": item["platform"],
@@ -1540,7 +1771,8 @@ class MarketIntelligenceStore:
                     UPDATE raw_drive_files
                     SET new_count = ?, new_qualified_count = ?, duplicate_count = ?, updated_count = ?,
                         missing_views_count = ?, scanned_count = ?, rejected_count = ?,
-                        unique_candidate_count = ?, unverified_count = ?, stop_reason = ?, target_achieved = ?
+                        unique_candidate_count = ?, unverified_count = ?, stop_reason = ?, target_achieved = ?,
+                        quality_qualified_count = ?, watchlist_count = ?, traffic_content_count = ?
                     WHERE file_id = ?
                     """,
                     (
@@ -1555,6 +1787,9 @@ class MarketIntelligenceStore:
                         v32_c.get("unverified_count"),
                         v32_c.get("stop_reason"),
                         (1 if v32_c.get("target_achieved") else 0) if v32_c.get("target_achieved") is not None else None,
+                        v32_c.get("quality_qualified_count") if v32_c.get("quality_qualified_count") is not None else quality_qualified_count,
+                        v32_c.get("watchlist_count") if v32_c.get("watchlist_count") is not None else watchlist_count,
+                        v32_c.get("traffic_content_count") if v32_c.get("traffic_content_count") is not None else traffic_content_count,
                         file_id,
                     ),
                 )
@@ -1582,6 +1817,9 @@ class MarketIntelligenceStore:
             "deduped": deduped,
             "new_count": new_count,
             "new_qualified_count": new_qualified_count,
+            "quality_qualified_count": quality_qualified_count,
+            "watchlist_count": watchlist_count,
+            "traffic_content_count": traffic_content_count,
             "duplicate_count": duplicate_count,
             "engagement_updated_count": engagement_updated_count,
             "missing_views_count": missing_views_count,
@@ -1775,6 +2013,7 @@ class MarketIntelligenceStore:
         verification_status: Optional[str] = None,
         activity_filter: Optional[str] = None,
         special_filter: Optional[str] = None,
+        quality_filter: Optional[str] = None,
         run_key: Optional[str] = None,
         search: Optional[str] = None,
         sort_by: str = "recent",
@@ -1794,8 +2033,10 @@ class MarketIntelligenceStore:
             plat_filter = (platform or "all").strip().lower()
             candidates = self._query_effective_run_snapshots(
                 run_id=grp["run_id"],
+                run_ids=grp.get("run_ids"),
                 raw_file_ids=[str(f["file_id"]) for f in grp["data_files"]],
                 platform=plat_filter,
+                prefer_qualified=bool(grp.get("is_request_bundle")),
             )
 
             filtered: List[Dict[str, Any]] = []
@@ -1892,10 +2133,21 @@ class MarketIntelligenceStore:
                     sf_norm = special_filter.lower().strip()
                     if sf_norm == "natural_viral" and it.get("natural_viral") is not True:
                         continue
+                    if sf_norm == "traffic_content" and it.get("traffic_content") is not True:
+                        continue
                     if sf_norm == "buyer_intent":
                         bi_v = it.get("buyer_intent")
                         if not (bi_v is True or (isinstance(bi_v, str) and bi_v.lower() in ("true", "cao", "trung_binh"))):
                             continue
+
+                if quality_filter and quality_filter != "all":
+                    qf_norm = quality_filter.lower().strip()
+                    if qf_norm == "quality_only" and not it.get("quality_qualified"):
+                        continue
+                    if qf_norm == "watchlist_only" and not it.get("is_watchlist"):
+                        continue
+                    if qf_norm == "traffic_content" and not it.get("traffic_content"):
+                        continue
 
                 if affiliate_only:
                     if (
@@ -1980,6 +2232,7 @@ class MarketIntelligenceStore:
                 "items": filtered[off : off + lim],
                 "run_key": grp["run_key"],
                 "run_id": grp["run_id"],
+                "is_request_bundle": bool(grp.get("is_request_bundle")),
             }
 
         clauses: List[str] = []
@@ -2061,8 +2314,16 @@ class MarketIntelligenceStore:
             sf_norm = special_filter.lower().strip()
             if sf_norm == "natural_viral":
                 clauses.append("json_extract(m.extra_meta_json, '$.natural_viral') = 1")
+            elif sf_norm == "traffic_content":
+                clauses.append("json_extract(m.extra_meta_json, '$.traffic_content') = 1")
             elif sf_norm == "buyer_intent":
                 clauses.append("(json_extract(m.extra_meta_json, '$.buyer_intent') = 1 OR m.purchase_intent IN ('cao', 'trung_binh'))")
+
+        qf_norm = quality_filter.lower().strip() if (quality_filter and quality_filter != "all") else ""
+        if qf_norm == "traffic_content":
+            clauses.append("json_extract(m.extra_meta_json, '$.traffic_content') = 1")
+        elif qf_norm == "watchlist_only":
+            clauses.append("LOWER(COALESCE(m.trend_tier, '')) = 'watchlist' AND COALESCE(m.classification, '') NOT IN ('REJECTED', 'DUPLICATE_HISTORY', 'UPDATED_METRICS', 'UNVERIFIED')")
 
         if affiliate_only:
             clauses.append(
@@ -2105,13 +2366,7 @@ class MarketIntelligenceStore:
         order_sql = sort_map.get(sort_by or "recent", sort_map["recent"])
 
         with self._lock:
-            total = self._conn.execute(
-                f"SELECT COUNT(*) AS c FROM market_items m LEFT JOIN raw_drive_files r ON m.raw_file_id = r.file_id {where_sql}",
-                params,
-            ).fetchone()["c"]
-
-            rows = self._conn.execute(
-                f"""
+            base_select = f"""
                 SELECT m.id, m.dedup_key, m.platform, m.external_id, m.post_id, m.post_pk, m.item_id, m.shop_id,
                        m.author_handle, m.author_name, m.title, m.text_content, m.summary_vi, m.url, m.canonical_url, m.evidence_url,
                        m.content_group, m.purchase_intent, m.language, m.published_at, m.crawled_at,
@@ -2130,10 +2385,19 @@ class MarketIntelligenceStore:
                 LEFT JOIN raw_drive_files r ON m.raw_file_id = r.file_id
                 {where_sql}
                 ORDER BY {order_sql}
-                LIMIT ? OFFSET ?
-                """,
-                params + [lim, off],
-            ).fetchall()
+            """
+            if qf_norm == "quality_only":
+                rows = self._conn.execute(base_select, params).fetchall()
+                total = None
+            else:
+                total = self._conn.execute(
+                    f"SELECT COUNT(*) AS c FROM market_items m LEFT JOIN raw_drive_files r ON m.raw_file_id = r.file_id {where_sql}",
+                    params,
+                ).fetchone()["c"]
+                rows = self._conn.execute(
+                    f"{base_select} LIMIT ? OFFSET ?",
+                    params + [lim, off],
+                ).fetchall()
 
         items = []
         for r in rows:
@@ -2152,9 +2416,16 @@ class MarketIntelligenceStore:
                 d["quality_issues"] = json.loads(d.pop("quality_issues_json") or "[]")
             except Exception:
                 d["quality_issues"] = []
-            items.append(self._attach_v33_fields(d))
+            enriched = self._attach_v33_fields(d)
+            if qf_norm == "quality_only" and not enriched.get("quality_qualified"):
+                continue
+            items.append(enriched)
 
-        return {"total": total, "limit": lim, "offset": off, "items": items}
+        if qf_norm == "quality_only":
+            total = len(items)
+            items = items[off : off + lim]
+
+        return {"total": int(total or 0), "limit": lim, "offset": off, "items": items}
 
     def query_item_snapshots(self, item_id: str) -> List[Dict[str, Any]]:
         with self._lock:
@@ -2258,8 +2529,10 @@ class MarketIntelligenceStore:
 
             all_snaps = self._query_effective_run_snapshots(
                 run_id=grp["run_id"],
+                run_ids=grp.get("run_ids"),
                 raw_file_ids=[str(f["file_id"]) for f in grp["data_files"]],
                 platform="all",
+                prefer_qualified=bool(grp.get("is_request_bundle")),
             )
             scoped_snaps = all_snaps if plat_scope == "all" else [it for it in all_snaps if str(it.get("platform") or "").lower() == plat_scope]
 
@@ -2924,6 +3197,15 @@ class MarketIntelligenceStore:
             return 0
         now_iso = _utc_now_iso()
         saved = 0
+
+        def _opt_int(val: Any) -> Optional[int]:
+            if val is None or isinstance(val, bool):
+                return None
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
         with self._lock:
             for req in requests_list:
                 if not isinstance(req, dict):
@@ -2945,20 +3227,33 @@ class MarketIntelligenceStore:
                 topics_raw = req.get("topics") if req.get("topics") is not None else opts.get("topics")
                 topic_ids, topic_labels = _normalize_crawl_topics(topics_raw, strict=False)
                 lookback_raw = req.get("lookback_hours") if req.get("lookback_hours") is not None else opts.get("lookback_hours")
-                try:
-                    lookback_int = int(lookback_raw) if lookback_raw is not None and not isinstance(lookback_raw, bool) else None
-                except (TypeError, ValueError):
-                    lookback_int = None
+                lookback_int = _opt_int(lookback_raw)
                 kw = self._clean_run_str(req.get("keywords"))
                 excl_raw = req.get("exclusions") if isinstance(req.get("exclusions"), dict) else opts.get("exclusions")
-                if not (crawl_mode or topic_ids or kw or lookback_int is not None):
+                contract_ver = self._clean_run_str(req.get("contract_version") or opts.get("contract_version"))
+                skill_ver = self._clean_run_str(req.get("skill_version") or opts.get("skill_version"))
+                qp_ver = self._clean_run_str(req.get("quality_policy_version") or opts.get("quality_policy_version"))
+                target_metric = self._clean_run_str(req.get("target_metric") or opts.get("target_metric"))
+                exec_phase = self._clean_run_str(req.get("execution_phase") or req.get("display_status"))
+                pause_reason = self._clean_run_str(req.get("pause_reason"))
+                session_seq = _opt_int(req.get("session_seq"))
+                lease_renew_count = _opt_int(req.get("lease_renew_count"))
+                acc_quality = _opt_int(req.get("accumulated_quality_count") if req.get("accumulated_quality_count") is not None else req.get("actual_quality_count"))
+                acc_new_q = _opt_int(req.get("accumulated_new_qualified_count") if req.get("accumulated_new_qualified_count") is not None else req.get("actual_new_qualified_count"))
+                acc_watch = _opt_int(req.get("accumulated_watchlist_count"))
+
+                if not (crawl_mode or topic_ids or kw or lookback_int is not None or contract_ver or target_metric or exec_phase or acc_quality is not None):
                     continue
                 self._conn.execute(
                     """
                     INSERT INTO crawl_request_metadata_cache
                     (request_id, platform, crawl_mode, crawl_mode_label, topics_json, topic_labels_json,
-                     keywords, lookback_hours, exclusions_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     keywords, lookback_hours, exclusions_json,
+                     contract_version, skill_version, quality_policy_version, target_metric,
+                     execution_phase, pause_reason, session_seq, lease_renew_count,
+                     accumulated_quality_count, accumulated_new_qualified_count, accumulated_watchlist_count,
+                     updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(request_id) DO UPDATE SET
                         platform = COALESCE(excluded.platform, crawl_request_metadata_cache.platform),
                         crawl_mode = COALESCE(excluded.crawl_mode, crawl_request_metadata_cache.crawl_mode),
@@ -2968,6 +3263,17 @@ class MarketIntelligenceStore:
                         keywords = COALESCE(excluded.keywords, crawl_request_metadata_cache.keywords),
                         lookback_hours = COALESCE(excluded.lookback_hours, crawl_request_metadata_cache.lookback_hours),
                         exclusions_json = COALESCE(excluded.exclusions_json, crawl_request_metadata_cache.exclusions_json),
+                        contract_version = COALESCE(excluded.contract_version, crawl_request_metadata_cache.contract_version),
+                        skill_version = COALESCE(excluded.skill_version, crawl_request_metadata_cache.skill_version),
+                        quality_policy_version = COALESCE(excluded.quality_policy_version, crawl_request_metadata_cache.quality_policy_version),
+                        target_metric = COALESCE(excluded.target_metric, crawl_request_metadata_cache.target_metric),
+                        execution_phase = COALESCE(excluded.execution_phase, crawl_request_metadata_cache.execution_phase),
+                        pause_reason = excluded.pause_reason,
+                        session_seq = COALESCE(excluded.session_seq, crawl_request_metadata_cache.session_seq),
+                        lease_renew_count = COALESCE(excluded.lease_renew_count, crawl_request_metadata_cache.lease_renew_count),
+                        accumulated_quality_count = COALESCE(excluded.accumulated_quality_count, crawl_request_metadata_cache.accumulated_quality_count),
+                        accumulated_new_qualified_count = COALESCE(excluded.accumulated_new_qualified_count, crawl_request_metadata_cache.accumulated_new_qualified_count),
+                        accumulated_watchlist_count = COALESCE(excluded.accumulated_watchlist_count, crawl_request_metadata_cache.accumulated_watchlist_count),
                         updated_at = excluded.updated_at
                     """,
                     (
@@ -2980,6 +3286,17 @@ class MarketIntelligenceStore:
                         kw,
                         lookback_int,
                         json.dumps(excl_raw, ensure_ascii=False) if isinstance(excl_raw, dict) else None,
+                        contract_ver,
+                        skill_ver,
+                        qp_ver,
+                        target_metric,
+                        exec_phase,
+                        pause_reason,
+                        session_seq,
+                        lease_renew_count,
+                        acc_quality,
+                        acc_new_q,
+                        acc_watch,
                         now_iso,
                     ),
                 )
@@ -2990,7 +3307,7 @@ class MarketIntelligenceStore:
 
     @staticmethod
     def _attach_v33_fields(d: Dict[str, Any]) -> Dict[str, Any]:
-        """Promote Strategy V3.3 / Contract V3.2 metadata from extra_meta without fabricating absent fields."""
+        """Promote Strategy V3.3 / Contract V3.3 metadata from extra_meta and compute authoritative V3.3 quality flags."""
         em = d.get("extra_meta") if isinstance(d.get("extra_meta"), dict) else {}
         v33_obs = em.get("v33_observation") if isinstance(em.get("v33_observation"), dict) else None
         followers = em.get("author_followers")
@@ -3006,6 +3323,8 @@ class MarketIntelligenceStore:
         buyer_intent = em.get("buyer_intent") if "buyer_intent" in em else None
         if buyer_intent is None and d.get("purchase_intent") not in (None, "", "True", "False"):
             buyer_intent = d.get("purchase_intent")
+        traffic_content = bool(em.get("traffic_content")) if em.get("traffic_content") is not None else False
+        traffic_analysis = em.get("traffic_analysis")
 
         d["strategy_version"] = em.get("strategy_version")
         d["contract_version"] = em.get("contract_version")
@@ -3014,7 +3333,18 @@ class MarketIntelligenceStore:
         d["views_to_followers_ratio"] = ratio
         d["natural_viral"] = nat_viral
         d["buyer_intent"] = buyer_intent
+        d["traffic_content"] = traffic_content
+        d["traffic_analysis"] = traffic_analysis
         d["v33_observation"] = v33_obs
+
+        q_eval = assess_v33_quality(d)
+        d["quality_qualified"] = bool(q_eval["quality_qualified"])
+        d["quality_tier_basis"] = q_eval.get("quality_tier_basis")
+        d["quality_exclusion_reason"] = q_eval.get("quality_exclusion_reason")
+        d["is_watchlist"] = bool(q_eval.get("is_watchlist"))
+        d["traffic_content"] = bool(q_eval.get("traffic_content"))
+        d["quality_policy_version"] = q_eval.get("quality_policy_version") or em.get("quality_policy_version")
+        d["skill_version"] = em.get("skill_version")
         return d
 
     @staticmethod
@@ -3312,8 +3642,10 @@ class MarketIntelligenceStore:
         self,
         *,
         run_id: Optional[str] = None,
+        run_ids: Optional[List[str]] = None,
         raw_file_ids: Optional[List[str]] = None,
         platform: str = "all",
+        prefer_qualified: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Return deduplicated point-in-time snapshots belonging to one crawl run or source-file group,
@@ -3322,19 +3654,27 @@ class MarketIntelligenceStore:
         plat = (platform or "all").strip().lower()
         where_parts: List[str] = []
         params: List[Any] = []
+        rid_list = list(
+            dict.fromkeys(
+                ([str(run_id).strip()] if run_id and str(run_id).strip() else [])
+                + [str(x).strip() for x in (run_ids or []) if str(x or "").strip()]
+            )
+        )
 
         if raw_file_ids:
             placeholders = ",".join("?" for _ in raw_file_ids)
-            if run_id:
-                where_parts.append(f"(s.raw_file_id IN ({placeholders}) OR s.run_id = ?)")
+            if rid_list:
+                r_placeholders = ",".join("?" for _ in rid_list)
+                where_parts.append(f"(s.raw_file_id IN ({placeholders}) OR s.run_id IN ({r_placeholders}))")
                 params.extend(raw_file_ids)
-                params.append(run_id)
+                params.extend(rid_list)
             else:
                 where_parts.append(f"s.raw_file_id IN ({placeholders})")
                 params.extend(raw_file_ids)
-        elif run_id:
-            where_parts.append("s.run_id = ?")
-            params.append(run_id)
+        elif rid_list:
+            r_placeholders = ",".join("?" for _ in rid_list)
+            where_parts.append(f"s.run_id IN ({r_placeholders})")
+            params.extend(rid_list)
         else:
             return []
 
@@ -3342,6 +3682,12 @@ class MarketIntelligenceStore:
         if plat and plat != "all":
             where_parts.append("LOWER(s.platform) = ?")
             params.append(plat)
+
+        prefer_cls_sql = (
+            "(CASE WHEN COALESCE(s.classification, '') = 'NEW' THEN 2 WHEN COALESCE(s.classification, '') = 'UPDATED_METRICS' THEN 1 ELSE 0 END) DESC,"
+            if prefer_qualified
+            else ""
+        )
 
         sql = f"""
             SELECT
@@ -3382,6 +3728,7 @@ class MarketIntelligenceStore:
             ORDER BY
                 COALESCE(s.is_corrected, rf.is_corrected, 0) DESC,
                 COALESCE(s.source_priority, m.source_priority, 1) DESC,
+                {prefer_cls_sql}
                 s.snapshot_at DESC,
                 s.id DESC
         """
@@ -3515,6 +3862,7 @@ class MarketIntelligenceStore:
                 groups[gkey] = {
                     "run_key": gkey,
                     "run_id": run_id,
+                    "run_ids": set(),
                     "grouped_by": grouped_by,
                     "has_run_id": bool(run_id),
                     "request_ids": set(),
@@ -3524,12 +3872,16 @@ class MarketIntelligenceStore:
                     "platforms": set(),
                     "source_files_refs": [],
                 }
+            if run_id:
+                groups[gkey]["run_ids"].add(run_id)
             return groups[gkey]
 
         def _attach_file(gkey: str, rf: Dict[str, Any]):
             grp = groups[gkey]
             fid = str(rf["file_id"])
             file_to_group[fid] = gkey
+            if rf.get("_run_id"):
+                grp["run_ids"].add(rf["_run_id"])
             fname_low = str(rf.get("file_name") or "").strip().lower()
             if fname_low:
                 fname_to_files.setdefault(fname_low, []).append(rf)
@@ -3708,18 +4060,25 @@ class MarketIntelligenceStore:
 
         effective_snaps = self._query_effective_run_snapshots(
             run_id=grp["run_id"],
+            run_ids=grp.get("run_ids"),
             raw_file_ids=raw_fids,
             platform=plat,
+            prefer_qualified=bool(grp.get("is_request_bundle")),
         )
         all_platform_snaps = effective_snaps if plat == "all" else self._query_effective_run_snapshots(
             run_id=grp["run_id"],
+            run_ids=grp.get("run_ids"),
             raw_file_ids=raw_fids,
             platform="all",
+            prefer_qualified=bool(grp.get("is_request_bundle")),
         )
 
         # Tier & classification counts directly from point-in-time effective snapshots
         tier_counts: Dict[str, int] = {"very_hot": 0, "hot": 0, "emerging": 0, "watchlist": 0, "unverified": 0}
         new_qualified_snap = 0
+        quality_qualified_snap = 0
+        watchlist_snap = 0
+        traffic_content_snap = 0
         updated_snap = 0
         dup_history_snap = 0
         unverified_snap = 0
@@ -3752,6 +4111,12 @@ class MarketIntelligenceStore:
             else:
                 if self._is_snapshot_qualified(item):
                     new_qualified_snap += 1
+                if item.get("quality_qualified"):
+                    quality_qualified_snap += 1
+                if item.get("is_watchlist"):
+                    watchlist_snap += 1
+                if item.get("traffic_content"):
+                    traffic_content_snap += 1
                 if tier in ("very_hot", "hot", "emerging", "watchlist"):
                     tier_counts[tier] += 1
 
@@ -3818,29 +4183,45 @@ class MarketIntelligenceStore:
         )
 
         # If snapshots weren't in sync with raw counters (e.g., empty partial upload), fall back to counters safely
+        is_bundle = bool(grp.get("is_request_bundle"))
         new_qualified_count = (
             int(df_counters["new_qualified_count"])
-            if use_envelope_counters and df_counters.get("new_qualified_count") is not None and len(effective_snaps) == 0
+            if not is_bundle and use_envelope_counters and df_counters.get("new_qualified_count") is not None and len(effective_snaps) == 0
             else new_qualified_snap
+        )
+        quality_qualified_count = (
+            int(df_counters["quality_qualified_count"])
+            if not is_bundle and use_envelope_counters and df_counters.get("quality_qualified_count") is not None and len(effective_snaps) == 0
+            else quality_qualified_snap
+        )
+        watchlist_count = (
+            int(df_counters["watchlist_count"])
+            if not is_bundle and use_envelope_counters and df_counters.get("watchlist_count") is not None and len(effective_snaps) == 0
+            else watchlist_snap
+        )
+        traffic_content_count = (
+            int(df_counters["traffic_content_count"])
+            if not is_bundle and use_envelope_counters and df_counters.get("traffic_content_count") is not None and len(effective_snaps) == 0
+            else traffic_content_snap
         )
         updated_metrics_count = (
             int(df_counters["updated_metrics_count"])
-            if use_envelope_counters and df_counters.get("updated_metrics_count") is not None and len(effective_snaps) == 0
+            if not is_bundle and use_envelope_counters and df_counters.get("updated_metrics_count") is not None and len(effective_snaps) == 0
             else updated_snap
         )
         duplicate_history_count = (
             int(df_counters["duplicate_history_count"])
-            if use_envelope_counters and df_counters.get("duplicate_history_count") is not None and len(effective_snaps) == 0
+            if not is_bundle and use_envelope_counters and df_counters.get("duplicate_history_count") is not None and len(effective_snaps) == 0
             else dup_history_snap
         )
         unverified_count = (
             int(df_counters["unverified_count"])
-            if use_envelope_counters and df_counters.get("unverified_count") is not None and len(effective_snaps) == 0
+            if not is_bundle and use_envelope_counters and df_counters.get("unverified_count") is not None and len(effective_snaps) == 0
             else unverified_snap
         )
         rejected_count = (
             int(df_counters["rejected_count"])
-            if use_envelope_counters and df_counters.get("rejected_count") is not None and len(effective_snaps) == 0
+            if not is_bundle and use_envelope_counters and df_counters.get("rejected_count") is not None and len(effective_snaps) == 0
             else rejected_snap
         )
 
@@ -3850,16 +4231,21 @@ class MarketIntelligenceStore:
             df_counters.get("stop_reason")
             or (primary_df.get("stop_reason") if primary_df else None)
             or (rep_parsed.get("screening") or {}).get("stop_reason")
+            or linked_req.get("pause_reason")
         )
         target_achieved_raw = (
             df_counters.get("target_achieved")
-            if df_counters.get("target_achieved") is not None
-            else (primary_df.get("target_achieved") if primary_df else None)
+            if df_counters.get("target_achieved") is not None and not is_bundle
+            else (primary_df.get("target_achieved") if primary_df and not is_bundle else None)
         )
         target_achieved = bool(target_achieved_raw) if target_achieved_raw is not None else None
+        if is_bundle and requested_count is not None:
+            is_v33_bundle = str(linked_req.get("contract_version") or (primary_df.get("contract_version") if primary_df else "") or "").startswith("3.3")
+            target_achieved = (quality_qualified_count >= int(requested_count)) if is_v33_bundle else (new_qualified_count >= int(requested_count))
 
         run_status = (
-            (primary_df.get("run_status") if primary_df else None)
+            (linked_req.get("display_status") if is_bundle else None)
+            or (primary_df.get("run_status") if primary_df else None)
             or (rep_parsed.get("run_status") if rep_parsed else None)
             or linked_req.get("display_status")
             or linked_req.get("status")
@@ -3979,14 +4365,49 @@ class MarketIntelligenceStore:
         if not special_counts:
             nv_snap = sum(1 for it in effective_snaps if it.get("natural_viral") is True)
             bi_snap = sum(1 for it in effective_snaps if it.get("buyer_intent") is True)
-            if nv_snap or bi_snap:
-                special_counts = {"natural_viral": nv_snap, "buyer_intent": bi_snap}
+            if nv_snap or bi_snap or traffic_content_snap:
+                special_counts = {"natural_viral": nv_snap, "buyer_intent": bi_snap, "traffic_content": traffic_content_snap}
+
+        if not contract_version:
+            contract_version = self._clean_run_str(linked_req.get("contract_version") or linked_opts.get("contract_version"))
+        skill_version = self._clean_run_str(
+            (primary_df.get("_meta") or {}).get("skill_version") if primary_df else None
+        ) or self._clean_run_str(rep_parsed.get("skill_version") or linked_req.get("skill_version") or linked_opts.get("skill_version"))
+        quality_policy_version = self._clean_run_str(
+            (primary_df.get("quality_policy_version") if primary_df else None)
+            or ((primary_df.get("_meta") or {}).get("quality_policy_version") if primary_df else None)
+            or rep_parsed.get("quality_policy_version")
+            or linked_req.get("quality_policy_version")
+        )
+        session_seq_val = (
+            (primary_df.get("session_seq") if primary_df else None)
+            or ((primary_df.get("_meta") or {}).get("session_seq") if primary_df else None)
+            or rep_parsed.get("session_seq")
+            or linked_req.get("session_seq")
+        )
+        is_checkpoint_val = bool(
+            (primary_df.get("is_checkpoint") if primary_df else False)
+            or ((primary_df.get("_meta") or {}).get("is_checkpoint") if primary_df else False)
+            or rep_parsed.get("is_checkpoint")
+        )
+        target_metric_val = self._clean_run_str(
+            df_counters.get("target_metric")
+            or ((primary_df.get("_meta") or {}).get("target_metric") if primary_df else None)
+            or linked_req.get("target_metric")
+            or ("quality_qualified_count" if str(contract_version or "").startswith("3.3") else "new_qualified_count")
+        )
+        session_run_ids = sorted(str(x) for x in (grp.get("run_ids") or []) if x)
 
         return {
             "run_key": grp["run_key"],
             "run_id": grp["run_id"],
             "grouped_by": grp["grouped_by"],
             "has_run_id": grp["has_run_id"],
+            "is_request_bundle": is_bundle,
+            "session_count": len(grp.get("session_run_keys") or session_run_ids) or 1,
+            "session_run_ids": session_run_ids,
+            "session_seq": int(session_seq_val) if session_seq_val is not None else None,
+            "is_checkpoint": is_checkpoint_val,
             "request_id": grp["request_id"],
             "crawl_time": grp["crawl_time"],
             "sort_ts": grp["sort_ts"],
@@ -3996,6 +4417,9 @@ class MarketIntelligenceStore:
             "schema_versions": schema_versions,
             "strategy_version": strategy_version,
             "contract_version": contract_version,
+            "skill_version": skill_version,
+            "quality_policy_version": quality_policy_version,
+            "target_metric": target_metric_val,
             "crawl_mode": crawl_mode,
             "crawl_mode_label": crawl_mode_label,
             "topics": topic_ids,
@@ -4015,6 +4439,9 @@ class MarketIntelligenceStore:
             "duplicate_current_run_count": dup_current_run,
             "new_qualified_count": new_qualified_count,
             "qualified_count": qualified_total,
+            "quality_qualified_count": quality_qualified_count,
+            "watchlist_count": watchlist_count,
+            "traffic_content_count": traffic_content_count,
             "updated_metrics_count": updated_metrics_count,
             "duplicate_history_count": duplicate_history_count,
             "unverified_count": unverified_count,
@@ -4030,6 +4457,83 @@ class MarketIntelligenceStore:
             "has_report": bool(formatted_report_files or reports),
         }
 
+    def _build_request_bundle_groups(self, base_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Aggregate individual session run groups sharing the same request_id into Request Bundles."""
+        by_req: Dict[str, List[Dict[str, Any]]] = {}
+        for grp in base_groups:
+            rid = self._clean_run_str(grp.get("request_id"))
+            if rid:
+                by_req.setdefault(rid, []).append(grp)
+
+        bundles: List[Dict[str, Any]] = []
+        for req_id, sub_groups in by_req.items():
+            sub_sorted = sorted(sub_groups, key=lambda g: (float(g.get("sort_ts") or 0.0), str(g.get("run_key") or "")), reverse=True)
+            seen_df: set = set()
+            seen_rf: set = set()
+            seen_rep: set = set()
+            merged_df: List[Dict[str, Any]] = []
+            merged_rf: List[Dict[str, Any]] = []
+            merged_rep: List[Dict[str, Any]] = []
+            merged_plats: set = set()
+            merged_run_ids: set = set()
+            merged_src_refs: List[str] = []
+            session_keys: List[str] = []
+            linked_req = None
+            for sg in sub_sorted:
+                session_keys.append(str(sg["run_key"]))
+                if sg.get("run_id"):
+                    merged_run_ids.add(str(sg["run_id"]))
+                for r in sg.get("run_ids") or []:
+                    if r:
+                        merged_run_ids.add(str(r))
+                merged_plats.update(sg.get("platforms") or [])
+                for f in sg.get("data_files") or []:
+                    fid = str(f["file_id"])
+                    if fid not in seen_df:
+                        seen_df.add(fid)
+                        merged_df.append(f)
+                for f in sg.get("report_files") or []:
+                    fid = str(f["file_id"])
+                    if fid not in seen_rf:
+                        seen_rf.add(fid)
+                        merged_rf.append(f)
+                for rep in sg.get("reports") or []:
+                    rkey = str(rep.get("report_key") or rep.get("id") or "")
+                    if rkey and rkey in seen_rep:
+                        continue
+                    if rkey:
+                        seen_rep.add(rkey)
+                    merged_rep.append(rep)
+                for sr in sg.get("source_files_refs") or []:
+                    if sr not in merged_src_refs:
+                        merged_src_refs.append(sr)
+                if not linked_req and sg.get("linked_request"):
+                    linked_req = sg.get("linked_request")
+
+            top_sg = sub_sorted[0]
+            bundles.append({
+                "run_key": f"req_bundle:{req_id}",
+                "run_id": req_id,
+                "run_ids": merged_run_ids,
+                "grouped_by": "request_bundle",
+                "is_request_bundle": True,
+                "session_run_keys": session_keys,
+                "has_run_id": True,
+                "request_id": req_id,
+                "request_ids": {req_id},
+                "data_files": merged_df,
+                "report_files": merged_rf,
+                "reports": merged_rep,
+                "platforms": merged_plats,
+                "source_files_refs": merged_src_refs,
+                "sort_ts": top_sg.get("sort_ts") or 0.0,
+                "crawl_time": top_sg.get("crawl_time") or "",
+                "linked_request": linked_req,
+            })
+
+        bundles.sort(key=lambda g: (float(g.get("sort_ts") or 0.0), str(g["run_key"])), reverse=True)
+        return bundles
+
     def _resolve_run_scope(
         self,
         run_key: Optional[str],
@@ -4041,6 +4545,12 @@ class MarketIntelligenceStore:
         if not key:
             return None
         groups = self._build_run_groups_index(include_archived=include_archived, crawl_requests=crawl_requests)
+        if key.startswith("req_bundle:"):
+            target_rid = key[len("req_bundle:"):].strip()
+            for bg in self._build_request_bundle_groups(groups):
+                if bg["request_id"] == target_rid or bg["run_key"] == key:
+                    return bg
+            return None
         for grp in groups:
             if grp["run_key"] == key or (grp["run_id"] and grp["run_id"] == key):
                 return grp
@@ -4049,6 +4559,30 @@ class MarketIntelligenceStore:
             if key in fids or (key.startswith("file:") and key[5:] in fids):
                 return grp
         return None
+
+    def list_request_bundles(
+        self,
+        platform: str = "all",
+        limit: int = 50,
+        include_archived: bool = False,
+        crawl_requests: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """List request-level aggregated bundles across multi-session runs (newest-first)."""
+        plat = (platform or "all").strip().lower()
+        groups = self._build_run_groups_index(include_archived=include_archived, crawl_requests=crawl_requests)
+        bundles = self._build_request_bundle_groups(groups)
+        out: List[Dict[str, Any]] = []
+        for bg in bundles:
+            if plat and plat != "all":
+                if plat not in bg["platforms"] and not any(
+                    plat in str(f.get("file_name") or "").lower()
+                    for f in bg["data_files"] + bg["report_files"]
+                ):
+                    continue
+            out.append(self._summarize_run_group(bg, platform=plat))
+            if len(out) >= max(1, min(int(limit), 200)):
+                break
+        return out
 
     def list_crawl_runs(
         self,
@@ -4602,6 +5136,14 @@ class MarketIntelligenceStore:
             evidence["run_id"] = run_summary.get("run_id")
             evidence["run_key"] = run_summary.get("run_key")
             evidence["grouped_by"] = run_summary.get("grouped_by")
+            evidence["is_request_bundle"] = bool(run_summary.get("is_request_bundle"))
+            evidence["session_count"] = run_summary.get("session_count")
+            evidence["session_seq"] = run_summary.get("session_seq")
+            evidence["is_checkpoint"] = bool(run_summary.get("is_checkpoint"))
+            evidence["contract_version"] = run_summary.get("contract_version")
+            evidence["skill_version"] = run_summary.get("skill_version")
+            evidence["quality_policy_version"] = run_summary.get("quality_policy_version")
+            evidence["target_metric"] = run_summary.get("target_metric")
             evidence["crawl_mode"] = run_summary.get("crawl_mode")
             evidence["crawl_mode_label"] = run_summary.get("crawl_mode_label")
             evidence["topics"] = run_summary.get("topics") or []

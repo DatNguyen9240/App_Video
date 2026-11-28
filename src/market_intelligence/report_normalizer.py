@@ -16,6 +16,9 @@ from typing import Any, Dict, List, Optional
 
 RUN_STATUS_LABELS_VI = {
     "completed": "✅ Hoàn thành với bài đạt chuẩn",
+    "paused": "⏸️ Tạm dừng — chờ phiên crawl tiếp theo",
+    "checkpoint_paused": "⏸️ Đã lưu checkpoint — chờ resume",
+    "blocked": "🚧 Tạm chặn nguồn (CAPTCHA / Rate Limit)",
     "no_qualifying_posts": "⚪ Nguồn chạy bình thường — Không có bài đạt chuẩn (no_qualifying_posts)",
     "insufficient_data": "⚠️ Dữ liệu không đủ (insufficient_data) — Chưa đủ cơ sở đánh giá xu hướng",
     "source_error": "❌ Lỗi nguồn dữ liệu (source_error) — Không kết luận về thị trường",
@@ -190,9 +193,20 @@ def normalize_muse_report(
     sections = src.get("sections") if isinstance(src.get("sections"), dict) else {}
     fname_lower = (file_name or "").lower()
     has_counters = isinstance(raw_obj.get("counters"), dict) or isinstance(src.get("counters"), dict)
+    is_checkpoint = bool(raw_obj.get("is_checkpoint") or src.get("is_checkpoint") or raw_obj.get("checkpoint"))
+    contract_ver_str = str(src.get("contract_version") or raw_obj.get("contract_version") or "").strip()
+    is_v33 = bool(
+        contract_ver_str.startswith("3.3")
+        or is_checkpoint
+        or raw_obj.get("quality_policy_version")
+        or src.get("quality_policy_version")
+        or raw_obj.get("quality_qualified_count") is not None
+        or (isinstance(raw_obj.get("counters"), dict) and raw_obj["counters"].get("quality_qualified_count") is not None)
+    )
     is_v32 = bool(
-        has_counters
-        or str(raw_obj.get("version") or src.get("version") or "").startswith("3.2")
+        is_v33
+        or has_counters
+        or str(raw_obj.get("version") or src.get("version") or "").startswith(("3.2", "3.3"))
         or isinstance(sections.get("9_growth_tracking"), list)
         or "10_priority_actions" in sections
     )
@@ -249,14 +263,52 @@ def normalize_muse_report(
     raw_groups = s2.get("groups") or s2.get("group_counts") or {}
     if not isinstance(raw_groups, dict):
         raw_groups = {}
+    raw_special = (
+        src.get("special_counts")
+        if isinstance(src.get("special_counts"), dict)
+        else (s2.get("special_counts") if isinstance(s2.get("special_counts"), dict) else {})
+    )
+    if not isinstance(raw_special, dict):
+        raw_special = {}
+
+    is_checkpoint = bool(
+        raw_obj.get("is_checkpoint") is True
+        or str(raw_obj.get("session_phase") or "").strip().lower() == "checkpoint"
+        or str(raw_obj.get("run_status") or "").strip().lower() == "paused"
+    )
+    contract_ver = str(raw_obj.get("contract_version") or raw_obj.get("schema_version") or "").strip()
+    quality_qualified_count = counters.get("quality_qualified_count")
+    watchlist_count = counters.get("watchlist_count") if counters.get("watchlist_count") is not None else raw_tiers.get("watchlist")
+    traffic_content_count = (
+        counters.get("traffic_content_count")
+        if counters.get("traffic_content_count") is not None
+        else raw_special.get("traffic_content")
+    )
 
     screening = {
+        "contract_version": contract_ver or None,
+        "quality_policy_version": raw_obj.get("quality_policy_version") or counters.get("quality_policy_version"),
+        "skill_version": raw_obj.get("skill_version") or counters.get("skill_version"),
+        "target_metric": counters.get("target_metric") or raw_obj.get("target_metric"),
+        "is_checkpoint": is_checkpoint,
+        "session_seq": raw_obj.get("session_seq"),
         "requested_count": counters.get("requested_count"),
         "scanned_count": counters.get("scanned_count") if counters.get("scanned_count") is not None else (s1.get("scanned_count") if s1.get("scanned_count") is not None else s1.get("scanned_posts")),
         "unique_candidate_count": counters.get("unique_candidate_count"),
         "new_count": counters.get("new_count"),
         "new_qualified_count": counters.get("new_qualified_count"),
-        "qualified_count": counters.get("new_qualified_count") if counters.get("new_qualified_count") is not None else (s1.get("qualified_count") if s1.get("qualified_count") is not None else s1.get("qualified_posts")),
+        "quality_qualified_count": quality_qualified_count,
+        "watchlist_count": watchlist_count,
+        "traffic_content_count": traffic_content_count,
+        "qualified_count": (
+            quality_qualified_count
+            if contract_ver.startswith("3.3") and quality_qualified_count is not None
+            else (
+                counters.get("new_qualified_count")
+                if counters.get("new_qualified_count") is not None
+                else (s1.get("qualified_count") if s1.get("qualified_count") is not None else s1.get("qualified_posts"))
+            )
+        ),
         "duplicate_current_run_count": counters.get("duplicate_current_run_count"),
         "duplicate_history_count": counters.get("duplicate_history_count"),
         "updated_metrics_count": counters.get("updated_metrics_count"),
@@ -286,6 +338,10 @@ def normalize_muse_report(
         if (raw_tiers or is_v3)
         else {},
         "groups": dict(raw_groups),
+        "special_counts": {
+            **raw_special,
+            **({"traffic_content": traffic_content_count} if traffic_content_count is not None else {}),
+        },
     }
 
     if is_v3 and not totals:
@@ -751,7 +807,7 @@ def normalize_muse_report(
     ]
     return {
         "report_key": report_key,
-        "schema_version": "v3.2" if is_v32 else ("v3.1" if is_v3 else "v2"),
+        "schema_version": "v3.3" if is_v33 else ("v3.2" if is_v32 else ("v3.1" if is_v3 else "v2")),
         "source_type": "muse_report_json",
         "source_label": f"Muse Report ({file_name or 'Drive JSON'})",
         "file_name": file_name,
@@ -765,6 +821,10 @@ def normalize_muse_report(
         "run_id": source_run.get("run_id") or raw_obj.get("run_id"),
         "strategy_version": src.get("strategy_version") or raw_obj.get("strategy_version"),
         "contract_version": src.get("contract_version") or raw_obj.get("contract_version"),
+        "skill_version": src.get("skill_version") or raw_obj.get("skill_version"),
+        "quality_policy_version": src.get("quality_policy_version") or raw_obj.get("quality_policy_version"),
+        "session_seq": raw_obj.get("session_seq") or src.get("session_seq") or source_run.get("session_seq"),
+        "is_checkpoint": is_checkpoint,
         "crawl_mode": src.get("crawl_mode") or raw_obj.get("crawl_mode") or source_run.get("crawl_mode"),
         "topics": src.get("topics") if isinstance(src.get("topics"), list) else (raw_obj.get("topics") if isinstance(raw_obj.get("topics"), list) else source_run.get("topics")),
         "keywords": src.get("keywords") or raw_obj.get("keywords") or source_run.get("keywords"),

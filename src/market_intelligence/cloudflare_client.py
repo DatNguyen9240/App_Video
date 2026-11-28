@@ -359,7 +359,71 @@ class CloudflareBridgeClient:
             max_attempts=2,
         )
         if not resp.ok:
-            raise RuntimeError(f"create_crawl_request failed: HTTP {resp.status_code}")
+            try:
+                err_data = resp.json()
+                err_msg = err_data.get("error") or resp.text[:250]
+            except Exception:
+                err_msg = resp.text[:250]
+            raise RuntimeError(f"create_crawl_request failed: HTTP {resp.status_code} ({err_msg})")
+        return resp.json()
+
+    def get_helper_compatibility(self) -> Dict[str, Any]:
+        """Query Muse Helper V3.3 compatibility state, degrading gracefully if Worker lacks the endpoint."""
+        resp = self._request_with_retry("GET", "/api/app/muse-helper/compatibility", max_attempts=2)
+        if resp.status_code in (404, 405, 501):
+            return {
+                "ok": True,
+                "worker_endpoint_missing": True,
+                "helper_compatibility": {
+                    "helper_name": "muse-ai",
+                    "helper_version": None,
+                    "v33_compatible": False,
+                    "supported_contracts": ["3.2"],
+                    "capabilities": [],
+                    "default_contract_version": "3.2",
+                    "default_lease_minutes": 30,
+                    "worker_endpoint_missing": True,
+                    "note": f"Worker chưa deploy endpoint V3.3 (/api/app/muse-helper/compatibility -> HTTP {resp.status_code}); giữ mặc định V3.2 an toàn.",
+                },
+            }
+        if not resp.ok:
+            raise RuntimeError(f"get_helper_compatibility failed: HTTP {resp.status_code}")
+        return resp.json()
+
+    def set_helper_compatibility(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        resp = self._request_with_retry(
+            "POST",
+            "/api/app/muse-helper/compatibility",
+            json_body=payload or {},
+            max_attempts=2,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"set_helper_compatibility failed: HTTP {resp.status_code}")
+        return resp.json()
+
+    def pause_crawl_request(self, crawl_id: str, pause_reason: str = "operator_paused") -> Dict[str, Any]:
+        resp = self._request_with_retry(
+            "POST",
+            f"/api/app/crawl-requests/{crawl_id}/pause",
+            json_body={"pause_reason": pause_reason},
+            max_attempts=2,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"pause_crawl_request failed: HTTP {resp.status_code}")
+        return resp.json()
+
+    def resume_crawl_request(self, crawl_id: str, lease_minutes: Optional[int] = None) -> Dict[str, Any]:
+        body: Dict[str, Any] = {}
+        if lease_minutes is not None:
+            body["lease_minutes"] = int(lease_minutes)
+        resp = self._request_with_retry(
+            "POST",
+            f"/api/app/crawl-requests/{crawl_id}/resume",
+            json_body=body,
+            max_attempts=2,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"resume_crawl_request failed: HTTP {resp.status_code}")
         return resp.json()
 
     def cancel_crawl_request(self, crawl_id: str) -> Dict[str, Any]:

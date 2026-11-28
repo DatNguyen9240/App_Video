@@ -1290,6 +1290,7 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0001_v2_market_and_commands.sql").read_text(encoding="utf-8"))
         conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0003_cross_run_dedup_registry.sql").read_text(encoding="utf-8"))
         conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0004_seed_post_identity_index_171.sql").read_text(encoding="utf-8"))
+        conn.executescript((root_p / "cloudflare-worker" / "migrations" / "0005_v33_quality_and_multisession.sql").read_text(encoding="utf-8"))
 
         now_iso = "2026-11-27T12:10:00.000Z"
         past_iso = "2026-11-27T11:00:00.000Z"
@@ -1360,6 +1361,29 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         self.assertEqual(eval_sig(), 1)
         conn.execute("UPDATE crawl_requests SET status = 'completed', result_summary_json = '{\"registry_sync_status\":\"ok\"}' WHERE id = 'q_th2'")
         self.assertEqual(eval_sig(), 0)
+
+        # 9. V3.3 multi-session & safety block checks in real SQLite:
+        # Clean V3.3 session resume with attempts=4, error_attempts=0, execution_phase='paused' STILL triggers signal -> 1
+        conn.execute(
+            """
+            INSERT INTO crawl_requests (
+                id, platform, keywords, requested_count, status, attempts, max_attempts,
+                contract_version, execution_phase, error_attempts, session_seq, created_at, updated_at
+            ) VALUES (
+                'q_th_v33', 'threads', 'beauty', 100, 'queued', 4, 3,
+                '3.3', 'paused', 0, 4, '2026-11-27T12:15:00.000Z', '2026-11-27T12:15:00.000Z'
+            )
+            """
+        )
+        self.assertEqual(eval_sig(), 1)
+        # CAPTCHA safety block (execution_phase='blocked') prevents signal wake loop -> 0
+        conn.execute("UPDATE crawl_requests SET execution_phase = 'blocked', pause_reason = 'captcha_blocked' WHERE id = 'q_th_v33'")
+        self.assertEqual(eval_sig(), 0)
+        # Unblocking with error_attempts >= max_attempts stays blocked -> 0; resetting to error_attempts=1 resumes -> 1
+        conn.execute("UPDATE crawl_requests SET execution_phase = 'paused', error_attempts = 3 WHERE id = 'q_th_v33'")
+        self.assertEqual(eval_sig(), 0)
+        conn.execute("UPDATE crawl_requests SET error_attempts = 1 WHERE id = 'q_th_v33'")
+        self.assertEqual(eval_sig(), 1)
         conn.close()
 
     def test_worker_v2_phase2_single_flight_and_guarded_sql_real_sqlite(self):
@@ -1455,23 +1479,83 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
 
 
 class _PromptCapableMockClient(MockCloudflareTransportClient):
-    """Extends MockCloudflareTransportClient with Manual Prompt Trigger fields."""
+    """Extends MockCloudflareTransportClient with Manual Prompt Trigger & V3.3 Multi-session fields."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.helper_compatibility = {
+            "v33_compatible": False,
+            "v33_ready": False,
+            "default_contract_version": "3.2",
+        }
 
     def get_public_config_summary(self):
         return {"configured": True, "muse_web_url": "https://muse.ai/"}
 
+    def get_helper_compatibility(self):
+        return {"ok": True, "helper_compatibility": dict(self.helper_compatibility)}
+
+    def set_helper_compatibility(self, payload=None):
+        p = payload if isinstance(payload, dict) else {}
+        ready = bool(p.get("v33_compatible") or p.get("verify_v33"))
+        self.helper_compatibility = {
+            "v33_compatible": ready,
+            "v33_ready": ready,
+            "default_contract_version": "3.3" if ready else "3.2",
+            "helper_version": p.get("helper_version") or "muse-helper/3.3.0",
+            "note": p.get("note"),
+        }
+        return {"ok": True, "helper_compatibility": dict(self.helper_compatibility)}
+
+    def pause_crawl_request(self, crawl_id: str, reason: str = "manual_pause"):
+        for req in self.mock_crawl_requests:
+            if req.get("id") == crawl_id:
+                req["status"] = "queued"
+                req["execution_phase"] = "paused"
+                req["pause_reason"] = reason
+                req["display_status"] = "paused"
+                req["display_status_label"] = "Tạm dừng — Chờ resume"
+                return {"ok": True, "request": req}
+        return {"ok": False, "status_code": 404, "error": "Not found"}
+
+    def resume_crawl_request(self, crawl_id: str):
+        for req in self.mock_crawl_requests:
+            if req.get("id") == crawl_id:
+                req["status"] = "queued"
+                req["execution_phase"] = "paused"
+                req["display_status"] = "paused"
+                req["pause_reason"] = None
+                req["resume_prompt"] = f"Tiếp tục Request ID: {crawl_id}"
+                return {
+                    "ok": True,
+                    "request": req,
+                    "resume_prompt": req["resume_prompt"],
+                    "manual_prompt": req["resume_prompt"],
+                    "muse_web_url": "https://muse.ai/",
+                }
+        return {"ok": False, "status_code": 404, "error": "Not found"}
+
     def create_crawl_request(self, platform: str, keywords: str = "", requested_count: int = 50, poll_profile=None, dedup_token=None, options=None):
+        opts = dict(options) if isinstance(options, dict) else {}
+        plat = str(platform or "threads").lower().strip()
+        req_cv = str(opts.get("contract_version") or "").strip().lower()
+        if plat == "threads" and req_cv == "3.3" and not self.helper_compatibility.get("v33_compatible"):
+            return {
+                "ok": False,
+                "status_code": 409,
+                "code": "muse_helper_incompatible",
+                "error": "Muse Helper chưa xác nhận tương thích V3.3",
+            }
         res = super().create_crawl_request(
             platform=platform,
             keywords=keywords,
             requested_count=requested_count,
             poll_profile=poll_profile,
             dedup_token=dedup_token,
-            options=options,
+            options=opts,
         )
         req = res["request"]
-        plat = str(req.get("platform") or "threads").lower()
-        cv = "3.2" if plat == "threads" else "v2"
+        cv = ("3.3" if (req_cv == "3.3" or (req_cv != "3.2" and self.helper_compatibility.get("v33_compatible"))) else "3.2") if plat == "threads" else "v2"
         req["display_status"] = "waiting_prompt"
         req["display_status_label"] = "Chờ gửi prompt"
         req["contract_version"] = cv
@@ -1572,6 +1656,71 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         )
         self.assertEqual(dur_resp.status_code, 200)
         self.assertEqual(self.client.mock_crawl_requests[-1]["options"].get("lease_seconds"), 3600)
+
+    def test_v33_helper_gate_pause_resume_and_bundle_api(self):
+        app_ui.reset_market_runtime_for_tests(data_dir=self.tmp_dir.name, client=self.client)
+        app_ui.app.config["TESTING"] = True
+        flask_client = app_ui.app.test_client()
+
+        # Helper incompatible initially -> explicit 3.3 returns HTTP 409 cleanly
+        h_before = flask_client.get("/api/remote/helper_compatibility").get_json()
+        self.assertFalse(h_before["helper_compatibility"]["v33_compatible"])
+        r409 = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 50, "contract_version": "3.3"},
+        )
+        self.assertEqual(r409.status_code, 409)
+        self.assertEqual(r409.get_json()["code"], "muse_helper_incompatible")
+
+        # Confirm helper compatibility -> creates 3.3 request, pauses & resumes with resume_prompt
+        h_after = flask_client.post(
+            "/api/remote/helper_compatibility",
+            json={"verify_v33": True, "helper_version": "muse-helper/3.3.0"},
+        ).get_json()
+        self.assertTrue(h_after["helper_compatibility"]["v33_compatible"])
+
+        r200 = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 50, "contract_version": "3.3"},
+        )
+        self.assertEqual(r200.status_code, 200)
+        req_id = r200.get_json()["request"]["id"]
+        self.assertEqual(r200.get_json()["request"]["contract_version"], "3.3")
+
+        p_res = flask_client.post(f"/api/remote/crawl_requests/{req_id}/pause", json={"reason": "manual_pause"})
+        self.assertEqual(p_res.status_code, 200)
+        self.assertEqual(p_res.get_json()["request"]["execution_phase"], "paused")
+
+        res_res = flask_client.post(f"/api/remote/crawl_requests/{req_id}/resume", json={})
+        self.assertEqual(res_res.status_code, 200)
+        self.assertIn(req_id, res_res.get_json()["resume_prompt"])
+
+        # HTML includes new V3.3 UI hooks & quality filter pills (and wraps Crawl Center controls without overflow)
+        html = flask_client.get("/").get_data(as_text=True)
+        for token in ["Xác nhận Helper V3.3", "Chất lượng V3.3", "quality_only", "watchlist_only", "traffic_content"]:
+            self.assertIn(token, html)
+        self.assertNotIn("flex flex-wrap xl:flex-nowrap items-center gap-2", html)
+
+        # runs_catalog exposes bundles alongside individual runs
+        cat = flask_client.get("/api/market/runs_catalog").get_json()
+        self.assertTrue(cat["ok"])
+        self.assertIn("bundles", cat)
+
+        # Live CloudflareBridgeClient.get_helper_compatibility gracefully degrades on HTTP 404 (pre-deploy prod Worker)
+        import types
+        from unittest import mock
+
+        live_client = CloudflareBridgeClient(worker_url="https://example.invalid", api_token="tok")
+        with mock.patch.object(
+            live_client,
+            "_request_with_retry",
+            return_value=types.SimpleNamespace(ok=False, status_code=404, json=lambda: {"error": "Not found"}),
+        ):
+            fallback = live_client.get_helper_compatibility()
+        self.assertTrue(fallback["ok"])
+        self.assertTrue(fallback["worker_endpoint_missing"])
+        self.assertFalse(fallback["helper_compatibility"]["v33_compatible"])
+        self.assertEqual(fallback["helper_compatibility"]["default_contract_version"], "3.2")
 
     def test_desktop_auto_sync_triggers_on_metrics_only_change_and_debounces(self):
         initial_post = {

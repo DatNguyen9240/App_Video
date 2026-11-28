@@ -161,8 +161,8 @@ class MarketSyncService:
             for req in crawl_items:
                 if not isinstance(req, dict):
                     continue
-                if str(req.get("status") or "").lower() != "completed":
-                    continue
+                req_status = str(req.get("status") or "").lower()
+                exec_phase = str(req.get("execution_phase") or "").lower()
                 req_id = str(req.get("id") or "").strip()
                 if not req_id:
                     continue
@@ -175,6 +175,14 @@ class MarketSyncService:
                         summary = {}
                 elif isinstance(req.get("result_summary"), dict):
                     summary = req.get("result_summary") or {}
+
+                is_paused_checkpoint = (
+                    req_status == "queued"
+                    and exec_phase in ("paused", "blocked")
+                    and bool(summary.get("run_id") or summary.get("is_checkpoint"))
+                )
+                if req_status != "completed" and not is_paused_checkpoint:
+                    continue
 
                 reg_status = str(summary.get("registry_sync_status") or "").lower().strip()
                 if reg_status in ("pending", "error"):

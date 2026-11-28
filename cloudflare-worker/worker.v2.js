@@ -141,10 +141,25 @@ function formatPollProfileLabel(profile) {
         : "Production (6 giờ/lần)";
 }
 
-function formatCrawlStatusLabel(status) {
+function formatCrawlStatusLabel(status, executionPhase = null, pauseReason = null) {
+    const ph = String(executionPhase || "").trim().toLowerCase();
+    const pr = String(pauseReason || "").trim().toLowerCase();
+    if (status === "queued" && ph === "blocked") {
+        if (pr === "captcha_blocked") return "🛡️ Tạm dừng (CAPTCHA) — Chờ xử lý";
+        if (pr === "rate_limited") return "🛡️ Tạm dừng (Giới hạn tốc độ) — Chờ tiếp tục";
+        return "🛡️ Tạm dừng an toàn — Chờ tiếp tục";
+    }
+    if (status === "queued" && ph === "paused") {
+        return "⏸️ Tạm dừng — Sẵn sàng tiếp tục crawl";
+    }
+    if (status === "running" && ph === "syncing_checkpoint") {
+        return "🔄 Đang đồng bộ checkpoint";
+    }
     const map = {
         queued: "⏳ Chờ gửi prompt",
         waiting_prompt: "⏳ Chờ gửi prompt",
+        paused: "⏸️ Tạm dừng — Tiếp tục crawl",
+        blocked: "🛡️ Tạm dừng an toàn — Chờ xử lý",
         running: "🕷️ Đang crawl",
         crawling: "🕷️ Đang crawl",
         syncing: "🔄 Đang đồng bộ",
@@ -155,8 +170,27 @@ function formatCrawlStatusLabel(status) {
     return map[status] || status;
 }
 
+function getEffectiveCrawlRequestContract(reqRow) {
+    const plat = String(reqRow?.platform || "threads").trim().toLowerCase();
+    const opts = parseRequestOptionsJson(reqRow);
+    const colCv = String(reqRow?.contract_version || "").trim();
+    const optCv = String(opts?.contract_version || opts?.schema_version || "").trim();
+    const rawCv = colCv || optCv;
+    if (plat !== "threads") {
+        if (plat === "tiktok" || plat === "shopee") return { contract_version: rawCv || "v2", target_metric: "new_qualified_count", isV33: false };
+        return { contract_version: rawCv || "threads:3.2 | tiktok/shopee:v2", target_metric: "new_qualified_count", isV33: false };
+    }
+    if (rawCv.startsWith("3.3")) {
+        return { contract_version: "3.3", target_metric: String(reqRow?.target_metric || opts?.target_metric || "quality_qualified_count").trim() || "quality_qualified_count", isV33: true };
+    }
+    // Preserve legacy V3.2 semantics strictly whenever contract_version is absent or "3.2"
+    return { contract_version: rawCv || "3.2", target_metric: String(reqRow?.target_metric || opts?.target_metric || "new_qualified_count").trim() || "new_qualified_count", isV33: false };
+}
+
 function deriveCrawlRequestDisplayState(reqRow, parsedSummary = null, hasActiveOutbox = false) {
     const rawStatus = String(reqRow?.status || "queued").trim().toLowerCase();
+    const execPhase = String(reqRow?.execution_phase || "").trim().toLowerCase();
+    const pauseReason = String(reqRow?.pause_reason || "").trim().toLowerCase();
     let summary = parsedSummary;
     if (!summary || typeof summary !== "object") {
         summary = {};
@@ -175,6 +209,22 @@ function deriveCrawlRequestDisplayState(reqRow, parsedSummary = null, hasActiveO
     const progStage = String(summary?.progress?.stage || "").trim().toLowerCase();
 
     if (rawStatus === "queued") {
+        if (execPhase === "blocked") {
+            return {
+                display_status: "blocked",
+                display_status_label: formatCrawlStatusLabel("queued", execPhase, pauseReason),
+                reconcile_status: reconcileStatus,
+                reconcile_message: reconcileMessage,
+            };
+        }
+        if (execPhase === "paused" || Number(reqRow?.session_seq || 0) > 0) {
+            return {
+                display_status: "paused",
+                display_status_label: "Tạm dừng — Tiếp tục crawl",
+                reconcile_status: reconcileStatus,
+                reconcile_message: reconcileMessage,
+            };
+        }
         return {
             display_status: "waiting_prompt",
             display_status_label: "Chờ gửi prompt",
@@ -183,10 +233,10 @@ function deriveCrawlRequestDisplayState(reqRow, parsedSummary = null, hasActiveO
         };
     }
     if (rawStatus === "running") {
-        if (progStage === "syncing") {
+        if (execPhase === "syncing_checkpoint" || progStage === "syncing" || progStage === "checkpoint_syncing") {
             return {
                 display_status: "syncing",
-                display_status_label: "Đang đồng bộ",
+                display_status_label: execPhase === "syncing_checkpoint" ? "Đang đồng bộ checkpoint" : "Đang đồng bộ",
                 reconcile_status: reconcileStatus,
                 reconcile_message: reconcileMessage,
             };
@@ -240,9 +290,41 @@ function deriveCrawlRequestDisplayState(reqRow, parsedSummary = null, hasActiveO
 
 const MUSE_DEFAULT_CLAIM_OWNER = "muse-ai";
 const MUSE_DEFAULT_LEASE_SECONDS = 1800;
+const MUSE_THREADS_DEFAULT_LEASE_SECONDS = 3600;
 const MUSE_MIN_LEASE_SECONDS = 60;
 const MUSE_MAX_LEASE_SECONDS = 7200;
+const MUSE_MAX_LEASE_RENEWALS_PER_SESSION = 2;
+const MUSE_LEASE_RENEW_INCREMENT_SECONDS = 1800;
 const THREADS_STRATEGY_VERSION = "3.3 (sửa đổi 28/11/2026)";
+const THREADS_CONTRACT_V32 = "3.2";
+const THREADS_CONTRACT_V33 = "3.3";
+const THREADS_SKILL_NAME = "threads_crawl";
+const THREADS_SKILL_VERSION = "1.0";
+const THREADS_QUALITY_POLICY_VERSION = "3.3-a-20261128";
+const THREADS_QUALITY_POLICY_SPEC = Object.freeze({
+    version: THREADS_QUALITY_POLICY_VERSION,
+    option: "A",
+    target_metric: "quality_qualified_count",
+    legacy_counter_preserved: "new_qualified_count",
+    watchlist_counted: false,
+    watchlist_exception_enabled: false,
+    thresholds: {
+        very_hot: { views_gte: 50000, likes_gte: 1000, logic: "OR" },
+        hot: { views_gte: 10000, likes_gte: 300, logic: "OR" },
+        emerging: { views_gte: 1000, likes_gte: 20, comments_gte: 5, shares_plus_reposts_gte: 10, logic: "views_gte AND (any secondary)" },
+    },
+    required_classification: "NEW",
+    required_metrics: ["views", "likes"],
+    zero_distinct_from_null: true,
+    traffic_content_requires_buyer_intent: false,
+    traffic_content_requires_affiliate: false,
+});
+const MUSE_REQUIRED_V33_CAPABILITIES = [
+    "multi_session",
+    "lease_renew",
+    "checkpoint",
+    "quality_first_v33",
+];
 const THREADS_DEFAULT_LOOKBACK_HOURS = 24;
 const THREADS_ALLOWED_LOOKBACK_HOURS = new Set([24, 48, 72, 168]);
 
@@ -493,14 +575,18 @@ function normalizeThreadsLeaseSeconds(rawOptions = null, fallbackSeconds = MUSE_
 function getRequestLeaseInfo(reqRow) {
     const plat = String(reqRow?.platform || "threads").trim().toLowerCase() || "threads";
     const opts = parseRequestOptionsJson(reqRow);
+    const contractInfo = getEffectiveCrawlRequestContract(reqRow);
+    const threadsFallback = contractInfo.isV33
+        ? MUSE_THREADS_DEFAULT_LEASE_SECONDS
+        : (reqRow?.id && !opts.lease_seconds && !opts.lease_minutes && !opts.duration_minutes ? MUSE_DEFAULT_LEASE_SECONDS : MUSE_THREADS_DEFAULT_LEASE_SECONDS);
     const leaseSeconds = plat === "threads"
-        ? normalizeThreadsLeaseSeconds(opts, MUSE_DEFAULT_LEASE_SECONDS)
+        ? normalizeThreadsLeaseSeconds(opts, threadsFallback)
         : MUSE_DEFAULT_LEASE_SECONDS;
     const leaseMinutes = Math.max(1, Math.round(leaseSeconds / 60));
     return {
         leaseSeconds,
         leaseMinutes,
-        isCustomDuration: plat === "threads" && leaseSeconds !== MUSE_DEFAULT_LEASE_SECONDS,
+        isCustomDuration: plat === "threads" && leaseSeconds !== threadsFallback,
     };
 }
 
@@ -511,9 +597,15 @@ function getThreadsStrategyConfig(reqRow, { strict = false } = {}) {
     const topicObjs = topics.map(id => THREADS_TOPIC_BY_ID.get(id)).filter(Boolean);
     const lookbackHours = normalizeThreadsLookbackHours(opts.lookback_hours ?? opts.time_range_hours, { strict });
     const exclusions = normalizeThreadsExclusions(opts.exclusions ?? opts);
-    const leaseInfo = getRequestLeaseInfo({ platform: "threads", options: opts });
+    const leaseInfo = getRequestLeaseInfo(reqRow || { platform: "threads", options: opts });
+    const contractInfo = getEffectiveCrawlRequestContract(reqRow || { platform: "threads", options: opts });
     return {
         strategy_version: THREADS_STRATEGY_VERSION,
+        contract_version: contractInfo.contract_version,
+        skill_name: THREADS_SKILL_NAME,
+        skill_version: String(reqRow?.skill_version || opts.skill_version || THREADS_SKILL_VERSION),
+        quality_policy_version: String(reqRow?.quality_policy_version || opts.quality_policy_version || THREADS_QUALITY_POLICY_VERSION),
+        target_metric: contractInfo.target_metric,
         crawl_mode: modeObj.id,
         crawl_mode_label: modeObj.label,
         topics,
@@ -533,6 +625,7 @@ function getThreadsStrategySignature(reqRow) {
     const cfg = getThreadsStrategyConfig(reqRow, { strict: false });
     const sortedTopics = [...cfg.topics].sort();
     return JSON.stringify([
+        cfg.contract_version,
         cfg.crawl_mode,
         sortedTopics,
         cfg.lookback_hours,
@@ -544,12 +637,22 @@ function getThreadsStrategySignature(reqRow) {
     ]);
 }
 
-function getPublicCrawlConfig() {
+function getPublicCrawlConfig(helperCompatibility = null) {
     return {
         strategy_version: THREADS_STRATEGY_VERSION,
-        contract_version: "3.2",
+        contract_version: THREADS_CONTRACT_V33,
+        legacy_contract_version: THREADS_CONTRACT_V32,
+        skill_name: THREADS_SKILL_NAME,
+        skill_version: THREADS_SKILL_VERSION,
+        quality_policy_version: THREADS_QUALITY_POLICY_VERSION,
+        quality_policy: THREADS_QUALITY_POLICY_SPEC,
         default_mode: "balanced",
         default_lookback_hours: THREADS_DEFAULT_LOOKBACK_HOURS,
+        default_lease_minutes: 60,
+        lease_options_minutes: [30, 60, 120],
+        max_lease_renewals_per_session: MUSE_MAX_LEASE_RENEWALS_PER_SESSION,
+        lease_renew_minutes: Math.round(MUSE_LEASE_RENEW_INCREMENT_SECONDS / 60),
+        helper_compatibility: helperCompatibility || null,
         modes: Object.values(THREADS_CRAWL_MODES).map(m => ({
             id: m.id,
             label: m.label,
@@ -571,15 +674,17 @@ function getPublicCrawlConfig() {
             { hours: 168, label: "7 ngày / 168h (mở rộng rõ ràng)" },
         ],
         exclusion_defaults: { ...THREADS_DEFAULT_EXCLUSIONS },
-        lease_options_minutes: [30, 60, 120],
     };
 }
 
-function getRequestContractVersion(platform) {
+function getRequestContractVersion(platform, reqRow = null) {
     const plat = String(platform || "threads").trim().toLowerCase();
-    if (plat === "threads") return "3.2";
+    if (reqRow && plat === "threads") {
+        return getEffectiveCrawlRequestContract(reqRow).contract_version;
+    }
+    if (plat === "threads") return THREADS_CONTRACT_V32;
     if (plat === "tiktok" || plat === "shopee") return "v2";
-    return "threads:3.2 | tiktok/shopee:v2";
+    return "threads:3.2/3.3 | tiktok/shopee:v2";
 }
 
 function buildThreadsTopicPromptLines(cfg, customKeywords) {
@@ -619,7 +724,8 @@ function buildMuseManualPrompt(reqRow) {
     const plat = String(reqRow?.platform || "threads").trim().toLowerCase() || "threads";
     const targetCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || 50);
     const keywords = String(reqRow?.keywords || "").trim();
-    const contractVersion = getRequestContractVersion(plat);
+    const contractInfo = getEffectiveCrawlRequestContract(reqRow);
+    const contractVersion = contractInfo.contract_version;
 
     if (plat === "threads") {
         const kwLine = keywords || "Mặc định theo chủ đề & mode";
@@ -628,8 +734,72 @@ function buildMuseManualPrompt(reqRow) {
         const { lease_seconds: leaseSeconds, lease_minutes: leaseMinutes, is_custom_duration: isCustomDuration } = cfg;
         const reserveMinutes = Math.max(10, Math.ceil(leaseMinutes * 0.2));
         const claimBodyNote = isCustomDuration
-            ? ` (lease ${leaseMinutes}p/${leaseSeconds}s, "lease_seconds":${leaseSeconds}, không tự gia hạn)`
+            ? ` (lease ${leaseMinutes}p/${leaseSeconds}s, "lease_seconds":${leaseSeconds})`
             : "";
+        const topicPrompt = buildThreadsTopicPromptLines(cfg, keywords);
+        const topicsCompact = cfg.topics.length >= THREADS_TOPIC_PRESETS.length
+            ? `ALL(${cfg.topics.length})`
+            : JSON.stringify(cfg.topics);
+        const execPhase = String(reqRow?.execution_phase || "").trim().toLowerCase();
+        const pauseReason = String(reqRow?.pause_reason || "").trim();
+        const sessionSeq = Math.max(0, Number.parseInt(reqRow?.session_seq, 10) || 0);
+        const accQuality = Math.max(0, Number.parseInt(reqRow?.accumulated_quality_count, 10) || 0);
+        const accNewQualified = Math.max(0, Number.parseInt(reqRow?.accumulated_new_qualified_count, 10) || 0);
+        const accWatchlist = Math.max(0, Number.parseInt(reqRow?.accumulated_watchlist_count, 10) || 0);
+        let checkpointObj = null;
+        if (typeof reqRow?.checkpoint_json === "string" && reqRow.checkpoint_json.trim()) {
+            try { checkpointObj = JSON.parse(reqRow.checkpoint_json); } catch {}
+        } else if (reqRow?.checkpoint && typeof reqRow.checkpoint === "object") {
+            checkpointObj = reqRow.checkpoint;
+        }
+        const isResume = execPhase === "paused" || execPhase === "blocked" || sessionSeq > 0;
+        const nextSessionSeq = sessionSeq + 1;
+        const progressSoFar = contractInfo.isV33 ? accQuality : accNewQualified;
+        const remainingTarget = Math.max(0, targetCount - progressSoFar);
+
+        if (contractInfo.isV33) {
+            const ex = cfg.exclusions;
+            const resumeBlock = isResume
+                ? [
+                    ``,
+                    `[TIẾP TỤC PHIÊN CRAWL • SESSION #${nextSessionSeq}]`,
+                    `- Tiến độ tích lũy hiện tại: ${accQuality}/${targetCount} bài đạt chuẩn V3.3 (còn thiếu ${remainingTarget} bài mới đạt chất lượng; hợp lệ V3.2=${accNewQualified}, Watchlist=${accWatchlist}).`,
+                    `- Trạng thái dừng trước: ${execPhase || "paused"}${pauseReason ? ` (lý do: ${pauseReason})` : ""} | Session trước: #${sessionSeq}.`,
+                    checkpointObj?.note ? `- Ghi chú checkpoint trước: ${checkpointObj.note}` : null,
+                    checkpointObj?.cursor ? `- Resume cursor/trạng thái: ${typeof checkpointObj.cursor === "string" ? checkpointObj.cursor : JSON.stringify(checkpointObj.cursor)}` : null,
+                    `- Bỏ qua toàn bộ bài đã thu thập ở các session trước (server tự lọc theo crawl_request_quality_items & Registry). Không tạo request mới.`,
+                ].filter(Boolean)
+                : [];
+
+            return [
+                `${isResume ? "TIẾP TỤC " : ""}Crawl Threads V3.3 (${ex.vn_only ? "VN Only" : "Ưu tiên VN"}) • Request ID: ${reqId}`,
+                `Skill bắt buộc: Nạp ${THREADS_SKILL_NAME} v${cfg.skill_version} (Quality Policy ${cfg.quality_policy_version} • Strategy ${THREADS_STRATEGY_VERSION} • Contract ${contractVersion})`,
+                `Platform: threads | Mode: ${modeObj.id} (${modeObj.label}) | Lookback: ${cfg.lookback_label}`,
+                `Topics: ${topicPrompt.topicHeader} (${topicsCompact}) | Keywords: ${kwLine}`,
+                `Exclusions: vn_only=${Boolean(ex.vn_only)}, exclude_celebrity=${Boolean(ex.exclude_celebrity)}, exclude_fandom=${Boolean(ex.exclude_fandom)}, exclude_pure_ads=${Boolean(ex.exclude_pure_ads)}`,
+                `Target Metric: quality_qualified_count | Requested Target: ${targetCount} bài đạt chất lượng V3.3${isResume ? ` (còn thiếu ${remainingTarget})` : ""}`,
+                `Session Lease: ${leaseMinutes} phút (${leaseSeconds}s) | Dự trữ đóng phiên: max(10p, 20% lease) ≈ ${reserveMinutes}p | Gia hạn: tối đa ${MUSE_MAX_LEASE_RENEWALS_PER_SESSION} lần × ${Math.round(MUSE_LEASE_RENEW_INCREMENT_SECONDS / 60)}p qua /api/crawl/lease/renew khi còn tiến độ thật (KHÔNG giới hạn tổng thời gian toàn request).`,
+                ...resumeBlock,
+                ``,
+                `I. THỰC THI THEO SKILL (${THREADS_SKILL_NAME} v${cfg.skill_version})`,
+                `- Nạp đầy đủ quy trình Discovery, Xác minh Cloud Browser (@toilaai267 + threads-cli), Phân tầng V3.3, Anti-hallucination (0 !== null), Traffic Content & Multi-session từ THREADS_CRAWL_SKILL v${cfg.skill_version}.`,
+                topicPrompt.keywordGuidance,
+                `- Nhắc nhanh chuẩn V3.3 (${cfg.quality_policy_version}): Bắt buộc xác minh cả views + likes; Very Hot (views>=50000 || likes>=1000); Hot (views>=10000 || likes>=300); Emerging (views>=1000 && (likes>=20 || comments>=5 || shares+reposts>=10)); Watchlist KHÔNG tính vào mục tiêu; Traffic Content không cần ép Buyer Intent/Affiliate.`,
+                ``,
+                `II. CUSTOM CONNECTOR & MULTI-SESSION WORKFLOW`,
+                `1. Claim${isResume ? " lại" : ""}: POST /api/crawl/claim {"request_id":"${reqId}","claimed_by":"muse-ai"${isCustomDuration ? `,"lease_seconds":${leaseSeconds}` : ""}}${claimBodyNote} — server cấp session_seq=${nextSessionSeq}. Không fallback sang request khác.`,
+                `2. Dedup trước khi chấm: POST /api/crawl/registry/check với candidate keys.`,
+                `3. Tiến độ định kỳ: POST /api/crawl/progress {"request_id":"${reqId}","session_seq":<session_seq>,"claimed_by":"muse-ai",...}.`,
+                `4. Gia hạn lease (nếu cần & đang có tiến độ mới): POST /api/crawl/lease/renew {"request_id":"${reqId}","session_seq":<session_seq>,"claimed_by":"muse-ai"} (tối đa 2 lần × 30p/phiên).`,
+                `5. Hết ngân sách phiên / CAPTCHA / rate limit mà CHƯA đủ ${targetCount} bài chất lượng:`,
+                `   - Lưu file checkpoint lên Drive với is_checkpoint=true, session_seq, run_status="paused" (KHÔNG đặt là final completed).`,
+                `   - Gọi POST /api/crawl/checkpoint {"request_id":"${reqId}","session_seq":<session_seq>,"claimed_by":"muse-ai","pause_reason":"session_budget_reached|captcha_blocked|rate_limited","items":[...],"checkpoint":{...}} để đồng bộ Registry xong rồi nhả phiên an toàn (KHÔNG gọi /complete khi chỉ hết phiên!).`,
+                `6. Khi đủ quality_qualified_count >= ${targetCount} hoặc nguồn cạn thực sự (source_exhausted / no_qualifying_posts):`,
+                `   - Lưu Data JSON & Report JSON/MD lên Drive với contract_version="3.3", quality_policy_version="${cfg.quality_policy_version}", skill_version="${cfg.skill_version}", run_id, request_id="${reqId}", session_seq, is_checkpoint=false.`,
+                `   - Gọi POST /api/crawl/complete với items & metrics đầy đủ (hoặc POST /api/crawl/fail nếu lỗi nguồn thật sự). Không bật Hook, không Scheduled Task, không SQL trực tiếp.`,
+            ].join("\n");
+        }
+
         const timeRuleLine = cfg.lookback_hours === 168
             ? "Mở rộng tối đa 7 ngày (168h; ưu tiên 24 giờ gần nhất -> 48 giờ trước)."
             : (cfg.lookback_hours === 72
@@ -647,10 +817,6 @@ function buildMuseManualPrompt(reqRow) {
             ex.exclude_pure_ads ? "hạn chế quảng cáo đơn thuần (Không loại cứng người bán hoặc thương hiệu nhỏ)" : "không loại cứng người bán hoặc thương hiệu nhỏ",
         ];
         const marketLine = ex.vn_only ? "chỉ thu thập thị trường Việt Nam" : "ưu tiên Việt Nam";
-        const topicPrompt = buildThreadsTopicPromptLines(cfg, keywords);
-        const topicsCompact = cfg.topics.length >= THREADS_TOPIC_PRESETS.length
-            ? `ALL(${cfg.topics.length})`
-            : JSON.stringify(cfg.topics);
 
         return [
             `Crawl Threads (${marketLine}) • Request ID: ${reqId}`,
@@ -699,7 +865,7 @@ function buildMuseManualPrompt(reqRow) {
             `Platform: ${plat}`,
             `Requested Count: ${targetCount}`,
             `Keywords: ${kwLine}`,
-            `Contract Version: ${contractVersion} (giữ Data Contract hiện hành của ${platTitle}, không áp V3.2 của Threads)`,
+            `Contract Version: ${contractVersion} (giữ Data Contract hiện hành của ${platTitle}, không áp V3.2/V3.3 của Threads)`,
             ``,
             `Lưu ý & hướng dẫn thực thi:`,
             `1. CHƯA hỗ trợ tự động hoàn tất request đầy đủ cho ${platTitle} — Custom Connector completion API (/api/crawl/claim, /progress, /complete, /fail) hiện CHỈ hỗ trợ platform="threads" (KHÔNG dùng các endpoint /api/crawl/* cho ${plat}).`,
@@ -721,12 +887,12 @@ function buildMuseManualPrompt(reqRow) {
         ``,
         `Lưu ý & hướng dẫn thực thi:`,
         `1. CHƯA hỗ trợ tự động hoàn tất request đầy đủ cho platform="all" — Custom Connector completion API (/api/crawl/claim, /progress, /complete, /fail) hiện CHỈ hỗ trợ request platform="threads" riêng lẻ.`,
-        `2. Nếu cần chạy theo luồng Custom Connector + D1 Registry tự động hoàn tất cho Threads V3.2, hãy tạo request platform="threads" riêng.`,
-        `3. Với request "all" này, giữ đúng Data Contract theo từng nền tảng (Threads V3.2 trong Threads/ + trend_report_*.json; TikTok & Shopee V2 hiện hành trong TikTok/, Shopee/ + market_report_*.json), gắn cùng request_id="${reqId}" và run_id để App_Video Auto Sync đồng bộ dữ liệu Drive (chưa hỗ trợ tự động hoàn tất request đầy đủ).`
+        `2. Nếu cần chạy theo luồng Custom Connector + D1 Registry tự động hoàn tất cho Threads, hãy tạo request platform="threads" riêng.`,
+        `3. Với request "all" này, giữ đúng Data Contract theo từng nền tảng (Threads trong Threads/ + trend_report_*.json; TikTok & Shopee V2 hiện hành trong TikTok/, Shopee/ + market_report_*.json), gắn cùng request_id="${reqId}" và run_id để App_Video Auto Sync đồng bộ dữ liệu Drive (chưa hỗ trợ tự động hoàn tất request đầy đủ).`
     ].join("\n");
 }
 
-function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
+function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null, extra = {}) {
     if (!reqRow || typeof reqRow !== "object") return reqRow;
     const plat = String(reqRow.platform || "threads").trim().toLowerCase();
     const hasOutbox = Boolean(activeOutboxReqIds && activeOutboxReqIds.has(reqRow.id));
@@ -736,12 +902,48 @@ function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
     } else if (reqRow.result_summary && typeof reqRow.result_summary === "object") {
         parsedSummary = reqRow.result_summary;
     }
+    let parsedCheckpoint = null;
+    if (typeof reqRow.checkpoint_json === "string" && reqRow.checkpoint_json.trim()) {
+        try { parsedCheckpoint = JSON.parse(reqRow.checkpoint_json); } catch {}
+    } else if (reqRow.checkpoint && typeof reqRow.checkpoint === "object") {
+        parsedCheckpoint = reqRow.checkpoint;
+    }
+    const contractInfo = getEffectiveCrawlRequestContract(reqRow);
     const displayState = deriveCrawlRequestDisplayState(reqRow, parsedSummary, hasOutbox);
     const leaseInfo = getRequestLeaseInfo(reqRow);
     const strategyCfg = plat === "threads" ? getThreadsStrategyConfig(reqRow, { strict: false }) : null;
+    const progressMetrics = computeCrawlRequestProgress(reqRow, activeOutboxReqIds);
+    const manualPrompt = buildMuseManualPrompt(reqRow);
+    const sessionsList = Array.isArray(extra?.sessionsByReqId?.[reqRow.id])
+        ? extra.sessionsByReqId[reqRow.id]
+        : (Array.isArray(reqRow._sessions) ? reqRow._sessions : null);
+    const requestedCount = Math.max(1, Number.parseInt(reqRow.requested_count, 10) || 50);
+    const accQuality = Math.max(
+        0,
+        Number.parseInt(reqRow.accumulated_quality_count, 10)
+        || (contractInfo.isV33 ? (Number.parseInt(progressMetrics?.quality_qualified_count, 10) || 0) : 0)
+    );
+    const accNewQualified = Math.max(
+        0,
+        Number.parseInt(reqRow.accumulated_new_qualified_count, 10)
+        || (Number.parseInt(progressMetrics?.new_qualified_count, 10) || 0)
+    );
+    const accWatchlist = Math.max(
+        0,
+        Number.parseInt(reqRow.accumulated_watchlist_count, 10)
+        || (Number.parseInt(progressMetrics?.watchlist_count, 10) || 0)
+    );
+    const targetProgress = contractInfo.isV33 ? accQuality : accNewQualified;
+    const isResumeReady = displayState.display_status === "paused" || displayState.display_status === "blocked";
+
     return {
         ...reqRow,
-        contract_version: getRequestContractVersion(reqRow.platform),
+        contract_version: contractInfo.contract_version,
+        target_metric: contractInfo.target_metric,
+        is_v33: contractInfo.isV33,
+        skill_name: plat === "threads" && contractInfo.isV33 ? THREADS_SKILL_NAME : null,
+        skill_version: plat === "threads" && contractInfo.isV33 ? (strategyCfg?.skill_version || THREADS_SKILL_VERSION) : null,
+        quality_policy_version: plat === "threads" && contractInfo.isV33 ? (strategyCfg?.quality_policy_version || THREADS_QUALITY_POLICY_VERSION) : null,
         strategy_version: plat === "threads" ? THREADS_STRATEGY_VERSION : null,
         crawl_mode: strategyCfg ? strategyCfg.crawl_mode : null,
         crawl_mode_label: strategyCfg ? strategyCfg.crawl_mode_label : null,
@@ -750,9 +952,26 @@ function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
         lookback_hours: strategyCfg ? strategyCfg.lookback_hours : null,
         lookback_label: strategyCfg ? strategyCfg.lookback_label : null,
         exclusions: strategyCfg ? strategyCfg.exclusions : null,
+        execution_phase: reqRow.execution_phase || null,
+        pause_reason: reqRow.pause_reason || null,
+        session_seq: Number.parseInt(reqRow.session_seq, 10) || 0,
+        error_attempts: Number.parseInt(reqRow.error_attempts, 10) || 0,
+        lease_renew_count: Number.parseInt(reqRow.lease_renew_count, 10) || 0,
+        max_lease_renewals: MUSE_MAX_LEASE_RENEWALS_PER_SESSION,
+        accumulated_quality_count: accQuality,
+        accumulated_new_qualified_count: accNewQualified,
+        accumulated_watchlist_count: accWatchlist,
+        remaining_target: Math.max(0, requestedCount - targetProgress),
+        checkpoint: parsedCheckpoint,
+        sessions: sessionsList,
         strategy_config: strategyCfg
             ? {
                 strategy_version: strategyCfg.strategy_version,
+                contract_version: strategyCfg.contract_version,
+                skill_name: strategyCfg.skill_name,
+                skill_version: strategyCfg.skill_version,
+                quality_policy_version: strategyCfg.quality_policy_version,
+                target_metric: strategyCfg.target_metric,
                 crawl_mode: strategyCfg.crawl_mode,
                 crawl_mode_label: strategyCfg.crawl_mode_label,
                 topics: strategyCfg.topics,
@@ -770,9 +989,11 @@ function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
         display_status_label: displayState.display_status_label,
         reconcile_status: displayState.reconcile_status,
         reconcile_message: displayState.reconcile_message,
-        manual_prompt: buildMuseManualPrompt(reqRow),
+        is_resume_ready: isResumeReady,
+        manual_prompt: manualPrompt,
+        resume_prompt: isResumeReady ? manualPrompt : null,
         muse_web_url: getMuseWebUrl(env),
-        progress_metrics: computeCrawlRequestProgress(reqRow, activeOutboxReqIds),
+        progress_metrics: progressMetrics,
     };
 }
 
@@ -799,6 +1020,75 @@ async function setRuntimeState(env, key, value) {
     } catch {
         // Ignore if pre-migration
     }
+}
+
+function evaluateMuseHelperCompatibilityPayload(raw) {
+    const obj = (raw && typeof raw === "object") ? raw : {};
+    const contracts = Array.isArray(obj.supported_contracts)
+        ? obj.supported_contracts.map(v => String(v || "").trim())
+        : (Array.isArray(obj.supported_contract_versions) ? obj.supported_contract_versions.map(v => String(v || "").trim()) : []);
+    const skills = Array.isArray(obj.supported_skills) ? obj.supported_skills : [];
+    const caps = Array.isArray(obj.capabilities) ? obj.capabilities.map(v => String(v || "").trim()) : [];
+    const explicitVerified = obj.verified === true || obj.v33_compatible === true || obj.v33_ready === true;
+    const hasV33Contract = contracts.some(v => v.startsWith("3.3"));
+    const hasSkill = Boolean(
+        obj.skill_version
+        || skills.some(s => (typeof s === "string" ? s.includes("threads_crawl") : String(s?.name || "") === THREADS_SKILL_NAME))
+    );
+    const missingCaps = MUSE_REQUIRED_V33_CAPABILITIES.filter(c => !caps.includes(c));
+    const hasAllCaps = missingCaps.length === 0 && caps.length > 0;
+    const v33Ready = explicitVerified || (hasV33Contract && hasSkill && (hasAllCaps || caps.length === 0));
+    return {
+        v33_ready: v33Ready,
+        v33_compatible: v33Ready,
+        default_contract_version: v33Ready ? THREADS_CONTRACT_V33 : THREADS_CONTRACT_V32,
+        helper_name: obj.helper_name ? String(obj.helper_name).trim() : null,
+        helper_version: obj.helper_version ? String(obj.helper_version).trim() : null,
+        supported_contracts: contracts,
+        skill_name: obj.skill_name ? String(obj.skill_name).trim() : (hasSkill ? THREADS_SKILL_NAME : null),
+        skill_version: obj.skill_version ? String(obj.skill_version).trim() : null,
+        capabilities: caps,
+        missing_capabilities: missingCaps,
+        verified_by: obj.verified_by ? String(obj.verified_by).trim() : null,
+        verified_at: obj.verified_at ? String(obj.verified_at).trim() : null,
+        note: obj.note ? String(obj.note).trim() : null,
+    };
+}
+
+async function getMuseHelperCompatibility(env) {
+    const raw = await getRuntimeState(env, "muse_helper_compatibility_json", null);
+    let parsed = null;
+    if (typeof raw === "string" && raw.trim()) {
+        try { parsed = JSON.parse(raw); } catch {}
+    }
+    const evaluated = evaluateMuseHelperCompatibilityPayload(parsed || {});
+    return {
+        ...evaluated,
+        required_skill_name: THREADS_SKILL_NAME,
+        required_skill_version: THREADS_SKILL_VERSION,
+        required_contract_version: THREADS_CONTRACT_V33,
+        required_quality_policy_version: THREADS_QUALITY_POLICY_VERSION,
+        required_capabilities: [...MUSE_REQUIRED_V33_CAPABILITIES],
+    };
+}
+
+async function setMuseHelperCompatibility(env, payload) {
+    const current = await getMuseHelperCompatibility(env);
+    const merged = {
+        ...current,
+        ...(payload && typeof payload === "object" ? payload : {}),
+        verified_at: (payload && payload.verified_at) || new Date().toISOString(),
+    };
+    const evaluated = evaluateMuseHelperCompatibilityPayload(merged);
+    await setRuntimeState(env, "muse_helper_compatibility_json", JSON.stringify(evaluated));
+    return {
+        ...evaluated,
+        required_skill_name: THREADS_SKILL_NAME,
+        required_skill_version: THREADS_SKILL_VERSION,
+        required_contract_version: THREADS_CONTRACT_V33,
+        required_quality_policy_version: THREADS_QUALITY_POLICY_VERSION,
+        required_capabilities: [...MUSE_REQUIRED_V33_CAPABILITIES],
+    };
 }
 
 async function computeExpectedPickup(env, explicitProfile = null) {
@@ -1159,11 +1449,24 @@ function extractMuseReportStats(d) {
     const c = (d.counters && typeof d.counters === "object") ? d.counters : (s1.counters && typeof s1.counters === "object" ? s1.counters : {});
     const tiers = s2.tiers || s2 || {};
     const groups = s2.groups || {};
+    const specialCounts = (d.special_counts && typeof d.special_counts === "object")
+        ? d.special_counts
+        : ((s2.special_counts && typeof s2.special_counts === "object") ? s2.special_counts : {});
+    const cvStr = String(d.contract_version || d.schema_version || "").trim();
+    const isV33 = Boolean(
+        cvStr.startsWith("3.3") ||
+        d.quality_policy_version ||
+        c.quality_qualified_count !== undefined ||
+        d.quality_qualified_count !== undefined ||
+        s1.quality_qualified_count !== undefined ||
+        String(d.target_metric || c.target_metric || "").trim() === "quality_qualified_count"
+    );
     const isV32 = Boolean(
+        isV33 ||
         d.counters ||
         d.sections?.["9_growth_tracking"] ||
         d.sections?.["10_priority_actions"] ||
-        String(d.contract_version || d.schema_version || "").includes("3.2") ||
+        cvStr.includes("3.2") ||
         c.new_qualified_count !== undefined
     );
     const isV3 = Boolean(isV32 || d.sections || d.run_status || d.section_1_screening);
@@ -1171,13 +1474,36 @@ function extractMuseReportStats(d) {
     const rawTechStatus = d.technical_status ? String(d.technical_status).trim().toLowerCase() : null;
     const rawDqStatus = d.data_quality_status ? String(d.data_quality_status).trim() : null;
     const effStatus = rawRunStatus || rawTechStatus || "completed";
+    const isCheckpoint = Boolean(
+        d.is_checkpoint === true ||
+        String(d.session_phase || "").trim().toLowerCase() === "checkpoint" ||
+        rawRunStatus === "paused"
+    );
 
     const requestedCount = pickFirstFiniteInt(c.requested_count, d.requested_count, s1.requested_count);
     const scanned = pickFirstFiniteInt(c.scanned_count, d.scanned_count, s1.scanned_count, s1.scanned_posts, d.totals?.records);
     const uniqueCandidates = pickFirstFiniteInt(c.unique_candidate_count, d.unique_candidate_count, s1.unique_candidate_count);
     const newQualifiedCount = pickFirstFiniteInt(c.new_qualified_count, d.new_qualified_count, s1.new_qualified_count);
+    const qualityQualifiedCount = pickFirstFiniteInt(
+        c.quality_qualified_count,
+        d.quality_qualified_count,
+        s1.quality_qualified_count
+    );
+    const watchlistCount = pickFirstFiniteInt(
+        c.watchlist_count,
+        d.watchlist_count,
+        s1.watchlist_count,
+        tiers.watchlist
+    );
+    const trafficContentCount = pickFirstFiniteInt(
+        c.traffic_content_count,
+        d.traffic_content_count,
+        s1.traffic_content_count,
+        specialCounts.traffic_content
+    );
     const newCount = pickFirstFiniteInt(c.new_count, d.new_count, s1.new_count);
     const qualified = pickFirstFiniteInt(
+        isV33 ? qualityQualifiedCount : null,
         newQualifiedCount,
         c.qualified_count,
         d.qualified_count,
@@ -1212,6 +1538,7 @@ function extractMuseReportStats(d) {
     if (typeof c.target_achieved === "boolean") targetAchieved = c.target_achieved;
     else if (typeof d.target_achieved === "boolean") targetAchieved = d.target_achieved;
     else if (typeof s1.target_achieved === "boolean") targetAchieved = s1.target_achieved;
+    else if (isV33 && qualityQualifiedCount !== null && requestedCount !== null) targetAchieved = qualityQualifiedCount >= requestedCount;
     else if (newQualifiedCount !== null && requestedCount !== null) targetAchieved = newQualifiedCount >= requestedCount;
 
     const stopReason = c.stop_reason || d.stop_reason || s1.stop_reason || null;
@@ -1248,6 +1575,8 @@ function extractMuseReportStats(d) {
     return {
         isV3,
         isV32,
+        isV33,
+        isCheckpoint,
         rawRunStatus,
         rawTechStatus,
         rawDqStatus,
@@ -1260,12 +1589,19 @@ function extractMuseReportStats(d) {
             watchlist: tiers.watchlist ?? 0,
             unverified
         },
+        specialCounts: {
+            ...specialCounts,
+            ...(trafficContentCount !== null ? { traffic_content: trafficContentCount } : {}),
+        },
         groups,
         requestedCount,
         scanned,
         uniqueCandidates,
         newCount,
         newQualifiedCount,
+        qualityQualifiedCount,
+        watchlistCount,
+        trafficContentCount,
         qualified,
         duplicateHistoryCount,
         updatedMetricsCount,
@@ -1372,7 +1708,9 @@ function extractRegistryMetrics(item) {
     const m = (item.metrics && typeof item.metrics === "object") ? item.metrics : item;
     const pickInt = (...keys) => {
         for (const k of keys) {
-            const v = m[k] !== undefined ? m[k] : item[k];
+            const mv = m[k];
+            const iv = item[k];
+            const v = (mv !== null && mv !== undefined && mv !== "") ? mv : iv;
             if (v !== null && v !== undefined && v !== "") {
                 const n = Number(v);
                 if (Number.isFinite(n)) return Math.trunc(n);
@@ -1388,7 +1726,9 @@ function extractRegistryMetrics(item) {
     const reposts = pickInt("reposts", "reposts_count", "repost_count");
     const quotes = pickInt("quotes", "quotes_count", "quote_count");
     const sold = pickInt("sold", "sold_count", "historical_sold");
-    const priceRaw = m.price ?? item.price_vnd ?? item.price;
+    const priceRaw = (m.price !== null && m.price !== undefined && m.price !== "")
+        ? m.price
+        : ((item.price_vnd !== null && item.price_vnd !== undefined && item.price_vnd !== "") ? item.price_vnd : item.price);
     const price = (priceRaw !== null && priceRaw !== undefined && priceRaw !== "" && Number.isFinite(Number(priceRaw))) ? Number(priceRaw) : null;
     if (views !== null) out.views = views;
     if (likes !== null) out.likes = likes;
@@ -1469,7 +1809,258 @@ function isValidV32ViewsProvenance(meta) {
     return true;
 }
 
-function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt = null) {
+function isValidV33LikesVerified(rawItem, meta) {
+    if (!meta || !meta.metrics) return false;
+    const likes = meta.metrics.likes;
+    if (likes === undefined || likes === null || !Number.isFinite(Number(likes)) || Number(likes) < 0) {
+        return false;
+    }
+    if (rawItem?.likes_verified === false || rawItem?.metrics?.likes_verified === false) {
+        return false;
+    }
+    return true;
+}
+
+function isTrafficContentItem(rawItem) {
+    if (!rawItem || typeof rawItem !== "object") return false;
+    if (rawItem.traffic_content === true || rawItem.is_traffic_content === true) return true;
+    const cType = String(rawItem.content_type || rawItem.category || rawItem.trend_group || "").trim().toLowerCase();
+    return cType === "traffic_content" || cType === "traffic";
+}
+
+function classifyQuantitativeV33Tier(metrics) {
+    const m = metrics || {};
+    const views = Number(m.views);
+    const likes = Number(m.likes);
+    const comments = Number(m.comments ?? 0);
+    const shares = Number(m.shares ?? 0);
+    const reposts = Number(m.reposts ?? 0);
+    if (!Number.isFinite(views) || views < 0 || !Number.isFinite(likes) || likes < 0) {
+        return { tier: "unverified", qualified: false, reason: "unverified_views_or_likes" };
+    }
+    if (views >= 50000 || likes >= 1000) {
+        return { tier: "very_hot", qualified: true, reason: null };
+    }
+    if (views >= 10000 || likes >= 300) {
+        return { tier: "hot", qualified: true, reason: null };
+    }
+    if (views >= 1000 && (likes >= 20 || comments >= 5 || (shares + reposts) >= 10)) {
+        return { tier: "emerging", qualified: true, reason: null };
+    }
+    return { tier: "watchlist", qualified: false, reason: "below_emerging_threshold" };
+}
+
+function assessV33QualityInWorker(rawItem, meta, reqContext = null) {
+    const item = rawItem && typeof rawItem === "object" ? rawItem : {};
+    const isTraffic = isTrafficContentItem(item);
+    const reportedTier = String(item.trend_tier || item.tier || "").trim().toLowerCase() || null;
+
+    if (!meta || meta.isRejected) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: "rejected",
+            quality_exclusion_reason: String(item.quality_exclusion_reason || item.rejection_reason || "rejected"),
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    const cls = String(meta.classification || item.classification || "").trim().toUpperCase();
+    if (cls === "DUPLICATE_HISTORY") {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: reportedTier || "duplicate_history",
+            quality_exclusion_reason: "duplicate_history",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+    if (cls === "UPDATED_METRICS") {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: reportedTier || "updated_metrics",
+            quality_exclusion_reason: "updated_metrics",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    if (!meta.hasQualifiedV32Views) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: "unverified",
+            quality_exclusion_reason: "unverified_views",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    if (!isValidV33LikesVerified(item, meta)) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: "unverified",
+            quality_exclusion_reason: "unverified_likes",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    if (reportedTier === "unverified" || cls === "UNVERIFIED" || String(item.verification_status || "").toLowerCase() === "unverified") {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: "unverified",
+            quality_exclusion_reason: "unverified_status",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    if (item.in_request_scope === false || item.is_in_scope === false || item.scope_match === false) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: reportedTier || "out_of_scope",
+            quality_exclusion_reason: String(item.quality_exclusion_reason || item.scope_exclusion_reason || "out_of_scope"),
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+    const exclusions = reqContext?.exclusions && typeof reqContext.exclusions === "object" ? reqContext.exclusions : {};
+    if (exclusions.vn_only) {
+        const lang = String(item.language || "").trim().toLowerCase();
+        const region = String(item.region || item.market || "").trim().toLowerCase();
+        if ((lang && !["vi", "vn", "vietnamese", "vi-vn"].includes(lang)) || (region && !["vn", "vietnam", "viet nam"].includes(region))) {
+            return {
+                quality_qualified: false,
+                quality_tier_basis: reportedTier || "out_of_scope",
+                quality_exclusion_reason: "out_of_scope_vn_only",
+                is_watchlist: false,
+                is_traffic_content: isTraffic,
+                traffic_content: isTraffic,
+                reported_tier: reportedTier,
+            };
+        }
+    }
+    if (exclusions.exclude_pure_ads && (item.is_pure_ad === true || String(item.ad_type || "").toLowerCase() === "pure_ad")) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: reportedTier || "rejected",
+            quality_exclusion_reason: "pure_ad_excluded",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+    if (exclusions.exclude_celebrity && (item.is_celebrity === true && item.is_ordinary_user !== true && item.natural_viral === false)) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: reportedTier || "rejected",
+            quality_exclusion_reason: "celebrity_excluded",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    const reqLookback = Number(reqContext?.lookback_hours || 0);
+    if (reqLookback > 0) {
+        const maxLookbackHours = reqLookback === 24 ? 48 : reqLookback;
+        const postTimeRaw = item.published_at || item.posted_at || item.post_created_at || item.created_at_post || null;
+        const refTimeMs = parseObsTimeMs(meta.measuredAt || reqContext?.crawledAt || new Date().toISOString());
+        const postTimeMs = parseObsTimeMs(postTimeRaw);
+        if (postTimeMs > 0 && refTimeMs > 0) {
+            const ageHours = (refTimeMs - postTimeMs) / 3600000;
+            if (ageHours > maxLookbackHours + 1) {
+                return {
+                    quality_qualified: false,
+                    quality_tier_basis: reportedTier || "out_of_scope",
+                    quality_exclusion_reason: "out_of_lookback_window",
+                    is_watchlist: false,
+                    is_traffic_content: isTraffic,
+                    traffic_content: isTraffic,
+                    reported_tier: reportedTier,
+                };
+            }
+        }
+    }
+
+    const hasContentAnalysis = item.content_analysis_ok !== false && Boolean(
+        isTraffic ||
+        item.content_text ||
+        item.text ||
+        item.content ||
+        item.summary ||
+        item.topic ||
+        item.primary_topic ||
+        item.viral_reason ||
+        (item.viral_analysis && typeof item.viral_analysis === "object") ||
+        item.traffic_analysis ||
+        item.buyer_intent !== undefined ||
+        item.natural_viral !== undefined
+    );
+    if (!hasContentAnalysis) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: reportedTier || "unqualified",
+            quality_exclusion_reason: "missing_content_analysis",
+            is_watchlist: false,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    const quant = classifyQuantitativeV33Tier(meta.metrics);
+    if (!quant.qualified) {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: "watchlist",
+            quality_exclusion_reason: "watchlist_excluded",
+            is_watchlist: true,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+    if (reportedTier === "watchlist") {
+        return {
+            quality_qualified: false,
+            quality_tier_basis: "watchlist",
+            quality_exclusion_reason: "watchlist_excluded",
+            is_watchlist: true,
+            is_traffic_content: isTraffic,
+            traffic_content: isTraffic,
+            reported_tier: reportedTier,
+        };
+    }
+
+    return {
+        quality_qualified: true,
+        quality_tier_basis: quant.tier,
+        quality_exclusion_reason: null,
+        is_watchlist: false,
+        is_traffic_content: isTraffic,
+        traffic_content: isTraffic,
+        reported_tier: reportedTier,
+    };
+}
+
+function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt = null, reqContext = null) {
     const metrics = extractRegistryMetrics(rawItem);
     const key = buildCanonicalDedupKey(rawItem);
     const plat = String(rawItem?.platform || "threads").toLowerCase().trim() || "threads";
@@ -1509,6 +2100,11 @@ function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt
         hasQualifiedV32Views: false,
         isUnverified: true,
         isNewQualified: false,
+        isQualityQualified: false,
+        isWatchlist: false,
+        isTrafficContent: false,
+        qualityTierBasis: null,
+        qualityExclusionReason: null,
         classification: cls,
         runId: itemRunId ? String(itemRunId).trim() : null,
     };
@@ -1524,6 +2120,13 @@ function extractRegistryItemMeta(rawItem, defaultRunId = null, defaultMeasuredAt
     meta.isUnverified = isUnverified;
     meta.isNewQualified = !isRejected && !isUnverified && hasQualifiedV32Views;
     meta.classification = cls || (isRejected ? "REJECTED" : (isUnverified ? "UNVERIFIED" : "NEW"));
+
+    const qAssessment = assessV33QualityInWorker(rawItem, meta, reqContext);
+    meta.isQualityQualified = Boolean(qAssessment.quality_qualified);
+    meta.isWatchlist = Boolean(qAssessment.is_watchlist);
+    meta.isTrafficContent = Boolean(qAssessment.is_traffic_content);
+    meta.qualityTierBasis = qAssessment.quality_tier_basis;
+    meta.qualityExclusionReason = qAssessment.quality_exclusion_reason;
     return meta;
 }
 
@@ -1734,14 +2337,79 @@ async function insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls,
     return Number(ins?.meta?.changes || 0) === 1;
 }
 
+async function recordRequestQualityItemInD1(env, reqId, meta, rawItem, sessionSeq = null, nowIso = null) {
+    if (!reqId || !env?.DB || !meta?.key) return false;
+    try {
+        const effNow = nowIso || new Date().toISOString();
+        const ins = await env.DB.prepare(`
+            INSERT OR IGNORE INTO crawl_request_quality_items
+            (request_id, dedup_key, session_seq, run_id, canonical_url, post_id, trend_tier, quality_qualified, quality_exclusion_reason, is_traffic_content, views_count, likes_count, comments_count, shares_count, reposts_count, first_seen_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+            reqId,
+            meta.key,
+            sessionSeq ?? null,
+            meta.runId || null,
+            meta.cUrl || null,
+            meta.postId || null,
+            meta.qualityTierBasis || (rawItem?.trend_tier ? String(rawItem.trend_tier).toLowerCase() : null),
+            meta.isQualityQualified ? 1 : 0,
+            meta.qualityExclusionReason || null,
+            meta.isTrafficContent ? 1 : 0,
+            meta.metrics?.views ?? null,
+            meta.metrics?.likes ?? null,
+            meta.metrics?.comments ?? null,
+            meta.metrics?.shares ?? null,
+            meta.metrics?.reposts ?? null,
+            meta.measuredAt || effNow,
+            effNow
+        ).run();
+        return Number(ins?.meta?.changes || 0) === 1;
+    } catch {
+        return false;
+    }
+}
+
+async function queryAuthoritativeRequestQualityTotals(env, reqId) {
+    if (!reqId || !env?.DB) return null;
+    try {
+        const row = await env.DB.prepare(`
+            SELECT
+                SUM(CASE WHEN quality_qualified = 1 THEN 1 ELSE 0 END) AS quality_qualified_count,
+                SUM(CASE WHEN quality_qualified = 0 AND trend_tier = 'watchlist' THEN 1 ELSE 0 END) AS watchlist_count,
+                SUM(CASE WHEN quality_qualified = 1 AND is_traffic_content = 1 THEN 1 ELSE 0 END) AS traffic_content_count,
+                COUNT(*) AS total_tracked_items
+            FROM crawl_request_quality_items
+            WHERE request_id = ?
+        `).bind(reqId).first();
+        if (!row) return null;
+        return {
+            quality_qualified_count: Number(row.quality_qualified_count || 0),
+            watchlist_count: Number(row.watchlist_count || 0),
+            traffic_content_count: Number(row.traffic_content_count || 0),
+            total_tracked_items: Number(row.total_tracked_items || 0),
+        };
+    } catch {
+        return null;
+    }
+}
+
 async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
     const items = Array.isArray(rawItems) ? rawItems : [];
     const nowIso = new Date().toISOString();
     const defaultMeasuredAt = opts?.crawledAt || null;
+    const reqContext = opts?.reqContext && typeof opts.reqContext === "object" ? opts.reqContext : null;
+    const reqId = opts?.requestId || reqContext?.requestId || null;
+    const sessionSeq = Number.isFinite(Number(opts?.sessionSeq))
+        ? Number(opts.sessionSeq)
+        : (Number.isFinite(Number(reqContext?.sessionSeq)) ? Number(reqContext.sessionSeq) : null);
     const chunkSize = 100;
 
     let newCount = 0;
     let newQualifiedCount = 0;
+    let qualityQualifiedCount = 0;
+    let watchlistCount = 0;
+    let trafficContentCount = 0;
     let duplicateCount = 0;
     let updatedCount = 0;
     let missingViewsCount = 0;
@@ -1753,7 +2421,7 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
     for (let offset = 0; offset < items.length; offset += chunkSize) {
         const chunk = items.slice(offset, offset + chunkSize);
         for (const rawItem of chunk) {
-            const meta = extractRegistryItemMeta(rawItem, runId, defaultMeasuredAt);
+            const meta = extractRegistryItemMeta(rawItem, runId, defaultMeasuredAt, reqContext);
             if (!meta.key) continue;
             if (
                 !meta.hasVerifiedViews &&
@@ -1848,9 +2516,27 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
 
                     if (regChanges === 1) {
                         newCount += 1;
-                        if (meta.isRejected) rejectedCount += 1;
-                        else if (meta.isNewQualified) newQualifiedCount += 1;
-                        else unverifiedCount += 1;
+                        if (meta.isRejected) {
+                            rejectedCount += 1;
+                        } else if (meta.isNewQualified) {
+                            newQualifiedCount += 1;
+                        } else {
+                            unverifiedCount += 1;
+                        }
+                        if (meta.isQualityQualified) {
+                            const tracked = reqId ? await recordRequestQualityItemInD1(env, reqId, meta, rawItem, sessionSeq, nowIso) : true;
+                            if (tracked || !reqId) {
+                                qualityQualifiedCount += 1;
+                                if (meta.isTrafficContent) trafficContentCount += 1;
+                            }
+                        } else if (meta.isWatchlist) {
+                            const trackedW = reqId ? await recordRequestQualityItemInD1(env, reqId, meta, rawItem, sessionSeq, nowIso) : true;
+                            if (trackedW || !reqId) {
+                                watchlistCount += 1;
+                            }
+                        } else if (reqId) {
+                            await recordRequestQualityItemInD1(env, reqId, meta, rawItem, sessionSeq, nowIso);
+                        }
 
                         if (snapChanges === 1) snapshotsCreated += 1;
                         else snapshotsDeduped += 1;
@@ -2002,6 +2688,9 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
     return {
         new_count: newCount,
         new_qualified_count: newQualifiedCount,
+        quality_qualified_count: qualityQualifiedCount,
+        watchlist_count: watchlistCount,
+        traffic_content_count: trafficContentCount,
         duplicate_count: duplicateCount,
         duplicate_history_count: duplicateCount,
         updated_count: updatedCount,
@@ -2022,6 +2711,9 @@ function createEmptyDedupStats() {
     return {
         new_count: 0,
         new_qualified_count: 0,
+        quality_qualified_count: 0,
+        watchlist_count: 0,
+        traffic_content_count: 0,
         duplicate_count: 0,
         duplicate_history_count: 0,
         updated_count: 0,
@@ -2099,7 +2791,7 @@ async function isRequestBlockedByPendingRegistrySync(env, reqRow) {
     return false;
 }
 
-function mergeDedupStatsIntoSummary(summaryObj, dRes) {
+function mergeDedupStatsIntoSummary(summaryObj, dRes, authTotals = null) {
     const prev = (summaryObj._partial_dedup_stats && typeof summaryObj._partial_dedup_stats === "object")
         ? summaryObj._partial_dedup_stats
         : null;
@@ -2112,6 +2804,9 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes) {
         // Authoritative D1 registry dedup counts always override client-supplied guesses
         summaryObj.new_count = agg.new_count;
         summaryObj.new_qualified_count = agg.new_qualified_count;
+        summaryObj.quality_qualified_count = authTotals ? authTotals.quality_qualified_count : agg.quality_qualified_count;
+        summaryObj.watchlist_count = authTotals ? authTotals.watchlist_count : agg.watchlist_count;
+        summaryObj.traffic_content_count = authTotals ? authTotals.traffic_content_count : agg.traffic_content_count;
         summaryObj.duplicate_history_count = agg.duplicate_history_count;
         summaryObj.duplicate_count = agg.duplicate_count;
         summaryObj.updated_metrics_count = agg.updated_metrics_count;
@@ -2122,6 +2817,9 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes) {
         if (summaryObj.counters && typeof summaryObj.counters === "object") {
             summaryObj.counters.new_count = agg.new_count;
             summaryObj.counters.new_qualified_count = agg.new_qualified_count;
+            summaryObj.counters.quality_qualified_count = summaryObj.quality_qualified_count;
+            summaryObj.counters.watchlist_count = summaryObj.watchlist_count;
+            summaryObj.counters.traffic_content_count = summaryObj.traffic_content_count;
             summaryObj.counters.duplicate_history_count = agg.duplicate_history_count;
             summaryObj.counters.duplicate_count = agg.duplicate_count;
             summaryObj.counters.updated_metrics_count = agg.updated_metrics_count;
@@ -2133,6 +2831,20 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes) {
     } else {
         summaryObj.new_count = summaryObj.new_count !== undefined ? summaryObj.new_count : agg.new_count;
         summaryObj.new_qualified_count = summaryObj.new_qualified_count !== undefined ? summaryObj.new_qualified_count : agg.new_qualified_count;
+        summaryObj.quality_qualified_count = authTotals
+            ? authTotals.quality_qualified_count
+            : (summaryObj.quality_qualified_count !== undefined ? summaryObj.quality_qualified_count : agg.quality_qualified_count);
+        summaryObj.watchlist_count = authTotals
+            ? authTotals.watchlist_count
+            : (summaryObj.watchlist_count !== undefined ? summaryObj.watchlist_count : agg.watchlist_count);
+        summaryObj.traffic_content_count = authTotals
+            ? authTotals.traffic_content_count
+            : (summaryObj.traffic_content_count !== undefined ? summaryObj.traffic_content_count : agg.traffic_content_count);
+        if (summaryObj.counters && typeof summaryObj.counters === "object" && authTotals) {
+            summaryObj.counters.quality_qualified_count = authTotals.quality_qualified_count;
+            summaryObj.counters.watchlist_count = authTotals.watchlist_count;
+            summaryObj.counters.traffic_content_count = authTotals.traffic_content_count;
+        }
         if (summaryObj.duplicate_history_count === undefined && summaryObj.duplicate_count === undefined) {
             summaryObj.duplicate_history_count = agg.duplicate_history_count;
             summaryObj.duplicate_count = agg.duplicate_count;
@@ -2145,8 +2857,13 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes) {
             summaryObj.missing_views_count = agg.missing_views_count;
         }
     }
-    summaryObj.dedup_stats = agg;
-    return agg;
+    summaryObj.dedup_stats = {
+        ...agg,
+        quality_qualified_count: summaryObj.quality_qualified_count ?? agg.quality_qualified_count,
+        watchlist_count: summaryObj.watchlist_count ?? agg.watchlist_count,
+        traffic_content_count: summaryObj.traffic_content_count ?? agg.traffic_content_count,
+    };
+    return summaryObj.dedup_stats;
 }
 
 async function enqueueRegistryOutboxStatements(env, requestId, runId, crawledAt, items, guard, nowIso) {
@@ -2217,8 +2934,25 @@ async function persistRegistryErrorState(env, crawlId, summaryObj, errMsg, nowIs
         .bind(JSON.stringify(baseSummary), nowIso, crawlId).run();
 }
 
-async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCrawledAt = null) {
+async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCrawledAt = null, drainOpts = {}) {
     const staleProcCutoffIso = new Date(Date.now() - REGISTRY_OUTBOX_PROCESSING_TTL_MS).toISOString();
+    let reqMetaRow = null;
+    try {
+        reqMetaRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+    } catch {}
+    const contractInfo = getEffectiveCrawlRequestContract(reqMetaRow || { platform: summaryObj?.platform || "threads", options: summaryObj });
+    const strategyCfg = String(reqMetaRow?.platform || summaryObj?.platform || "threads").trim().toLowerCase() === "threads"
+        ? getThreadsStrategyConfig(reqMetaRow || summaryObj || {}, { strict: false })
+        : null;
+    const reqContext = drainOpts?.reqContext || (reqMetaRow || strategyCfg ? {
+        requestId: crawlId,
+        sessionSeq: drainOpts?.sessionSeq ?? Number.parseInt(reqMetaRow?.session_seq, 10) ?? null,
+        isV33: contractInfo.isV33,
+        exclusions: strategyCfg?.exclusions || {},
+        lookback_hours: strategyCfg?.lookback_hours || null,
+        crawledAt: defaultCrawledAt || summaryObj?.crawled_at || summaryObj?.generated_at || null,
+    } : null);
+
     const outboxRes = await env.DB.prepare(`
         SELECT * FROM registry_sync_outbox
         WHERE request_id = ?
@@ -2246,6 +2980,9 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
         try {
             const cRes = await recordCrossRunDedupInD1(env, chunkItems, row.run_id || summaryObj.run_id || crawlId, {
                 crawledAt: row.crawled_at || defaultCrawledAt || null,
+                requestId: crawlId,
+                sessionSeq: reqContext?.sessionSeq ?? drainOpts?.sessionSeq ?? null,
+                reqContext,
             });
             const donePayload = `${DONE_STATS_PREFIX}${JSON.stringify(normalizeDedupStats(cRes))}`;
             await env.DB.prepare(`
@@ -2290,17 +3027,15 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
     }
 
     let latestSummary = { ...summaryObj };
+    let prevFreshRow = reqMetaRow;
     try {
-        const freshReq = await env.DB.prepare("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
+        const freshReq = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?")
             .bind(crawlId).first();
+        if (freshReq) prevFreshRow = freshReq;
         if (freshReq?.result_summary_json) {
             const parsedFresh = JSON.parse(freshReq.result_summary_json);
-            if (String(parsedFresh?.registry_sync_status || "").toLowerCase() === "ok") {
+            if (!drainOpts?.forceRecompute && candidateRows.length === 0 && doneRows.length === 0 && String(parsedFresh?.registry_sync_status || "").toLowerCase() === "ok") {
                 Object.assign(summaryObj, parsedFresh);
-                if (doneRows.length > 0) {
-                    await env.DB.prepare("DELETE FROM registry_sync_outbox WHERE request_id = ? AND status = 'done'")
-                        .bind(crawlId).run();
-                }
                 return {
                     completed: true,
                     inProgress: false,
@@ -2317,10 +3052,42 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
         if (chunkStats) addDedupStatsInto(totalAgg, chunkStats);
     }
 
+    const authTotals = await queryAuthoritativeRequestQualityTotals(env, crawlId);
+    const hasAuthTracked = Boolean(authTotals && authTotals.total_tracked_items > 0);
     const finIso = new Date().toISOString();
     latestSummary.registry_sync_status = "ok";
     delete latestSummary.registry_sync_error;
-    mergeDedupStatsIntoSummary(latestSummary, totalAgg);
+    mergeDedupStatsIntoSummary(latestSummary, totalAgg, hasAuthTracked ? authTotals : null);
+
+    // Sync cumulative multi-session counts for V3.3 requests without rewriting historical V3.2 semantics
+    const prevAccNewQual = Math.max(0, Number.parseInt(prevFreshRow?.accumulated_new_qualified_count, 10) || 0);
+    const nextAccNewQual = doneRows.length > 0
+        ? (prevAccNewQual + Number(totalAgg.new_qualified_count || 0))
+        : Math.max(prevAccNewQual, Number(latestSummary.new_qualified_count || 0));
+    const nextAccQuality = hasAuthTracked
+        ? authTotals.quality_qualified_count
+        : Math.max(
+            Number.parseInt(prevFreshRow?.accumulated_quality_count, 10) || 0,
+            Number(latestSummary.quality_qualified_count || 0)
+        );
+    const nextAccWatchlist = hasAuthTracked
+        ? authTotals.watchlist_count
+        : Math.max(
+            Number.parseInt(prevFreshRow?.accumulated_watchlist_count, 10) || 0,
+            Number(latestSummary.watchlist_count || 0)
+        );
+
+    if (contractInfo.isV33 || drainOpts?.isCheckpoint || (Number.parseInt(prevFreshRow?.session_seq, 10) || 0) > 1) {
+        latestSummary.quality_qualified_count = nextAccQuality;
+        latestSummary.watchlist_count = nextAccWatchlist;
+        latestSummary.accumulated_quality_count = nextAccQuality;
+        latestSummary.accumulated_new_qualified_count = nextAccNewQual;
+        latestSummary.accumulated_watchlist_count = nextAccWatchlist;
+        if (latestSummary.counters && typeof latestSummary.counters === "object") {
+            latestSummary.counters.quality_qualified_count = nextAccQuality;
+            latestSummary.counters.watchlist_count = nextAccWatchlist;
+        }
+    }
     Object.assign(summaryObj, latestSummary);
 
     const updReqStmt = env.DB.prepare("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ?")
@@ -2335,7 +3102,23 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
         await delDoneStmt.run();
     }
 
-    return { completed: true, inProgress: false, dedup_stats: latestSummary.dedup_stats };
+    try {
+        await env.DB.prepare(`
+            UPDATE crawl_requests
+            SET accumulated_quality_count = ?,
+                accumulated_new_qualified_count = ?,
+                accumulated_watchlist_count = ?,
+                execution_phase = CASE WHEN execution_phase = 'syncing_checkpoint' THEN 'paused' ELSE execution_phase END
+            WHERE id = ?
+        `).bind(nextAccQuality, nextAccNewQual, nextAccWatchlist, crawlId).run();
+    } catch {}
+
+    return {
+        completed: true,
+        inProgress: false,
+        dedup_stats: latestSummary.dedup_stats,
+        authoritative_totals: authTotals,
+    };
 }
 
 async function drainPendingRegistryOutboxInD1(env, limit = 10) {
@@ -2356,7 +3139,10 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
         const reqId = entry.request_id;
         if (!reqId) continue;
         const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(reqId).first();
-        if (!reqRow || !["completed", "failed"].includes(reqRow.status)) continue;
+        if (!reqRow) continue;
+        const isTerminal = ["completed", "failed"].includes(reqRow.status);
+        const isPausedCheckpoint = ["paused", "blocked", "syncing_checkpoint"].includes(String(reqRow.execution_phase || "").toLowerCase());
+        if (!isTerminal && !isPausedCheckpoint) continue;
         let summaryObj = {};
         try { summaryObj = JSON.parse(reqRow.result_summary_json || "{}"); } catch {}
         try {
@@ -2364,9 +3150,10 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
                 env,
                 reqId,
                 summaryObj,
-                summaryObj.crawled_at || summaryObj.generated_at || null
+                summaryObj.crawled_at || summaryObj.generated_at || null,
+                { isCheckpoint: !isTerminal && isPausedCheckpoint }
             );
-            if (!drainRes?.completed || drainRes?.inProgress) continue;
+            if (!drainRes?.completed || drainRes?.inProgress || !isTerminal) continue;
             const freshReq = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(reqId).first();
             const notifyChatId = freshReq ? (freshReq.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null) : null;
             if (
@@ -2437,6 +3224,28 @@ function extractCrossRunDedupStats(obj) {
         obj.qualified_count,
         s1.qualified_count
     );
+    const qualityQualifiedCount = pickFirstFiniteInt(
+        obj.accumulated_quality_count,
+        ds.quality_qualified_count,
+        c.quality_qualified_count,
+        obj.quality_qualified_count,
+        s1.quality_qualified_count
+    );
+    const watchlistCount = pickFirstFiniteInt(
+        obj.accumulated_watchlist_count,
+        ds.watchlist_count,
+        c.watchlist_count,
+        obj.watchlist_count,
+        s1.watchlist_count,
+        obj.sections?.["2_tier_distribution"]?.tiers?.watchlist
+    );
+    const trafficContentCount = pickFirstFiniteInt(
+        ds.traffic_content_count,
+        c.traffic_content_count,
+        obj.traffic_content_count,
+        s1.traffic_content_count,
+        obj.special_counts?.traffic_content
+    );
     const duplicateCount = pickFirstFiniteInt(
         ds.duplicate_history_count,
         ds.duplicate_count,
@@ -2484,12 +3293,15 @@ function extractCrossRunDedupStats(obj) {
     return {
         newCount,
         newQualifiedCount,
+        qualityQualifiedCount,
+        watchlistCount,
+        trafficContentCount,
         duplicateCount,
         updatedCount,
         missingViewsCount,
         unverifiedCount,
         similarContentCount,
-        hasAny: [newCount, newQualifiedCount, duplicateCount, updatedCount, missingViewsCount, unverifiedCount, similarContentCount].some(v => v !== null),
+        hasAny: [newCount, newQualifiedCount, qualityQualifiedCount, watchlistCount, duplicateCount, updatedCount, missingViewsCount, unverifiedCount, similarContentCount].some(v => v !== null),
     };
 }
 
@@ -2503,26 +3315,50 @@ function computeCrawlRequestProgress(reqRow, activeOutboxReqIds = null) {
     const c = (summary.counters && typeof summary.counters === "object") ? summary.counters : {};
     const s1 = summary?.sections?.["1_screening"] || summary?.screening || {};
     const reqCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || Number.parseInt(c.requested_count, 10) || 50);
+    const contractInfo = getEffectiveCrawlRequestContract(reqRow);
     const dedup = extractCrossRunDedupStats(summary);
     const scannedCount = pickFirstFiniteInt(c.scanned_count, summary.scanned_count, summary.scanned_posts, s1.scanned_count, s1.scanned_posts);
     const uniqueCandidateCount = pickFirstFiniteInt(c.unique_candidate_count, summary.unique_candidate_count, s1.unique_candidate_count);
     const explicitQualified = dedup.newQualifiedCount ?? pickFirstFiniteInt(summary.qualified_posts, summary.record_count);
-    const qualifiedCount = explicitQualified !== null ? explicitQualified : dedup.newCount;
+    const qualifiedCount = explicitQualified !== null
+        ? explicitQualified
+        : (reqRow?.accumulated_new_qualified_count != null && Number(reqRow.session_seq || 0) > 0
+            ? Number(reqRow.accumulated_new_qualified_count)
+            : dedup.newCount);
+    const qualityQualifiedCount = dedup.qualityQualifiedCount !== null
+        ? dedup.qualityQualifiedCount
+        : ((reqRow?.accumulated_quality_count != null && (Number(reqRow.session_seq || 0) > 0 || ["completed", "failed"].includes(String(reqRow?.status || ""))))
+            ? Number(reqRow.accumulated_quality_count)
+            : null);
+    const watchlistCount = dedup.watchlistCount !== null
+        ? dedup.watchlistCount
+        : ((reqRow?.accumulated_watchlist_count != null && Number(reqRow.session_seq || 0) > 0)
+            ? Number(reqRow.accumulated_watchlist_count)
+            : null);
     const rejectedCount = pickFirstFiniteInt(c.rejected_count, summary.rejected_count, summary.rejected_posts, s1.rejected_count);
     const stopReason = c.stop_reason || summary.stop_reason || s1.stop_reason || null;
     const explicitAchieved =
         typeof c.target_achieved === "boolean"
             ? c.target_achieved
             : (typeof summary.target_achieved === "boolean" ? summary.target_achieved : null);
-    const targetReached = explicitAchieved !== null ? explicitAchieved : (qualifiedCount !== null ? qualifiedCount >= reqCount : null);
+    const targetReached = contractInfo.isV33
+        ? (qualityQualifiedCount !== null ? qualityQualifiedCount >= reqCount : false)
+        : (explicitAchieved !== null ? explicitAchieved : (qualifiedCount !== null ? qualifiedCount >= reqCount : null));
     const hasOutbox = Boolean(activeOutboxReqIds && reqRow?.id && activeOutboxReqIds.has(reqRow.id));
     const displayState = deriveCrawlRequestDisplayState(reqRow, summary, hasOutbox);
+    const effectiveTargetCount = contractInfo.isV33 ? (qualityQualifiedCount ?? 0) : (qualifiedCount ?? 0);
     return {
+        contract_version: contractInfo.contract_version,
+        target_metric: contractInfo.target_metric,
         requested_count: reqCount,
+        remaining_target: Math.max(0, reqCount - effectiveTargetCount),
         scanned_count: scannedCount,
         unique_candidate_count: uniqueCandidateCount,
-        qualified_count: qualifiedCount,
+        qualified_count: contractInfo.isV33 ? qualityQualifiedCount : qualifiedCount,
         new_qualified_count: qualifiedCount,
+        quality_qualified_count: qualityQualifiedCount,
+        watchlist_count: watchlistCount,
+        traffic_content_count: dedup.trafficContentCount,
         new_count: dedup.newCount,
         duplicate_history_count: dedup.duplicateCount,
         duplicate_count: dedup.duplicateCount,
@@ -2535,6 +3371,10 @@ function computeCrawlRequestProgress(reqRow, activeOutboxReqIds = null) {
         target_achieved: targetReached,
         target_reached: targetReached,
         stop_reason: stopReason,
+        session_seq: Number.parseInt(reqRow?.session_seq, 10) || 0,
+        execution_phase: reqRow?.execution_phase || null,
+        pause_reason: reqRow?.pause_reason || null,
+        lease_renew_count: Number.parseInt(reqRow?.lease_renew_count, 10) || 0,
         display_status: displayState.display_status,
         display_status_label: displayState.display_status_label,
         reconcile_status: displayState.reconcile_status,
@@ -3648,6 +4488,7 @@ function compareCompositeItemToCursor(itemTsMs, itemId, parsedCursor) {
 
 function buildDirectD1CrawlNotificationText(req, summary) {
     const s = (summary && typeof summary === "object") ? summary : {};
+    const contractInfo = getEffectiveCrawlRequestContract(req || { platform: s.platform || "threads", options: s });
     const platLabel = String(req?.platform || s.platform || "all").toUpperCase();
     const runStatus = s.run_status ? String(s.run_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
     const techStatus = s.technical_status ? String(s.technical_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
@@ -3655,10 +4496,23 @@ function buildDirectD1CrawlNotificationText(req, summary) {
     const c = (s.counters && typeof s.counters === "object") ? s.counters : {};
     const screening = (s.sections?.["1_screening"] || s.screening || {});
     const scannedVal = pickFirstFiniteInt(c.scanned_count, s.scanned_count, s.scanned_posts, screening.scanned_count, screening.scanned_posts);
-    const qualifiedVal = pickFirstFiniteInt(c.new_qualified_count, s.new_qualified_count, s.qualified_count, s.qualified_posts, screening.qualified_count, s.record_count);
+    const qualifiedVal = contractInfo.isV33
+        ? pickFirstFiniteInt(
+            s.accumulated_quality_count,
+            c.quality_qualified_count,
+            s.quality_qualified_count,
+            req?.accumulated_quality_count,
+            c.new_qualified_count,
+            s.new_qualified_count
+        )
+        : pickFirstFiniteInt(c.new_qualified_count, s.new_qualified_count, s.qualified_count, s.qualified_posts, screening.qualified_count, s.record_count);
+    const watchlistVal = pickFirstFiniteInt(s.accumulated_watchlist_count, c.watchlist_count, s.watchlist_count, req?.accumulated_watchlist_count);
     const rejectedVal = pickFirstFiniteInt(c.rejected_count, s.rejected_count, s.rejected_posts, screening.rejected_count);
     const syntheticReport = {
         ...s,
+        contract_version: contractInfo.contract_version,
+        target_metric: contractInfo.target_metric,
+        session_seq: req?.session_seq ?? s.session_seq ?? null,
         run_id: s.run_id || req?.id || `crw_${platLabel.toLowerCase()}`,
         run_status: runStatus,
         technical_status: techStatus,
@@ -3666,11 +4520,13 @@ function buildDirectD1CrawlNotificationText(req, summary) {
         error_message: req?.error_message || s.error_message || null,
         sections: {
             ...(s.sections || {}),
-            ...((scannedVal !== null || qualifiedVal !== null || rejectedVal !== null) ? {
+            ...((scannedVal !== null || qualifiedVal !== null || rejectedVal !== null || watchlistVal !== null) ? {
                 "1_screening": {
                     ...screening,
                     ...(scannedVal !== null ? { scanned_count: scannedVal } : {}),
                     ...(qualifiedVal !== null ? { qualified_count: qualifiedVal } : {}),
+                    ...(contractInfo.isV33 && qualifiedVal !== null ? { quality_qualified_count: qualifiedVal } : {}),
+                    ...(watchlistVal !== null ? { watchlist_count: watchlistVal } : {}),
                     ...(rejectedVal !== null ? { rejected_count: rejectedVal } : {}),
                 }
             } : {}),
@@ -3692,11 +4548,15 @@ function buildDirectD1CrawlNotificationText(req, summary) {
 
 function isV32CrawlContext(reportData = null, reqRow = null, reqSummary = null) {
     const cvReport = String(reportData?.contract_version || reportData?.schema_version || "").trim().toLowerCase();
-    const cvSum = String(reqSummary?.contract_version || reqSummary?.schema_version || "").trim().toLowerCase();
-    if (cvReport.startsWith("3.2") || cvReport.includes("v3.2") || cvSum.startsWith("3.2") || cvSum.includes("v3.2")) {
+    const cvSum = String(reqSummary?.contract_version || reqSummary?.schema_version || reqRow?.contract_version || "").trim().toLowerCase();
+    if (
+        cvReport.startsWith("3.2") || cvReport.startsWith("3.3") || cvReport.includes("v3.2") || cvReport.includes("v3.3") ||
+        cvSum.startsWith("3.2") || cvSum.startsWith("3.3") || cvSum.includes("v3.2") || cvSum.includes("v3.3")
+    ) {
         return true;
     }
-    if (String(reportData?.report || "").toLowerCase().includes("v3.2")) {
+    const repTitle = String(reportData?.report || "").toLowerCase();
+    if (repTitle.includes("v3.2") || repTitle.includes("v3.3")) {
         return true;
     }
     if (reqSummary && (reqSummary.registry_sync_status !== undefined || reqSummary.dedup_stats !== undefined)) {
@@ -3707,7 +4567,9 @@ function isV32CrawlContext(reportData = null, reqRow = null, reqSummary = null) 
     }
     if (
         reportData?.counters?.new_qualified_count !== undefined ||
-        reportData?.sections?.["1_screening"]?.new_qualified_count !== undefined
+        reportData?.counters?.quality_qualified_count !== undefined ||
+        reportData?.sections?.["1_screening"]?.new_qualified_count !== undefined ||
+        reportData?.sections?.["1_screening"]?.quality_qualified_count !== undefined
     ) {
         return true;
     }
@@ -3715,6 +4577,12 @@ function isV32CrawlContext(reportData = null, reqRow = null, reqSummary = null) 
 }
 
 async function evaluateDriveRequestNotificationGate(env, { requestId, reportData = null, reportEffStatus = "completed", isCorrected = false }) {
+    const repStats = reportData ? extractMuseReportStats(reportData) : null;
+    if (repStats?.isCheckpoint || String(reportEffStatus || "").toLowerCase() === "paused") {
+        // Intermediate multi-session checkpoint reports NEVER trigger final Telegram completion alert
+        return { action: "skip", linkedReqRow: null };
+    }
+
     if (!requestId) {
         if (await isRequestBlockedByPendingRegistrySync(env, { id: null, result_summary: reportData || {} })) {
             return { action: "block_cursor", linkedReqRow: null };
@@ -3726,7 +4594,7 @@ async function evaluateDriveRequestNotificationGate(env, { requestId, reportData
     let linkedReqRow = null;
     try {
         linkedReqRow = await env.DB.prepare(
-            "SELECT id, status, claimed_by, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
+            "SELECT * FROM crawl_requests WHERE id = ?"
         ).bind(reqIdStr).first();
     } catch {
         // Fail closed on D1 lookup error so cursor never skips a pending request report
@@ -3789,6 +4657,7 @@ function validateDriveArtifactPairForRequest(reqRow, dataEntry, reportEntry, exi
     const reqPlat = String(reqRow?.platform || "").trim().toLowerCase();
     const dataObj = dataEntry?.data || {};
     const repObj = reportEntry?.data || {};
+    const contractInfo = getEffectiveCrawlRequestContract(reqRow);
 
     const dataReqId = dataObj.request_id ? String(dataObj.request_id).trim() : null;
     const repReqId = repObj.request_id ? String(repObj.request_id).trim() : null;
@@ -3827,7 +4696,29 @@ function validateDriveArtifactPairForRequest(reqRow, dataEntry, reportEntry, exi
         };
     }
 
-    if (existingSummary?.run_id && String(existingSummary.run_id).trim() !== dataRunId) {
+    const isCheckpointPair = Boolean(
+        dataObj.is_checkpoint === true ||
+        repObj.is_checkpoint === true ||
+        String(dataObj.session_phase || repObj.session_phase || "").trim().toLowerCase() === "checkpoint" ||
+        String(repObj.run_status || "").trim().toLowerCase() === "paused"
+    );
+
+    const reqSessSeq = Number(reqRow.session_seq || 0);
+    if (reqSessSeq > 0) {
+        const rawDataSess = dataObj.session_seq ?? dataObj.execution?.session_seq;
+        const rawRepSess = repObj.session_seq ?? repObj.execution?.session_seq;
+        if (rawDataSess != null && rawRepSess != null) {
+            if (Number(rawDataSess) !== Number(rawRepSess) || Number(rawDataSess) !== reqSessSeq) {
+                return {
+                    ok: false,
+                    status: "stale_session_rejected",
+                    reason: `Artifact thuộc session_seq ${rawDataSess}, không khớp session hiện tại (${reqSessSeq})`,
+                };
+            }
+        }
+    }
+
+    if (existingSummary?.run_id && String(existingSummary.run_id).trim() !== dataRunId && !contractInfo.isV33) {
         return {
             ok: false,
             status: "validation_failed",
@@ -3869,19 +4760,30 @@ function validateDriveArtifactPairForRequest(reqRow, dataEntry, reportEntry, exi
         }
         const cvData = String(dataObj.contract_version || dataObj.schema_version || "").trim();
         const cvRep = String(repObj.contract_version || repObj.schema_version || "").trim();
-        if (!cvData.startsWith("3.2") || !cvRep.startsWith("3.2")) {
-            return { ok: false, status: "validation_failed", reason: "Data và Report Threads phải khai báo contract_version 3.2" };
+        const validCv = contractInfo.isV33
+            ? (cvData.startsWith("3.3") && cvRep.startsWith("3.3"))
+            : ((cvData.startsWith("3.2") || cvData.startsWith("3.3")) && (cvRep.startsWith("3.2") || cvRep.startsWith("3.3")));
+        if (!validCv) {
+            return {
+                ok: false,
+                status: "validation_failed",
+                reason: contractInfo.isV33
+                    ? "Data và Report Threads V3.3 phải khai báo contract_version 3.3"
+                    : "Data và Report Threads phải khai báo contract_version 3.2",
+            };
         }
-        if (!repObj.sections || typeof repObj.sections !== "object" || !String(repObj.telegram_summary || "").trim()) {
-            return { ok: false, status: "validation_failed", reason: "Report V3.2 thiếu sections hoặc telegram_summary" };
+        if (!isCheckpointPair && (!repObj.sections || typeof repObj.sections !== "object" || !String(repObj.telegram_summary || "").trim())) {
+            return { ok: false, status: "validation_failed", reason: "Report thiếu sections hoặc telegram_summary" };
         }
         const itemsCheck = validateThreadsOnlyCompletionItems(rawItems);
         if (itemsCheck.errorResponse) {
             return { ok: false, status: "validation_failed", reason: "Data JSON chứa item hoặc URL không hợp lệ cho Threads" };
         }
-        const v32Check = validateStrictV32CompletionPayload(repObj, itemsCheck.items);
-        if (v32Check) {
-            return { ok: false, status: "validation_failed", reason: "Payload vi phạm Data Contract V3.2 (thiếu records hoặc run_status/stop_reason không hợp lệ)" };
+        if (!isCheckpointPair) {
+            const v32Check = validateStrictV32CompletionPayload(repObj, itemsCheck.items);
+            if (v32Check) {
+                return { ok: false, status: "validation_failed", reason: "Payload vi phạm Data Contract V3.2/V3.3 (thiếu records hoặc run_status/stop_reason không hợp lệ)" };
+            }
         }
         const rc = (repObj.counters && typeof repObj.counters === "object") ? repObj.counters : {};
         const dc = (dataObj.counters && typeof dataObj.counters === "object") ? dataObj.counters : null;
@@ -3903,8 +4805,10 @@ function validateDriveArtifactPairForRequest(reqRow, dataEntry, reportEntry, exi
         }
         return {
             ok: true,
+            isCheckpoint: isCheckpointPair,
             runId: dataRunId,
             attempt: dataAtt,
+            sessionSeq: reqSessSeq || Number(dataObj.session_seq || 0) || null,
             items: itemsCheck.items,
             summaryBase: { ...repObj },
         };
@@ -3920,8 +4824,10 @@ function validateDriveArtifactPairForRequest(reqRow, dataEntry, reportEntry, exi
         }
         return {
             ok: true,
+            isCheckpoint: false,
             runId: dataRunId,
             attempt: dataAtt,
+            sessionSeq: null,
             items: normalizedV2,
             summaryBase: { ...repObj },
         };
@@ -4092,19 +4998,32 @@ async function reconcileDriveArtifactsForRequests(env) {
         const nowIso = new Date().toISOString();
         const items = validation.items || [];
         const crawledAt = validation.summaryBase?.crawled_at || validation.summaryBase?.generated_at || bestPair.d.data?.crawled_at || nowIso;
+        const contractInfo = getEffectiveCrawlRequestContract(reqRow);
+        const stopReasonRaw = String(validation.summaryBase?.counters?.stop_reason || validation.summaryBase?.stop_reason || "").trim().toLowerCase();
+        const treatAsCheckpoint = Boolean(
+            validation.isCheckpoint ||
+            (contractInfo.isV33 && (stopReasonRaw === "time_budget" || stopReasonRaw === "session_budget_reached"))
+        );
+
         const summaryObj = {
             ...validation.summaryBase,
             request_id: reqRow.id,
             run_id: validation.runId,
             attempt: validation.attempt,
+            session_seq: validation.sessionSeq ?? reqRow.session_seq ?? null,
+            is_checkpoint: treatAsCheckpoint,
             crawled_at: crawledAt,
             drive_reconciled: true,
             registry_sync_status: items.length > 0 ? "pending" : "ok",
             drive_reconcile: {
-                status: "ok",
-                reason: "Đồng bộ an toàn từ cặp Data + Report trên Google Drive",
+                status: treatAsCheckpoint ? "checkpoint_reconciled" : "ok",
+                reason: treatAsCheckpoint
+                    ? "Đã đồng bộ checkpoint từ Drive và đưa request về trạng thái tạm dừng (chưa kết thúc)"
+                    : "Đồng bộ an toàn từ cặp Data + Report trên Google Drive",
                 run_id: validation.runId,
                 attempt: validation.attempt,
+                session_seq: validation.sessionSeq ?? null,
+                is_checkpoint: treatAsCheckpoint,
                 data_file_id: bestPair.d.file.id,
                 report_file_id: bestPair.r.file.id,
                 reconciled_at: nowIso,
@@ -4119,22 +5038,43 @@ async function reconcileDriveArtifactsForRequests(env) {
         const outboxStmts = items.length > 0
             ? await enqueueRegistryOutboxStatements(env, reqRow.id, validation.runId, crawledAt, items, guard, nowIso)
             : [];
-        const updateReqStmt = env.DB.prepare(`
-            UPDATE crawl_requests
-            SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
-            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
-              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
-        `).bind(
-            "completed",
-            JSON.stringify(summaryObj),
-            bestPair.r.file.id,
-            null,
-            nowIso,
-            reqRow.id,
-            reqRow.claimed_by,
-            Number(reqRow.attempts),
-            ""
-        );
+
+        const pauseReason = treatAsCheckpoint
+            ? (String(validation.summaryBase?.pause_reason || stopReasonRaw || "session_budget_reached").trim())
+            : null;
+        const nextPausedPhase = (pauseReason === "captcha_blocked" || pauseReason === "rate_limited") ? "blocked" : "paused";
+
+        const updateReqStmt = treatAsCheckpoint
+            ? env.DB.prepare(`
+                UPDATE crawl_requests
+                SET status = 'running', execution_phase = 'syncing_checkpoint', pause_reason = ?, result_summary_json = ?, updated_at = ?
+                WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+                  AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+            `).bind(
+                pauseReason,
+                JSON.stringify(summaryObj),
+                nowIso,
+                reqRow.id,
+                reqRow.claimed_by,
+                Number(reqRow.attempts),
+                ""
+            )
+            : env.DB.prepare(`
+                UPDATE crawl_requests
+                SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
+                WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+                  AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+            `).bind(
+                "completed",
+                JSON.stringify(summaryObj),
+                bestPair.r.file.id,
+                null,
+                nowIso,
+                reqRow.id,
+                reqRow.claimed_by,
+                Number(reqRow.attempts),
+                ""
+            );
 
         let upd = null;
         if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
@@ -4149,7 +5089,45 @@ async function reconcileDriveArtifactsForRequests(env) {
         }
         if (items.length > 0) {
             try {
-                await drainRegistryOutboxForRequest(env, reqRow.id, summaryObj, crawledAt);
+                await drainRegistryOutboxForRequest(env, reqRow.id, summaryObj, crawledAt, {
+                    sessionSeq: validation.sessionSeq,
+                    isCheckpoint: treatAsCheckpoint,
+                    forceRecompute: true,
+                });
+            } catch {
+                if (treatAsCheckpoint) continue;
+            }
+        }
+        if (treatAsCheckpoint) {
+            try {
+                const cpJson = JSON.stringify({
+                    run_id: validation.runId,
+                    session_seq: validation.sessionSeq,
+                    pause_reason: pauseReason,
+                    reconciled_from_drive: true,
+                    checkpoint_at: nowIso,
+                });
+                await env.DB.prepare(`
+                    UPDATE crawl_requests
+                    SET status = 'queued',
+                        execution_phase = ?,
+                        pause_reason = ?,
+                        checkpoint_json = ?,
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'running' AND attempts = ?
+                `).bind(nextPausedPhase, pauseReason, cpJson, nowIso, reqRow.id, Number(reqRow.attempts)).run();
+                await env.DB.prepare(`
+                    UPDATE crawl_request_sessions
+                    SET status = ?, ended_at = ?, stop_reason = ?, run_id = COALESCE(run_id, ?), checkpoint_json = ?, updated_at = ?
+                    WHERE request_id = ? AND attempt = ?
+                `).bind(nextPausedPhase, nowIso, pauseReason, validation.runId, cpJson, nowIso, reqRow.id, Number(reqRow.attempts)).run();
+            } catch {}
+        } else {
+            try {
+                await env.DB.prepare("UPDATE crawl_requests SET execution_phase = 'completed' WHERE id = ?").bind(reqRow.id).run();
             } catch {}
         }
     }
@@ -4569,21 +5547,106 @@ async function notifyNewCrawl(env) {
 
 async function expireStaleLeases(env) {
     const nowIso = new Date().toISOString();
-    for (const table of ["app_commands", "crawl_requests"]) {
-        try {
-            await env.DB.prepare(`
-                UPDATE ${table}
-                SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
-                WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ? AND attempts < max_attempts
-            `).bind(nowIso, nowIso).run();
+    // 1. app_commands uses attempts < max_attempts
+    try {
+        await env.DB.prepare(`
+            UPDATE app_commands
+            SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+            WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ? AND attempts < max_attempts
+        `).bind(nowIso, nowIso).run();
 
-            await env.DB.prepare(`
-                UPDATE ${table}
-                SET status = 'failed', error_message = 'Execution lease expired before completion', updated_at = ?
-                WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ? AND attempts >= max_attempts
-            `).bind(nowIso, nowIso).run();
-        } catch {
-            // Table may not exist yet prior to migration 0001
+        await env.DB.prepare(`
+            UPDATE app_commands
+            SET status = 'failed', error_message = 'Execution lease expired before completion', updated_at = ?
+            WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ? AND attempts >= max_attempts
+        `).bind(nowIso, nowIso).run();
+    } catch {}
+
+    // 2. crawl_requests: V3.3 tracks error_attempts separately from clean session_seq; legacy V3.2 keeps attempts < max_attempts
+    let expiredReqs = [];
+    try {
+        const expRes = await env.DB.prepare(`
+            SELECT * FROM crawl_requests
+            WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
+        `).bind(nowIso).all();
+        expiredReqs = expRes?.results || [];
+    } catch {
+        return;
+    }
+
+    for (const reqRow of expiredReqs) {
+        const contractInfo = getEffectiveCrawlRequestContract(reqRow);
+        const maxAtt = Math.max(1, Number.parseInt(reqRow.max_attempts, 10) || 3);
+        if (contractInfo.isV33) {
+            const curErr = Math.max(0, Number.parseInt(reqRow.error_attempts, 10) || 0);
+            const nextErr = curErr + 1;
+            const shouldFail = nextErr >= maxAtt;
+            try {
+                if (shouldFail) {
+                    await env.DB.prepare(`
+                        UPDATE crawl_requests
+                        SET status = 'failed',
+                            execution_phase = 'failed',
+                            pause_reason = 'lease_expired_max_errors',
+                            error_attempts = ?,
+                            error_message = 'Execution lease expired before completion',
+                            updated_at = ?
+                        WHERE id = ? AND status = 'running' AND lease_expires_at < ?
+                    `).bind(nextErr, nowIso, reqRow.id, nowIso).run();
+                } else {
+                    await env.DB.prepare(`
+                        UPDATE crawl_requests
+                        SET status = 'queued',
+                            execution_phase = 'paused',
+                            pause_reason = 'lease_expired_recovered',
+                            error_attempts = ?,
+                            claimed_by = NULL,
+                            claimed_at = NULL,
+                            lease_expires_at = NULL,
+                            error_message = 'Session lease expired cleanly recoverable',
+                            updated_at = ?
+                        WHERE id = ? AND status = 'running' AND lease_expires_at < ?
+                    `).bind(nextErr, nowIso, reqRow.id, nowIso).run();
+                }
+                await env.DB.prepare(`
+                    UPDATE crawl_request_sessions
+                    SET status = 'expired', ended_at = ?, stop_reason = 'lease_expired', updated_at = ?
+                    WHERE request_id = ? AND status = 'running'
+                `).bind(nowIso, nowIso, reqRow.id).run();
+            } catch {
+                // Fallback for pre-0005 schema
+                try {
+                    if (Number(reqRow.attempts || 0) < maxAtt) {
+                        await env.DB.prepare(`
+                            UPDATE crawl_requests
+                            SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+                            WHERE id = ? AND status = 'running' AND lease_expires_at < ?
+                        `).bind(nowIso, reqRow.id, nowIso).run();
+                    } else {
+                        await env.DB.prepare(`
+                            UPDATE crawl_requests
+                            SET status = 'failed', error_message = 'Execution lease expired before completion', updated_at = ?
+                            WHERE id = ? AND status = 'running' AND lease_expires_at < ?
+                        `).bind(nowIso, reqRow.id, nowIso).run();
+                    }
+                } catch {}
+            }
+        } else {
+            try {
+                if (Number(reqRow.attempts || 0) < maxAtt) {
+                    await env.DB.prepare(`
+                        UPDATE crawl_requests
+                        SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+                        WHERE id = ? AND status = 'running' AND lease_expires_at < ? AND attempts < max_attempts
+                    `).bind(nowIso, reqRow.id, nowIso).run();
+                } else {
+                    await env.DB.prepare(`
+                        UPDATE crawl_requests
+                        SET status = 'failed', error_message = 'Execution lease expired before completion', updated_at = ?
+                        WHERE id = ? AND status = 'running' AND lease_expires_at < ? AND attempts >= max_attempts
+                    `).bind(nowIso, reqRow.id, nowIso).run();
+                }
+            } catch {}
         }
     }
 }
@@ -4776,24 +5839,76 @@ async function createCrawlRequestInD1(env, {
     const cleanOptions = (options && typeof options === "object" && !Array.isArray(options)) ? { ...options } : {};
     let requestedLeaseSec = MUSE_DEFAULT_LEASE_SECONDS;
     let targetStrategySig = null;
+    let lockedContractVersion = plat === "threads" ? THREADS_CONTRACT_V32 : getRequestContractVersion(plat);
+    let lockedTargetMetric = "new_qualified_count";
+    let lockedSkillVersion = null;
+    let lockedQualityPolicyVersion = null;
+
     if (plat === "threads") {
+        const helperCompat = await getMuseHelperCompatibility(env);
+        const explicitCvRaw = String(cleanOptions.contract_version || cleanOptions.schema_version || "").trim();
+        if (explicitCvRaw.startsWith("3.3")) {
+            if (!helperCompat.v33_ready) {
+                const incompatErr = new Error(
+                    "Muse Helper chưa xác nhận tương thích Data Contract V3.3 & Skill threads_crawl v1.0. Vui lòng kiểm tra / xác nhận Muse Helper trước khi bật V3.3."
+                );
+                incompatErr.statusCode = 409;
+                incompatErr.code = "muse_helper_incompatible";
+                throw incompatErr;
+            }
+            lockedContractVersion = THREADS_CONTRACT_V33;
+        } else if (explicitCvRaw.startsWith("3.2")) {
+            lockedContractVersion = THREADS_CONTRACT_V32;
+        } else {
+            lockedContractVersion = helperCompat.v33_ready ? THREADS_CONTRACT_V33 : THREADS_CONTRACT_V32;
+        }
+
+        const isV33Req = lockedContractVersion.startsWith("3.3");
+        const defaultPlatLeaseSec = isV33Req ? MUSE_THREADS_DEFAULT_LEASE_SECONDS : MUSE_DEFAULT_LEASE_SECONDS;
         const hasCustomLease =
             cleanOptions.lease_seconds !== undefined ||
             cleanOptions.lease_minutes !== undefined ||
             cleanOptions.duration_minutes !== undefined ||
             cleanOptions.crawl_duration_minutes !== undefined;
-        requestedLeaseSec = normalizeThreadsLeaseSeconds(cleanOptions, MUSE_DEFAULT_LEASE_SECONDS);
-        const cfg = getThreadsStrategyConfig({ platform: "threads", options: cleanOptions }, { strict: true });
+        requestedLeaseSec = hasCustomLease
+            ? normalizeThreadsLeaseSeconds(cleanOptions, defaultPlatLeaseSec)
+            : defaultPlatLeaseSec;
+
+        cleanOptions.contract_version = lockedContractVersion;
+        if (isV33Req) {
+            lockedTargetMetric = "quality_qualified_count";
+            lockedSkillVersion = THREADS_SKILL_VERSION;
+            lockedQualityPolicyVersion = THREADS_QUALITY_POLICY_VERSION;
+            cleanOptions.skill_name = THREADS_SKILL_NAME;
+            cleanOptions.skill_version = lockedSkillVersion;
+            cleanOptions.quality_policy_version = lockedQualityPolicyVersion;
+            cleanOptions.target_metric = lockedTargetMetric;
+        } else {
+            lockedTargetMetric = "new_qualified_count";
+            cleanOptions.target_metric = lockedTargetMetric;
+        }
+
+        const cfg = getThreadsStrategyConfig({
+            platform: "threads",
+            contract_version: lockedContractVersion,
+            target_metric: lockedTargetMetric,
+            options: cleanOptions,
+        }, { strict: true });
         cleanOptions.strategy_version = THREADS_STRATEGY_VERSION;
         cleanOptions.crawl_mode = cfg.crawl_mode;
         cleanOptions.topics = cfg.topics;
         cleanOptions.lookback_hours = cfg.lookback_hours;
         cleanOptions.exclusions = cfg.exclusions;
-        if (hasCustomLease) {
+        if (hasCustomLease || isV33Req) {
             cleanOptions.lease_seconds = requestedLeaseSec;
             cleanOptions.lease_minutes = Math.round(requestedLeaseSec / 60);
         }
-        targetStrategySig = getThreadsStrategySignature({ platform: "threads", options: cleanOptions });
+        targetStrategySig = getThreadsStrategySignature({
+            platform: "threads",
+            contract_version: lockedContractVersion,
+            target_metric: lockedTargetMetric,
+            options: cleanOptions,
+        });
     }
     await expireStaleLeases(env);
 
@@ -4805,7 +5920,7 @@ async function createCrawlRequestInD1(env, {
         if (byToken) return { deduplicated: true, request: byToken };
     }
 
-    // 2. Active-queue deduplication for identical platform + keywords + count (+ Threads strategy/topic/lookback/lease config)
+    // 2. Active-queue deduplication for identical platform + keywords + count (+ Threads contract/strategy/topic/lookback/lease config)
     const activeCandidatesRes = await env.DB.prepare(`
         SELECT * FROM crawl_requests
         WHERE platform = ? AND lower(trim(keywords)) = ? AND requested_count = ? AND status IN ('queued', 'running')
@@ -4823,26 +5938,58 @@ async function createCrawlRequestInD1(env, {
     const nowIso = new Date().toISOString();
     const id = genId("crw");
 
-    await env.DB.prepare(`
-        INSERT INTO crawl_requests (
-            id, platform, keywords, requested_count, options_json, status, dedup_token,
-            muse_connector_mode, poll_profile, expected_pickup_at, attempts, max_attempts,
-            requested_by_chat_id, requested_by_source, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'queued', ?, 'd1_polling', ?, ?, 0, 3, ?, ?, ?, ?)
-    `).bind(
-        id,
-        plat,
-        cleanKeywords,
-        count,
-        JSON.stringify(cleanOptions),
-        dedupToken,
-        eta.poll_profile,
-        eta.expected_pickup_at,
-        chatId ? String(chatId) : null,
-        source,
-        nowIso,
-        nowIso
-    ).run();
+    try {
+        await env.DB.prepare(`
+            INSERT INTO crawl_requests (
+                id, platform, keywords, requested_count, options_json, status, dedup_token,
+                muse_connector_mode, poll_profile, expected_pickup_at, attempts, max_attempts,
+                requested_by_chat_id, requested_by_source,
+                contract_version, skill_version, quality_policy_version, target_metric,
+                execution_phase, session_seq, error_attempts, lease_renew_count,
+                accumulated_quality_count, accumulated_new_qualified_count, accumulated_watchlist_count,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'queued', ?, 'd1_polling', ?, ?, 0, 3, ?, ?, ?, ?, ?, ?, 'waiting_prompt', 0, 0, 0, 0, 0, 0, ?, ?)
+        `).bind(
+            id,
+            plat,
+            cleanKeywords,
+            count,
+            JSON.stringify(cleanOptions),
+            dedupToken,
+            eta.poll_profile,
+            eta.expected_pickup_at,
+            chatId ? String(chatId) : null,
+            source,
+            lockedContractVersion,
+            lockedSkillVersion,
+            lockedQualityPolicyVersion,
+            lockedTargetMetric,
+            nowIso,
+            nowIso
+        ).run();
+    } catch {
+        // Legacy pre-0005 schema fallback
+        await env.DB.prepare(`
+            INSERT INTO crawl_requests (
+                id, platform, keywords, requested_count, options_json, status, dedup_token,
+                muse_connector_mode, poll_profile, expected_pickup_at, attempts, max_attempts,
+                requested_by_chat_id, requested_by_source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'queued', ?, 'd1_polling', ?, ?, 0, 3, ?, ?, ?, ?)
+        `).bind(
+            id,
+            plat,
+            cleanKeywords,
+            count,
+            JSON.stringify(cleanOptions),
+            dedupToken,
+            eta.poll_profile,
+            eta.expected_pickup_at,
+            chatId ? String(chatId) : null,
+            source,
+            nowIso,
+            nowIso
+        ).run();
+    }
 
     const created = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(id).first();
     return { deduplicated: false, request: created, eta };
@@ -5252,7 +6399,37 @@ async function handleAppApi(request, env, url) {
     };
 
     if (request.method === "GET" && path === "/api/app/crawl-config") {
-        return jsonResponse({ ok: true, config: getPublicCrawlConfig() });
+        const helperCompat = await getMuseHelperCompatibility(env);
+        return jsonResponse({ ok: true, config: getPublicCrawlConfig(helperCompat) });
+    }
+
+    if (request.method === "GET" && path === "/api/app/muse-helper/compatibility") {
+        const helperCompat = await getMuseHelperCompatibility(env);
+        return jsonResponse({ ok: true, helper_compatibility: helperCompat });
+    }
+
+    if (request.method === "POST" && path === "/api/app/muse-helper/compatibility") {
+        let body = {};
+        try { body = await request.json(); } catch { body = {}; }
+        const patch = (body && typeof body === "object" && !Array.isArray(body)) ? { ...body } : {};
+        if (patch.verify_v33 === true && patch.v33_compatible === undefined && patch.verified === undefined) {
+            patch.v33_compatible = true;
+            patch.verified = true;
+            if (!Array.isArray(patch.supported_contracts)) {
+                patch.supported_contracts = [THREADS_CONTRACT_V32, THREADS_CONTRACT_V33];
+            }
+            if (!patch.skill_version) {
+                patch.skill_version = THREADS_SKILL_VERSION;
+            }
+            if (!Array.isArray(patch.capabilities)) {
+                patch.capabilities = [...MUSE_REQUIRED_V33_CAPABILITIES];
+            }
+        }
+        if (!patch.verified_by) {
+            patch.verified_by = clientId || "app_video_operator";
+        }
+        const updatedCompat = await setMuseHelperCompatibility(env, patch);
+        return jsonResponse({ ok: true, helper_compatibility: updatedCompat });
     }
 
     if (request.method === "GET" && path === "/api/app/crawl-requests") {
@@ -5260,13 +6437,26 @@ async function handleAppApi(request, env, url) {
         const rows = await env.DB.prepare(`
             SELECT * FROM crawl_requests ORDER BY created_at DESC LIMIT 40
         `).all();
+        const sessionsByReqId = {};
+        try {
+            const sessRes = await env.DB.prepare(`
+                SELECT * FROM crawl_request_sessions ORDER BY session_seq ASC LIMIT 300
+            `).all();
+            for (const sRow of (sessRes?.results || [])) {
+                if (!sRow?.request_id) continue;
+                if (!sessionsByReqId[sRow.request_id]) sessionsByReqId[sRow.request_id] = [];
+                sessionsByReqId[sRow.request_id].push(sRow);
+            }
+        } catch {}
         const activeOutboxSet = await buildActiveOutboxReqSet();
         const schedule = await computeExpectedPickup(env);
-        const enriched = (rows.results || []).map(r => enrichCrawlRequestRow(r, env, activeOutboxSet));
+        const helperCompat = await getMuseHelperCompatibility(env);
+        const enriched = (rows.results || []).map(r => enrichCrawlRequestRow(r, env, activeOutboxSet, { sessionsByReqId }));
         return jsonResponse({
             ok: true,
             muse_web_url: getMuseWebUrl(env),
             schedule,
+            helper_compatibility: helperCompat,
             items: enriched
         });
     }
@@ -5276,12 +6466,20 @@ async function handleAppApi(request, env, url) {
         if (!crawlId) return jsonResponse({ ok: false, error: "Missing crawl request ID" }, 400);
         const row = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
         if (!row) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+        const sessionsByReqId = {};
+        try {
+            const sessRes = await env.DB.prepare(
+                "SELECT * FROM crawl_request_sessions WHERE request_id = ? ORDER BY session_seq ASC"
+            ).bind(crawlId).all();
+            sessionsByReqId[crawlId] = sessRes?.results || [];
+        } catch {}
         const activeOutboxSet = await buildActiveOutboxReqSet();
-        const enriched = enrichCrawlRequestRow(row, env, activeOutboxSet);
+        const enriched = enrichCrawlRequestRow(row, env, activeOutboxSet, { sessionsByReqId });
         return jsonResponse({
             ok: true,
             request: enriched,
             manual_prompt: enriched.manual_prompt,
+            resume_prompt: enriched.resume_prompt,
             muse_web_url: getMuseWebUrl(env),
         });
     }
@@ -5293,6 +6491,9 @@ async function handleAppApi(request, env, url) {
             const mergedOpts = (body.options && typeof body.options === "object" && !Array.isArray(body.options))
                 ? { ...body.options }
                 : {};
+            if (body.contract_version !== undefined && mergedOpts.contract_version === undefined) {
+                mergedOpts.contract_version = body.contract_version;
+            }
             if (body.crawl_mode !== undefined && mergedOpts.crawl_mode === undefined) mergedOpts.crawl_mode = body.crawl_mode;
             if (body.topics !== undefined && mergedOpts.topics === undefined) mergedOpts.topics = body.topics;
             if (body.lookback_hours !== undefined && mergedOpts.lookback_hours === undefined) mergedOpts.lookback_hours = body.lookback_hours;
@@ -5320,19 +6521,117 @@ async function handleAppApi(request, env, url) {
                 muse_web_url: getMuseWebUrl(env),
             }, res.deduplicated ? 200 : 201);
         } catch (err) {
-            return jsonResponse({ ok: false, error: err.message }, 400);
+            return jsonResponse({
+                ok: false,
+                code: err.code || null,
+                error: err.message
+            }, err.statusCode || 400);
         }
+    }
+
+    if (request.method === "POST" && path.startsWith("/api/app/crawl-requests/") && path.endsWith("/pause")) {
+        const crawlId = decodeURIComponent(path.slice("/api/app/crawl-requests/".length, -"/pause".length)).trim();
+        if (!crawlId) return jsonResponse({ ok: false, error: "Missing crawl request ID" }, 400);
+        let body = {};
+        try { body = await request.json(); } catch { body = {}; }
+        const row = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+        if (!row) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+        if (!["queued", "running"].includes(row.status)) {
+            return jsonResponse({ ok: false, error: "Only queued or running requests can be paused" }, 409);
+        }
+        const nowIso = new Date().toISOString();
+        const pauseReason = String(body.pause_reason || "operator_paused").trim().slice(0, 120) || "operator_paused";
+        try {
+            await env.DB.prepare(`
+                UPDATE crawl_requests
+                SET status = 'queued',
+                    execution_phase = 'paused',
+                    pause_reason = ?,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE id = ? AND status IN ('queued', 'running')
+            `).bind(pauseReason, nowIso, crawlId).run();
+            await env.DB.prepare(`
+                UPDATE crawl_request_sessions
+                SET status = 'paused', ended_at = ?, stop_reason = ?, updated_at = ?
+                WHERE request_id = ? AND status = 'running'
+            `).bind(nowIso, pauseReason, nowIso, crawlId).run();
+        } catch (err) {
+            return jsonResponse({ ok: false, error: err?.message || "Pause failed" }, 500);
+        }
+        const updated = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+        const activeOutboxSet = await buildActiveOutboxReqSet();
+        const enriched = enrichCrawlRequestRow(updated, env, activeOutboxSet);
+        return jsonResponse({
+            ok: true,
+            request: enriched,
+            manual_prompt: enriched.manual_prompt,
+            resume_prompt: enriched.resume_prompt,
+        });
+    }
+
+    if (request.method === "POST" && path.startsWith("/api/app/crawl-requests/") && path.endsWith("/resume")) {
+        const crawlId = decodeURIComponent(path.slice("/api/app/crawl-requests/".length, -"/resume".length)).trim();
+        if (!crawlId) return jsonResponse({ ok: false, error: "Missing crawl request ID" }, 400);
+        let body = {};
+        try { body = await request.json(); } catch { body = {}; }
+        const row = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+        if (!row) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+        if (["completed", "failed", "cancelled"].includes(row.status)) {
+            return jsonResponse({ ok: false, error: `Cannot resume finalized request (${row.status})` }, 409);
+        }
+        if (row.status === "running" && (!row.lease_expires_at || Date.parse(row.lease_expires_at) >= Date.now())) {
+            return jsonResponse({ ok: false, error: "Request currently has an active running session lease" }, 409);
+        }
+        const nowIso = new Date().toISOString();
+        let nextOpts = parseRequestOptionsJson(row);
+        if (body.lease_minutes !== undefined || body.lease_seconds !== undefined) {
+            const leaseSec = normalizeThreadsLeaseSeconds(body, getRequestLeaseInfo(row).leaseSeconds);
+            nextOpts = { ...nextOpts, lease_seconds: leaseSec, lease_minutes: Math.round(leaseSec / 60) };
+        }
+        try {
+            await env.DB.prepare(`
+                UPDATE crawl_requests
+                SET status = 'queued',
+                    execution_phase = 'paused',
+                    pause_reason = NULL,
+                    options_json = ?,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE id = ?
+            `).bind(JSON.stringify(nextOpts), nowIso, crawlId).run();
+        } catch (err) {
+            return jsonResponse({ ok: false, error: err?.message || "Resume update failed" }, 500);
+        }
+        const updated = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+        const activeOutboxSet = await buildActiveOutboxReqSet();
+        const enriched = enrichCrawlRequestRow(updated, env, activeOutboxSet);
+        return jsonResponse({
+            ok: true,
+            request: enriched,
+            manual_prompt: enriched.manual_prompt,
+            resume_prompt: enriched.resume_prompt || enriched.manual_prompt,
+            muse_web_url: getMuseWebUrl(env),
+        });
     }
 
     if (request.method === "POST" && path.startsWith("/api/app/crawl-requests/") && path.endsWith("/cancel")) {
         const crawlId = path.slice("/api/app/crawl-requests/".length, -"/cancel".length).trim();
         if (!crawlId) return jsonResponse({ ok: false, error: "Missing crawl request ID" }, 400);
+        const nowIso = new Date().toISOString();
         const upd = await env.DB.prepare(`
             UPDATE crawl_requests SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'queued'
-        `).bind(new Date().toISOString(), crawlId).run();
+        `).bind(nowIso, crawlId).run();
         if (upd.meta.changes !== 1) {
             return jsonResponse({ ok: false, error: "Request is not in queued state or not found" }, 409);
         }
+        try {
+            await env.DB.prepare("UPDATE crawl_requests SET execution_phase = 'cancelled' WHERE id = ?").bind(crawlId).run();
+        } catch {}
         return jsonResponse({ ok: true, id: crawlId, status: "cancelled", display_status: "cancelled", display_status_label: "Đã hủy" });
     }
 
@@ -5701,19 +7000,34 @@ async function buildNotificationIssuesView(env) {
 
 async function buildCrawlCenterMenu(env) {
     await expireStaleLeases(env);
-    const rowsRes = await env.DB.prepare(
-        "SELECT id, platform, keywords, requested_count, status, requested_by_source, result_summary_json FROM crawl_requests ORDER BY created_at DESC LIMIT 6"
-    ).all();
-    const rows = rowsRes.results || [];
+    const compat = await getMuseHelperCompatibility(env);
+    let rows = [];
+    try {
+        const rowsRes = await env.DB.prepare(`
+            SELECT id, platform, keywords, requested_count, status, requested_by_source, result_summary_json,
+                   contract_version, execution_phase, pause_reason, session_seq, accumulated_quality_count
+            FROM crawl_requests ORDER BY created_at DESC LIMIT 6
+        `).all();
+        rows = rowsRes.results || [];
+    } catch {
+        const rowsRes = await env.DB.prepare(
+            "SELECT id, platform, keywords, requested_count, status, requested_by_source, result_summary_json FROM crawl_requests ORDER BY created_at DESC LIMIT 6"
+        ).all();
+        rows = rowsRes.results || [];
+    }
     const summaryLines = rows.map(r => {
         const srcLabel = r.requested_by_source === "telegram" ? "Telegram" : (r.requested_by_source === "app_video" ? "App_Video" : (r.requested_by_source || "N/A"));
         const ds = deriveCrawlRequestDisplayState(r);
-        return `• [${r.platform}/${r.requested_count}|${srcLabel}] ${formatCrawlStatusLabel(ds.display_status)} (${r.id.slice(-8)})`;
+        const ci = getEffectiveCrawlRequestContract(r);
+        const sessInfo = (Number(r.session_seq || 0) > 0 || ci.isV33)
+            ? ` ${Number(r.accumulated_quality_count || 0)}/${r.requested_count}${Number(r.session_seq || 0) > 0 ? ` S${r.session_seq}` : ""}`
+            : "";
+        return `• [${r.platform}/${r.requested_count}${sessInfo}|${srcLabel}] ${formatCrawlStatusLabel(ds.display_status, r.execution_phase, r.pause_reason)} (${r.id.slice(-8)})`;
     });
 
     const inlineRows = [
         [
-            { text: "🧵 Threads (V3.2)", callback_data: "crawl:plat:threads" },
+            { text: compat.v33_ready ? "🧵 Threads (V3.3)" : "🧵 Threads (V3.2)", callback_data: "crawl:plat:threads" },
             { text: "🎵 TikTok", callback_data: "crawl:plat:tiktok" }
         ],
         [
@@ -5723,8 +7037,13 @@ async function buildCrawlCenterMenu(env) {
     ];
     for (const r of rows) {
         if (r.status === "queued") {
+            const ds = deriveCrawlRequestDisplayState(r);
+            const isPausedOrBlocked = ds.display_status === "paused" || ds.display_status === "blocked";
             inlineRows.push([
-                { text: `📋 Prompt (${r.id.slice(-8)})`, callback_data: `crawl:prompt:${r.id}` },
+                {
+                    text: isPausedOrBlocked ? `▶️ Tiếp tục (${r.id.slice(-8)})` : `📋 Prompt (${r.id.slice(-8)})`,
+                    callback_data: isPausedOrBlocked ? `crawl:resume:${r.id}` : `crawl:prompt:${r.id}`
+                },
                 { text: `✖️ Hủy (${r.id.slice(-8)})`, callback_data: `crawl:cancel:${r.id}` }
             ]);
         }
@@ -5733,8 +7052,9 @@ async function buildCrawlCenterMenu(env) {
 
     const text =
         "🕷️ CRAWL DỮ LIỆU — MANUAL PROMPT TRIGGER\n━━━━━━━━━━━━━━━━━━━━\n" +
+        `• Threads Contract hiện hành: ${compat.v33_ready ? "V3.3 (Skill threads_crawl v1.0 • Multi-session)" : "V3.2 (Kiểm tra Muse Helper để bật V3.3)"}.\n` +
         "• Chọn nền tảng để tạo request D1 và nhận Prompt copy gửi sang Muse (desktop không cần bật).\n" +
-        "• Yêu cầu giữ trạng thái CHỜ GỬI PROMPT cho đến khi Muse claim đúng Request ID.\n\n" +
+        "• Yêu cầu giữ trạng thái CHỜ GỬI PROMPT / TẠM DỪNG cho đến khi Muse claim đúng Request ID.\n\n" +
         (summaryLines.length ? `Gần đây:\n${summaryLines.join("\n")}` : "Chưa có yêu cầu nào.");
 
     return { text, reply_markup: { inline_keyboard: inlineRows } };
@@ -5743,18 +7063,27 @@ async function buildCrawlCenterMenu(env) {
 function buildTelegramPromptResponse(env, reqRow, { deduplicated = false } = {}) {
     const promptText = buildMuseManualPrompt(reqRow);
     const ds = deriveCrawlRequestDisplayState(reqRow);
+    const contractInfo = getEffectiveCrawlRequestContract(reqRow);
     const plat = String(reqRow?.platform || "").trim().toLowerCase();
     const cfg = plat === "threads" ? getThreadsStrategyConfig(reqRow, { strict: false }) : null;
     const leaseInfo = getRequestLeaseInfo(reqRow);
     const topicSummary = cfg && cfg.topics.length
         ? (cfg.topics.length >= THREADS_TOPIC_PRESETS.length ? `Tất cả (${cfg.topics.length})` : `${cfg.topic_labels.slice(0, 2).join(", ")}${cfg.topic_labels.length > 2 ? ` +${cfg.topic_labels.length - 2}` : ""}`)
         : "Tự do";
+    const isResume = ds.display_status === "paused" || ds.display_status === "blocked";
+    const accQual = Number(reqRow?.accumulated_quality_count || 0);
+    const reqCount = Number(reqRow?.requested_count || 50);
+    const sessNum = Number(reqRow?.session_seq || 0);
     const stratPart = plat === "threads"
         ? ` | Str:<code>3.3</code> | Mode:<code>${escapeTelegramHtml(cfg.crawl_mode)}</code> | ${escapeTelegramHtml(cfg.lookback_hours + "h")} | Chủ đề:<b>${escapeTelegramHtml(topicSummary)}</b> | Lease:<b>${leaseInfo.leaseMinutes}p</b>`
         : "";
+    const progressPart = isResume ? ` | Tiến độ:<b>${accQual}/${reqCount}</b> (S${sessNum + 1})` : "";
+    const titleHeader = isResume
+        ? "TIẾP TỤC PHIÊN CRAWL D1"
+        : (deduplicated ? "DÙNG LẠI REQUEST CRAWL D1" : "ĐÃ TẠO REQUEST CRAWL D1");
     const metaHeader =
-        `📝 <b>${deduplicated ? "DÙNG LẠI REQUEST CRAWL D1" : "ĐÃ TẠO REQUEST CRAWL D1"}</b> • <code>${escapeTelegramHtml(reqRow.id)}</code>\n` +
-        `<b>${escapeTelegramHtml(plat.toUpperCase())}</b> | Mục tiêu:<b>${Number(reqRow.requested_count || 50)}</b>${stratPart} | V:${escapeTelegramHtml(getRequestContractVersion(reqRow.platform))} | ${escapeTelegramHtml(ds.display_status_label)}\n`;
+        `📝 <b>${titleHeader}</b> • <code>${escapeTelegramHtml(reqRow.id)}</code>\n` +
+        `<b>${escapeTelegramHtml(plat.toUpperCase())}</b> | Mục tiêu:<b>${reqCount}</b>${progressPart}${stratPart} | C:<b>${escapeTelegramHtml(contractInfo.contract_version)}</b> | ${escapeTelegramHtml(ds.display_status_label)}\n`;
     const escapedPrompt = escapeTelegramHtml(promptText);
     const wrappedHtml = `${metaHeader}<pre>${escapedPrompt}</pre>`;
     let header = wrappedHtml;
@@ -5765,10 +7094,10 @@ function buildTelegramPromptResponse(env, reqRow, { deduplicated = false } = {})
     const kb = {
         inline_keyboard: [
             [
-                { text: "📋 Lấy lại Prompt", callback_data: `crawl:prompt:${reqRow.id}` },
+                { text: isResume ? "🔄 Cập nhật Resume Prompt" : "📋 Lấy lại Prompt", callback_data: isResume ? `crawl:resume:${reqRow.id}` : `crawl:prompt:${reqRow.id}` },
                 { text: "🌐 Mở Muse", url: getMuseWebUrl(env) },
             ],
-            plat === "threads" && reqRow.status === "queued"
+            plat === "threads" && reqRow.status === "queued" && !isResume
                 ? [
                     { text: "🎯 Chế độ / Chủ đề", callback_data: `crawl:cfg:${reqRow.id}` },
                     { text: "✖️ Hủy yêu cầu này", callback_data: `crawl:cancel:${reqRow.id}` },
@@ -6164,14 +7493,23 @@ async function handleTelegramUpdate(request, env) {
             return new Response("OK");
         }
 
-        if (data.startsWith("crawl:prompt:")) {
-            const crawlId = data.slice("crawl:prompt:".length).trim();
+        if (data.startsWith("crawl:resume:") || data.startsWith("crawl:prompt:")) {
+            const isResumeCb = data.startsWith("crawl:resume:");
+            const crawlId = data.slice(isResumeCb ? "crawl:resume:".length : "crawl:prompt:".length).trim();
             const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
             if (!reqRow) {
                 await sendOrEditTelegram(env, chatId, msgId, `⚠️ Không tìm thấy request ${crawlId}.`, homeOnlyInlineKeyboard());
                 return new Response("OK");
             }
-            const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: true });
+            if (isResumeCb && reqRow.status === "queued" && String(reqRow.execution_phase || "").toLowerCase() === "blocked") {
+                try {
+                    await env.DB.prepare(
+                        "UPDATE crawl_requests SET execution_phase = 'paused', pause_reason = NULL, updated_at = ? WHERE id = ? AND status = 'queued'"
+                    ).bind(new Date().toISOString(), crawlId).run();
+                } catch {}
+            }
+            const freshRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+            const promptView = buildTelegramPromptResponse(env, freshRow || reqRow, { deduplicated: true });
             await sendOrEditTelegram(
                 env,
                 chatId,
@@ -6313,6 +7651,11 @@ async function handleTelegramUpdate(request, env) {
                             break;
                         }
                     }
+                    const cvMatch = s.match(/^contract=(3\.[23])$/i);
+                    if (cvMatch) {
+                        reqOptions.contract_version = cvMatch[1];
+                        continue;
+                    }
                     leadingFlagsDone = true;
                 }
                 kwParts.push(s);
@@ -6437,6 +7780,15 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
     }
     await expireStaleLeases(env);
 
+    const checkRetryBudget = (row) => {
+        const ci = getEffectiveCrawlRequestContract(row);
+        const maxAtt = Math.max(1, Number(row.max_attempts || 3));
+        const usedErr = ci.isV33
+            ? Math.max(0, Number.parseInt(row.error_attempts, 10) || 0)
+            : Math.max(0, Number.parseInt(row.attempts, 10) || 0);
+        return { usedErr, maxAtt, ok: usedErr < maxAtt, ci };
+    };
+
     if (enforceRequestId) {
         const targetRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(explicitReqId).first();
         if (!targetRow) {
@@ -6456,7 +7808,19 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
                 request: null,
             };
         }
-        if (Number(targetRow.attempts || 0) >= Number(targetRow.max_attempts || 3)) {
+        if (String(targetRow.execution_phase || "").trim().toLowerCase() === "blocked" && !options.allowBlockedResume) {
+            return {
+                ok: false,
+                statusCode: 409,
+                conflict: true,
+                reason: "request_blocked",
+                pause_reason: targetRow.pause_reason || null,
+                error: `Crawl request ${explicitReqId} is safely paused (${targetRow.pause_reason || "blocked"}); resume via App_Video or Telegram before re-claiming`,
+                request: null,
+            };
+        }
+        const budget = checkRetryBudget(targetRow);
+        if (!budget.ok) {
             return {
                 ok: false,
                 statusCode: 409,
@@ -6504,19 +7868,21 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
 
     const attemptsLoopMax = enforceRequestId ? 1 : 2;
     for (let retry = 0; retry < attemptsLoopMax; retry++) {
-        const candidate = enforceRequestId
-            ? await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(explicitReqId).first()
-            : (threadsOnly
-                ? await env.DB.prepare(`
-                    SELECT * FROM crawl_requests
-                    WHERE status = 'queued'
-                      AND lower(trim(platform)) = 'threads'
-                      AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
-                    ORDER BY created_at ASC LIMIT 1
-                `).first()
-                : await env.DB.prepare(`
-                    SELECT * FROM crawl_requests WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1
-                `).first());
+        let candidate = null;
+        if (enforceRequestId) {
+            candidate = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(explicitReqId).first();
+        } else {
+            const qRes = await env.DB.prepare(
+                "SELECT * FROM crawl_requests WHERE status = 'queued' ORDER BY created_at ASC LIMIT 25"
+            ).all();
+            const qRows = qRes?.results || [];
+            candidate = qRows.find((r) => {
+                if (!r || r.status !== "queued") return false;
+                if (threadsOnly && String(r.platform || "").trim().toLowerCase() !== "threads") return false;
+                if (String(r.execution_phase || "").trim().toLowerCase() === "blocked") return false;
+                return checkRetryBudget(r).ok;
+            }) || null;
+        }
 
         if (!candidate || candidate.status !== "queued") {
             if (enforceRequestId) {
@@ -6533,12 +7899,19 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
         }
 
         const candidatePlat = String(candidate.platform || "").trim().toLowerCase();
+        const contractInfo = getEffectiveCrawlRequestContract(candidate);
+        const fallbackLeaseSec = (candidatePlat === "threads" && contractInfo.isV33)
+            ? MUSE_THREADS_DEFAULT_LEASE_SECONDS
+            : MUSE_DEFAULT_LEASE_SECONDS;
         const candidateLeaseSec = explicitLeaseSec !== null
             ? explicitLeaseSec
             : (candidatePlat === "threads"
-                ? normalizeThreadsLeaseSeconds(parseRequestOptionsJson(candidate), MUSE_DEFAULT_LEASE_SECONDS)
+                ? normalizeThreadsLeaseSeconds(parseRequestOptionsJson(candidate), fallbackLeaseSec)
                 : MUSE_DEFAULT_LEASE_SECONDS);
         const leaseExpires = new Date(now.getTime() + candidateLeaseSec * 1000).toISOString();
+        const nextAttempt = Number(candidate.attempts || 0) + 1;
+        const nextSessionSeq = Number(candidate.session_seq || 0) + 1;
+
         const claimed = (singleFlight || threadsOnly)
             ? await env.DB.prepare(`
                 UPDATE crawl_requests
@@ -6546,7 +7919,6 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
                 WHERE id = ?
                   AND status = 'queued'
                   AND lower(trim(platform)) = 'threads'
-                  AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
                   AND NOT EXISTS (
                       SELECT 1 FROM crawl_requests r_run
                       WHERE r_run.status = 'running'
@@ -6564,6 +7936,33 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
             `).bind(workerId, nowIso, leaseExpires, nowIso, candidate.id).run();
 
         if (Number(claimed?.meta?.changes || 0) === 1) {
+            try {
+                await env.DB.prepare(`
+                    UPDATE crawl_requests
+                    SET session_seq = ?, execution_phase = 'running', pause_reason = NULL, lease_renew_count = 0
+                    WHERE id = ? AND status = 'running' AND attempts = ?
+                `).bind(nextSessionSeq, candidate.id, nextAttempt).run();
+            } catch {}
+            try {
+                const sessId = `crs_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+                await env.DB.prepare(`
+                    INSERT OR IGNORE INTO crawl_request_sessions
+                    (id, request_id, session_seq, attempt, claimed_by, claimed_at, lease_seconds, lease_expires_at, status, lease_renew_count, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, ?)
+                `).bind(
+                    sessId,
+                    candidate.id,
+                    nextSessionSeq,
+                    nextAttempt,
+                    workerId,
+                    nowIso,
+                    candidateLeaseSec,
+                    leaseExpires,
+                    nowIso,
+                    nowIso
+                ).run();
+            } catch {}
+
             const updatedRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(candidate.id).first();
             if (updatedRow) {
                 let parsedOpts = {};
@@ -6573,7 +7972,11 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
                     ok: true,
                     request: {
                         ...enriched,
-                        attempt: Number(updatedRow.attempts || 1),
+                        attempt: Number(updatedRow.attempts || nextAttempt),
+                        session_seq: Number(updatedRow.session_seq || nextSessionSeq),
+                        lease_seconds: candidateLeaseSec,
+                        lease_renew_count: Number(updatedRow.lease_renew_count || 0),
+                        max_lease_renewals: MUSE_MAX_LEASE_RENEWALS_PER_SESSION,
                         options: parsedOpts,
                     },
                 };
@@ -6751,6 +8154,9 @@ function normalizeProgressMetricsPatch(existingSummary, body, reqRow, nowIso) {
         "unique_candidate_count",
         "qualified_count",
         "new_qualified_count",
+        "quality_qualified_count",
+        "watchlist_count",
+        "traffic_content_count",
         "new_count",
         "duplicate_history_count",
         "duplicate_count",
@@ -6760,6 +8166,7 @@ function normalizeProgressMetricsPatch(existingSummary, body, reqRow, nowIso) {
         "unverified_count",
         "similar_content_count",
         "rejected_count",
+        "session_seq",
     ];
     for (const k of intFields) {
         const raw = bodyCounters[k] !== undefined ? bodyCounters[k] : body[k];
@@ -6814,6 +8221,9 @@ async function updateCrawlProgressInD1(env, { crawlId, body, defaultOwner = "", 
     if (parsedAttempt !== Number(existing.attempts || 0)) {
         return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
     }
+    if (body.session_seq !== undefined && body.session_seq !== null && Number(existing.session_seq || 0) > 0 && Number(body.session_seq) !== Number(existing.session_seq)) {
+        return jsonResponse({ ok: false, error: "Stale crawl session_seq", conflict: true }, 409);
+    }
     if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
         await expireStaleLeases(env);
         return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
@@ -6836,14 +8246,446 @@ async function updateCrawlProgressInD1(env, { crawlId, body, defaultOwner = "", 
         return jsonResponse({ ok: false, error: "Crawl progress conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
     }
 
+    try {
+        await env.DB.prepare(`
+            UPDATE crawl_request_sessions
+            SET run_id = COALESCE(?, run_id),
+                scanned_count = COALESCE(?, scanned_count),
+                quality_qualified_count = COALESCE(?, quality_qualified_count),
+                new_qualified_count = COALESCE(?, new_qualified_count),
+                watchlist_count = COALESCE(?, watchlist_count),
+                updated_at = ?
+            WHERE request_id = ? AND attempt = ?
+        `).bind(
+            updatedSummary.run_id || null,
+            updatedSummary.counters?.scanned_count ?? null,
+            updatedSummary.counters?.quality_qualified_count ?? null,
+            updatedSummary.counters?.new_qualified_count ?? null,
+            updatedSummary.counters?.watchlist_count ?? null,
+            nowIso,
+            cleanId,
+            parsedAttempt
+        ).run();
+    } catch {}
+
     return jsonResponse({
         ok: true,
         request_id: cleanId,
         status: "running",
         claimed_by: callerOwner,
         attempt: parsedAttempt,
+        session_seq: Number(existing.session_seq || 1),
+        lease_renew_count: Number(existing.lease_renew_count || 0),
+        lease_expires_at: existing.lease_expires_at || null,
         progress: updatedSummary.progress,
         progress_metrics: computeCrawlRequestProgress({ ...existing, result_summary_json: updatedSummaryJson }),
+    });
+}
+
+async function renewCrawlLeaseInD1(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, requireThreads = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
+    if (parsed.errorResponse) return parsed.errorResponse;
+    const { parsedAttempt, callerOwner } = parsed;
+    const cleanId = parsed.crawlId;
+
+    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
+        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
+    }
+    if (existing.status !== "running") {
+        return jsonResponse({ ok: false, error: "Crawl request is not running", conflict: true }, 409);
+    }
+    if (existing.claimed_by && callerOwner !== existing.claimed_by) {
+        return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+    }
+    if (parsedAttempt !== Number(existing.attempts || 0)) {
+        return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+    }
+    if (body.session_seq !== undefined && body.session_seq !== null && Number(existing.session_seq || 0) > 0 && Number(body.session_seq) !== Number(existing.session_seq)) {
+        return jsonResponse({ ok: false, error: "Stale crawl session_seq", conflict: true }, 409);
+    }
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < nowMs) {
+        await expireStaleLeases(env);
+        return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+    }
+
+    const curRenew = Math.max(0, Number.parseInt(existing.lease_renew_count, 10) || 0);
+    if (curRenew >= MUSE_MAX_LEASE_RENEWALS_PER_SESSION) {
+        return jsonResponse({
+            ok: false,
+            conflict: true,
+            reason: "max_lease_renewals_reached",
+            lease_renew_count: curRenew,
+            max_lease_renewals: MUSE_MAX_LEASE_RENEWALS_PER_SESSION,
+            error: `Session reached max ${MUSE_MAX_LEASE_RENEWALS_PER_SESSION} lease renewals; call POST /api/crawl/checkpoint to save progress cleanly`,
+        }, 409);
+    }
+
+    let existingSummary = {};
+    try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
+    const prevScanned = Number(existingSummary?.counters?.scanned_count || 0);
+    const prevQual = Number(existingSummary?.counters?.quality_qualified_count ?? existingSummary?.counters?.new_qualified_count ?? 0);
+    const baselineScanned = Number(existingSummary?._last_renew_scanned || 0);
+    const baselineQual = Number(existingSummary?._last_renew_qual || 0);
+
+    const updatedSummary = normalizeProgressMetricsPatch(existingSummary, body, existing, nowIso);
+    const newScanned = Number(updatedSummary?.counters?.scanned_count || 0);
+    const newQual = Number(updatedSummary?.counters?.quality_qualified_count ?? updatedSummary?.counters?.new_qualified_count ?? 0);
+    const explicitDelta = Number(body.progress_delta || body.new_candidates_scanned || 0);
+    const hasRealProgress = Boolean(
+        newScanned > Math.max(prevScanned, baselineScanned) ||
+        newQual > Math.max(prevQual, baselineQual) ||
+        (prevScanned > baselineScanned && newScanned >= prevScanned) ||
+        (prevQual > baselineQual && newQual >= prevQual) ||
+        explicitDelta > 0
+    );
+    if (!hasRealProgress) {
+        return jsonResponse({
+            ok: false,
+            conflict: true,
+            reason: "no_real_progress",
+            error: "Chỉ được gia hạn lease khi phiên đang có tiến độ crawl thật sự mới phát sinh",
+        }, 409);
+    }
+
+    updatedSummary._last_renew_scanned = newScanned;
+    updatedSummary._last_renew_qual = newQual;
+    updatedSummary.progress = {
+        stage: "renewed",
+        message: `Gia hạn lease lần ${curRenew + 1}/${MUSE_MAX_LEASE_RENEWALS_PER_SESSION} (+30p)`,
+        updated_at: nowIso,
+    };
+
+    const currentExpiryMs = existing.lease_expires_at ? Date.parse(existing.lease_expires_at) : nowMs;
+    const baseMs = Number.isFinite(currentExpiryMs) ? Math.max(nowMs, currentExpiryMs) : nowMs;
+    const nextExpiryIso = new Date(baseMs + MUSE_LEASE_RENEW_INCREMENT_SECONDS * 1000).toISOString();
+    const nextRenewCount = curRenew + 1;
+
+    const upd = await env.DB.prepare(`
+        UPDATE crawl_requests
+        SET lease_expires_at = ?,
+            lease_renew_count = ?,
+            result_summary_json = ?,
+            updated_at = ?
+        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+    `).bind(
+        nextExpiryIso,
+        nextRenewCount,
+        JSON.stringify(updatedSummary),
+        nowIso,
+        cleanId,
+        callerOwner,
+        parsedAttempt,
+        nowIso
+    ).run();
+
+    if (Number(upd?.meta?.changes || 0) !== 1) {
+        return jsonResponse({ ok: false, error: "Lease renewal conflict: atomic guard failed", conflict: true }, 409);
+    }
+
+    try {
+        await env.DB.prepare(`
+            UPDATE crawl_request_sessions
+            SET lease_expires_at = ?, lease_renew_count = ?, updated_at = ?
+            WHERE request_id = ? AND attempt = ?
+        `).bind(nextExpiryIso, nextRenewCount, nowIso, cleanId, parsedAttempt).run();
+    } catch {}
+
+    return jsonResponse({
+        ok: true,
+        request_id: cleanId,
+        session_seq: Number(existing.session_seq || 1),
+        attempt: parsedAttempt,
+        lease_expires_at: nextExpiryIso,
+        lease_renew_count: nextRenewCount,
+        max_lease_renewals: MUSE_MAX_LEASE_RENEWALS_PER_SESSION,
+        renewals_remaining: Math.max(0, MUSE_MAX_LEASE_RENEWALS_PER_SESSION - nextRenewCount),
+        added_seconds: MUSE_LEASE_RENEW_INCREMENT_SECONDS,
+    });
+}
+
+async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, requireThreads = false }) {
+    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
+    if (parsed.errorResponse) return parsed.errorResponse;
+    const { parsedAttempt, callerOwner } = parsed;
+    const cleanId = parsed.crawlId;
+    const nowIso = new Date().toISOString();
+
+    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
+        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
+    }
+
+    let existingSummary = {};
+    try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
+
+    const existingSessSeq = Number.parseInt(existing.session_seq, 10) || 0;
+    const rawBodySess = body.session_seq !== undefined && body.session_seq !== null ? Number.parseInt(body.session_seq, 10) : null;
+    const curExecPhase = String(existing.execution_phase || "").trim().toLowerCase();
+
+    // Idempotent replay handling for already-checkpointed session
+    if (
+        existing.status === "queued" &&
+        ["paused", "blocked"].includes(curExecPhase) &&
+        ((rawBodySess !== null && rawBodySess === existingSessSeq) || parsedAttempt === Number(existing.attempts || 0))
+    ) {
+        let outboxCnt = 0;
+        try {
+            const cRow = await env.DB.prepare("SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?").bind(cleanId).first();
+            outboxCnt = Number(cRow?.cnt || 0);
+        } catch {}
+        if (outboxCnt > 0 || ["pending", "error"].includes(String(existingSummary?.registry_sync_status || "").toLowerCase())) {
+            try {
+                const drainRes = await drainRegistryOutboxForRequest(env, cleanId, existingSummary, existingSummary.crawled_at || nowIso, {
+                    sessionSeq: existingSessSeq,
+                    isCheckpoint: true,
+                    forceRecompute: true,
+                });
+                if (!drainRes?.completed || drainRes?.inProgress) {
+                    return jsonResponse({ ok: false, registry_sync_in_progress: true, checkpoint_sync_pending: true }, 503);
+                }
+            } catch (err) {
+                return jsonResponse({ ok: false, registry_unavailable: true, checkpoint_sync_pending: true, error: String(err?.message || "D1 registry unavailable") }, 503);
+            }
+        }
+        const refreshed = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+        const enrichedReplay = enrichCrawlRequestRow(refreshed || existing, env);
+        return jsonResponse({
+            ok: true,
+            idempotent_replay: true,
+            request_id: cleanId,
+            status: "queued",
+            execution_phase: refreshed?.execution_phase || existing.execution_phase,
+            pause_reason: refreshed?.pause_reason || existing.pause_reason,
+            session_seq: existingSessSeq,
+            accumulated_quality_count: enrichedReplay.accumulated_quality_count,
+            remaining_target: enrichedReplay.remaining_target,
+            registry_sync_status: "ok",
+            resume_prompt: enrichedReplay.resume_prompt || enrichedReplay.manual_prompt,
+        });
+    }
+
+    if (["completed", "failed", "cancelled"].includes(existing.status)) {
+        return jsonResponse({ ok: false, error: `Cannot checkpoint finalized request (${existing.status})`, conflict: true }, 409);
+    }
+    if (existing.status !== "running") {
+        return jsonResponse({ ok: false, error: "Crawl request is not running", conflict: true }, 409);
+    }
+    if (existing.claimed_by && callerOwner !== existing.claimed_by) {
+        return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+    }
+    if (parsedAttempt !== Number(existing.attempts || 0)) {
+        return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+    }
+    if (rawBodySess !== null && existingSessSeq > 0 && rawBodySess !== existingSessSeq) {
+        return jsonResponse({ ok: false, error: `Stale crawl session_seq (${rawBodySess} != ${existingSessSeq})`, conflict: true }, 409);
+    }
+    if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
+        await expireStaleLeases(env);
+        return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+    }
+
+    const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
+        ? { ...body.result_summary }
+        : { ...body };
+    let bodyDedupItems = Array.isArray(bodySummaryObj.items)
+        ? bodySummaryObj.items
+        : (Array.isArray(bodySummaryObj.records)
+            ? bodySummaryObj.records
+            : (Array.isArray(body.items) ? body.items : (Array.isArray(body.records) ? body.records : [])));
+
+    if (requireThreads) {
+        const itemsCheck = validateThreadsOnlyCompletionItems(bodyDedupItems);
+        if (itemsCheck.errorResponse) return itemsCheck.errorResponse;
+        bodyDedupItems = itemsCheck.items;
+    }
+
+    const rawPauseReason = String(body.pause_reason || body.stop_reason || bodySummaryObj.pause_reason || bodySummaryObj.stop_reason || "session_budget_reached")
+        .trim().toLowerCase().slice(0, 120) || "session_budget_reached";
+    const isSafetyBlock = rawPauseReason === "captcha_blocked" || rawPauseReason === "rate_limited" || body.blocked === true;
+    const nextPhase = isSafetyBlock ? "blocked" : "paused";
+    const effSessionSeq = existingSessSeq > 0 ? existingSessSeq : 1;
+
+    const cpPayload = {
+        session_seq: effSessionSeq,
+        attempt: parsedAttempt,
+        pause_reason: rawPauseReason,
+        blocked: isSafetyBlock,
+        note: body.checkpoint?.note || body.note || null,
+        cursor: body.checkpoint?.cursor || body.resume_cursor || null,
+        run_id: bodySummaryObj.run_id || body.run_id || existingSummary.run_id || null,
+        checkpoint_at: nowIso,
+    };
+
+    const summaryObj = normalizeProgressMetricsPatch(existingSummary, bodySummaryObj, existing, nowIso);
+    summaryObj.is_checkpoint = true;
+    summaryObj.session_seq = effSessionSeq;
+    summaryObj.pause_reason = rawPauseReason;
+    summaryObj.registry_sync_status = bodyDedupItems.length > 0 ? "pending" : "ok";
+    summaryObj.progress = {
+        stage: "syncing_checkpoint",
+        message: `Đang đồng bộ checkpoint phiên #${effSessionSeq} (${rawPauseReason})`,
+        updated_at: nowIso,
+    };
+
+    const crawledAt = summaryObj.crawled_at || summaryObj.generated_at || nowIso;
+    const runId = summaryObj.run_id || `${cleanId}_s${effSessionSeq}`;
+    summaryObj.run_id = runId;
+
+    const outboxStmts = bodyDedupItems.length > 0
+        ? await enqueueRegistryOutboxStatements(
+            env,
+            cleanId,
+            runId,
+            crawledAt,
+            bodyDedupItems,
+            { callerOwner, parsedAttempt, nowIso },
+            nowIso
+        )
+        : [];
+
+    const updateSyncingStmt = env.DB.prepare(`
+        UPDATE crawl_requests
+        SET status = 'running',
+            execution_phase = 'syncing_checkpoint',
+            pause_reason = ?,
+            checkpoint_json = ?,
+            result_summary_json = ?,
+            updated_at = ?
+        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+    `).bind(
+        rawPauseReason,
+        JSON.stringify(cpPayload),
+        JSON.stringify(summaryObj),
+        nowIso,
+        cleanId,
+        callerOwner,
+        parsedAttempt,
+        nowIso
+    );
+
+    let upd = null;
+    if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
+        const batchRes = await env.DB.batch([...outboxStmts, updateSyncingStmt]);
+        upd = batchRes[batchRes.length - 1];
+    } else {
+        for (const st of outboxStmts) await st.run();
+        upd = await updateSyncingStmt.run();
+    }
+    if (Number(upd?.meta?.changes || 0) !== 1) {
+        return jsonResponse({ ok: false, error: "Checkpoint conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
+    }
+
+    if (bodyDedupItems.length > 0) {
+        try {
+            const drainRes = await drainRegistryOutboxForRequest(env, cleanId, summaryObj, crawledAt, {
+                sessionSeq: effSessionSeq,
+                isCheckpoint: true,
+                forceRecompute: true,
+            });
+            if (drainRes?.inProgress || !drainRes?.completed) {
+                return jsonResponse({
+                    ok: false,
+                    registry_sync_in_progress: true,
+                    checkpoint_sync_pending: true,
+                    error: "Checkpoint Registry sync in progress by another worker",
+                }, 503);
+            }
+        } catch (err) {
+            return jsonResponse({
+                ok: false,
+                registry_unavailable: true,
+                checkpoint_sync_pending: true,
+                error: String(err?.message || "D1 registry unavailable"),
+            }, 503);
+        }
+    }
+
+    summaryObj.registry_sync_status = "ok";
+    summaryObj.progress = {
+        stage: nextPhase,
+        message: `Đã checkpoint phiên #${effSessionSeq} (${rawPauseReason})`,
+        updated_at: nowIso,
+    };
+
+    const releaseIso = new Date().toISOString();
+    await env.DB.prepare(`
+        UPDATE crawl_requests
+        SET status = 'queued',
+            execution_phase = ?,
+            pause_reason = ?,
+            checkpoint_json = ?,
+            result_summary_json = ?,
+            claimed_by = NULL,
+            claimed_at = NULL,
+            lease_expires_at = NULL,
+            updated_at = ?
+        WHERE id = ? AND status = 'running' AND attempts = ?
+    `).bind(
+        nextPhase,
+        rawPauseReason,
+        JSON.stringify(cpPayload),
+        JSON.stringify(summaryObj),
+        releaseIso,
+        cleanId,
+        parsedAttempt
+    ).run();
+
+    try {
+        await env.DB.prepare(`
+            UPDATE crawl_request_sessions
+            SET status = ?,
+                ended_at = ?,
+                stop_reason = ?,
+                run_id = COALESCE(?, run_id),
+                scanned_count = ?,
+                quality_qualified_count = ?,
+                new_qualified_count = ?,
+                watchlist_count = ?,
+                checkpoint_json = ?,
+                updated_at = ?
+            WHERE request_id = ? AND attempt = ?
+        `).bind(
+            nextPhase,
+            releaseIso,
+            rawPauseReason,
+            runId,
+            Number(summaryObj.counters?.scanned_count || 0),
+            Number(summaryObj.dedup_stats?.quality_qualified_count ?? summaryObj.quality_qualified_count ?? 0),
+            Number(summaryObj.dedup_stats?.new_qualified_count ?? summaryObj.new_qualified_count ?? 0),
+            Number(summaryObj.dedup_stats?.watchlist_count ?? summaryObj.watchlist_count ?? 0),
+            JSON.stringify(cpPayload),
+            releaseIso,
+            cleanId,
+            parsedAttempt
+        ).run();
+    } catch {}
+
+    const finalRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+    const enriched = enrichCrawlRequestRow(finalRow || existing, env);
+
+    return jsonResponse({
+        ok: true,
+        idempotent_replay: false,
+        request_id: cleanId,
+        status: "queued",
+        execution_phase: nextPhase,
+        pause_reason: rawPauseReason,
+        blocked: isSafetyBlock,
+        session_seq: effSessionSeq,
+        registry_sync_status: "ok",
+        dedup_stats: summaryObj.dedup_stats || createEmptyDedupStats(),
+        accumulated_quality_count: enriched.accumulated_quality_count,
+        accumulated_new_qualified_count: enriched.accumulated_new_qualified_count,
+        accumulated_watchlist_count: enriched.accumulated_watchlist_count,
+        remaining_target: enriched.remaining_target,
+        resume_prompt: enriched.resume_prompt || enriched.manual_prompt,
     });
 }
 
@@ -6957,7 +8799,8 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
                     env,
                     cleanId,
                     existingSummary,
-                    existingSummary.crawled_at || existingSummary.generated_at || null
+                    existingSummary.crawled_at || existingSummary.generated_at || null,
+                    { forceRecompute: true }
                 );
                 if (drainRes?.inProgress || !drainRes?.completed) {
                     return jsonResponse(
@@ -7047,9 +8890,70 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
     if (parsedAttempt !== Number(existing.attempts || 0)) {
         return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
     }
+    if (body.session_seq !== undefined && body.session_seq !== null && Number(existing.session_seq || 0) > 0 && Number(body.session_seq) !== Number(existing.session_seq)) {
+        return jsonResponse({ ok: false, error: "Stale crawl session_seq", conflict: true }, 409);
+    }
     if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
         await expireStaleLeases(env);
         return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+    }
+
+    const contractInfo = getEffectiveCrawlRequestContract(existing);
+    const stopReasonRaw = String(bodySummaryObj?.counters?.stop_reason || bodySummaryObj?.stop_reason || body.stop_reason || "").trim().toLowerCase();
+    if (contractInfo.isV33 && nextStatus === "completed") {
+        if (stopReasonRaw === "time_budget" || stopReasonRaw === "session_budget_reached") {
+            return jsonResponse({
+                ok: false,
+                error: "V3.3 không cho phép gọi /complete với stop_reason='time_budget' hoặc 'session_budget_reached'; hãy gọi POST /api/crawl/checkpoint để lưu phiên và tiếp tục.",
+            }, 400);
+        }
+        const terminalStopAllowed = new Set([
+            "source_exhausted",
+            "no_qualifying_posts",
+            "insufficient_data",
+            "user_cancelled",
+            "manual_stop",
+        ]).has(stopReasonRaw);
+        const targetCount = Math.max(1, Number.parseInt(existing.requested_count, 10) || 50);
+        const curAccQual = Math.max(0, Number.parseInt(existing.accumulated_quality_count, 10) || 0);
+        if (!terminalStopAllowed) {
+            const strategyCfg = getThreadsStrategyConfig(existing, { strict: false });
+            const reqCtx = {
+                requestId: cleanId,
+                sessionSeq: Number.parseInt(existing.session_seq, 10) || 1,
+                isV33: true,
+                exclusions: strategyCfg?.exclusions || {},
+                lookback_hours: strategyCfg?.lookback_hours || null,
+                crawledAt: bodySummaryObj.crawled_at || bodySummaryObj.generated_at || nowIso,
+            };
+            const existingKeys = new Set();
+            try {
+                const kRes = await env.DB.prepare("SELECT dedup_key FROM crawl_request_quality_items WHERE request_id = ?").bind(cleanId).all();
+                for (const kr of (kRes?.results || [])) {
+                    if (kr?.dedup_key) existingKeys.add(kr.dedup_key);
+                }
+            } catch {}
+            let batchNewQuality = 0;
+            for (const it of (bodyDedupItems || [])) {
+                const meta = extractRegistryItemMeta(it, bodySummaryObj.run_id || cleanId, reqCtx.crawledAt, reqCtx);
+                if (!meta.key || existingKeys.has(meta.key)) continue;
+                existingKeys.add(meta.key);
+                if (!meta.isQualityQualified) continue;
+                const prevReg = await lookupRegistryRow(env, meta.key, meta.plat, meta.cUrl, meta.postId);
+                if (!prevReg) batchNewQuality += 1;
+            }
+            const projectedTotal = curAccQual + batchNewQuality;
+            if (projectedTotal < targetCount) {
+                return jsonResponse({
+                    ok: false,
+                    conflict: false,
+                    target_reached: false,
+                    projected_quality_count: projectedTotal,
+                    requested_count: targetCount,
+                    error: `V3.3 chỉ đạt ${projectedTotal}/${targetCount} bài đạt chuẩn chất lượng; gọi POST /api/crawl/checkpoint để tiếp tục phiên mới hoặc khai báo stop_reason='source_exhausted' nếu cạn nguồn thật sự.`,
+                }, 400);
+            }
+        }
     }
 
     const summaryObj = { ...bodySummaryObj };
@@ -7060,6 +8964,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
         summaryObj.registry_sync_status = summaryObj.registry_sync_status || "ok";
     }
 
+    const curSessSeq = Number.parseInt(existing.session_seq, 10) || 1;
     const outboxStmts = (dedupSourceItems && dedupSourceItems.length > 0)
         ? await enqueueRegistryOutboxStatements(
             env,
@@ -7103,13 +9008,19 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
         return jsonResponse({ ok: false, error: "Crawl completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
     }
 
+    try {
+        await env.DB.prepare("UPDATE crawl_requests SET execution_phase = ?, pause_reason = NULL WHERE id = ?")
+            .bind(nextStatus === "failed" ? "failed" : "completed", cleanId).run();
+    } catch {}
+
     if (dedupSourceItems && dedupSourceItems.length > 0) {
         try {
             const drainRes = await drainRegistryOutboxForRequest(
                 env,
                 cleanId,
                 summaryObj,
-                summaryObj.crawled_at || summaryObj.generated_at || null
+                summaryObj.crawled_at || summaryObj.generated_at || null,
+                { sessionSeq: curSessSeq, isCheckpoint: false, forceRecompute: true }
             );
             if (drainRes?.inProgress || !drainRes?.completed) {
                 return jsonResponse(
@@ -7137,6 +9048,34 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
         }
     }
 
+    try {
+        await env.DB.prepare(`
+            UPDATE crawl_request_sessions
+            SET status = ?,
+                ended_at = ?,
+                stop_reason = COALESCE(?, stop_reason),
+                run_id = COALESCE(?, run_id),
+                scanned_count = COALESCE(?, scanned_count),
+                quality_qualified_count = COALESCE(?, quality_qualified_count),
+                new_qualified_count = COALESCE(?, new_qualified_count),
+                watchlist_count = COALESCE(?, watchlist_count),
+                updated_at = ?
+            WHERE request_id = ? AND attempt = ?
+        `).bind(
+            nextStatus,
+            nowIso,
+            stopReasonRaw || null,
+            summaryObj.run_id || null,
+            summaryObj.counters?.scanned_count ?? null,
+            summaryObj.quality_qualified_count ?? summaryObj.dedup_stats?.quality_qualified_count ?? null,
+            summaryObj.new_qualified_count ?? summaryObj.dedup_stats?.new_qualified_count ?? null,
+            summaryObj.watchlist_count ?? summaryObj.dedup_stats?.watchlist_count ?? null,
+            nowIso,
+            cleanId,
+            parsedAttempt
+        ).run();
+    } catch {}
+
     let telegramNotified = false;
     const notifyChatId = existing.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null;
     if (
@@ -7145,6 +9084,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
         env.TELEGRAM_BOT_TOKEN_VIDEO &&
         !(await isRequestBlockedByPendingRegistrySync(env, { id: cleanId, result_summary_json: JSON.stringify(summaryObj) }))
     ) {
+        const freshAfterFin = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
         const summary = summaryObj;
         const notifKey = resolveCanonicalNotificationKey({
             requestId: cleanId,
@@ -7156,7 +9096,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
             summary.run_id ? resolveCanonicalNotificationKey({ runId: summary.run_id, isCorrected: true }) : null,
         ].filter(Boolean);
         const pseudoReq = {
-            ...existing,
+            ...(freshAfterFin || existing),
             status: nextStatus,
             error_message: body.error_message || existing.error_message,
             updated_at: nowIso,
@@ -7185,6 +9125,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
         display_status_label: finalDisplay.display_status_label,
         registry_sync_status: summaryObj.registry_sync_status || "ok",
         dedup_stats: summaryObj.dedup_stats || undefined,
+        accumulated_quality_count: summaryObj.accumulated_quality_count ?? summaryObj.quality_qualified_count ?? undefined,
         telegram_notified: telegramNotified,
     });
 }
@@ -7226,8 +9167,13 @@ async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enf
         return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
     }
 
+    const contractInfo = getEffectiveCrawlRequestContract(existing);
     const maxAttempts = Math.max(1, Number(existing.max_attempts || 3));
-    const allowRetry = body?.retryable !== false && parsedAttempt < maxAttempts;
+    const curErrAttempts = Math.max(0, Number.parseInt(existing.error_attempts, 10) || 0);
+    const usedErr = contractInfo.isV33 ? (curErrAttempts + 1) : parsedAttempt;
+    const rawPauseReason = String(body?.pause_reason || body?.stop_reason || "").trim().toLowerCase() || null;
+    const isBlockedStop = rawPauseReason === "captcha_blocked" || rawPauseReason === "rate_limited";
+    const allowRetry = isBlockedStop || (body?.retryable !== false && usedErr < maxAttempts);
 
     if (!allowRetry) {
         return finalizeCrawlRequestCore(env, {
@@ -7241,6 +9187,7 @@ async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enf
     }
 
     const nowIso = new Date().toISOString();
+    const nextPhase = isBlockedStop ? "blocked" : "paused";
     const upd = await env.DB.prepare(`
         UPDATE crawl_requests
         SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, error_message = ?, updated_at = ?
@@ -7252,14 +9199,30 @@ async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enf
         return jsonResponse({ ok: false, error: "Crawl fail conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
     }
 
+    try {
+        await env.DB.prepare(`
+            UPDATE crawl_requests
+            SET execution_phase = ?, pause_reason = ?, error_attempts = COALESCE(error_attempts, 0) + 1
+            WHERE id = ?
+        `).bind(nextPhase, rawPauseReason || (contractInfo.isV33 ? "retryable_error" : null), cleanId).run();
+        await env.DB.prepare(`
+            UPDATE crawl_request_sessions
+            SET status = ?, ended_at = ?, stop_reason = ?, updated_at = ?
+            WHERE request_id = ? AND attempt = ?
+        `).bind(isBlockedStop ? "blocked" : "failed", nowIso, rawPauseReason || errMsg.slice(0, 120), nowIso, cleanId, parsedAttempt).run();
+    } catch {}
+
     return jsonResponse({
         ok: true,
         request_id: cleanId,
         status: "queued",
+        execution_phase: nextPhase,
+        pause_reason: rawPauseReason,
         retried: true,
         attempts: parsedAttempt,
+        error_attempts: contractInfo.isV33 ? usedErr : undefined,
         max_attempts: maxAttempts,
-        retries_remaining: Math.max(0, maxAttempts - parsedAttempt),
+        retries_remaining: Math.max(0, maxAttempts - usedErr),
         error_message: errMsg,
     });
 }
@@ -7277,7 +9240,7 @@ async function handleMuseCrawlApi(request, env, url) {
 
     const path = url.pathname;
 
-    // 1. GET /api/crawl/health (read-only connector & D1 verification)
+    // 1. GET /api/crawl/health (read-only connector & D1 verification + V3.3 compatibility status)
     if (path === "/api/crawl/health") {
         if (request.method !== "GET") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "GET" });
@@ -7310,21 +9273,50 @@ async function handleMuseCrawlApi(request, env, url) {
                 503
             );
         }
+        const helperCompat = await getMuseHelperCompatibility(env);
         return jsonResponse({
             ok: true,
             auth_scope: "muse_crawl",
             phase: "phase_2_active",
             worker: "app-video-scheduler",
-            version: "2.2.0",
+            version: "2.3.0",
             db_ok: true,
             registry_ready: true,
             registry_count: registryCount,
-            contract_version: "3.2",
+            contract_version: THREADS_CONTRACT_V33,
+            legacy_contract_version: THREADS_CONTRACT_V32,
+            skill_name: THREADS_SKILL_NAME,
+            skill_version: THREADS_SKILL_VERSION,
+            quality_policy_version: THREADS_QUALITY_POLICY_VERSION,
+            helper_compatibility: helperCompat,
             server_time: new Date().toISOString(),
         });
     }
 
-    // 2. POST /api/crawl/registry/check (read-only V3.2 dedup lookup reusing checkCrossRunDedupInD1)
+    // 1b. POST /api/crawl/helper/handshake (Muse Helper self-reports V3.3/Skill capability)
+    if (path === "/api/crawl/helper/handshake") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        const compat = await setMuseHelperCompatibility(env, {
+            helper_name: body.helper_name || "muse-ai",
+            helper_version: body.helper_version || null,
+            supported_contracts: body.supported_contracts || body.supported_contract_versions || [],
+            supported_skills: body.supported_skills || [],
+            skill_name: body.skill_name || THREADS_SKILL_NAME,
+            skill_version: body.skill_version || null,
+            capabilities: body.capabilities || [],
+            verified: body.verified,
+            v33_compatible: body.v33_compatible,
+            verified_by: body.verified_by || "muse_helper_handshake",
+            note: body.note || null,
+        });
+        return jsonResponse({ ok: true, helper_compatibility: compat });
+    }
+
+    // 2. POST /api/crawl/registry/check (read-only V3.2/V3.3 dedup lookup reusing checkCrossRunDedupInD1)
     if (path === "/api/crawl/registry/check") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -7351,7 +9343,7 @@ async function handleMuseCrawlApi(request, env, url) {
         }
     }
 
-    // 3. POST /api/crawl/claim (Threads only, single-flight, atomic claim, fixed server owner muse-ai, 30-min lease, optional strict request_id)
+    // 3. POST /api/crawl/claim (Threads only, single-flight, atomic claim, fixed server owner muse-ai)
     if (path === "/api/crawl/claim") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -7383,6 +9375,7 @@ async function handleMuseCrawlApi(request, env, url) {
                 singleFlight: true,
                 requestId: hasExplicitReqId ? String(body.request_id).trim() : null,
                 enforceRequestId: hasExplicitReqId,
+                allowBlockedResume: body.allow_blocked_resume === true,
             });
             const statusCode = res.statusCode || 200;
             const outBody = { ...res };
@@ -7409,7 +9402,39 @@ async function handleMuseCrawlApi(request, env, url) {
         });
     }
 
-    // 5. POST /api/crawl/complete (guarded completion + Threads items + V3.2 contract + outbox + Telegram gate)
+    // 4b. POST /api/crawl/lease/renew (guarded session lease renewal: max 2x30m, requires real progress)
+    if (path === "/api/crawl/lease/renew") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        return renewCrawlLeaseInD1(env, {
+            crawlId: body.request_id,
+            body,
+            defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            enforceFixedOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            requireThreads: true,
+        });
+    }
+
+    // 4c. POST /api/crawl/checkpoint (multi-session clean checkpoint: drains outbox -> paused/blocked)
+    if (path === "/api/crawl/checkpoint") {
+        if (request.method !== "POST") {
+            return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
+        }
+        let body = {};
+        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
+        return checkpointCrawlRequestInD1(env, {
+            crawlId: body.request_id,
+            body,
+            defaultOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            enforceFixedOwner: MUSE_DEFAULT_CLAIM_OWNER,
+            requireThreads: true,
+        });
+    }
+
+    // 5. POST /api/crawl/complete (guarded completion + Threads items + V3.2/V3.3 contract + outbox + Telegram gate)
     if (path === "/api/crawl/complete") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -7528,7 +9553,11 @@ const CRAWL_QUEUE_SIGNAL_SQL = `
           SELECT 1 FROM crawl_requests
           WHERE status = 'queued'
             AND lower(trim(platform)) = 'threads'
-            AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+            AND COALESCE(execution_phase, '') != 'blocked'
+            AND CASE
+                  WHEN COALESCE(contract_version, '') LIKE '3.3%' THEN COALESCE(error_attempts, 0) < COALESCE(max_attempts, 3)
+                  ELSE COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+                END
         ) THEN 1
         ELSE 0
       END AS queued

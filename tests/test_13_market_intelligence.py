@@ -1774,5 +1774,267 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestDataContractV33AndSafeMetricRepair(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.store = MarketIntelligenceStore(data_dir=self.tmp_dir.name)
+
+    def tearDown(self):
+        try:
+            self.store.close()
+        except Exception:
+            pass
+        self.tmp_dir.cleanup()
+
+    def test_extract_canonical_metrics_zero_vs_null_and_precedence(self):
+        from market_intelligence.normalizer import extract_canonical_metrics
+
+        m_zero = extract_canonical_metrics({
+            "metrics": {"views": 4200, "likes": 0, "comments": 6, "shares": 0, "reposts": 0},
+        })
+        self.assertEqual(m_zero["views_count"], 4200)
+        self.assertEqual(m_zero["likes_count"], 0)
+        self.assertIsNotNone(m_zero["likes_count"])
+        self.assertEqual(m_zero["comments_count"], 6)
+        self.assertEqual(m_zero["shares_count"], 0)
+        self.assertEqual(m_zero["reposts_count"], 0)
+
+        m_null = extract_canonical_metrics({"metrics": {"views": 10000, "likes": None}})
+        self.assertEqual(m_null["views_count"], 10000)
+        self.assertIsNone(m_null["likes_count"])
+
+        m_str_display = extract_canonical_metrics({"views": "513K", "metrics": {"views": 513000, "likes": 0}})
+        self.assertEqual(m_str_display["views_count"], 513000)
+        self.assertEqual(m_str_display["likes_count"], 0)
+
+    def test_assess_v33_quality_option_a_rules(self):
+        from market_intelligence.normalizer import assess_v33_quality
+
+        def _base(**over):
+            d = {
+                "platform": "threads",
+                "classification": "NEW",
+                "trend_tier": "hot",
+                "verification_status": "cross_verified_web",
+                "data_quality": "usable",
+                "views_count": 15000,
+                "likes_count": 320,
+                "comments_count": 12,
+                "shares_count": 2,
+                "reposts_count": 3,
+                "views_display": "15K",
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-28T05:00:00Z",
+                "views_evidence_url": "https://www.threads.com/@user/post/P1",
+                "summary_vi": "Review sản phẩm dùng rất ổn, người xem hỏi nhiều",
+            }
+            d.update(over)
+            return d
+
+        # High views with 0 likes (0 !== null) qualifies in Very Hot / Hot; Emerging qualifies via comments >= 5
+        self.assertTrue(assess_v33_quality(_base(trend_tier="very_hot", views_count=55000, likes_count=0))["quality_qualified"])
+        self.assertTrue(assess_v33_quality(_base(trend_tier="hot", views_count=12000, likes_count=0))["quality_qualified"])
+        q_em_ok = assess_v33_quality(_base(trend_tier="emerging", views_count=1200, likes_count=0, comments_count=6, shares_count=0, reposts_count=0))
+        self.assertTrue(q_em_ok["quality_qualified"])
+        self.assertEqual(q_em_ok["quality_tier_basis"], "emerging")
+
+        # Emerging failing secondary engagement gate becomes watchlist & excluded from quality target
+        q_em_low = assess_v33_quality(_base(trend_tier="emerging", views_count=1500, likes_count=5, comments_count=1, shares_count=0, reposts_count=0))
+        self.assertFalse(q_em_low["quality_qualified"])
+        self.assertTrue(q_em_low["is_watchlist"])
+
+        # Explicit Watchlist NEVER qualifies
+        q_wl = assess_v33_quality(_base(trend_tier="watchlist", views_count=450, likes_count=12))
+        self.assertFalse(q_wl["quality_qualified"])
+        self.assertTrue(q_wl["is_watchlist"])
+        self.assertEqual(q_wl["quality_exclusion_reason"], "watchlist_excluded")
+
+        # Traffic Content qualifies WITHOUT buyer_intent / affiliate
+        q_tf = assess_v33_quality(_base(
+            trend_tier="very_hot",
+            views_count=62000,
+            likes_count=1100,
+            traffic_content=True,
+            buyer_intent=False,
+            purchase_intent="khong_ro",
+        ))
+        self.assertTrue(q_tf["quality_qualified"])
+        self.assertTrue(q_tf["traffic_content"])
+
+        # Missing likes=None or non-Web provenance or non-NEW classification excluded
+        self.assertFalse(assess_v33_quality(_base(likes_count=None))["quality_qualified"])
+        self.assertFalse(assess_v33_quality(_base(views_source="api_guess"))["quality_qualified"])
+        self.assertFalse(assess_v33_quality(_base(classification="UPDATED_METRICS"))["quality_qualified"])
+
+    def test_safe_metric_repair_fixes_38_likes_without_mutating_raw_timestamps_or_reports(self):
+        # Simulate 38 Threads records whose raw_payload_json stored metrics.likes (23 zero, 15 positive)
+        records = []
+        for idx in range(38):
+            likes_val = 0 if idx < 23 else (10 + idx)
+            views_val = 20000 + idx * 500
+            records.append({
+                "post_id": f"R38_{idx:02d}",
+                "post_url": f"https://www.threads.com/@ruser_{idx}/post/R38_{idx:02d}",
+                "author_handle": f"@ruser_{idx}",
+                "content_summary_vi": f"Review item {idx}",
+                "classification": "NEW",
+                "trend_tier": "hot",
+                "verification_status": "cross_verified_web",
+                "views_display": f"{views_val // 1000}K",
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-28T02:00:00Z",
+                "views_evidence_url": f"https://www.threads.com/@ruser_{idx}/post/R38_{idx:02d}",
+                "metrics": {"views": views_val, "likes": likes_val, "comments": 7},
+            })
+
+        data_payload = {
+            "contract_version": "3.2",
+            "run_id": "run_repair_38",
+            "platform": "threads",
+            "crawled_at": "2026-11-28T02:05:00Z",
+            "records": records,
+        }
+        report_payload = {
+            "contract_version": "3.2",
+            "run_id": "run_repair_38",
+            "platform": "threads",
+            "generated_at": "2026-11-28T02:06:00Z",
+            "sections": {"1_screening": {"scanned_count": 38, "new_qualified_count": 38}},
+            "telegram_summary": "Keep immutable report summary",
+        }
+        self.store.ingest_raw_file("fid_r38", "threads_trend_20261128_0905.json", json.dumps(data_payload).encode("utf-8"), modified_time="2026-11-28T02:05:00Z")
+        self.store.ingest_raw_file("fid_r38_rep", "trend_report_20261128_0906.json", json.dumps(report_payload).encode("utf-8"), modified_time="2026-11-28T02:06:00Z")
+
+        # Snapshot immutable fields before corrupting cached likes_count to NULL
+        before_rows = {
+            r["post_id"]: (r["raw_payload_json"], r["first_seen_at"], r["last_seen_at"], r["crawled_at"], r["classification"], r["trend_tier"], r["verification_status"])
+            for r in self.store._conn.execute(
+                "SELECT post_id, raw_payload_json, first_seen_at, last_seen_at, crawled_at, classification, trend_tier, verification_status FROM market_items"
+            ).fetchall()
+        }
+        before_rep = self.store._conn.execute("SELECT report_json FROM market_reports WHERE run_id = 'run_repair_38'").fetchone()["report_json"]
+
+        # Corrupt cached SQLite metric columns to NULL & clear repair state to simulate upgrade on live DB
+        self.store._conn.execute("UPDATE market_items SET likes_count = NULL")
+        self.store._conn.execute("UPDATE market_item_snapshots SET likes_count = NULL")
+        self.store._conn.execute("DELETE FROM sync_state WHERE key = 'metrics_cache_repaired_v1'")
+        self.store._conn.commit()
+        self.store.close()
+
+        # Reopen triggers safe one-time cache repair automatically
+        repaired_store = MarketIntelligenceStore(data_dir=self.tmp_dir.name)
+        self.store = repaired_store
+
+        null_items = repaired_store._conn.execute("SELECT COUNT(*) AS c FROM market_items WHERE likes_count IS NULL").fetchone()["c"]
+        null_snaps = repaired_store._conn.execute("SELECT COUNT(*) AS c FROM market_item_snapshots WHERE likes_count IS NULL").fetchone()["c"]
+        zero_items = repaired_store._conn.execute("SELECT COUNT(*) AS c FROM market_items WHERE likes_count = 0").fetchone()["c"]
+        pos_items = repaired_store._conn.execute("SELECT COUNT(*) AS c FROM market_items WHERE likes_count > 0").fetchone()["c"]
+        self.assertEqual(null_items, 0)
+        self.assertEqual(null_snaps, 0)
+        self.assertEqual(zero_items, 23)
+        self.assertEqual(pos_items, 15)
+
+        after_rows = {
+            r["post_id"]: (r["raw_payload_json"], r["first_seen_at"], r["last_seen_at"], r["crawled_at"], r["classification"], r["trend_tier"], r["verification_status"])
+            for r in repaired_store._conn.execute(
+                "SELECT post_id, raw_payload_json, first_seen_at, last_seen_at, crawled_at, classification, trend_tier, verification_status FROM market_items"
+            ).fetchall()
+        }
+        self.assertEqual(after_rows, before_rows)
+        after_rep = repaired_store._conn.execute("SELECT report_json FROM market_reports WHERE run_id = 'run_repair_38'").fetchone()["report_json"]
+        self.assertEqual(after_rep, before_rep)
+
+        # Second explicit call is idempotent
+        second_stats = repaired_store.repair_cached_metrics_from_raw_payloads()
+        self.assertEqual(second_stats["items_repaired"], 0)
+
+    def test_v33_multisession_request_bundle_and_quality_filters(self):
+        def _rec(pid, likes, views, tier="hot", cls="NEW", traffic=False):
+            return {
+                "post_id": pid,
+                "post_url": f"https://www.threads.com/@m_{pid}/post/{pid}",
+                "author_handle": f"@m_{pid}",
+                "content_summary_vi": f"Bài phân tích {pid}",
+                "classification": cls,
+                "trend_tier": tier,
+                "verification_status": "cross_verified_web",
+                "views_display": f"{views // 1000}K" if views >= 1000 else str(views),
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-28T06:00:00Z",
+                "views_evidence_url": f"https://www.threads.com/@m_{pid}/post/{pid}",
+                "traffic_content": traffic,
+                "buyer_intent": False if traffic else True,
+                "metrics": {"views": views, "likes": likes, "comments": 10},
+            }
+
+        s1_payload = {
+            "contract_version": "3.3",
+            "quality_policy_version": "3.3-a-20261128",
+            "skill_version": "1.0",
+            "request_id": "crw_bundle_100",
+            "run_id": "crw_bundle_100_s1",
+            "session_seq": 1,
+            "is_checkpoint": True,
+            "platform": "threads",
+            "crawled_at": "2026-11-28T06:10:00Z",
+            "counters": {"requested_count": 3, "scanned_count": 3, "new_qualified_count": 3, "quality_qualified_count": 2, "watchlist_count": 1},
+            "records": [
+                _rec("MS_1", 400, 15000, tier="hot"),
+                _rec("MS_2", 350, 12000, tier="hot"),
+                _rec("MS_W1", 12, 450, tier="watchlist"),
+            ],
+        }
+        s2_payload = {
+            "contract_version": "3.3",
+            "quality_policy_version": "3.3-a-20261128",
+            "skill_version": "1.0",
+            "request_id": "crw_bundle_100",
+            "run_id": "crw_bundle_100_s2",
+            "session_seq": 2,
+            "is_checkpoint": False,
+            "platform": "threads",
+            "crawled_at": "2026-11-28T07:10:00Z",
+            "counters": {"requested_count": 3, "scanned_count": 2, "new_qualified_count": 1, "quality_qualified_count": 1, "traffic_content_count": 1},
+            "records": [
+                # Overlap with Session 1 seen again as DUPLICATE_HISTORY in Session 2
+                _rec("MS_1", 410, 15500, tier="hot", cls="DUPLICATE_HISTORY"),
+                # New Traffic Content post in Session 2
+                _rec("MS_TF1", 1500, 82000, tier="very_hot", traffic=True),
+            ],
+        }
+
+        self.store.ingest_raw_file("fid_ms1", "threads_trend_crw_bundle_100_s1.json", json.dumps(s1_payload).encode("utf-8"), modified_time="2026-11-28T06:11:00Z")
+        self.store.ingest_raw_file("fid_ms2", "threads_trend_crw_bundle_100_s2.json", json.dumps(s2_payload).encode("utf-8"), modified_time="2026-11-28T07:11:00Z")
+
+        # Individual session runs preserved point-in-time
+        runs = self.store.list_crawl_runs(limit=10)
+        run_map = {r["run_key"]: r for r in runs}
+        self.assertTrue(run_map["crw_bundle_100_s1"]["is_checkpoint"])
+        self.assertEqual(run_map["crw_bundle_100_s1"]["quality_qualified_count"], 2)
+        self.assertEqual(run_map["crw_bundle_100_s1"]["watchlist_count"], 1)
+        self.assertFalse(run_map["crw_bundle_100_s2"]["is_checkpoint"])
+        self.assertEqual(run_map["crw_bundle_100_s2"]["quality_qualified_count"], 1)
+
+        # Request bundle deduplicates MS_1 across s1/s2 and yields exact totals
+        bundles = self.store.list_request_bundles(limit=10)
+        b0 = next(b for b in bundles if b["request_id"] == "crw_bundle_100")
+        self.assertEqual(b0["run_key"], "req_bundle:crw_bundle_100")
+        self.assertEqual(b0["session_count"], 2)
+        self.assertEqual(b0["quality_qualified_count"], 3)
+        self.assertEqual(b0["watchlist_count"], 1)
+        self.assertEqual(b0["traffic_content_count"], 1)
+        self.assertTrue(b0["target_achieved"])
+
+        q_only = self.store.query_items(run_key="req_bundle:crw_bundle_100", quality_filter="quality_only", limit=50)
+        self.assertEqual({x["post_id"] for x in q_only["items"]}, {"MS_1", "MS_2", "MS_TF1"})
+        w_only = self.store.query_items(run_key="req_bundle:crw_bundle_100", quality_filter="watchlist_only", limit=50)
+        self.assertEqual([x["post_id"] for x in w_only["items"]], ["MS_W1"])
+        tf_only = self.store.query_items(run_key="req_bundle:crw_bundle_100", quality_filter="traffic_content", limit=50)
+        self.assertEqual([x["post_id"] for x in tf_only["items"]], ["MS_TF1"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

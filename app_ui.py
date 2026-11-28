@@ -2556,10 +2556,17 @@ HTML_TEMPLATE = """
               <template v-if="marketViewMode === 'by_run'">
                 <select v-model="selectedRunKey" @change="onSelectRunDropdown"
                   class="glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-900 text-slate-100 max-w-md font-mono">
-                  <option v-if="!crawlRunsCatalog.length" value="">Chưa có lượt crawl nào</option>
-                  <option v-for="(r, idx) in crawlRunsCatalog" :key="'opt-'+r.run_key" :value="r.run_key">
-                    {{ idx === 0 ? '[Mới nhất] ' : '' }}{{ formatIsoTime(r.crawl_time) || '—' }} • {{ r.run_id || ('Theo file: ' + (r.data_file?.file_name || r.run_key)) }} ({{ String(r.platform || '').toUpperCase() }} • {{ r.scanned_count }} quét / {{ r.new_qualified_count }} đạt)
-                  </option>
+                  <option v-if="!crawlRunsCatalog.length && !crawlRequestBundles.length" value="">Chưa có lượt crawl nào</option>
+                  <optgroup v-if="crawlRequestBundles.length" label="📦 Tổng hợp theo Request (Multi-Session V3.3)">
+                    <option v-for="b in crawlRequestBundles" :key="'opt-b-'+b.run_key" :value="b.run_key">
+                      📦 {{ b.request_id }} ({{ b.session_count }} phiên • {{ b.quality_qualified_count ?? b.new_qualified_count }}/{{ b.requested_count ?? '—' }} CL V3.3)
+                    </option>
+                  </optgroup>
+                  <optgroup label="🕒 Từng Lượt / Phiên Crawl (Point-in-time)">
+                    <option v-for="(r, idx) in crawlRunsCatalog" :key="'opt-'+r.run_key" :value="r.run_key">
+                      {{ idx === 0 ? '[Mới nhất] ' : '' }}{{ formatIsoTime(r.crawl_time) || '—' }} • {{ r.run_id || ('Theo file: ' + (r.data_file?.file_name || r.run_key)) }} ({{ String(r.platform || '').toUpperCase() }} • {{ r.scanned_count }} quét / {{ r.new_qualified_count }} đạt{{ r.is_checkpoint ? ' • CP#' + (r.session_seq || '') : '' }})
+                    </option>
+                  </optgroup>
                 </select>
                 <button v-if="crawlRunsCatalog.length && selectedRunKey !== crawlRunsCatalog[0].run_key"
                   @click="selectCrawlRun(crawlRunsCatalog[0].run_key, false)"
@@ -2578,11 +2585,17 @@ HTML_TEMPLATE = """
           <div v-if="marketViewMode === 'by_run' && activeRunMeta"
             class="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800/90 flex flex-wrap items-center justify-between gap-2 text-[11px]">
             <div class="flex flex-wrap items-center gap-2">
-              <span class="font-bold text-indigo-300 font-mono">{{ activeRunMeta.run_id || 'Không có run_id' }}</span>
+              <span class="font-bold text-indigo-300 font-mono">{{ activeRunMeta.is_request_bundle ? ('📦 Bundle ' + activeRunMeta.request_id) : (activeRunMeta.run_id || 'Không có run_id') }}</span>
+              <span v-if="activeRunMeta.is_request_bundle" class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-200 border border-indigo-500/40 text-[10px]">
+                {{ activeRunMeta.session_count }} phiên (đã khử trùng liên phiên)
+              </span>
+              <span v-else-if="activeRunMeta.is_checkpoint" class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 text-[10px]">
+                ⏸️ Checkpoint Phiên #{{ activeRunMeta.session_seq || 1 }}
+              </span>
               <span v-if="!activeRunMeta.has_run_id" class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px]">
                 Nhóm theo file nguồn (không bịa run_id)
               </span>
-              <span v-if="activeRunMeta.request_id" class="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 font-mono text-[10px]">
+              <span v-if="activeRunMeta.request_id && !activeRunMeta.is_request_bundle" class="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 font-mono text-[10px]">
                 req: {{ activeRunMeta.request_id }}
               </span>
               <span v-if="activeRunMeta.strategy_version" class="px-2 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 font-mono text-[10px]">
@@ -2590,6 +2603,9 @@ HTML_TEMPLATE = """
               </span>
               <span v-if="activeRunMeta.contract_version" class="px-2 py-0.5 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 font-mono text-[10px]">
                 Contract V{{ activeRunMeta.contract_version }}
+              </span>
+              <span v-if="activeRunMeta.quality_policy_version" class="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/35 text-emerald-200 font-mono text-[10px]">
+                Policy {{ activeRunMeta.quality_policy_version }}
               </span>
               <span v-if="activeRunMeta.crawl_mode" class="px-2 py-0.5 rounded bg-fuchsia-500/20 border border-fuchsia-500/40 text-fuchsia-200 text-[10px] font-semibold">
                 🎯 Mode: {{ activeRunMeta.crawl_mode_label || activeRunMeta.crawl_mode }}
@@ -2613,7 +2629,9 @@ HTML_TEMPLATE = """
                 Mục tiêu: <strong class="text-slate-200">{{ activeRunMeta.requested_count ?? '—' }}</strong> •
                 Quét: <strong class="text-white">{{ activeRunMeta.scanned_count }}</strong> •
                 Ứng viên: <strong class="text-cyan-300">{{ activeRunMeta.unique_candidate_count }}</strong> •
-                Đạt chuẩn mới: <strong class="text-emerald-300">{{ activeRunMeta.new_qualified_count }}</strong> •
+                Đạt chuẩn V3.3: <strong class="text-emerald-300">{{ activeRunMeta.quality_qualified_count ?? activeRunMeta.new_qualified_count }}</strong> •
+                Hợp lệ V3.2: <strong class="text-teal-300">{{ activeRunMeta.new_qualified_count }}</strong> •
+                Watchlist: <strong class="text-sky-300">{{ activeRunMeta.watchlist_count ?? 0 }}</strong> •
                 Cập nhật: <strong class="text-sky-300">{{ activeRunMeta.updated_metrics_count }}</strong> •
                 Trùng: <strong class="text-slate-300">{{ activeRunMeta.duplicate_history_count }}</strong> •
                 Chưa XM: <strong class="text-amber-300">{{ activeRunMeta.unverified_count }}</strong> •
@@ -2933,7 +2951,9 @@ HTML_TEMPLATE = """
             <div v-if="marketReport?.screening || activeRunMeta" class="text-[11px] text-slate-300 font-mono">
               Sàng lọc: Mục tiêu {{ (marketReport?.screening?.requested_count ?? activeRunMeta?.requested_count) ?? '—' }} •
               Quét {{ (marketReport?.screening?.scanned_count ?? activeRunMeta?.scanned_count) ?? '—' }} •
-              Đạt chuẩn mới {{ (marketReport?.screening?.new_qualified_count ?? marketReport?.screening?.qualified_count ?? activeRunMeta?.new_qualified_count) ?? '—' }} •
+              Chất lượng V3.3 {{ (marketReport?.screening?.quality_qualified_count ?? activeRunMeta?.quality_qualified_count ?? activeRunMeta?.new_qualified_count) ?? '—' }} •
+              Hợp lệ V3.2 {{ (marketReport?.screening?.new_qualified_count ?? marketReport?.screening?.qualified_count ?? activeRunMeta?.new_qualified_count) ?? '—' }} •
+              Watchlist {{ (marketReport?.screening?.watchlist_count ?? activeRunMeta?.watchlist_count) ?? 0 }} •
               Cập nhật {{ (marketReport?.screening?.updated_metrics_count ?? activeRunMeta?.updated_metrics_count) ?? 0 }} •
               Trùng {{ (marketReport?.screening?.duplicate_history_count ?? activeRunMeta?.duplicate_history_count) ?? 0 }} •
               Loại {{ (marketReport?.screening?.rejected_count ?? activeRunMeta?.rejected_count) ?? '—' }}
@@ -3119,10 +3139,39 @@ HTML_TEMPLATE = """
               </div>
             </details>
 
+            <!-- Muse Helper V3.3 Compatibility Gate Status -->
+            <div class="px-3 py-2 rounded-xl border text-[11px] flex flex-wrap items-center justify-between gap-2"
+              :class="helperCompatibility?.v33_compatible ? 'bg-emerald-950/35 border-emerald-500/40 text-emerald-200' : 'bg-amber-950/30 border-amber-500/35 text-amber-200'">
+              <div class="space-y-0.5">
+                <div class="font-semibold flex items-center gap-2 flex-wrap">
+                  <span v-if="helperCompatibility?.v33_compatible">✅ Muse Helper V3.3 Sẵn sàng (Target chất lượng • 60p/phiên • Checkpoint Multi-Session)</span>
+                  <span v-else>⏳ Chưa xác nhận Muse Helper V3.3 — Threads đang giữ mặc định tương thích V3.2 (30p)</span>
+                  <span v-if="helperCompatibility?.helper_version" class="px-1.5 py-0.5 rounded bg-black/30 font-mono text-[10px]">
+                    {{ helperCompatibility.helper_version }}
+                  </span>
+                </div>
+                <div class="text-[10px] opacity-85">
+                  <span v-if="helperCompatibility?.note">{{ helperCompatibility.note }}</span>
+                  <span v-else>Sau khi nâng cấp Muse Helper hỗ trợ /lease/renew và /checkpoint, hệ thống tự mở khóa mặc định V3.3.</span>
+                </div>
+              </div>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <button type="button" @click="loadHelperCompatibility(true)" :disabled="isCheckingHelper"
+                  class="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-[10px] font-semibold cursor-pointer">
+                  {{ isCheckingHelper ? 'Đang kiểm tra...' : '🔄 Kiểm tra Helper' }}
+                </button>
+                <button v-if="!helperCompatibility?.v33_compatible" type="button" @click="confirmHelperV33" :disabled="isCheckingHelper"
+                  title="Chỉ bấm sau khi đã nâng cấp & nạp custom connector mới trên Muse"
+                  class="px-2.5 py-1 rounded-lg bg-emerald-600/80 hover:bg-emerald-500 text-white text-[10px] font-bold cursor-pointer">
+                  ✅ Xác nhận Helper V3.3
+                </button>
+              </div>
+            </div>
+
             <div class="space-y-2.5">
-              <div class="flex flex-wrap xl:flex-nowrap items-center gap-2">
+              <div class="flex flex-wrap items-center gap-2">
                 <select v-model="crawlRequestForm.platform" class="w-full sm:w-40 shrink-0 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
-                  <option value="threads">Threads (Str 3.3 / V3.2)</option>
+                  <option value="threads">Threads (Str 3.3 / V3.3)</option>
                   <option value="tiktok">TikTok (V2)</option>
                   <option value="shopee">Shopee (V2)</option>
                   <option value="all">Tất cả (All)</option>
@@ -3133,23 +3182,30 @@ HTML_TEMPLATE = """
                     class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs font-mono bg-slate-800 text-slate-100">
                   <span class="text-[10px] text-slate-400 shrink-0">bài</span>
                 </div>
-                <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lease_minutes"
-                  title="Tùy chọn thời lượng lease an toàn (30 / 60 / 120 phút) cho Threads Strategy 3.3 — ưu tiên chất lượng"
-                  class="w-full sm:w-32 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                <select v-if="crawlRequestForm.platform === 'threads'" v-model="crawlRequestForm.contract_version"
+                  title="Chế độ Data Contract cho lượt crawl Threads"
+                  class="w-full sm:w-36 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="auto">{{ helperCompatibility?.v33_compatible ? '🛡️ Auto (V3.3)' : '🛡️ Auto (V3.2)' }}</option>
+                  <option value="3.3" :disabled="!helperCompatibility?.v33_compatible">⭐ V3.3 (Chất lượng)</option>
+                  <option value="3.2">📜 V3.2 (Legacy)</option>
+                </select>
+                <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lease_minutes" @change="leaseManuallyChanged = true"
+                  title="Tùy chọn thời lượng lease an toàn (30 / 60 / 120 phút) cho Threads"
+                  class="w-full sm:w-28 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
                   <option :value="30">⏱️ 30 phút</option>
                   <option :value="60">⏱️ 60 phút</option>
                   <option :value="120">⏱️ 120 phút</option>
                 </select>
                 <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lookback_hours"
                   title="Phạm vi thời gian bài viết (mặc định ưu tiên 24h, tối đa 48h)"
-                  class="w-full sm:w-44 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  class="w-full sm:w-40 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
                   <option :value="24">🕒 24h (tối đa 48h)</option>
                   <option :value="48">🕒 48h gần nhất</option>
                   <option :value="72">🕒 72h (mở rộng)</option>
                   <option :value="168">🕒 7 ngày (mở rộng)</option>
                 </select>
                 <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa tùy chỉnh thêm (ngách / sản phẩm / format)..."
-                  class="flex-1 min-w-[140px] glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
+                  class="flex-1 min-w-[200px] glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
                 <button @click="submitCrawlRequest"
                   class="shrink-0 px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold cursor-pointer whitespace-nowrap">
                   Tạo & Copy Prompt
@@ -3166,7 +3222,12 @@ HTML_TEMPLATE = """
                   </button>
                 </div>
                 <span v-if="crawlRequestForm.platform === 'threads'" class="text-indigo-300/90">
-                  🧭 Crawl Strategy 3.3 + Contract V3.2 • Lease an toàn 30/60/120 phút (mặc định 30p, không tự gia hạn).
+                  <template v-if="(crawlRequestForm.contract_version === '3.3') || (crawlRequestForm.contract_version === 'auto' && helperCompatibility?.v33_compatible)">
+                    🧭 Crawl Strategy 3.3 + Contract V3.3 (Chất lượng • Đa phiên) • Mặc định 60p/phiên + gia hạn tối đa 2×30p, tổng thời gian không giới hạn.
+                  </template>
+                  <template v-else>
+                    🧭 Crawl Strategy 3.3 + Contract V3.2 • Lease 30/60/120 phút (mặc định 30p chờ Helper V3.3).
+                  </template>
                 </span>
                 <span v-else class="text-amber-300/90">
                   ℹ️ {{ crawlRequestForm.platform.toUpperCase() }} CHƯA hỗ trợ tự động hoàn tất request đầy đủ (Completion API /api/crawl/* chỉ hỗ trợ Threads V3.2); chỉ dùng Drive Sync.
@@ -3181,7 +3242,7 @@ HTML_TEMPLATE = """
                     <span class="text-[11px] font-bold text-indigo-300 uppercase tracking-wide">🎯 Mục tiêu crawl (Crawl Mode)</span>
                     <span v-if="selectedCrawlModeObj" class="text-[10px] text-slate-400">{{ selectedCrawlModeObj.summary }}</span>
                   </div>
-                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-1.5">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
                     <button v-for="m in crawlStrategyModes" :key="'cm-' + m.id" type="button"
                       @click="m.enabled && (crawlRequestForm.crawl_mode = m.id)"
                       :disabled="!m.enabled"
@@ -3301,6 +3362,8 @@ HTML_TEMPLATE = """
                     <div class="flex items-center gap-2 flex-wrap">
                       <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
                       <span class="font-mono text-[11px] text-slate-200 font-semibold">Mục tiêu: {{ crw.requested_count || 50 }} bài</span>
+                      <span v-if="getCrawlProgress(crw).contractVersion" class="px-1.5 py-0.5 rounded bg-cyan-950/70 text-cyan-200 border border-cyan-500/40 font-mono text-[10px]">V{{ getCrawlProgress(crw).contractVersion }}</span>
+                      <span v-if="getCrawlProgress(crw).sessionSeq" class="px-1.5 py-0.5 rounded bg-slate-800 text-amber-200 border border-amber-500/30 font-mono text-[10px]" :title="'Phiên crawl #' + getCrawlProgress(crw).sessionSeq">Phiên #{{ getCrawlProgress(crw).sessionSeq }}<template v-if="getCrawlProgress(crw).leaseRenewCount > 0"> • Gia hạn {{ getCrawlProgress(crw).leaseRenewCount }}/2</template></span>
                       <span v-if="getCrawlProgress(crw).strategyVersion" class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 border border-indigo-500/30 font-mono text-[10px]" :title="'Strategy ' + getCrawlProgress(crw).strategyVersion">Str {{ String(getCrawlProgress(crw).strategyVersion).includes('3.3') ? '3.3' : getCrawlProgress(crw).strategyVersion }}</span>
                       <span v-if="crw.platform === 'threads' && (getCrawlProgress(crw).crawlModeLabel || crw.crawl_mode_label || crw.crawl_mode)" class="px-1.5 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30 text-[10px]">🎯 {{ getCrawlProgress(crw).crawlModeLabel || crw.crawl_mode_label || crw.crawl_mode }}</span>
                       <span v-if="crw.platform === 'threads' && (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length" :title="(crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).join(', ')" class="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-200 border border-violet-500/30 text-[10px]">🏷️ {{ (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).slice(0, 2).join(', ') }}{{ (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length > 2 ? ` +${(crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length - 2}` : '' }}</span>
@@ -3316,16 +3379,16 @@ HTML_TEMPLATE = """
                         class="px-1.5 py-0.5 rounded bg-rose-950/60 text-rose-300 border border-rose-500/40 text-[10px]">
                         ⚠️ {{ crw.reconcile_status === 'waiting_pair' ? 'Chờ đủ Data+Report Drive' : 'Chưa đủ ĐK đối chiếu Drive' }}
                       </span>
-                      <template v-if="getCrawlProgress(crw).hasRealMetrics && getCrawlProgress(crw).newQualified !== null">
+                      <template v-if="getCrawlProgress(crw).hasRealMetrics && getCrawlProgress(crw).primaryCount !== null">
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border"
                           :class="getCrawlProgress(crw).reached ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-amber-500/20 text-amber-300 border-amber-500/40'">
-                          {{ getCrawlProgress(crw).newQualified }}/{{ getCrawlProgress(crw).target }} • {{ getCrawlProgress(crw).reached ? 'Đủ mục tiêu' : 'Chưa đạt mục tiêu' }}
+                          {{ getCrawlProgress(crw).primaryCount }}/{{ getCrawlProgress(crw).target }} • {{ getCrawlProgress(crw).reached ? 'Đủ mục tiêu' : (getCrawlProgress(crw).remaining > 0 ? ('Còn thiếu ' + getCrawlProgress(crw).remaining) : 'Chưa đạt mục tiêu') }}
                         </span>
                       </template>
-                      <span v-if="getCrawlProgress(crw).stopReason"
-                        :title="'Mã kỹ thuật: ' + getCrawlProgress(crw).stopReason"
+                      <span v-if="getCrawlProgress(crw).stopReason || crw.pause_reason"
+                        :title="'Mã kỹ thuật: ' + (crw.pause_reason || getCrawlProgress(crw).stopReason)"
                         class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-200 border border-slate-700 text-[10px]">
-                        {{ formatStopReasonLabel(getCrawlProgress(crw).stopReason) }}
+                        {{ formatStopReasonLabel(crw.pause_reason || getCrawlProgress(crw).stopReason) }}
                       </span>
                       <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
                     </div>
@@ -3341,16 +3404,24 @@ HTML_TEMPLATE = """
                       ❗ {{ crw.error_message }}
                     </div>
                   </div>
-                  <div class="flex items-center gap-1.5 shrink-0">
+                  <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
                     <button v-if="canOpenCrawlResultRun(crw)" @click="openCrawlResultRun(crw)"
                       class="px-2.5 py-1 rounded-lg bg-emerald-600/25 hover:bg-emerald-600/45 text-emerald-200 border border-emerald-500/40 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
                       🔍 Xem kết quả crawl
+                    </button>
+                    <button v-if="['paused', 'blocked'].includes(String(crw.status || '').toLowerCase()) || ['paused', 'blocked'].includes(getCrawlDisplayState(crw).code)" @click="resumeCrawlRequest(crw)"
+                      class="px-2.5 py-1 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 text-[10px] font-bold cursor-pointer whitespace-nowrap">
+                      ▶️ Tiếp tục crawl (Resume Prompt)
+                    </button>
+                    <button v-if="crw.status === 'running'" @click="pauseCrawlRequest(crw.id)"
+                      class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
+                      ⏸️ Tạm dừng
                     </button>
                     <button v-if="crw.status === 'queued'" @click="copyExistingRequestPrompt(crw)"
                       class="px-2 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
                       Copy lại Prompt
                     </button>
-                    <button v-if="crw.status === 'queued'" @click="cancelCrawlRequest(crw.id)"
+                    <button v-if="crw.status === 'queued' || crw.status === 'paused' || crw.status === 'blocked'" @click="cancelCrawlRequest(crw.id)"
                       class="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/30 text-[10px] font-semibold cursor-pointer">
                       Hủy chờ
                     </button>
@@ -3359,18 +3430,21 @@ HTML_TEMPLATE = """
 
                 <!-- Tiến độ thực tế từ backend (khi có số liệu) -->
                 <div v-if="getCrawlProgress(crw).hasRealMetrics" class="space-y-1 pt-1 border-t border-slate-800/80">
-                  <div v-if="getCrawlProgress(crw).newQualified !== null" class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div v-if="getCrawlProgress(crw).primaryCount !== null" class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
                     <div class="h-full transition-all duration-300 rounded-full"
                       :class="getCrawlProgress(crw).reached ? 'bg-emerald-500' : 'bg-amber-500'"
-                      :style="{ width: Math.min(100, Math.round((getCrawlProgress(crw).newQualified / Math.max(1, getCrawlProgress(crw).target)) * 100)) + '%' }"></div>
+                      :style="{ width: Math.min(100, Math.round((getCrawlProgress(crw).primaryCount / Math.max(1, getCrawlProgress(crw).target)) * 100)) + '%' }"></div>
                   </div>
                   <div class="flex flex-wrap gap-1.5 text-[10px] font-mono">
                     <span v-if="getCrawlProgress(crw).scanned !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200">Quét: {{ getCrawlProgress(crw).scanned }}</span>
                     <span v-if="getCrawlProgress(crw).uniqueCandidates !== null" class="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700">Ứng viên: {{ getCrawlProgress(crw).uniqueCandidates }}</span>
+                    <span v-if="getCrawlProgress(crw).qualityQualified !== null" class="px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-200 border border-emerald-400/50 font-bold" title="Đạt chuẩn chất lượng server-side V3.3 (tính vào mục tiêu)">Chất lượng V3.3: {{ getCrawlProgress(crw).qualityQualified }}</span>
+                    <span v-if="getCrawlProgress(crw).newQualified !== null" class="px-1.5 py-0.5 rounded bg-teal-950/60 text-teal-300 border border-teal-500/30" title="Tổng bài mới hợp lệ V3.2 (gồm cả Watchlist)">Hợp lệ V3.2: {{ getCrawlProgress(crw).newQualified }}</span>
+                    <span v-if="getCrawlProgress(crw).watchlistCount !== null && getCrawlProgress(crw).watchlistCount > 0" class="px-1.5 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-500/30" title="Watchlist không tính vào mục tiêu V3.3">Watchlist: {{ getCrawlProgress(crw).watchlistCount }}</span>
+                    <span v-if="getCrawlProgress(crw).trafficContentCount !== null && getCrawlProgress(crw).trafficContentCount > 0" class="px-1.5 py-0.5 rounded bg-fuchsia-950/60 text-fuchsia-300 border border-fuchsia-500/30">Traffic: {{ getCrawlProgress(crw).trafficContentCount }}</span>
                     <span v-if="getCrawlProgress(crw).newCount !== null && getCrawlProgress(crw).newCount !== getCrawlProgress(crw).newQualified"
                       title="Tổng ứng viên lần đầu xuất hiện trong Registry (gồm bài đạt chuẩn, chưa xác minh và bị loại)"
-                      class="px-1.5 py-0.5 rounded bg-teal-950/50 text-teal-300 border border-teal-500/30">Ứng viên mới phát hiện: {{ getCrawlProgress(crw).newCount }}</span>
-                    <span v-if="getCrawlProgress(crw).newQualified !== null" class="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-500/30">Mới đạt chuẩn: {{ getCrawlProgress(crw).newQualified }}</span>
+                      class="px-1.5 py-0.5 rounded bg-cyan-950/40 text-cyan-300 border border-cyan-500/30">Ứng viên mới phát hiện: {{ getCrawlProgress(crw).newCount }}</span>
                     <span v-if="getCrawlProgress(crw).duplicate !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">Trùng: {{ getCrawlProgress(crw).duplicate }}</span>
                     <span v-if="getCrawlProgress(crw).updated !== null" class="px-1.5 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-500/30">Cập nhật tương tác: {{ getCrawlProgress(crw).updated }}</span>
                     <span v-if="getCrawlProgress(crw).unverified !== null && getCrawlProgress(crw).unverified > 0" class="px-1.5 py-0.5 rounded bg-orange-950/50 text-orange-300 border border-orange-500/30">Chưa xác minh: {{ getCrawlProgress(crw).unverified }}</span>
@@ -3440,21 +3514,36 @@ HTML_TEMPLATE = """
             class="px-3 py-1 rounded-lg cursor-pointer transition">👁️ Thiếu views ({{ activePlatformActivity.missing_views ?? 0 }})</button>
         </div>
 
-        <!-- V3.3 Signal Filters: Natural Viral & Buyer Intent -->
+        <!-- V3.3 Signal & Quality Filters: Natural Viral, Buyer Intent, Quality V3.3, Traffic Content -->
         <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
           <div class="flex flex-wrap items-center gap-1.5">
-            <button @click="marketFilters.special_filter = 'all'; loadMarketItems(0);"
-              :class="marketFilters.special_filter === 'all' ? 'bg-slate-200 text-slate-900 font-bold' : 'bg-slate-900 text-slate-300 border border-slate-800'"
-              class="px-2.5 py-1 rounded-lg cursor-pointer transition">Mọi tín hiệu V3.3</button>
-            <button @click="marketFilters.special_filter = 'natural_viral'; loadMarketItems(0);"
+            <button @click="marketFilters.special_filter = 'all'; marketFilters.quality_filter = 'all'; loadMarketItems(0);"
+              :class="(marketFilters.special_filter === 'all' && marketFilters.quality_filter === 'all') ? 'bg-slate-200 text-slate-900 font-bold' : 'bg-slate-900 text-slate-300 border border-slate-800'"
+              class="px-2.5 py-1 rounded-lg cursor-pointer transition">Mọi tín hiệu & chất lượng</button>
+            <button @click="marketFilters.quality_filter = (marketFilters.quality_filter === 'quality_only' ? 'all' : 'quality_only'); loadMarketItems(0);"
+              :class="marketFilters.quality_filter === 'quality_only' ? 'bg-emerald-500 text-slate-950 font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
+              class="px-2.5 py-1 rounded-lg cursor-pointer transition">
+              ✅ Đạt chuẩn V3.3<span v-if="activeRunMeta?.quality_qualified_count !== undefined"> ({{ activeRunMeta.quality_qualified_count }})</span>
+            </button>
+            <button @click="marketFilters.quality_filter = (marketFilters.quality_filter === 'watchlist_only' ? 'all' : 'watchlist_only'); loadMarketItems(0);"
+              :class="marketFilters.quality_filter === 'watchlist_only' ? 'bg-sky-500 text-slate-950 font-bold shadow' : 'bg-sky-950/40 text-sky-200 border border-sky-500/30'"
+              class="px-2.5 py-1 rounded-lg cursor-pointer transition">
+              👀 Watchlist (loại khỏi target)<span v-if="activeRunMeta?.watchlist_count !== undefined"> ({{ activeRunMeta.watchlist_count }})</span>
+            </button>
+            <button @click="marketFilters.special_filter = (marketFilters.special_filter === 'natural_viral' ? 'all' : 'natural_viral'); loadMarketItems(0);"
               :class="marketFilters.special_filter === 'natural_viral' ? 'bg-amber-500 text-slate-950 font-bold shadow' : 'bg-amber-950/40 text-amber-200 border border-amber-500/30'"
               class="px-2.5 py-1 rounded-lg cursor-pointer transition">
               ⚡ Natural Viral<span v-if="activeRunMeta?.special_counts?.natural_viral !== undefined"> ({{ activeRunMeta.special_counts.natural_viral }})</span>
             </button>
-            <button @click="marketFilters.special_filter = 'buyer_intent'; loadMarketItems(0);"
-              :class="marketFilters.special_filter === 'buyer_intent' ? 'bg-emerald-500 text-slate-950 font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
+            <button @click="marketFilters.special_filter = (marketFilters.special_filter === 'buyer_intent' ? 'all' : 'buyer_intent'); loadMarketItems(0);"
+              :class="marketFilters.special_filter === 'buyer_intent' ? 'bg-teal-500 text-slate-950 font-bold shadow' : 'bg-teal-950/40 text-teal-200 border border-teal-500/30'"
               class="px-2.5 py-1 rounded-lg cursor-pointer transition">
               🛒 Buyer Intent<span v-if="activeRunMeta?.special_counts?.buyer_intent !== undefined"> ({{ activeRunMeta.special_counts.buyer_intent }})</span>
+            </button>
+            <button @click="marketFilters.quality_filter = (marketFilters.quality_filter === 'traffic_content' ? 'all' : 'traffic_content'); loadMarketItems(0);"
+              :class="marketFilters.quality_filter === 'traffic_content' ? 'bg-fuchsia-500 text-slate-950 font-bold shadow' : 'bg-fuchsia-950/40 text-fuchsia-200 border border-fuchsia-500/30'"
+              class="px-2.5 py-1 rounded-lg cursor-pointer transition">
+              🚀 Traffic Content<span v-if="activeRunMeta?.traffic_content_count !== undefined"> ({{ activeRunMeta.traffic_content_count }})</span>
             </button>
           </div>
           <div v-if="marketViewMode === 'by_run'" class="text-[11px] font-mono text-slate-400">
@@ -3563,11 +3652,20 @@ HTML_TEMPLATE = """
                           • 👥 {{ formatCompactMetric(item.author_followers) }} flw
                         </span>
                       </div>
-                      <div v-if="item.natural_viral === true || item.buyer_intent === true" class="flex flex-wrap gap-1 pt-0.5">
+                      <div v-if="item.natural_viral === true || item.buyer_intent === true || item.traffic_content === true || item.quality_qualified !== undefined" class="flex flex-wrap gap-1 pt-0.5">
+                        <span v-if="item.quality_qualified === true" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-500/40 text-[10px] font-bold" :title="item.quality_tier_basis ? ('Đạt chuẩn V3.3 theo ' + item.quality_tier_basis) : 'Đạt chuẩn chất lượng V3.3'">
+                          ✅ Chuẩn V3.3
+                        </span>
+                        <span v-else-if="item.is_watchlist" class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-[10px]" :title="item.quality_exclusion_reason || 'Watchlist không tính mục tiêu V3.3'">
+                          👀 Watchlist
+                        </span>
+                        <span v-if="item.traffic_content === true" class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-200 border border-fuchsia-500/40 text-[10px] font-bold">
+                          🚀 Traffic Content
+                        </span>
                         <span v-if="item.natural_viral === true" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold">
                           ⚡ Natural Viral
                         </span>
-                        <span v-if="item.buyer_intent === true" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold">
+                        <span v-if="item.buyer_intent === true" class="px-1.5 py-0.5 rounded bg-teal-500/20 text-teal-300 border border-teal-500/40 text-[10px] font-bold">
                           🛒 Buyer Intent
                         </span>
                       </div>
@@ -4425,7 +4523,7 @@ HTML_TEMPLATE = """
           marketOffset: 0,
           marketLimit: 25,
           marketConfigInterval: 300,
-          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', trend_tier: 'all', trend_group: 'all', verification_status: 'all', activity_filter: 'all', special_filter: 'all', sort_by: 'recent', search: '' },
+          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', trend_tier: 'all', trend_group: 'all', verification_status: 'all', activity_filter: 'all', special_filter: 'all', quality_filter: 'all', sort_by: 'recent', search: '' },
           marketSubTab: 'overview',
           shopeeAffiliateOnly: false,
           selectedMarketDetail: null,
@@ -4435,15 +4533,20 @@ HTML_TEMPLATE = """
             platform: 'threads',
             requested_count: 50,
             lease_minutes: 30,
+            contract_version: 'auto',
             keywords: '',
             crawl_mode: 'balanced',
             topics: [],
             lookback_hours: 24,
             exclusions: { exclude_celebrity: true, exclude_fandom: true, exclude_pure_ads: true, vn_only: true }
           },
+          leaseManuallyChanged: false,
+          helperCompatibility: null,
+          isCheckingHelper: false,
           crawlStrategyModes: (typeof window !== 'undefined' && window.__THREADS_CRAWL_CONFIG__ && Array.isArray(window.__THREADS_CRAWL_CONFIG__.modes)) ? window.__THREADS_CRAWL_CONFIG__.modes : [],
           crawlTopicPresets: (typeof window !== 'undefined' && window.__THREADS_CRAWL_CONFIG__ && Array.isArray(window.__THREADS_CRAWL_CONFIG__.topics)) ? window.__THREADS_CRAWL_CONFIG__.topics : [],
           crawlRequests: [],
+          crawlRequestBundles: [],
           activePromptInfo: null,
           museWebUrl: 'https://muse.ai/',
           lastMarketSyncSignature: '',
@@ -4510,7 +4613,7 @@ HTML_TEMPLATE = """
         activeRunMeta() {
           if (this.marketViewMode !== 'by_run') return null;
           if (this.selectedRunKey) {
-            const hit = (this.crawlRunsCatalog || []).find(r => r.run_key === this.selectedRunKey);
+            const hit = [...(this.crawlRunsCatalog || []), ...(this.crawlRequestBundles || [])].find(r => r.run_key === this.selectedRunKey);
             if (hit) return hit;
           }
           return this.marketStatus?.stats?.run_summary || null;
@@ -5535,6 +5638,7 @@ HTML_TEMPLATE = """
             const prevLatest = this.crawlRunsCatalog[0]?.run_key || '';
             const runs = data.runs || [];
             this.crawlRunsCatalog = runs;
+            this.crawlRequestBundles = data.bundles || [];
             const newLatest = runs[0]?.run_key || '';
             if (!this.selectedRunKey && newLatest) {
               this.selectedRunKey = newLatest;
@@ -5577,6 +5681,7 @@ HTML_TEMPLATE = """
           this.runTab = tab;
           if (!opts.keepTier) this.marketFilters.trend_tier = 'all';
           if (!opts.keepSpecial) this.marketFilters.special_filter = 'all';
+          if (!opts.keepQuality) this.marketFilters.quality_filter = 'all';
           if (['new_qualified', 'updated', 'duplicate_history', 'unverified', 'rejected'].includes(tab)) {
             this._applyRunTabFilters(tab);
             await this.loadMarketItems(0);
@@ -5603,6 +5708,7 @@ HTML_TEMPLATE = """
           this.runPlatformOverride = '';
           this.marketFilters.trend_tier = 'all';
           this.marketFilters.special_filter = 'all';
+          this.marketFilters.quality_filter = 'all';
           if (this.isRunItemTab) {
             this._applyRunTabFilters(this.runTab);
           }
@@ -5623,6 +5729,7 @@ HTML_TEMPLATE = """
           this.runPlatformOverride = '';
           this.marketFilters.trend_tier = 'all';
           this.marketFilters.special_filter = 'all';
+          this.marketFilters.quality_filter = 'all';
           if (mode === 'by_run') {
             if (!this.selectedRunKey && this.crawlRunsCatalog.length) {
               this.selectedRunKey = this.crawlRunsCatalog[0].run_key;
@@ -5767,6 +5874,8 @@ HTML_TEMPLATE = """
           if (!clean) return '';
           const map = {
             time_budget: 'Hết ngân sách thời gian',
+            session_budget_reached: 'Hết ngân sách phiên — đã lưu checkpoint',
+            max_extensions_reached: 'Hết 2 lần gia hạn — đã lưu checkpoint',
             target_achieved: 'Đạt mục tiêu',
             source_exhausted: 'Cạn nguồn phù hợp',
             exhausted: 'Cạn nguồn phù hợp',
@@ -5776,6 +5885,9 @@ HTML_TEMPLATE = """
             platform_limit: 'Giới hạn nền tảng',
             captcha_blocked: 'Gặp CAPTCHA / xác minh',
             captcha: 'Gặp CAPTCHA / xác minh',
+            manual_pause: 'Người dùng tạm dừng',
+            lease_expired: 'Hết hạn lease — chờ resume',
+            helper_incompatible: 'Muse Helper chưa hỗ trợ V3.3',
           };
           return map[clean] || String(reason);
         },
@@ -5795,6 +5907,13 @@ HTML_TEMPLATE = """
           const targetRunId = prog.runId || null;
           const reqId = String(crw.id || '').trim();
           const repFileId = String(crw.report_file_id || prog.reportFileId || '').trim();
+          const bundles = Array.isArray(this.crawlRequestBundles) ? this.crawlRequestBundles : [];
+          if (reqId) {
+            const bHit = bundles.find(b => String(b.request_id || '').trim() === reqId);
+            if (bHit && (bHit.session_count > 1 || String(crw.contract_version || '').startsWith('3.3') || ['paused', 'blocked'].includes(String(crw.status || '').toLowerCase()))) {
+              return bHit.run_key;
+            }
+          }
           const catalog = Array.isArray(this.crawlRunsCatalog) ? this.crawlRunsCatalog : [];
           for (const r of catalog) {
             if (targetRunId && r.run_id && String(r.run_id).trim() === targetRunId) return r.run_key;
@@ -5811,9 +5930,11 @@ HTML_TEMPLATE = """
           return null;
         },
         canOpenCrawlResultRun(crw) {
-          if (!crw || String(crw.status || '').toLowerCase() !== 'completed') return false;
+          if (!crw) return false;
+          const st = String(crw.status || '').toLowerCase();
+          if (!['completed', 'paused', 'blocked'].includes(st)) return false;
           const prog = this.getCrawlProgress(crw);
-          return Boolean(prog.runId || this.findMatchingRunKeyForRequest(crw));
+          return Boolean(prog.runId || prog.qualityQualified > 0 || prog.newQualified > 0 || this.findMatchingRunKeyForRequest(crw));
         },
         async openCrawlResultRun(crw) {
           if (!crw) return;
@@ -5844,13 +5965,15 @@ HTML_TEMPLATE = """
         getCrawlDisplayState(crw) {
           const pm = (crw?.progress_metrics && typeof crw.progress_metrics === 'object') ? crw.progress_metrics : {};
           const raw = String(crw?.status || 'queued').toLowerCase();
-          let code = crw?.display_status || pm.display_status || '';
+          let code = crw?.display_status || pm.display_status || crw?.execution_phase || '';
           let label = crw?.display_status_label || pm.display_status_label || '';
           if (!code) {
             let sum = {};
             try { sum = typeof crw?.result_summary_json === 'string' ? JSON.parse(crw.result_summary_json || '{}') : (crw?.result_summary || {}); } catch (e) {}
             const regSt = String(sum?.registry_sync_status || '').toLowerCase();
             if (raw === 'queued') code = 'waiting_prompt';
+            else if (raw === 'paused') code = 'paused';
+            else if (raw === 'blocked') code = 'blocked';
             else if (raw === 'running') code = (sum?.progress?.stage === 'syncing' ? 'syncing' : 'crawling');
             else if (raw === 'completed') code = (regSt === 'pending' || regSt === 'error' ? 'syncing' : 'completed');
             else code = raw;
@@ -5868,15 +5991,135 @@ HTML_TEMPLATE = """
             waiting_prompt: { label: label || 'Chờ gửi prompt', badgeClass: 'bg-amber-500/20 text-amber-300' },
             crawling: { label: label || 'Đang crawl', badgeClass: 'bg-cyan-500/20 text-cyan-300' },
             syncing: { label: label || 'Đang đồng bộ', badgeClass: 'bg-indigo-500/25 text-indigo-300' },
+            syncing_checkpoint: { label: label || 'Đang lưu checkpoint', badgeClass: 'bg-indigo-500/25 text-indigo-300' },
+            paused: { label: label || 'Tạm dừng — Chờ resume', badgeClass: 'bg-amber-500/25 text-amber-200 border border-amber-500/40' },
+            blocked: { label: label || 'Bị chặn nguồn (CAPTCHA / Rate Limit)', badgeClass: 'bg-rose-500/25 text-rose-200 border border-rose-500/40' },
             completed: completedMeta,
             failed: { label: label || 'Lỗi', badgeClass: 'bg-rose-500/20 text-rose-300' },
             cancelled: { label: label || 'Đã hủy', badgeClass: 'bg-slate-800 text-slate-400' },
           };
           return { code, ...(map[code] || { label: label || code || raw, badgeClass: 'bg-slate-800 text-slate-300' }) };
         },
+        async loadHelperCompatibility(manual = false) {
+          this.isCheckingHelper = true;
+          try {
+            const res = await fetch('/api/remote/helper_compatibility');
+            const data = await res.json();
+            if (data.helper_compatibility) {
+              this.helperCompatibility = data.helper_compatibility;
+              if (data.crawl_config && Array.isArray(data.crawl_config.modes)) {
+                this.crawlStrategyModes = data.crawl_config.modes;
+              }
+              if (data.helper_compatibility.v33_compatible && !this.leaseManuallyChanged && Number(this.crawlRequestForm.lease_minutes) === 30) {
+                this.crawlRequestForm.lease_minutes = Number(data.helper_compatibility.default_lease_minutes) || 60;
+              }
+              if (manual) {
+                this.notify(
+                  data.helper_compatibility.v33_compatible
+                    ? '✅ Muse Helper V3.3 đã xác nhận sẵn sàng (mặc định 60p/phiên, Target chất lượng).'
+                    : 'ℹ️ Muse Helper chưa báo cáo sẵn sàng V3.3 — giữ mặc định tương thích V3.2.',
+                  data.helper_compatibility.v33_compatible ? 'success' : 'info'
+                );
+              }
+            }
+          } catch (e) {
+            if (manual) this.notify('Không kiểm tra được trạng thái Muse Helper: ' + e, 'warning');
+          } finally {
+            this.isCheckingHelper = false;
+          }
+        },
+        async confirmHelperV33() {
+          this.isCheckingHelper = true;
+          try {
+            const res = await fetch('/api/remote/helper_compatibility', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                v33_compatible: true,
+                contract_version: '3.3',
+                skill_version: '1.0',
+                source: 'app_video_manual_confirm',
+                note: 'Đã xác nhận từ Crawl Center (App_Video)',
+              }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+              this.helperCompatibility = data.helper_compatibility || { v33_compatible: true };
+              if (!this.leaseManuallyChanged) this.crawlRequestForm.lease_minutes = 60;
+              this.notify('✅ Đã bật Data Contract V3.3 cho Threads (mặc định 60p/phiên, đa phiên).', 'success');
+            } else {
+              this.notify(data.error || 'Không cập nhật được trạng thái Helper V3.3.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi xác nhận Helper V3.3: ' + e, 'error');
+          } finally {
+            this.isCheckingHelper = false;
+          }
+        },
+        async pauseCrawlRequest(crawlId) {
+          if (!crawlId) return;
+          try {
+            const res = await fetch('/api/remote/crawl_requests/' + encodeURIComponent(crawlId) + '/pause', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reason: 'manual_pause' }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+              this.notify('⏸️ Đã tạm dừng request ' + crawlId + ' — bảo toàn tiến độ để resume phiên mới.', 'success');
+              await this.loadCrawlRequests();
+            } else {
+              this.notify(data.error || 'Không thể tạm dừng request.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi tạm dừng request: ' + e, 'error');
+          }
+        },
+        async resumeCrawlRequest(crw) {
+          if (!crw || !crw.id) return;
+          try {
+            const res = await fetch('/api/remote/crawl_requests/' + encodeURIComponent(crw.id) + '/resume', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            const data = await res.json();
+            if (data.ok) {
+              const reqObj = data.request || crw;
+              const promptText = data.resume_prompt || data.manual_prompt || reqObj.resume_prompt || reqObj.manual_prompt || '';
+              if (data.muse_web_url) this.museWebUrl = data.muse_web_url;
+              if (promptText) {
+                this.activePromptInfo = {
+                  request_id: reqObj.id,
+                  platform: reqObj.platform,
+                  strategy_version: reqObj.strategy_version || '3.3 (sửa đổi 28/11/2026)',
+                  contract_version: reqObj.contract_version || '3.3',
+                  crawl_mode: reqObj.crawl_mode || null,
+                  crawl_mode_label: reqObj.crawl_mode_label || null,
+                  topics: reqObj.topics || [],
+                  topic_labels: reqObj.topic_labels || [],
+                  lookback_hours: reqObj.lookback_hours || null,
+                  lease_minutes: reqObj.lease_minutes || 60,
+                  manual_prompt: promptText,
+                };
+                await this.copyTextToClipboard(promptText, `▶️ Đã mở lại ${reqObj.id} & copy Resume Prompt gửi Muse!`);
+              } else {
+                this.notify(`▶️ Đã đưa ${reqObj.id} về hàng đợi tiếp tục crawl.`, 'success');
+              }
+              await this.loadCrawlRequests();
+            } else {
+              this.notify(data.error || 'Không thể resume request.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi resume request: ' + e, 'error');
+          }
+        },
         async loadCrawlRequests() {
           try {
-            const res = await fetch('/api/remote/crawl_requests');
+            const [res] = await Promise.all([
+              fetch('/api/remote/crawl_requests'),
+              this.loadHelperCompatibility(false),
+            ]);
             const data = await res.json();
             if (data.ok) {
               this.crawlRequests = data.items || [];
@@ -5936,13 +6179,23 @@ HTML_TEMPLATE = """
           const newCount = pickInt(pm.new_count, summary.new_count, s1.new_count);
           const explicitQualified = pickInt(pm.new_qualified_count, summary.new_qualified_count, pm.qualified_count, summary.qualified_count, summary.qualified_posts, s1.new_qualified_count, s1.qualified_count);
           const newQualified = explicitQualified !== null ? explicitQualified : (newCount === null ? pickInt(summary.record_count) : newCount);
+          const qualityQualified = pickInt(pm.quality_qualified_count, crw?.accumulated_quality_count, crw?.actual_quality_count, summary.quality_qualified_count, summary.total_quality_qualified, s1.quality_qualified_count);
+          const watchlistCount = pickInt(pm.watchlist_count, crw?.accumulated_watchlist_count, summary.watchlist_count, s1.watchlist_count);
+          const trafficContentCount = pickInt(pm.traffic_content_count, summary.traffic_content_count, s1.traffic_content_count);
+          const contractVersion = String(crw?.contract_version || pm.contract_version || summary.contract_version || '').trim() || null;
+          const targetMetric = String(crw?.target_metric || pm.target_metric || summary.target_metric || (contractVersion && contractVersion.startsWith('3.3') ? 'quality_qualified_count' : 'new_qualified_count')).trim();
+          const sessionSeq = pickInt(crw?.session_seq, pm.session_seq, summary.session_seq);
+          const leaseRenewCount = pickInt(crw?.lease_renew_count, pm.lease_renew_count, summary.lease_renew_count) || 0;
+          const isV33 = Boolean((contractVersion && contractVersion.startsWith('3.3')) || targetMetric === 'quality_qualified_count');
+          const primaryCount = isV33 ? (qualityQualified !== null ? qualityQualified : newQualified) : newQualified;
+          const remaining = primaryCount !== null ? Math.max(0, target - primaryCount) : target;
           const duplicate = pickInt(pm.duplicate_history_count, pm.duplicate_count, summary.duplicate_history_count, summary.duplicate_count, summary.historical_duplicates, s1.duplicate_history_count, s1.duplicate_count);
           const updated = pickInt(pm.updated_metrics_count, pm.updated_count, summary.updated_metrics_count, summary.updated_count, summary.engagement_updated_count, summary.growth_count, s1.updated_metrics_count);
           const unverified = pickInt(pm.unverified_count, summary.unverified_count, s1.unverified_count);
           const missingViews = pickInt(pm.missing_views_count, summary.missing_views_count, summary.views_missing_count, s1.missing_views_count);
           const rejected = pickInt(pm.rejected_count, summary.rejected_count, summary.rejected_posts, s1.rejected_count);
           const similarContent = pickInt(pm.similar_content_count, summary.similar_content_count, s1.similar_content_count);
-          const stopReason = pm.stop_reason || summary.stop_reason || s1.stop_reason || null;
+          const stopReason = pm.stop_reason || crw?.pause_reason || summary.stop_reason || s1.stop_reason || null;
           const runId = String(summary.run_id || summary.drive_reconcile?.run_id || s1.run_id || crw?.run_id || '').trim() || null;
           const reportFileId = String(summary.report_file_id || summary.drive_reconcile?.report_file_id || crw?.report_file_id || '').trim() || null;
           const strategyVersion = crw?.strategy_version || summary.strategy_version || null;
@@ -5970,12 +6223,13 @@ HTML_TEMPLATE = """
           }
           const actualDurationLabel = this.formatActualProcessingDuration(actualDurationSec);
 
-          const hasRealMetrics = [scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified, missingViews, rejected].some(v => v !== null);
+          const hasRealMetrics = [scanned, uniqueCandidates, newCount, newQualified, qualityQualified, watchlistCount, duplicate, updated, unverified, missingViews, rejected].some(v => v !== null);
           const explicitTargetAchieved = (typeof pm.target_achieved === 'boolean') ? pm.target_achieved : ((typeof summary.target_achieved === 'boolean') ? summary.target_achieved : null);
-          const reached = explicitTargetAchieved !== null ? explicitTargetAchieved : (newQualified !== null ? newQualified >= target : null);
+          const reached = explicitTargetAchieved !== null ? explicitTargetAchieved : (primaryCount !== null ? primaryCount >= target : null);
           return {
-            target, scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified,
-            missingViews, rejected, similarContent, stopReason, runId, reportFileId,
+            target, scanned, uniqueCandidates, newCount, newQualified, qualityQualified, watchlistCount, trafficContentCount,
+            primaryCount, remaining, contractVersion, targetMetric, sessionSeq, leaseRenewCount,
+            duplicate, updated, unverified, missingViews, rejected, similarContent, stopReason, runId, reportFileId,
             strategyVersion, crawlModeLabel, topics,
             actualDurationSec, actualDurationLabel, actualDurationTitle,
             hasRealMetrics, reached,
@@ -6092,6 +6346,7 @@ HTML_TEMPLATE = """
               verification_status: this.marketFilters.verification_status || 'all',
               activity_filter: this.marketFilters.activity_filter || 'all',
               special_filter: this.marketFilters.special_filter || 'all',
+              quality_filter: this.marketFilters.quality_filter || 'all',
               run_key: this.activeRunKey || '',
               sort_by: this.marketFilters.sort_by || 'recent',
               affiliate_only: (effPlatform === 'shopee' && this.shopeeAffiliateOnly) ? '1' : '0',
@@ -6231,7 +6486,11 @@ HTML_TEMPLATE = """
               const selTopics = Array.isArray(this.crawlRequestForm.topics) ? [...this.crawlRequestForm.topics] : [];
               const selLookback = [24, 48, 72, 168].includes(Number(this.crawlRequestForm.lookback_hours)) ? Number(this.crawlRequestForm.lookback_hours) : 24;
               const excl = this.crawlRequestForm.exclusions || { exclude_celebrity: true, exclude_fandom: true, exclude_pure_ads: true, vn_only: true };
+              const selContract = String(this.crawlRequestForm.contract_version || 'auto').trim().toLowerCase();
               payloadBody.lease_minutes = parsedLeaseMin;
+              if (selContract === '3.2' || selContract === '3.3') {
+                payloadBody.contract_version = selContract;
+              }
               payloadBody.crawl_mode = selMode;
               payloadBody.topics = selTopics;
               payloadBody.lookback_hours = selLookback;
@@ -6247,6 +6506,7 @@ HTML_TEMPLATE = """
                 topics: selTopics,
                 lookback_hours: selLookback,
                 exclusions: payloadBody.exclusions,
+                ...(selContract === '3.2' || selContract === '3.3' ? { contract_version: selContract } : {}),
               };
             }
             const res = await fetch('/api/remote/crawl_requests', {
@@ -7423,6 +7683,7 @@ def api_market_items():
     verification_status = request.args.get("verification_status", "all")
     activity_filter = request.args.get("activity_filter", "all")
     special_filter = request.args.get("special_filter", "all")
+    quality_filter = request.args.get("quality_filter", "all")
     run_key = request.args.get("run_key") or None
     sort_by = request.args.get("sort_by", "recent")
     affiliate_only = request.args.get("affiliate_only", "0") in ("1", "true", "True")
@@ -7446,6 +7707,7 @@ def api_market_items():
             verification_status=verification_status,
             activity_filter=activity_filter,
             special_filter=special_filter,
+            quality_filter=quality_filter,
             run_key=run_key,
             search=search,
             sort_by=sort_by,
@@ -7542,9 +7804,16 @@ def api_market_runs_catalog():
         crawl_mode=crawl_mode,
         topic=topic,
     )
+    bundles = rt["store"].list_request_bundles(
+        platform=platform,
+        limit=limit,
+        include_archived=include_archived,
+        crawl_requests=remote_reqs,
+    )
     return jsonify({
         "ok": True,
         "runs": runs,
+        "bundles": bundles,
         "total": len(runs),
         "latest_run_key": runs[0]["run_key"] if runs else None,
     })
@@ -7569,6 +7838,27 @@ def api_remote_crawl_config():
     return jsonify({"ok": True, **get_crawl_config_payload()})
 
 
+@app.route("/api/remote/helper_compatibility", methods=["GET", "POST"])
+def api_remote_helper_compatibility():
+    rt = get_market_runtime()
+    if not rt["client"].is_configured():
+        return jsonify({"ok": False, "error": "Thiếu CLOUDFLARE_APP_TOKEN"}), 503
+    try:
+        if request.method == "POST":
+            body = request.json or {}
+            res = rt["client"].set_helper_compatibility(body)
+        else:
+            res = rt["client"].get_helper_compatibility()
+        compat = res.get("helper_compatibility") if isinstance(res, dict) else None
+        status_code = int(res.get("status_code") or 200) if isinstance(res, dict) and not res.get("ok") and res.get("status_code") else 200
+        return jsonify({
+            **(res if isinstance(res, dict) else {"ok": False}),
+            "crawl_config": get_crawl_config_payload(helper_compatibility=compat),
+        }), status_code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
 @app.route("/api/remote/crawl_requests", methods=["GET", "POST"])
 def api_remote_crawl_requests():
     rt = get_market_runtime()
@@ -7586,6 +7876,9 @@ def api_remote_crawl_requests():
             plat = str(body.get("platform", "")).lower().strip()
             opts = dict(body.get("options")) if isinstance(body.get("options"), dict) else {}
             if plat == "threads":
+                raw_cv = str(body.get("contract_version") or opts.get("contract_version") or "").strip().lower()
+                if raw_cv in ("3.2", "3.3"):
+                    opts["contract_version"] = raw_cv
                 raw_lm = body.get("lease_minutes")
                 if raw_lm is not None and raw_lm != "":
                     try:
@@ -7621,6 +7914,8 @@ def api_remote_crawl_requests():
                         rt["store"].upsert_crawl_request_metadata_cache([res["request"]])
                     except Exception:
                         pass
+                if not res.get("ok") and res.get("status_code"):
+                    return jsonify(res), int(res["status_code"])
             return jsonify(res)
         listing = rt["client"].list_crawl_requests()
         if isinstance(listing, dict):
@@ -7648,6 +7943,46 @@ def api_remote_crawl_prompt(crawl_id):
         res = rt["client"].get_crawl_request_prompt(crawl_id)
         if isinstance(res, dict):
             res.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/api/remote/crawl_requests/<crawl_id>/pause", methods=["POST"])
+def api_remote_crawl_pause(crawl_id):
+    rt = get_market_runtime()
+    if not rt["client"].is_configured():
+        return jsonify({"ok": False, "error": "Thiếu CLOUDFLARE_APP_TOKEN"}), 503
+    try:
+        body = request.json or {}
+        res = rt["client"].pause_crawl_request(crawl_id, reason=str(body.get("reason") or "manual_pause"))
+        if isinstance(res, dict) and isinstance(res.get("request"), dict):
+            try:
+                rt["store"].upsert_crawl_request_metadata_cache([res["request"]])
+            except Exception:
+                pass
+        status_code = int(res.get("status_code") or 200) if isinstance(res, dict) and not res.get("ok") and res.get("status_code") else 200
+        return jsonify(res), status_code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/api/remote/crawl_requests/<crawl_id>/resume", methods=["POST"])
+def api_remote_crawl_resume(crawl_id):
+    rt = get_market_runtime()
+    if not rt["client"].is_configured():
+        return jsonify({"ok": False, "error": "Thiếu CLOUDFLARE_APP_TOKEN"}), 503
+    try:
+        res = rt["client"].resume_crawl_request(crawl_id)
+        if isinstance(res, dict):
+            res.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+            if isinstance(res.get("request"), dict):
+                try:
+                    rt["store"].upsert_crawl_request_metadata_cache([res["request"]])
+                except Exception:
+                    pass
+            if not res.get("ok") and res.get("status_code"):
+                return jsonify(res), int(res["status_code"])
         return jsonify(res)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502

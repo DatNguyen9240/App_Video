@@ -1,0 +1,111 @@
+{
+  "contract": "Data Contract V3.3 — Quality-first Option A & Multi-session Target-based Crawl",
+  "version": "3.3",
+  "supersedes_for_v33_requests": "3.2",
+  "backward_compatibility": {
+    "legacy_v32_preserved": true,
+    "rules": [
+      "Request cũ (V3.1 / V3.2 hoặc contract_version IS NULL trên D1) giữ nguyên target_metric='new_qualified_count' và kết quả lịch sử.",
+      "Không đặt DEFAULT migration ép các request V3.2 cũ chuyển nghĩa sang V3.3.",
+      "new_qualified_count giữ nguyên ngữ nghĩa V3.2 (bài NEW đạt chuẩn kỹ thuật V3.2 gồm cả Watchlist).",
+      "quality_qualified_count là con số mục tiêu chính thức của các request V3.3."
+    ]
+  },
+  "skill_binding": {
+    "skill_name": "threads_crawl",
+    "skill_version": "1.0",
+    "recommended_path": "~/workspace/custom-skills/threads_crawl/SKILL.md"
+  },
+  "quality_policy": {
+    "quality_policy_version": "3.3-a-20261128",
+    "option": "A",
+    "watchlist_counted_toward_target": false,
+    "watchlist_exception_enabled": false,
+    "authoritative_evaluator": "server_side_from_source_metrics",
+    "criteria": {
+      "required_classification": "NEW",
+      "required_verified_metrics": ["views", "likes"],
+      "zero_distinct_from_null": true,
+      "tiers": {
+        "very_hot": "views >= 50000 OR likes >= 1000",
+        "hot": "views >= 10000 OR likes >= 300",
+        "emerging": "views >= 1000 AND (likes >= 20 OR comments >= 5 OR (shares + reposts) >= 10)",
+        "watchlist": "Valid V3.2 NEW record below Emerging threshold (quality_qualified=false)"
+      },
+      "content_analysis_required": true,
+      "traffic_content_requires_buyer_intent_or_affiliate": false,
+      "natural_viral_preference": "Ưu tiên người dùng bình thường và creator nhỏ có views vượt quy mô tài khoản"
+    }
+  },
+  "target_based_multisession": {
+    "total_request_time_limit": null,
+    "session_lease_default_minutes": 60,
+    "session_lease_options_minutes": [30, 60, 120],
+    "session_lease_reserve_rule": "max(10 phút, 20% lease)",
+    "max_lease_renewals_per_session": 2,
+    "lease_renewal_increment_minutes": 30,
+    "lease_renewal_requires_real_progress": true,
+    "separate_counters": {
+      "session_seq": "Tăng mỗi phiên nối tiếp bình thường (1, 2, 3...), không tiêu hao error_attempts",
+      "error_attempts": "Chỉ tăng khi lỗi thực thi (/fail) hoặc hết lease bất thường không checkpoint"
+    },
+    "dedup_and_snapshots": [
+      "Giữ nguyên request_id xuyên suốt; mỗi phiên có session_run_id riêng.",
+      "Khóa UNIQUE(request_id, dedup_key) tại Worker chặn cộng đúp bài chất lượng giữa các phiên hoặc khi gửi lại checkpoint.",
+      "Checkpoint chỉ giải phóng phiên sau khi registry_sync_outbox đồng bộ xong (registry_sync_status='ok').",
+      "Drive Listener phân biệt is_checkpoint=true với hoàn tất cuối cùng của request."
+    ],
+    "stop_and_pause_taxonomy": {
+      "pause_reasons": ["session_slice_done", "lease_reserve_reached", "rate_limited", "captcha_blocked", "user_paused"],
+      "terminal_stop_reasons": ["target_reached", "sources_exhausted", "no_qualifying_posts", "source_error", "views_source_blocked"]
+    }
+  },
+  "record_schema_v33": {
+    "metrics_nesting_support": "Đọc đồng nhất cả root (likes, comments, views, shares, reposts, quotes...) và item.metrics.*, giữ 0 khác null",
+    "added_fields": {
+      "quality_qualified": "boolean — server tính lại từ số liệu nguồn theo quality_policy_version",
+      "quality_tier_basis": "very_hot | hot | emerging | none",
+      "quality_exclusion_reason": "string | null",
+      "author_followers": "integer | null",
+      "followers_measured_at": "ISO-8601 | null",
+      "views_to_followers_ratio": "number | null",
+      "natural_viral": "boolean | null",
+      "buyer_intent": "boolean | string | null",
+      "buyer_intent_signals": "object | array | null",
+      "traffic_content": "boolean | null",
+      "traffic_analysis": {
+        "hook_and_copy_structure": "string | null",
+        "humour_or_surprise_element": "string | null",
+        "image_role": "string | null",
+        "share_motivation": "string | null",
+        "emotion_triggered": "string | null",
+        "reusable_format": "string | null",
+        "derivative_potential": "string | null",
+        "follower_building_potential": "string | null"
+      }
+    }
+  },
+  "counters_schema_v33": {
+    "fields": [
+      "requested_count",
+      "scanned_count",
+      "unique_candidate_count",
+      "new_count",
+      "new_qualified_count",
+      "quality_qualified_count",
+      "watchlist_count",
+      "duplicate_current_run_count",
+      "duplicate_history_count",
+      "updated_metrics_count",
+      "similar_content_count",
+      "missing_views_count",
+      "unverified_count",
+      "rejected_count",
+      "target_metric",
+      "target_achieved",
+      "stop_reason"
+    ],
+    "reconciliation_v32_preserved": "unique_candidate_count == new_qualified_count + unverified_count + duplicate_history_count + updated_metrics_count + rejected_count",
+    "quality_subset_invariant": "new_qualified_count >= quality_qualified_count + watchlist_count (with watchlist excluded from target in V3.3)"
+  }
+}

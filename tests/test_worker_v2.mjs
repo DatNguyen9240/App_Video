@@ -30,6 +30,8 @@ class MockD1Database {
     this.heartbeats = new Map();
     this.audits = [];
     this.crawlRequests = [];
+    this.crawlSessions = [];
+    this.requestQualityItems = new Map();
     this.notifications = [];
     this.runtimeState = new Map();
     this.postRegistry = new Map();
@@ -60,6 +62,8 @@ class MockD1Database {
   async batch(stmts) {
     const snapCommands = this.commands.map((x) => ({ ...x }));
     const snapRequests = this.crawlRequests.map((x) => ({ ...x }));
+    const snapSessions = this.crawlSessions.map((x) => ({ ...x }));
+    const snapReqQuality = new Map(Array.from(this.requestQualityItems.entries(), ([k, v]) => [k, { ...v }]));
     const snapNotifications = this.notifications.map((x) => ({ ...x }));
     const snapOutbox = this.registryOutbox.map((x) => ({ ...x }));
     const snapState = new Map(this.runtimeState);
@@ -77,6 +81,8 @@ class MockD1Database {
     } catch (err) {
       this.commands = snapCommands;
       this.crawlRequests = snapRequests;
+      this.crawlSessions = snapSessions;
+      this.requestQualityItems = snapReqQuality;
       this.notifications = snapNotifications;
       this.registryOutbox = snapOutbox;
       this.runtimeState = snapState;
@@ -133,7 +139,10 @@ class MockD1Database {
             (r) =>
               r.status === "queued" &&
               String(r.platform || "").trim().toLowerCase() === "threads" &&
-              Number(r.attempts ?? 0) < Number(r.max_attempts ?? 3)
+              String(r.execution_phase || "").trim().toLowerCase() !== "blocked" &&
+              (String(r.contract_version || "").startsWith("3.3")
+                ? Number(r.error_attempts ?? 0) < Number(r.max_attempts ?? 3)
+                : Number(r.attempts ?? 0) < Number(r.max_attempts ?? 3))
           );
           return { queued: hasEligibleThreadsQueued ? 1 : 0 };
         }
@@ -243,6 +252,16 @@ class MockD1Database {
         if (norm === "SELECT * FROM crawl_requests WHERE id = ?") {
           const row = db.crawlRequests.find((c) => c.id === this.args[0]);
           return row ? { ...row } : null;
+        }
+        if (norm.includes("FROM crawl_request_quality_items WHERE request_id = ?")) {
+          const reqId = this.args[0];
+          const rows = [...db.requestQualityItems.values()].filter((x) => x.request_id === reqId);
+          return {
+            quality_qualified_count: rows.filter((x) => Number(x.quality_qualified || 0) === 1).length,
+            watchlist_count: rows.filter((x) => Number(x.quality_qualified || 0) === 0 && x.trend_tier === "watchlist").length,
+            traffic_content_count: rows.filter((x) => Number(x.quality_qualified || 0) === 1 && Number(x.is_traffic_content || 0) === 1).length,
+            total_tracked_items: rows.length,
+          };
         }
         if (norm.includes("FROM market_post_registry")) {
           if (db.failRegistry) throw new Error("Simulated D1 registry outage");
@@ -429,12 +448,54 @@ class MockD1Database {
               .map((c) => ({ ...c })),
           };
         }
+        if (norm.includes("FROM crawl_request_quality_items WHERE request_id = ?")) {
+          const [reqId] = this.args;
+          return {
+            results: [...db.requestQualityItems.values()]
+              .filter((x) => x.request_id === reqId)
+              .map((x) => ({ dedup_key: x.dedup_key })),
+          };
+        }
+        if (norm.includes("FROM crawl_request_sessions WHERE request_id = ?")) {
+          const [reqId] = this.args;
+          return {
+            results: db.crawlSessions
+              .filter((s) => s.request_id === reqId)
+              .sort((a, b) => Number(a.session_seq || 0) - Number(b.session_seq || 0))
+              .map((s) => ({ ...s })),
+          };
+        }
+        if (norm.includes("FROM crawl_request_sessions")) {
+          return {
+            results: [...db.crawlSessions]
+              .sort((a, b) => Number(a.session_seq || 0) - Number(b.session_seq || 0))
+              .slice(0, 300)
+              .map((s) => ({ ...s })),
+          };
+        }
+        if (norm.includes("FROM crawl_requests WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?")) {
+          const [nowIso] = this.args;
+          return {
+            results: db.crawlRequests
+              .filter((r) => r.status === "running" && r.lease_expires_at && String(r.lease_expires_at) < String(nowIso))
+              .map((r) => ({ ...r })),
+          };
+        }
         if (norm.includes("FROM crawl_requests WHERE status IN ('queued', 'running')")) {
           return {
             results: db.crawlRequests
               .filter((c) => c.status === "queued" || c.status === "running")
               .map((c) => ({ ...c }))
               .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))),
+          };
+        }
+        if (norm.includes("FROM crawl_requests WHERE status = 'queued'")) {
+          return {
+            results: db.crawlRequests
+              .filter((c) => c.status === "queued")
+              .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+              .slice(0, 25)
+              .map((c) => ({ ...c })),
           };
         }
         if (norm.includes("FROM crawl_requests")) {
@@ -835,13 +896,339 @@ class MockD1Database {
           if (this.args.length === 3) row.updated_at = this.args[1];
           return { meta: { changes: 1 } };
         }
+        if (norm.startsWith("INSERT OR IGNORE INTO crawl_request_quality_items")) {
+          const [
+            request_id, dedup_key, session_seq, run_id, canonical_url, post_id,
+            trend_tier, quality_qualified, quality_exclusion_reason, is_traffic_content,
+            views_count, likes_count, comments_count, shares_count, reposts_count,
+            first_seen_at, created_at
+          ] = this.args;
+          const k = `${request_id}::${dedup_key}`;
+          if (db.requestQualityItems.has(k)) {
+            return { meta: { changes: 0 } };
+          }
+          db.requestQualityItems.set(k, {
+            request_id, dedup_key, session_seq, run_id, canonical_url, post_id,
+            trend_tier, quality_qualified: Number(quality_qualified ? 1 : 0), quality_exclusion_reason,
+            is_traffic_content: Number(is_traffic_content ? 1 : 0),
+            views_count, likes_count, comments_count, shares_count, reposts_count,
+            first_seen_at, created_at,
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("INSERT OR IGNORE INTO crawl_request_sessions")) {
+          const [id, request_id, session_seq, attempt, claimed_by, claimed_at, lease_seconds, lease_expires_at, created_at, updated_at] = this.args;
+          if (db.crawlSessions.some((s) => s.request_id === request_id && Number(s.session_seq) === Number(session_seq))) {
+            return { meta: { changes: 0 } };
+          }
+          db.crawlSessions.push({
+            id, request_id, session_seq: Number(session_seq), attempt: Number(attempt),
+            claimed_by, claimed_at, lease_seconds: Number(lease_seconds), lease_expires_at,
+            status: "running", lease_renew_count: 0, pause_reason: null, stop_reason: null, run_id: null,
+            scanned_count: 0, quality_qualified_count: 0, new_qualified_count: 0, watchlist_count: 0,
+            ended_at: null, checkpoint_json: null, created_at, updated_at,
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_request_sessions SET")) {
+          if (norm.includes("SET status = 'expired'")) {
+            const [ended_at, updated_at, request_id] = this.args;
+            let ch = 0;
+            for (const s of db.crawlSessions) {
+              if (s.request_id === request_id && s.status === "running") {
+                s.status = "expired";
+                s.ended_at = ended_at;
+                s.stop_reason = "lease_expired";
+                s.updated_at = updated_at;
+                ch++;
+              }
+            }
+            return { meta: { changes: ch } };
+          }
+          if (norm.includes("SET status = 'paused'") && norm.includes("WHERE request_id = ? AND status = 'running'")) {
+            const [ended_at, stop_reason, updated_at, request_id] = this.args;
+            let ch = 0;
+            for (const s of db.crawlSessions) {
+              if (s.request_id === request_id && s.status === "running") {
+                s.status = "paused";
+                s.ended_at = ended_at;
+                s.stop_reason = stop_reason;
+                s.updated_at = updated_at;
+                ch++;
+              }
+            }
+            return { meta: { changes: ch } };
+          }
+          if (norm.includes("SET lease_expires_at = ?, lease_renew_count = ?, updated_at = ?")) {
+            const [lease_expires_at, lease_renew_count, updated_at, request_id, attempt] = this.args;
+            const s = db.crawlSessions.find((x) => x.request_id === request_id && Number(x.attempt) === Number(attempt));
+            if (!s) return { meta: { changes: 0 } };
+            s.lease_expires_at = lease_expires_at;
+            s.lease_renew_count = Number(lease_renew_count);
+            s.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
+          if (norm.includes("SET run_id = COALESCE(?, run_id)")) {
+            const [run_id, scanned_count, quality_qualified_count, new_qualified_count, watchlist_count, updated_at, request_id, attempt] = this.args;
+            const s = db.crawlSessions.find((x) => x.request_id === request_id && Number(x.attempt) === Number(attempt));
+            if (!s) return { meta: { changes: 0 } };
+            if (run_id !== null && run_id !== undefined) s.run_id = run_id;
+            if (scanned_count !== null && scanned_count !== undefined) s.scanned_count = scanned_count;
+            if (quality_qualified_count !== null && quality_qualified_count !== undefined) s.quality_qualified_count = quality_qualified_count;
+            if (new_qualified_count !== null && new_qualified_count !== undefined) s.new_qualified_count = new_qualified_count;
+            if (watchlist_count !== null && watchlist_count !== undefined) s.watchlist_count = watchlist_count;
+            s.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
+          if (norm.includes("WHERE request_id = ? AND attempt = ?") && norm.includes("checkpoint_json = ?")) {
+            const [status, ended_at, stop_reason, run_id, scanned_count, quality_qualified_count, new_qualified_count, watchlist_count, checkpoint_json, updated_at, request_id, attempt] = this.args;
+            const s = db.crawlSessions.find((x) => x.request_id === request_id && Number(x.attempt) === Number(attempt));
+            if (!s) return { meta: { changes: 0 } };
+            s.status = status;
+            s.ended_at = ended_at;
+            if (stop_reason !== null) s.stop_reason = stop_reason;
+            if (run_id) s.run_id = run_id;
+            if (scanned_count !== null && scanned_count !== undefined) s.scanned_count = scanned_count;
+            if (quality_qualified_count !== null && quality_qualified_count !== undefined) s.quality_qualified_count = quality_qualified_count;
+            if (new_qualified_count !== null && new_qualified_count !== undefined) s.new_qualified_count = new_qualified_count;
+            if (watchlist_count !== null && watchlist_count !== undefined) s.watchlist_count = watchlist_count;
+            s.checkpoint_json = checkpoint_json;
+            s.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
+          if (norm.includes("WHERE request_id = ? AND attempt = ?") && this.args.length === 10) {
+            const [status, ended_at, stop_reason, run_id, scanned_count, quality_qualified_count, new_qualified_count, watchlist_count, updated_at, request_id, attempt] = this.args;
+            const s = db.crawlSessions.find((x) => x.request_id === request_id && Number(x.attempt) === Number(attempt));
+            if (!s) return { meta: { changes: 0 } };
+            s.status = status;
+            s.ended_at = ended_at;
+            if (stop_reason !== null) s.stop_reason = stop_reason;
+            if (run_id) s.run_id = run_id;
+            if (scanned_count !== null && scanned_count !== undefined) s.scanned_count = scanned_count;
+            if (quality_qualified_count !== null && quality_qualified_count !== undefined) s.quality_qualified_count = quality_qualified_count;
+            if (new_qualified_count !== null && new_qualified_count !== undefined) s.new_qualified_count = new_qualified_count;
+            if (watchlist_count !== null && watchlist_count !== undefined) s.watchlist_count = watchlist_count;
+            s.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
+          if (norm.includes("WHERE request_id = ? AND attempt = ?") && this.args.length === 6) {
+            const [status, ended_at, stop_reason, updated_at, request_id, attempt] = this.args;
+            const s = db.crawlSessions.find((x) => x.request_id === request_id && Number(x.attempt) === Number(attempt));
+            if (!s) return { meta: { changes: 0 } };
+            s.status = status;
+            s.ended_at = ended_at;
+            s.stop_reason = stop_reason;
+            s.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
+          return { meta: { changes: 0 } };
+        }
         if (norm.startsWith("INSERT INTO crawl_requests")) {
+          if (norm.includes("contract_version")) {
+            const [
+              id, platform, keywords, requested_count, options_json, dedup_token,
+              poll_profile, expected_pickup_at, requested_by_chat_id, requested_by_source,
+              contract_version, skill_version, quality_policy_version, target_metric,
+              created_at, updated_at
+            ] = this.args;
+            db.crawlRequests.push({
+              id, platform, keywords, requested_count, options_json, status: "queued", dedup_token,
+              muse_connector_mode: "d1_polling", poll_profile, expected_pickup_at, attempts: 0, max_attempts: 3,
+              requested_by_chat_id, requested_by_source,
+              contract_version, skill_version, quality_policy_version, target_metric,
+              execution_phase: "waiting_prompt", pause_reason: null,
+              session_seq: 0, error_attempts: 0, lease_renew_count: 0,
+              accumulated_quality_count: 0, accumulated_new_qualified_count: 0, accumulated_watchlist_count: 0,
+              checkpoint_json: null,
+              created_at, updated_at, notified_at: null,
+            });
+            return { meta: { changes: 1 } };
+          }
           const [id, platform, keywords, requested_count, options_json, dedup_token, poll_profile, expected_pickup_at, requested_by_chat_id, requested_by_source, created_at, updated_at] = this.args;
           db.crawlRequests.push({
             id, platform, keywords, requested_count, options_json, status: "queued", dedup_token,
             muse_connector_mode: "d1_polling", poll_profile, expected_pickup_at, attempts: 0, max_attempts: 3,
             requested_by_chat_id, requested_by_source, created_at, updated_at, notified_at: null,
           });
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET session_seq = ?, execution_phase = 'running', pause_reason = NULL, lease_renew_count = 0")) {
+          const [session_seq, id, attempts] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && Number(c.attempts || 0) === Number(attempts));
+          if (!row) return { meta: { changes: 0 } };
+          row.session_seq = Number(session_seq);
+          row.execution_phase = "running";
+          row.pause_reason = null;
+          row.lease_renew_count = 0;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET lease_expires_at = ?, lease_renew_count = ?, result_summary_json = ?, updated_at = ?")) {
+          const [lease_expires_at, lease_renew_count, result_summary_json, updated_at, id, claimed_by, attempts, nowIso] = this.args;
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              c.claimed_by === claimed_by &&
+              Number(c.attempts || 0) === Number(attempts) &&
+              (!nowIso || !c.lease_expires_at || String(c.lease_expires_at) >= String(nowIso))
+          );
+          if (!row) return { meta: { changes: 0 } };
+          row.lease_expires_at = lease_expires_at;
+          row.lease_renew_count = Number(lease_renew_count);
+          row.result_summary_json = result_summary_json;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'running', execution_phase = 'syncing_checkpoint'")) {
+          if (norm.includes("checkpoint_json = ?")) {
+            const [pause_reason, checkpoint_json, result_summary_json, updated_at, id, claimed_by, attempts, nowIso] = this.args;
+            const row = db.crawlRequests.find(
+              (c) =>
+                c.id === id &&
+                c.status === "running" &&
+                c.claimed_by === claimed_by &&
+                Number(c.attempts || 0) === Number(attempts) &&
+                (!nowIso || !c.lease_expires_at || String(c.lease_expires_at) >= String(nowIso))
+            );
+            if (!row) return { meta: { changes: 0 } };
+            row.execution_phase = "syncing_checkpoint";
+            row.pause_reason = pause_reason;
+            row.checkpoint_json = checkpoint_json;
+            row.result_summary_json = result_summary_json;
+            row.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
+          const [pause_reason, result_summary_json, updated_at, id, claimed_by, attempts, nowIso] = this.args;
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              c.claimed_by === claimed_by &&
+              Number(c.attempts || 0) === Number(attempts) &&
+              (!nowIso || !c.lease_expires_at || String(c.lease_expires_at) >= String(nowIso))
+          );
+          if (!row) return { meta: { changes: 0 } };
+          row.execution_phase = "syncing_checkpoint";
+          row.pause_reason = pause_reason;
+          row.result_summary_json = result_summary_json;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = 'paused', pause_reason = NULL, options_json = ?")) {
+          const [options_json, updated_at, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id);
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "queued";
+          row.execution_phase = "paused";
+          row.pause_reason = null;
+          row.options_json = options_json;
+          row.claimed_by = null;
+          row.claimed_at = null;
+          row.lease_expires_at = null;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = ?, pause_reason = ?, checkpoint_json = ?, result_summary_json = ?")) {
+          const [execution_phase, pause_reason, checkpoint_json, result_summary_json, updated_at, id, attempts] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && Number(c.attempts || 0) === Number(attempts));
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "queued";
+          row.execution_phase = execution_phase;
+          row.pause_reason = pause_reason;
+          row.checkpoint_json = checkpoint_json;
+          row.result_summary_json = result_summary_json;
+          row.claimed_by = null;
+          row.claimed_at = null;
+          row.lease_expires_at = null;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = ?, pause_reason = ?, checkpoint_json = ?, claimed_by = NULL")) {
+          const [execution_phase, pause_reason, checkpoint_json, updated_at, id, attempts] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && Number(c.attempts || 0) === Number(attempts));
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "queued";
+          row.execution_phase = execution_phase;
+          row.pause_reason = pause_reason;
+          row.checkpoint_json = checkpoint_json;
+          row.claimed_by = null;
+          row.claimed_at = null;
+          row.lease_expires_at = null;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = 'paused', pause_reason = 'lease_expired_recovered'")) {
+          const [error_attempts, updated_at, id, nowIso] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && c.lease_expires_at && String(c.lease_expires_at) < String(nowIso));
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "queued";
+          row.execution_phase = "paused";
+          row.pause_reason = "lease_expired_recovered";
+          row.error_attempts = Number(error_attempts);
+          row.claimed_by = null;
+          row.claimed_at = null;
+          row.lease_expires_at = null;
+          row.error_message = "Session lease expired cleanly recoverable";
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = 'paused', pause_reason = ?")) {
+          const [pause_reason, updated_at, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && ["queued", "running"].includes(c.status));
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "queued";
+          row.execution_phase = "paused";
+          row.pause_reason = pause_reason;
+          row.claimed_by = null;
+          row.claimed_at = null;
+          row.lease_expires_at = null;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET status = 'failed', execution_phase = 'failed', pause_reason = 'lease_expired_max_errors'")) {
+          const [error_attempts, updated_at, id, nowIso] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && c.lease_expires_at && String(c.lease_expires_at) < String(nowIso));
+          if (!row) return { meta: { changes: 0 } };
+          row.status = "failed";
+          row.execution_phase = "failed";
+          row.pause_reason = "lease_expired_max_errors";
+          row.error_attempts = Number(error_attempts);
+          row.error_message = "Execution lease expired before completion";
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET execution_phase = ?, pause_reason = ?, error_attempts = COALESCE(error_attempts, 0) + 1 WHERE id = ?")) {
+          const [execution_phase, pause_reason, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id);
+          if (!row) return { meta: { changes: 0 } };
+          row.execution_phase = execution_phase;
+          row.pause_reason = pause_reason;
+          row.error_attempts = Number(row.error_attempts || 0) + 1;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET execution_phase = ?, pause_reason = NULL WHERE id = ?")) {
+          const [execution_phase, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id);
+          if (row) {
+            row.execution_phase = execution_phase;
+            row.pause_reason = null;
+          }
+          return { meta: { changes: row ? 1 : 0 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET execution_phase = 'completed' WHERE id = ?") || norm.startsWith("UPDATE crawl_requests SET execution_phase = 'cancelled' WHERE id = ?")) {
+          const id = this.args[0];
+          const row = db.crawlRequests.find((c) => c.id === id);
+          if (row) row.execution_phase = norm.includes("'completed'") ? "completed" : "cancelled";
+          return { meta: { changes: row ? 1 : 0 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET accumulated_quality_count = ?, accumulated_new_qualified_count = ?, accumulated_watchlist_count = ?")) {
+          const [qCnt, nqCnt, wCnt, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id);
+          if (!row) return { meta: { changes: 0 } };
+          row.accumulated_quality_count = Number(qCnt || 0);
+          row.accumulated_new_qualified_count = Number(nqCnt || 0);
+          row.accumulated_watchlist_count = Number(wCnt || 0);
+          if (row.execution_phase === "syncing_checkpoint") row.execution_phase = "paused";
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'running'")) {
@@ -863,8 +1250,7 @@ class MockD1Database {
               c.id === id &&
               c.status === "queued" &&
               (!norm.includes("AND lower(trim(platform)) = 'threads'") ||
-                (String(c.platform || "").trim().toLowerCase() === "threads" &&
-                  Number(c.attempts ?? 0) < Number(c.max_attempts ?? 3)))
+                String(c.platform || "").trim().toLowerCase() === "threads")
           );
           if (!row) return { meta: { changes: 0 } };
           row.status = "running";
@@ -895,6 +1281,24 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'queued'")) {
+          if (norm.includes("WHERE id = ?")) {
+            const [updated_at, id, nowIso] = this.args;
+            const row = db.crawlRequests.find(
+              (r) =>
+                r.id === id &&
+                r.status === "running" &&
+                r.lease_expires_at &&
+                r.lease_expires_at < nowIso &&
+                r.attempts < r.max_attempts
+            );
+            if (!row) return { meta: { changes: 0 } };
+            row.status = "queued";
+            row.claimed_by = null;
+            row.claimed_at = null;
+            row.lease_expires_at = null;
+            row.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
           const [updated_at, nowIso] = this.args;
           let changes = 0;
           for (const row of db.crawlRequests) {
@@ -910,6 +1314,22 @@ class MockD1Database {
           return { meta: { changes } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'failed', error_message = 'Execution lease expired before completion'")) {
+          if (norm.includes("WHERE id = ?")) {
+            const [updated_at, id, nowIso] = this.args;
+            const row = db.crawlRequests.find(
+              (r) =>
+                r.id === id &&
+                r.status === "running" &&
+                r.lease_expires_at &&
+                r.lease_expires_at < nowIso &&
+                r.attempts >= r.max_attempts
+            );
+            if (!row) return { meta: { changes: 0 } };
+            row.status = "failed";
+            row.error_message = "Execution lease expired before completion";
+            row.updated_at = updated_at;
+            return { meta: { changes: 1 } };
+          }
           const [updated_at, nowIso] = this.args;
           let changes = 0;
           for (const row of db.crawlRequests) {
@@ -6884,6 +7304,679 @@ assert.equal(v3StartBtns.length, 6);
     assert.doesNotMatch(tkReq.manual_prompt, /Strategy Version: 3\.3/);
   } finally {
     globalThis.fetch = prevFetch23;
+  }
+}
+
+function makeV33ThreadsItem(idx, overrides = {}) {
+  const pid = `V33Post_${String(idx).padStart(4, "0")}`;
+  const handle = `@creator_${idx}`;
+  const url = `https://www.threads.com/${handle}/post/${pid}`;
+  return {
+    platform: "threads",
+    post_id: pid,
+    url,
+    canonical_url: url,
+    author_handle: handle,
+    author_type: "nguoi_dung_binh_thuong",
+    author_followers: 1200,
+    followers_measured_at: "2026-11-28T07:00:00Z",
+    text_content: `Review chân thật sản phẩm gia dụng mã ${idx}`,
+    summary_vi: `Trải nghiệm thực tế món ${idx}, người dùng hỏi chỗ mua nhiều.`,
+    content_group: "review_trai_nghiem",
+    trend_tier: "hot",
+    trend_group: "trend_toan_thi_truong",
+    verification_status: "cross_verified_web",
+    views: 15000 + idx,
+    views_display: `${15 + Math.floor(idx / 10)}K`,
+    views_precision: "rounded_display",
+    views_source: "threads_web_browser",
+    views_measured_at: "2026-11-28T07:05:00Z",
+    views_evidence_url: url,
+    metrics: {
+      views: 15000 + idx,
+      likes: 420,
+      comments: 18,
+      shares: 6,
+      reposts: 5,
+    },
+    natural_viral: true,
+    buyer_intent: true,
+    ...overrides,
+  };
+}
+
+function makeV33Env() {
+  return {
+    DB: new MockD1Database(),
+    GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: "sa@test.iam.gserviceaccount.com", private_key: privateKey }),
+    GOOGLE_DRIVE_FOLDER_ID: WORKSPACE_ID,
+    TELEGRAM_BOT_TOKEN_VIDEO: "123:tg-bot-token",
+    TELEGRAM_OWNER_ID: "999001",
+    TELEGRAM_WEBHOOK_SECRET: "tg-sec-v33",
+    APP_VIDEO_API_TOKEN: "app-video-v33-secret",
+    MUSE_APP_VIDEO_TOKEN: "muse-v33-secret",
+    MUSE_SIGNAL_TOKEN: "sig-v33-secret",
+  };
+}
+
+// ─── Test 24: Helper V3.3 Compatibility Gate, Skill-backed Prompt & Server Quality Gate ─
+{
+  const env24 = makeV33Env();
+  const appHeaders = {
+    Authorization: `Bearer ${env24.APP_VIDEO_API_TOKEN}`,
+    "Content-Type": "application/json",
+    "X-Client-Id": "app-video-test",
+  };
+  const museHeaders = {
+    Authorization: `Bearer ${env24.MUSE_APP_VIDEO_TOKEN}`,
+    "Content-Type": "application/json",
+  };
+
+  // 1. Before helper handshake -> V3.2 remains default for Threads, explicit 3.3 returns 409
+  const cfgBefore = await (await worker.fetch(
+    new Request("https://worker.example/api/app/crawl-config", { headers: appHeaders }),
+    env24
+  )).json();
+  assert.equal(cfgBefore.config.helper_compatibility.v33_compatible, false);
+  assert.equal(cfgBefore.config.contract_version, "3.3");
+  assert.equal(cfgBefore.config.legacy_contract_version, "3.2");
+  assert.equal(cfgBefore.config.default_lease_minutes, 60);
+
+  const blocked33Res = await worker.fetch(
+    new Request("https://worker.example/api/app/crawl-requests", {
+      method: "POST",
+      headers: appHeaders,
+      body: JSON.stringify({ platform: "threads", requested_count: 50, contract_version: "3.3" }),
+    }),
+    env24
+  );
+  assert.equal(blocked33Res.status, 409);
+  assert.equal((await blocked33Res.json()).code, "muse_helper_incompatible");
+
+  const defaultBeforeRes = await (await worker.fetch(
+    new Request("https://worker.example/api/app/crawl-requests", {
+      method: "POST",
+      headers: appHeaders,
+      body: JSON.stringify({ platform: "threads", requested_count: 25, keywords: "legacy gate" }),
+    }),
+    env24
+  )).json();
+  assert.equal(defaultBeforeRes.request.contract_version, "3.2");
+  assert.equal(defaultBeforeRes.request.lease_minutes, 30);
+  await worker.fetch(
+    new Request(`https://worker.example/api/app/crawl-requests/${defaultBeforeRes.request.id}/cancel`, {
+      method: "POST",
+      headers: appHeaders,
+    }),
+    env24
+  );
+
+  // 2a. Partial capabilities handshake must NOT enable V3.3 yet
+  const partialHs = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/helper/handshake", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({
+        helper_version: "muse-helper/3.2.5",
+        supported_contracts: ["3.2", "3.3"],
+        skill_version: "1.0",
+        capabilities: ["lease_renew"],
+      }),
+    }),
+    env24
+  )).json();
+  assert.equal(partialHs.helper_compatibility.v33_compatible, false);
+
+  // 2b. Complete V3.3 handshake activates V3.3 + 60m default lease + Skill prompt
+  const hsRes = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/helper/handshake", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({
+        helper_version: "muse-helper/3.3.0",
+        supported_contracts: ["3.2", "3.3"],
+        skill_version: "1.0",
+        capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
+      }),
+    }),
+    env24
+  )).json();
+  assert.equal(hsRes.ok, true);
+  assert.equal(hsRes.helper_compatibility.v33_compatible, true);
+
+  const healthV33 = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/health", { headers: museHeaders }),
+    env24
+  )).json();
+  assert.equal(healthV33.ok, true);
+  assert.equal(healthV33.contract_version, "3.3");
+  assert.equal(healthV33.helper_compatibility.v33_compatible, true);
+
+  const req33Res = await (await worker.fetch(
+    new Request("https://worker.example/api/app/crawl-requests", {
+      method: "POST",
+      headers: appHeaders,
+      body: JSON.stringify({
+        platform: "threads",
+        requested_count: 4,
+        crawl_mode: "balanced",
+        topics: ["home_living", "meme_humor"],
+        lookback_hours: 24,
+        keywords: "máy ép chậm",
+      }),
+    }),
+    env24
+  )).json();
+  assert.equal(req33Res.ok, true, JSON.stringify(req33Res));
+  assert.equal(req33Res.request.contract_version, "3.3");
+  assert.equal(req33Res.request.skill_version, "1.0");
+  assert.equal(req33Res.request.quality_policy_version, "3.3-a-20261128");
+  assert.equal(req33Res.request.target_metric, "quality_qualified_count");
+  assert.equal(req33Res.request.lease_minutes, 60);
+  assert.match(req33Res.manual_prompt, /THREADS_CRAWL_SKILL/);
+  assert.match(req33Res.manual_prompt, /Contract 3\.3/);
+  assert.match(req33Res.manual_prompt, /\/api\/crawl\/checkpoint/);
+  assert.match(req33Res.manual_prompt, /12p/);
+
+  // 3. Server-side quality gate catches hallucinated flags & honors 0 != null & traffic_content
+  const claim24 = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/claim", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({}),
+    }),
+    env24
+  )).json();
+  assert.equal(claim24.request.session_seq, 1);
+
+  const itemsToGrade = [
+    // #1 Hallucinated watchlist claimed qualified -> rejected from quality target
+    makeV33ThreadsItem(1, {
+      trend_tier: "watchlist",
+      views: 450,
+      views_display: "450",
+      metrics: { views: 450, likes: 12, comments: 2, shares: 0, reposts: 0 },
+      quality_qualified: true,
+    }),
+    // #2 Emerging failing secondary gate (1500 views, 0 likes, 1 comment, 0 shares) -> rejected
+    makeV33ThreadsItem(2, {
+      trend_tier: "emerging",
+      views: 1500,
+      views_display: "1.5K",
+      metrics: { views: 1500, likes: 0, comments: 1, shares: 0, reposts: 0 },
+      quality_qualified: true,
+    }),
+    // #3 Emerging PASSES with likes=0 (0 !== null) AND comments=6 -> QUALIFIED
+    makeV33ThreadsItem(3, {
+      trend_tier: "emerging",
+      views: 1800,
+      views_display: "1.8K",
+      metrics: { views: 1800, likes: 0, comments: 6, shares: 0, reposts: 0 },
+    }),
+    // #4 Missing likes (null) -> rejected from V3.3 quality target even with high views
+    makeV33ThreadsItem(4, {
+      trend_tier: "very_hot",
+      views: 65000,
+      views_display: "65K",
+      metrics: { views: 65000, likes: null, comments: 25 },
+      quality_qualified: true,
+    }),
+    // #5 Traffic Content without buyer_intent -> QUALIFIED under Option A
+    makeV33ThreadsItem(5, {
+      trend_tier: "very_hot",
+      views: 72000,
+      views_display: "72K",
+      metrics: { views: 72000, likes: 1400, comments: 55, shares: 20, reposts: 15 },
+      traffic_content: true,
+      buyer_intent: false,
+      purchase_intent: "khong_ro",
+    }),
+  ];
+
+  // Trying /complete early with only 2/4 true quality items MUST fail (400) unless stop_reason='source_exhausted'
+  const earlyFailRes = await worker.fetch(
+    new Request("https://worker.example/api/crawl/complete", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({
+        request_id: req33Res.request.id,
+        attempt: claim24.request.attempt,
+        session_seq: 1,
+        run_id: "threads_v33_grade_s1",
+        crawled_at: "2026-11-28T07:10:00Z",
+        counters: { requested_count: 4, scanned_count: 5, new_qualified_count: 5, quality_qualified_count: 5 },
+        items: itemsToGrade,
+      }),
+    }),
+    env24
+  );
+  assert.equal(earlyFailRes.status, 400);
+  const earlyJson = await earlyFailRes.json();
+  assert.equal(earlyJson.projected_quality_count, 2);
+
+  // Checkpoint saves the 2 valid quality posts + 1 watchlist safely!
+  const cp24 = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/checkpoint", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({
+        request_id: req33Res.request.id,
+        attempt: claim24.request.attempt,
+        session_seq: 1,
+        pause_reason: "session_budget_reached",
+        run_id: "threads_v33_grade_s1",
+        crawled_at: "2026-11-28T07:15:00Z",
+        counters: { requested_count: 4, scanned_count: 5, new_qualified_count: 5, quality_qualified_count: 5 },
+        items: itemsToGrade,
+      }),
+    }),
+    env24
+  )).json();
+  assert.equal(cp24.ok, true);
+  assert.equal(cp24.accumulated_quality_count, 2);
+  assert.equal(cp24.accumulated_watchlist_count, 2);
+  assert.equal(cp24.remaining_target, 2);
+}
+
+// ─── Test 25: Multi-Session 100-Post Crawl, Lease Renewals, Dedup, CAPTCHA Block & Drive Checkpoint ─
+{
+  const env25 = makeV33Env();
+  const appHeaders = {
+    Authorization: `Bearer ${env25.APP_VIDEO_API_TOKEN}`,
+    "Content-Type": "application/json",
+    "X-Client-Id": "app-video-test",
+  };
+  const museHeaders = {
+    Authorization: `Bearer ${env25.MUSE_APP_VIDEO_TOKEN}`,
+    "Content-Type": "application/json",
+  };
+  const prevFetch25 = globalThis.fetch;
+  let telegramCount = 0;
+  let mockDriveFiles = [];
+  let mockDrivePayloads = {};
+
+  globalThis.fetch = async (url, init = {}) => {
+    const s = String(url);
+    if (s.includes("oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "drive-tok-25", expires_in: 3600 }), { status: 200 });
+    }
+    if (s.includes("www.googleapis.com/drive/v3/files?")) {
+      const u = new URL(s);
+      const q = u.searchParams.get("q") || "";
+      if (q.includes(`'${WORKSPACE_ID}' in parents`) && q.includes("01_Market_Data")) {
+        return new Response(JSON.stringify({ files: [{ id: "fld_market_25", name: "01_Market_Data", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200 });
+      }
+      if (q.includes(`'${WORKSPACE_ID}' in parents`)) {
+        return new Response(JSON.stringify({ files: [{ id: "fld_market_25", name: "01_Market_Data", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200 });
+      }
+      if (q.includes("'fld_market_25' in parents") && q.includes("'Reports'")) {
+        return new Response(JSON.stringify({ files: [{ id: "fld_reports_25", name: "Reports", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200 });
+      }
+      if (q.includes("'fld_market_25' in parents") && q.includes("'Threads'")) {
+        return new Response(JSON.stringify({ files: [{ id: "fld_threads_25", name: "Threads", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200 });
+      }
+      if (q.includes("'fld_market_25' in parents")) {
+        return new Response(JSON.stringify({
+          files: [
+            { id: "fld_threads_25", name: "Threads", mimeType: "application/vnd.google-apps.folder" },
+            { id: "fld_reports_25", name: "Reports", mimeType: "application/vnd.google-apps.folder" },
+          ],
+        }), { status: 200 });
+      }
+      if (q.includes("'fld_threads_25' in parents")) {
+        return new Response(JSON.stringify({ files: mockDriveFiles.filter(f => (f.parents || []).includes("fld_threads_25")) }), { status: 200 });
+      }
+      if (q.includes("'fld_reports_25' in parents")) {
+        return new Response(JSON.stringify({ files: mockDriveFiles.filter(f => (f.parents || []).includes("fld_reports_25")) }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ files: mockDriveFiles }), { status: 200 });
+    }
+    if (s.includes("www.googleapis.com/drive/v3/files/") && s.includes("alt=media")) {
+      const m = s.match(/files\/([^?]+)/);
+      const fid = m ? m[1] : "";
+      if (mockDrivePayloads[fid] !== undefined) {
+        return new Response(JSON.stringify(mockDrivePayloads[fid]), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    }
+    if (s.includes("api.telegram.org")) {
+      telegramCount += 1;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 900 + telegramCount } }), { status: 200 });
+    }
+    return prevFetch25(url, init);
+  };
+
+  try {
+    // Enable V3.3 via operator confirmation
+    const compatRes = await (await worker.fetch(
+      new Request("https://worker.example/api/app/muse-helper/compatibility", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ verify_v33: true, helper_version: "muse-helper/3.3.1" }),
+      }),
+      env25
+    )).json();
+    assert.equal(compatRes.helper_compatibility.v33_compatible, true);
+
+    // 1. Create 100-post V3.3 Threads request
+    const req100 = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 100, crawl_mode: "balanced" }),
+      }),
+      env25
+    )).json();
+    const reqId = req100.request.id;
+    assert.equal(req100.request.lease_minutes, 60);
+
+    // 2. Claim Session 1 + test Lease Renewal (blocked without progress, max 2x30m)
+    const c1 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
+      env25
+    )).json();
+    assert.equal(c1.request.session_seq, 1);
+
+    const renewNoProg = await worker.fetch(
+      new Request("https://worker.example/api/crawl/lease/renew", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqId, attempt: 1, session_seq: 1 }),
+      }),
+      env25
+    );
+    assert.equal(renewNoProg.status, 409);
+
+    await worker.fetch(
+      new Request("https://worker.example/api/crawl/progress", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqId, attempt: 1, session_seq: 1, scanned_count: 30, new_qualified_count: 15 }),
+      }),
+      env25
+    );
+    const ren1 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/lease/renew", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqId, attempt: 1, session_seq: 1 }),
+      }),
+      env25
+    )).json();
+    assert.equal(ren1.ok, true);
+    assert.equal(ren1.lease_renew_count, 1);
+
+    const ren2 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/lease/renew", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqId, attempt: 1, session_seq: 1, progress_delta: 25 }),
+      }),
+      env25
+    )).json();
+    assert.equal(ren2.lease_renew_count, 2);
+
+    const ren3 = await worker.fetch(
+      new Request("https://worker.example/api/crawl/lease/renew", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqId, attempt: 1, session_seq: 1, progress_delta: 10 }),
+      }),
+      env25
+    );
+    assert.equal(ren3.status, 409);
+
+    // Reject time_budget on /complete for V3.3
+    const rejTime = await worker.fetch(
+      new Request("https://worker.example/api/crawl/complete", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: reqId,
+          attempt: 1,
+          session_seq: 1,
+          stop_reason: "time_budget",
+          items: [],
+        }),
+      }),
+      env25
+    );
+    assert.equal(rejTime.status, 400);
+
+    // 3. Session 1 Checkpoint: 40 quality items -> paused, 40/100, NO Telegram sent
+    const s1Items = Array.from({ length: 40 }, (_, i) => makeV33ThreadsItem(i + 1));
+    const cp1 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: reqId,
+          attempt: 1,
+          session_seq: 1,
+          pause_reason: "session_budget_reached",
+          run_id: `${reqId}_s1`,
+          crawled_at: "2026-11-28T07:30:00Z",
+          items: s1Items,
+        }),
+      }),
+      env25
+    )).json();
+    assert.equal(cp1.ok, true);
+    assert.equal(cp1.execution_phase, "paused");
+    assert.equal(cp1.accumulated_quality_count, 40);
+    assert.equal(cp1.remaining_target, 60);
+    assert.match(cp1.resume_prompt, /40\/100/);
+    assert.equal(telegramCount, 0);
+
+    // Idempotent replay of Session 1 checkpoint returns ok without doubling
+    const cp1Replay = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: reqId,
+          attempt: 1,
+          session_seq: 1,
+          pause_reason: "session_budget_reached",
+          run_id: `${reqId}_s1`,
+          items: s1Items,
+        }),
+      }),
+      env25
+    )).json();
+    assert.equal(cp1Replay.idempotent_replay, true);
+    assert.equal(cp1Replay.accumulated_quality_count, 40);
+
+    // 4. Session 2 Claim + stale Session 1 rejected + cross-session dedup (5 overlap + 35 new = 75 total)
+    const c2 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
+      env25
+    )).json();
+    assert.equal(c2.request.session_seq, 2);
+    assert.equal(c2.request.attempt, 2);
+
+    const staleS1 = await worker.fetch(
+      new Request("https://worker.example/api/crawl/progress", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqId, attempt: 1, session_seq: 1, scanned_count: 999 }),
+      }),
+      env25
+    );
+    assert.equal(staleS1.status, 409);
+
+    const s2Items = [
+      ...Array.from({ length: 5 }, (_, i) => makeV33ThreadsItem(i + 1)),
+      ...Array.from({ length: 35 }, (_, i) => makeV33ThreadsItem(41 + i)),
+    ];
+    const cp2 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: reqId,
+          attempt: 2,
+          session_seq: 2,
+          pause_reason: "max_extensions_reached",
+          run_id: `${reqId}_s2`,
+          crawled_at: "2026-11-28T08:30:00Z",
+          items: s2Items,
+        }),
+      }),
+      env25
+    )).json();
+    assert.equal(cp2.accumulated_quality_count, 75);
+    assert.equal(cp2.remaining_target, 25);
+
+    // 5. Session 3 Claim -> expires -> recovers into Session 4 (error_attempts=1) -> final 25 items complete 100/100!
+    const c3 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
+      env25
+    )).json();
+    assert.equal(c3.request.session_seq, 3);
+    const dbRow3 = env25.DB.crawlRequests.find((r) => r.id === reqId);
+    dbRow3.lease_expires_at = "2020-01-01T00:00:00.000Z";
+
+    const c4 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
+      env25
+    )).json();
+    assert.equal(c4.request.session_seq, 4);
+    assert.equal(c4.request.error_attempts, 1);
+
+    const s4Items = Array.from({ length: 25 }, (_, i) => makeV33ThreadsItem(76 + i));
+    const fin = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/complete", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: reqId,
+          attempt: c4.request.attempt,
+          session_seq: 4,
+          run_id: `${reqId}_s4`,
+          crawled_at: "2026-11-28T09:15:00Z",
+          stop_reason: "target_achieved",
+          counters: { requested_count: 100, scanned_count: 40, new_qualified_count: 25, quality_qualified_count: 25, target_achieved: true },
+          items: s4Items,
+        }),
+      }),
+      env25
+    )).json();
+    assert.equal(fin.ok, true);
+    assert.equal(fin.status, "completed");
+    assert.equal(fin.accumulated_quality_count, 100);
+    assert.equal(fin.telegram_notified, true);
+    assert.equal(telegramCount, 1);
+
+    // 6. CAPTCHA Safety Block stops /signal + /claim until operator /resume
+    const reqCap = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 20, keywords: "captcha safety" }),
+      }),
+      env25
+    )).json();
+    const capId = reqCap.request.id;
+    const cCap = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
+      env25
+    )).json();
+    const cpCap = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: capId,
+          attempt: cCap.request.attempt,
+          session_seq: 1,
+          pause_reason: "captcha_blocked",
+          items: [makeV33ThreadsItem(501)],
+        }),
+      }),
+      env25
+    )).json();
+    assert.equal(cpCap.execution_phase, "blocked");
+
+    const sigBlocked = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl-queue/signal", {
+        headers: { "X-Signal-Token": env25.MUSE_SIGNAL_TOKEN },
+      }),
+      env25
+    )).json();
+    assert.equal(sigBlocked.queued, false);
+
+    const claimBlocked = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
+      env25
+    )).json();
+    assert.equal(claimBlocked.request, null);
+
+    const resumedCap = await (await worker.fetch(
+      new Request(`https://worker.example/api/app/crawl-requests/${capId}/resume`, {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({}),
+      }),
+      env25
+    )).json();
+    assert.equal(resumedCap.ok, true);
+    assert.equal(resumedCap.request.execution_phase, "paused");
+    assert.match(resumedCap.resume_prompt, /1\/20/);
+
+    const sigResumed = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl-queue/signal", {
+        headers: { "X-Signal-Token": env25.MUSE_SIGNAL_TOKEN },
+      }),
+      env25
+    )).json();
+    assert.equal(sigResumed.queued, true);
+
+    // 7. Drive Reconcile distinguishes Checkpoint pair vs Final pair!
+    const claimDriveTest = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", { method: "POST", headers: museHeaders, body: JSON.stringify({}) }),
+      env25
+    )).json();
+    const driveRunId = `${capId}_s2_drive`;
+    mockDriveFiles = [
+      { id: "df_cp_1", name: `threads_trend_${driveRunId}.json`, parents: ["fld_threads_25"], modifiedTime: "2026-11-28T09:30:00Z" },
+      { id: "rf_cp_1", name: `trend_report_${driveRunId}.json`, parents: ["fld_reports_25"], modifiedTime: "2026-11-28T09:31:00Z" },
+    ];
+    mockDrivePayloads = {
+      df_cp_1: {
+        request_id: capId,
+        run_id: driveRunId,
+        attempt: claimDriveTest.request.attempt,
+        contract_version: "3.3",
+        is_checkpoint: true,
+        session_seq: claimDriveTest.request.session_seq,
+        pause_reason: "session_budget_reached",
+        crawled_at: "2026-11-28T09:30:00Z",
+        counters: { requested_count: 20, scanned_count: 4, new_qualified_count: 3, quality_qualified_count: 3 },
+        records: [makeV33ThreadsItem(601), makeV33ThreadsItem(602), makeV33ThreadsItem(603)],
+      },
+      rf_cp_1: {
+        request_id: capId,
+        run_id: driveRunId,
+        attempt: claimDriveTest.request.attempt,
+        contract_version: "3.3",
+        is_checkpoint: true,
+        session_seq: claimDriveTest.request.session_seq,
+        pause_reason: "session_budget_reached",
+        run_status: "paused",
+        counters: { requested_count: 20, scanned_count: 4, new_qualified_count: 3, quality_qualified_count: 3 },
+        source_files: [`threads_trend_${driveRunId}.json`],
+      },
+    };
+    const tgBeforeReconcile = telegramCount;
+    await worker.scheduled({}, env25, { waitUntil() {} });
+    const afterReconcileRow = env25.DB.crawlRequests.find((r) => r.id === capId);
+    assert.equal(afterReconcileRow.status, "queued");
+    assert.equal(afterReconcileRow.execution_phase, "paused");
+    assert.equal(afterReconcileRow.accumulated_quality_count, 4);
+    assert.equal(telegramCount, tgBeforeReconcile);
+  } finally {
+    globalThis.fetch = prevFetch25;
   }
 }
 
