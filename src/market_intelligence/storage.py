@@ -30,6 +30,10 @@ from .report_normalizer import (
     has_muse_report_sections,
     normalize_muse_report,
 )
+from .crawl_strategy import (
+    get_mode_label as _get_crawl_mode_label,
+    normalize_topics_list as _normalize_crawl_topics,
+)
 
 
 def _utc_now_iso() -> str:
@@ -355,6 +359,27 @@ class MarketIntelligenceStore:
         self._add_column_if_missing("raw_drive_files", "strategy_version", "TEXT")
         self._add_column_if_missing("raw_drive_files", "contract_version", "TEXT")
         self._add_column_if_missing("raw_drive_files", "special_counts_json", "TEXT")
+        self._add_column_if_missing("raw_drive_files", "crawl_mode", "TEXT")
+        self._add_column_if_missing("raw_drive_files", "topics_json", "TEXT")
+        self._add_column_if_missing("raw_drive_files", "keywords", "TEXT")
+        self._add_column_if_missing("raw_drive_files", "lookback_hours", "INTEGER")
+
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crawl_request_metadata_cache (
+                request_id TEXT PRIMARY KEY,
+                platform TEXT,
+                crawl_mode TEXT,
+                crawl_mode_label TEXT,
+                topics_json TEXT,
+                topic_labels_json TEXT,
+                keywords TEXT,
+                lookback_hours INTEGER,
+                exclusions_json TEXT,
+                updated_at TEXT
+            )
+            """
+        )
 
         self._add_column_if_missing("market_item_snapshots", "trend_tier", "TEXT")
         self._add_column_if_missing("market_item_snapshots", "trend_group", "TEXT")
@@ -610,12 +635,44 @@ class MarketIntelligenceStore:
         envelope = normalized["envelope"] or {}
         items = normalized["items"]
 
+        req_ctx = envelope.get("crawl") if isinstance(envelope.get("crawl"), dict) else {}
+        src_run_ctx = envelope.get("source_run") if isinstance(envelope.get("source_run"), dict) else {}
+        raw_crawl_mode = self._clean_run_str(
+            envelope.get("crawl_mode")
+            or req_ctx.get("crawl_mode")
+            or src_run_ctx.get("crawl_mode")
+        )
+        raw_topics_raw = (
+            envelope.get("topics")
+            if envelope.get("topics") is not None
+            else (req_ctx.get("topics") if req_ctx.get("topics") is not None else src_run_ctx.get("topics"))
+        )
+        norm_topic_ids, _ = _normalize_crawl_topics(raw_topics_raw, strict=False)
+        raw_keywords_meta = self._clean_run_str(
+            envelope.get("keywords")
+            or req_ctx.get("keywords")
+            or src_run_ctx.get("keywords")
+        )
+        raw_lookback_val = (
+            envelope.get("lookback_hours")
+            if envelope.get("lookback_hours") is not None
+            else (req_ctx.get("lookback_hours") if req_ctx.get("lookback_hours") is not None else src_run_ctx.get("lookback_hours"))
+        )
+        try:
+            raw_lookback_int = int(raw_lookback_val) if raw_lookback_val is not None and not isinstance(raw_lookback_val, bool) else None
+        except (TypeError, ValueError):
+            raw_lookback_int = None
+
         run_meta = {
             "platform": envelope.get("platform") or ("threads" if str(file_name or "").lower().startswith(("threads_trend", "trend_report")) else None),
             "run_id": envelope.get("run_id"),
             "request_id": envelope.get("request_id"),
             "strategy_version": envelope.get("strategy_version"),
             "contract_version": envelope.get("contract_version"),
+            "crawl_mode": raw_crawl_mode,
+            "topics": norm_topic_ids if raw_topics_raw is not None else None,
+            "keywords": raw_keywords_meta,
+            "lookback_hours": raw_lookback_int,
             "special_counts": envelope.get("special_counts"),
             "run_status": envelope.get("run_status"),
             "technical_status": envelope.get("technical_status") or envelope.get("status"),
@@ -709,8 +766,9 @@ class MarketIntelligenceStore:
                      raw_path, record_count, status, error_message, synced_at,
                      file_role, is_corrected, corrects_file, corrects_report, run_status, technical_status, data_quality_status,
                      business_usable_records, run_meta_json, request_id, run_id, platform, crawl_time,
-                     requested_count, duplicate_current_run_count, strategy_version, contract_version, special_counts_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     requested_count, duplicate_current_run_count, strategy_version, contract_version, special_counts_json,
+                     crawl_mode, topics_json, keywords, lookback_hours)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_id) DO UPDATE SET
                         file_name = excluded.file_name,
                         folder_path = excluded.folder_path,
@@ -741,6 +799,10 @@ class MarketIntelligenceStore:
                         strategy_version = COALESCE(excluded.strategy_version, raw_drive_files.strategy_version),
                         contract_version = COALESCE(excluded.contract_version, raw_drive_files.contract_version),
                         special_counts_json = COALESCE(excluded.special_counts_json, raw_drive_files.special_counts_json),
+                        crawl_mode = COALESCE(excluded.crawl_mode, raw_drive_files.crawl_mode),
+                        topics_json = COALESCE(excluded.topics_json, raw_drive_files.topics_json),
+                        keywords = COALESCE(excluded.keywords, raw_drive_files.keywords),
+                        lookback_hours = COALESCE(excluded.lookback_hours, raw_drive_files.lookback_hours),
                         is_archived = 0,
                         archived_at = NULL
                     """,
@@ -773,6 +835,10 @@ class MarketIntelligenceStore:
                         self._clean_run_str(envelope.get("strategy_version")),
                         self._clean_run_str(envelope.get("contract_version")),
                         json.dumps(envelope.get("special_counts"), ensure_ascii=False) if isinstance(envelope.get("special_counts"), dict) else None,
+                        raw_crawl_mode,
+                        json.dumps(norm_topic_ids, ensure_ascii=False) if raw_topics_raw is not None else None,
+                        raw_keywords_meta,
+                        raw_lookback_int,
                     ),
                 )
 
@@ -2827,10 +2893,100 @@ class MarketIntelligenceStore:
                         needs_heal = bool(null_meta_snap or unpop_raw)
             if needs_heal and cached_count > 0:
                 self.reconcile_cached_raw_files()
+            else:
+                with self._lock:
+                    self._conn.execute(
+                        """
+                        UPDATE raw_drive_files
+                        SET crawl_mode = COALESCE(crawl_mode, json_extract(run_meta_json, '$.crawl_mode')),
+                            topics_json = COALESCE(topics_json, json_extract(run_meta_json, '$.topics')),
+                            keywords = COALESCE(keywords, json_extract(run_meta_json, '$.keywords')),
+                            lookback_hours = COALESCE(lookback_hours, json_extract(run_meta_json, '$.lookback_hours'))
+                        WHERE status = 'synced'
+                          AND COALESCE(is_archived, 0) = 0
+                          AND (
+                              (crawl_mode IS NULL AND json_extract(run_meta_json, '$.crawl_mode') IS NOT NULL)
+                              OR (topics_json IS NULL AND json_extract(run_meta_json, '$.topics') IS NOT NULL)
+                              OR (keywords IS NULL AND json_extract(run_meta_json, '$.keywords') IS NOT NULL)
+                              OR (lookback_hours IS NULL AND json_extract(run_meta_json, '$.lookback_hours') IS NOT NULL)
+                          )
+                        """
+                    )
+                    self._conn.commit()
             self.set_state("run_centric_backfill_v4", "done")
         except Exception:
             # Never block startup if legacy cache has a bad raw file; subsequent syncs still write new columns.
             pass
+
+    def upsert_crawl_request_metadata_cache(self, requests_list: Optional[Iterable[Dict[str, Any]]]) -> int:
+        """Persist real request strategy metadata from Cloudflare Worker keyed by request_id (never guesses legacy runs)."""
+        if not requests_list:
+            return 0
+        now_iso = _utc_now_iso()
+        saved = 0
+        with self._lock:
+            for req in requests_list:
+                if not isinstance(req, dict):
+                    continue
+                req_id = self._clean_run_str(req.get("id") or req.get("request_id"))
+                if not req_id:
+                    continue
+                opts: Dict[str, Any] = {}
+                if isinstance(req.get("options"), dict):
+                    opts = req["options"]
+                elif isinstance(req.get("options_json"), str) and req["options_json"].strip():
+                    try:
+                        parsed_o = json.loads(req["options_json"])
+                        if isinstance(parsed_o, dict):
+                            opts = parsed_o
+                    except Exception:
+                        opts = {}
+                crawl_mode = self._clean_run_str(req.get("crawl_mode") or opts.get("crawl_mode"))
+                topics_raw = req.get("topics") if req.get("topics") is not None else opts.get("topics")
+                topic_ids, topic_labels = _normalize_crawl_topics(topics_raw, strict=False)
+                lookback_raw = req.get("lookback_hours") if req.get("lookback_hours") is not None else opts.get("lookback_hours")
+                try:
+                    lookback_int = int(lookback_raw) if lookback_raw is not None and not isinstance(lookback_raw, bool) else None
+                except (TypeError, ValueError):
+                    lookback_int = None
+                kw = self._clean_run_str(req.get("keywords"))
+                excl_raw = req.get("exclusions") if isinstance(req.get("exclusions"), dict) else opts.get("exclusions")
+                if not (crawl_mode or topic_ids or kw or lookback_int is not None):
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO crawl_request_metadata_cache
+                    (request_id, platform, crawl_mode, crawl_mode_label, topics_json, topic_labels_json,
+                     keywords, lookback_hours, exclusions_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(request_id) DO UPDATE SET
+                        platform = COALESCE(excluded.platform, crawl_request_metadata_cache.platform),
+                        crawl_mode = COALESCE(excluded.crawl_mode, crawl_request_metadata_cache.crawl_mode),
+                        crawl_mode_label = COALESCE(excluded.crawl_mode_label, crawl_request_metadata_cache.crawl_mode_label),
+                        topics_json = COALESCE(excluded.topics_json, crawl_request_metadata_cache.topics_json),
+                        topic_labels_json = COALESCE(excluded.topic_labels_json, crawl_request_metadata_cache.topic_labels_json),
+                        keywords = COALESCE(excluded.keywords, crawl_request_metadata_cache.keywords),
+                        lookback_hours = COALESCE(excluded.lookback_hours, crawl_request_metadata_cache.lookback_hours),
+                        exclusions_json = COALESCE(excluded.exclusions_json, crawl_request_metadata_cache.exclusions_json),
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        req_id,
+                        self._clean_run_str(req.get("platform")),
+                        crawl_mode,
+                        self._clean_run_str(req.get("crawl_mode_label")) or _get_crawl_mode_label(crawl_mode),
+                        json.dumps(topic_ids, ensure_ascii=False) if topics_raw is not None else None,
+                        json.dumps(topic_labels, ensure_ascii=False) if topics_raw is not None else None,
+                        kw,
+                        lookback_int,
+                        json.dumps(excl_raw, ensure_ascii=False) if isinstance(excl_raw, dict) else None,
+                        now_iso,
+                    ),
+                )
+                saved += 1
+            if saved:
+                self._conn.commit()
+        return saved
 
     @staticmethod
     def _attach_v33_fields(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -3276,6 +3432,10 @@ class MarketIntelligenceStore:
             snap_plats_rows = self._conn.execute(
                 "SELECT raw_file_id, LOWER(platform) AS plat FROM market_item_snapshots WHERE raw_file_id IS NOT NULL GROUP BY raw_file_id, LOWER(platform)"
             ).fetchall()
+            cached_req_rows = [
+                dict(r)
+                for r in self._conn.execute("SELECT * FROM crawl_request_metadata_cache").fetchall()
+            ]
 
         snap_plats_by_file: Dict[str, set] = {}
         for sr in snap_plats_rows:
@@ -3290,9 +3450,29 @@ class MarketIntelligenceStore:
                 reports_by_raw_fid[str(rfid)] = rep
 
         req_lookup: Dict[str, Dict[str, Any]] = {}
+        for cr in cached_req_rows:
+            rid = str(cr.get("request_id") or "").strip()
+            if not rid:
+                continue
+            item_cache = dict(cr)
+            item_cache["id"] = rid
+            if cr.get("topics_json"):
+                try:
+                    item_cache["topics"] = json.loads(cr["topics_json"])
+                except Exception:
+                    pass
+            if cr.get("topic_labels_json"):
+                try:
+                    item_cache["topic_labels"] = json.loads(cr["topic_labels_json"])
+                except Exception:
+                    pass
+            req_lookup[rid] = item_cache
         for req in crawl_requests or []:
             if isinstance(req, dict) and req.get("id"):
-                req_lookup[str(req["id"]).strip()] = req
+                rid = str(req["id"]).strip()
+                merged_req = dict(req_lookup.get(rid) or {})
+                merged_req.update(req)
+                req_lookup[rid] = merged_req
 
         # Filter to actual crawl data / report artifacts
         relevant_files: List[Dict[str, Any]] = []
@@ -3712,6 +3892,10 @@ class MarketIntelligenceStore:
 
         strategy_version = None
         contract_version = None
+        crawl_mode = None
+        topics_raw = None
+        keywords_meta = None
+        lookback_hours = None
         special_counts: Dict[str, Any] = {}
         for f in sorted(data_files + report_files, key=lambda x: (1 if x.get("is_corrected") else 0, str(x.get("modified_time") or "")), reverse=True):
             f_meta = f.get("_meta") or {}
@@ -3719,6 +3903,22 @@ class MarketIntelligenceStore:
                 strategy_version = self._clean_run_str(f.get("strategy_version") or f_meta.get("strategy_version"))
             if not contract_version:
                 contract_version = self._clean_run_str(f.get("contract_version") or f_meta.get("contract_version"))
+            if not crawl_mode:
+                crawl_mode = self._clean_run_str(f.get("crawl_mode") or f_meta.get("crawl_mode"))
+            if topics_raw is None:
+                if f.get("topics_json") is not None:
+                    topics_raw = f.get("topics_json")
+                elif f_meta.get("topics") is not None:
+                    topics_raw = f_meta.get("topics")
+            if not keywords_meta:
+                keywords_meta = self._clean_run_str(f.get("keywords") or f_meta.get("keywords"))
+            if lookback_hours is None:
+                lb_cand = f.get("lookback_hours") if f.get("lookback_hours") is not None else f_meta.get("lookback_hours")
+                if lb_cand is not None and not isinstance(lb_cand, bool):
+                    try:
+                        lookback_hours = int(lb_cand)
+                    except (TypeError, ValueError):
+                        pass
             if not special_counts:
                 sc_raw = f_meta.get("special_counts")
                 if not isinstance(sc_raw, dict) and f.get("special_counts_json"):
@@ -3728,6 +3928,54 @@ class MarketIntelligenceStore:
                         sc_raw = None
                 if isinstance(sc_raw, dict) and sc_raw:
                     special_counts = dict(sc_raw)
+        if not crawl_mode and rep_parsed:
+            crawl_mode = self._clean_run_str(rep_parsed.get("crawl_mode"))
+        if topics_raw is None and rep_parsed and rep_parsed.get("topics") is not None:
+            topics_raw = rep_parsed.get("topics")
+        if not keywords_meta and rep_parsed:
+            keywords_meta = self._clean_run_str(rep_parsed.get("keywords"))
+        if lookback_hours is None and rep_parsed and rep_parsed.get("lookback_hours") is not None:
+            try:
+                lookback_hours = int(rep_parsed.get("lookback_hours"))
+            except (TypeError, ValueError):
+                pass
+
+        linked_opts: Dict[str, Any] = {}
+        if isinstance(linked_req.get("options"), dict):
+            linked_opts = linked_req["options"]
+        elif isinstance(linked_req.get("options_json"), str) and linked_req["options_json"].strip():
+            try:
+                parsed_lo = json.loads(linked_req["options_json"])
+                if isinstance(parsed_lo, dict):
+                    linked_opts = parsed_lo
+            except Exception:
+                linked_opts = {}
+
+        if not crawl_mode:
+            crawl_mode = self._clean_run_str(linked_req.get("crawl_mode") or linked_opts.get("crawl_mode"))
+        if topics_raw is None:
+            if linked_req.get("topics") is not None:
+                topics_raw = linked_req.get("topics")
+            elif linked_opts.get("topics") is not None:
+                topics_raw = linked_opts.get("topics")
+        if not keywords_meta:
+            keywords_meta = self._clean_run_str(linked_req.get("keywords"))
+        if lookback_hours is None:
+            lb_linked = linked_req.get("lookback_hours") if linked_req.get("lookback_hours") is not None else linked_opts.get("lookback_hours")
+            if lb_linked is not None and not isinstance(lb_linked, bool):
+                try:
+                    lookback_hours = int(lb_linked)
+                except (TypeError, ValueError):
+                    pass
+
+        topic_ids, topic_labels = _normalize_crawl_topics(topics_raw, strict=False) if topics_raw is not None else ([], [])
+        crawl_mode_label = (
+            self._clean_run_str(linked_req.get("crawl_mode_label")) or _get_crawl_mode_label(crawl_mode)
+            if crawl_mode
+            else None
+        )
+        has_strategy_metadata = bool(crawl_mode or topic_ids or keywords_meta or lookback_hours is not None)
+
         if not special_counts:
             nv_snap = sum(1 for it in effective_snaps if it.get("natural_viral") is True)
             bi_snap = sum(1 for it in effective_snaps if it.get("buyer_intent") is True)
@@ -3748,11 +3996,17 @@ class MarketIntelligenceStore:
             "schema_versions": schema_versions,
             "strategy_version": strategy_version,
             "contract_version": contract_version,
+            "crawl_mode": crawl_mode,
+            "crawl_mode_label": crawl_mode_label,
+            "topics": topic_ids,
+            "topic_labels": topic_labels,
+            "lookback_hours": lookback_hours,
+            "has_strategy_metadata": has_strategy_metadata,
             "special_counts": special_counts or None,
             "run_status": run_status,
             "display_status": linked_req.get("display_status"),
             "display_status_label": linked_req.get("display_status_label"),
-            "keywords": linked_req.get("keywords"),
+            "keywords": keywords_meta,
             "stop_reason": stop_reason,
             "target_achieved": target_achieved,
             "requested_count": int(requested_count) if requested_count is not None else None,
@@ -3802,9 +4056,16 @@ class MarketIntelligenceStore:
         limit: int = 50,
         include_archived: bool = False,
         crawl_requests: Optional[List[Dict[str, Any]]] = None,
+        crawl_mode: Optional[str] = None,
+        topic: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List crawl runs newest-first with Data+Report Drive links, per-run counters, and status."""
+        """List crawl runs newest-first with Data+Report Drive links, per-run counters, optional metadata filters, and status."""
         plat = (platform or "all").strip().lower()
+        mode_filter = (crawl_mode or "").strip().lower()
+        topic_filter_raw = (topic or "").strip()
+        topic_filter_ids, topic_filter_labels = _normalize_crawl_topics(topic_filter_raw, strict=False) if topic_filter_raw and topic_filter_raw.lower() != "all" else ([], [])
+        topic_match_set = {t.lower() for t in (topic_filter_ids + topic_filter_labels)}
+
         groups = self._build_run_groups_index(include_archived=include_archived, crawl_requests=crawl_requests)
         out: List[Dict[str, Any]] = []
         for grp in groups:
@@ -3814,7 +4075,22 @@ class MarketIntelligenceStore:
                     for f in grp["data_files"] + grp["report_files"]
                 ):
                     continue
-            out.append(self._summarize_run_group(grp, platform=plat))
+            summary = self._summarize_run_group(grp, platform=plat)
+            if mode_filter and mode_filter != "all":
+                if mode_filter == "__none__":
+                    if summary.get("crawl_mode"):
+                        continue
+                elif str(summary.get("crawl_mode") or "").lower() != mode_filter:
+                    continue
+            if topic_match_set:
+                run_topics = {
+                    str(x).lower()
+                    for x in ((summary.get("topics") or []) + (summary.get("topic_labels") or []))
+                    if x
+                }
+                if not (run_topics & topic_match_set):
+                    continue
+            out.append(summary)
             if len(out) >= max(1, min(int(limit), 200)):
                 break
         return out
@@ -4326,6 +4602,12 @@ class MarketIntelligenceStore:
             evidence["run_id"] = run_summary.get("run_id")
             evidence["run_key"] = run_summary.get("run_key")
             evidence["grouped_by"] = run_summary.get("grouped_by")
+            evidence["crawl_mode"] = run_summary.get("crawl_mode")
+            evidence["crawl_mode_label"] = run_summary.get("crawl_mode_label")
+            evidence["topics"] = run_summary.get("topics") or []
+            evidence["topic_labels"] = run_summary.get("topic_labels") or []
+            evidence["keywords"] = run_summary.get("keywords")
+            evidence["lookback_hours"] = run_summary.get("lookback_hours")
         evidence["has_muse_report"] = bool(chosen)
 
         if chosen:
@@ -4333,6 +4615,15 @@ class MarketIntelligenceStore:
             evidence["schema_version"] = chosen.get("schema_version") or "v2"
             evidence["strategy_version"] = chosen.get("strategy_version") or (run_summary.get("strategy_version") if run_summary else None)
             evidence["contract_version"] = chosen.get("contract_version") or (run_summary.get("contract_version") if run_summary else None)
+            evidence["crawl_mode"] = chosen.get("crawl_mode") or evidence.get("crawl_mode")
+            if chosen.get("crawl_mode") and not evidence.get("crawl_mode_label"):
+                evidence["crawl_mode_label"] = _get_crawl_mode_label(chosen.get("crawl_mode"))
+            if isinstance(chosen.get("topics"), list) and chosen.get("topics"):
+                c_tids, c_tlabs = _normalize_crawl_topics(chosen.get("topics"), strict=False)
+                evidence["topics"] = c_tids
+                evidence["topic_labels"] = c_tlabs
+            evidence["keywords"] = chosen.get("keywords") or evidence.get("keywords")
+            evidence["lookback_hours"] = chosen.get("lookback_hours") if chosen.get("lookback_hours") is not None else evidence.get("lookback_hours")
             evidence["special_counts"] = chosen.get("special_counts") or (run_summary.get("special_counts") if run_summary else None)
             evidence["growth_tracking"] = chosen.get("growth_tracking") or []
             evidence["run_id"] = chosen.get("run_id") or evidence.get("run_id")

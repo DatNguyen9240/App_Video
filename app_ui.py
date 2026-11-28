@@ -61,6 +61,13 @@ from market_intelligence import (
     MarketSyncService,
     RemoteCommandPoller,
 )
+from market_intelligence.crawl_strategy import (
+    THREADS_CRAWL_MODES,
+    THREADS_TOPIC_PRESETS,
+    THREADS_EXCLUSION_DEFAULTS,
+    get_crawl_config_payload,
+    validate_threads_strategy_options,
+)
 
 _market_runtime_lock = threading.Lock()
 _market_runtime = None
@@ -2584,6 +2591,18 @@ HTML_TEMPLATE = """
               <span v-if="activeRunMeta.contract_version" class="px-2 py-0.5 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 font-mono text-[10px]">
                 Contract V{{ activeRunMeta.contract_version }}
               </span>
+              <span v-if="activeRunMeta.crawl_mode" class="px-2 py-0.5 rounded bg-fuchsia-500/20 border border-fuchsia-500/40 text-fuchsia-200 text-[10px] font-semibold">
+                🎯 Mode: {{ activeRunMeta.crawl_mode_label || activeRunMeta.crawl_mode }}
+              </span>
+              <span v-if="(activeRunMeta.topic_labels || activeRunMeta.topics || []).length" class="px-2 py-0.5 rounded bg-violet-500/20 border border-violet-500/40 text-violet-200 text-[10px]">
+                🏷️ {{ (activeRunMeta.topic_labels || activeRunMeta.topics).slice(0, 3).join(', ') }}{{ (activeRunMeta.topic_labels || activeRunMeta.topics).length > 3 ? ` +${(activeRunMeta.topic_labels || activeRunMeta.topics).length - 3}` : '' }}
+              </span>
+              <span v-if="activeRunMeta.lookback_hours" class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-[10px]">
+                🕒 {{ activeRunMeta.lookback_hours === 168 ? '7 ngày' : activeRunMeta.lookback_hours + 'h' }}
+              </span>
+              <span v-if="activeRunMeta.keywords" class="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-amber-200 text-[10px] truncate max-w-[220px]" :title="activeRunMeta.keywords">
+                🔎 {{ activeRunMeta.keywords }}
+              </span>
               <span v-if="activeRunMeta.special_counts?.natural_viral" class="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-200 font-bold text-[10px]">
                 ⚡ Natural Viral: {{ activeRunMeta.special_counts.natural_viral }}
               </span>
@@ -2621,18 +2640,34 @@ HTML_TEMPLATE = """
 
       <!-- CRAWL RUNS HISTORY TABLE (Requirement #1) -->
       <div v-show="showCrawlRunHistory && marketViewMode !== 'compare'" class="glass-panel rounded-2xl p-4 shadow-xl space-y-2.5">
-        <div class="flex items-center justify-between gap-2">
+        <div class="flex flex-wrap items-center justify-between gap-2">
           <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-2">
-            <i class="fa-solid fa-layer-group"></i> Danh Sách Lịch Sử Lượt Crawl ({{ crawlRunsCatalog.length }} lượt)
+            <i class="fa-solid fa-layer-group"></i> Danh Sách Lịch Sử Lượt Crawl ({{ filteredCrawlRunsCatalog.length }}/{{ crawlRunsCatalog.length }} lượt)
           </h3>
-          <button @click="showCrawlRunHistory = false" class="text-[11px] text-slate-400 hover:text-white cursor-pointer">Thu gọn</button>
+          <div class="flex flex-wrap items-center gap-2 text-[11px]">
+            <select v-model="runCatalogModeFilter" class="glass-input rounded-lg px-2 py-1 text-[11px] bg-slate-900 text-slate-200">
+              <option value="all">🎯 Tất cả mục tiêu</option>
+              <option v-for="m in crawlStrategyModes" :key="'flt-m-'+m.id" :value="m.id">{{ m.label }}</option>
+              <option value="__none__">Chưa gắn metadata mục tiêu</option>
+            </select>
+            <select v-model="runCatalogTopicFilter" class="glass-input rounded-lg px-2 py-1 text-[11px] bg-slate-900 text-slate-200 max-w-[200px]">
+              <option value="all">🏷️ Tất cả chủ đề</option>
+              <option v-for="t in crawlTopicPresets" :key="'flt-t-'+t.id" :value="t.id">{{ t.label }}</option>
+            </select>
+            <button v-if="runCatalogModeFilter !== 'all' || runCatalogTopicFilter !== 'all'"
+              @click="runCatalogModeFilter = 'all'; runCatalogTopicFilter = 'all'"
+              class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-[10px] cursor-pointer">
+              Xóa lọc
+            </button>
+            <button @click="showCrawlRunHistory = false" class="text-[11px] text-slate-400 hover:text-white cursor-pointer">Thu gọn</button>
+          </div>
         </div>
         <div class="overflow-x-auto rounded-xl border border-slate-800 max-h-72 overflow-y-auto">
           <table class="w-full text-left text-[11px]">
             <thead class="bg-slate-900/95 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800 sticky top-0">
               <tr>
                 <th class="px-3 py-2">Lượt crawl (run_id) & Thời gian</th>
-                <th class="px-2.5 py-2">Nền tảng</th>
+                <th class="px-2.5 py-2">Nền tảng & Chiến lược</th>
                 <th class="px-2.5 py-2">File Data & Report (Drive)</th>
                 <th class="px-2.5 py-2 text-right">Mục tiêu</th>
                 <th class="px-2.5 py-2 text-right">Quét / Ứng viên</th>
@@ -2642,23 +2677,36 @@ HTML_TEMPLATE = """
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/70 text-slate-200">
-              <tr v-if="!crawlRunsCatalog.length">
-                <td colspan="8" class="px-4 py-6 text-center text-slate-500">Chưa có lượt crawl nào.</td>
+              <tr v-if="!filteredCrawlRunsCatalog.length">
+                <td colspan="8" class="px-4 py-6 text-center text-slate-500">Không có lượt crawl phù hợp bộ lọc.</td>
               </tr>
-              <tr v-for="(r, rIdx) in crawlRunsCatalog" :key="'row-'+r.run_key"
-                @click="selectCrawlRun(r.run_key, rIdx !== 0)"
+              <tr v-for="(r, rIdx) in filteredCrawlRunsCatalog" :key="'row-'+r.run_key"
+                @click="selectCrawlRun(r.run_key, !(crawlRunsCatalog[0] && crawlRunsCatalog[0].run_key === r.run_key))"
                 :class="(marketViewMode === 'by_run' && selectedRunKey === r.run_key) ? 'bg-indigo-950/50 border-l-2 border-indigo-400' : 'hover:bg-slate-900/60'"
                 class="cursor-pointer transition">
                 <td class="px-3 py-2 align-top">
                   <div class="font-mono font-bold text-white flex items-center gap-1.5 flex-wrap">
                     <span>{{ r.run_id || ('File: ' + (r.data_file?.file_name || r.run_key)) }}</span>
-                    <span v-if="rIdx === 0" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px]">Mới nhất</span>
+                    <span v-if="crawlRunsCatalog[0] && crawlRunsCatalog[0].run_key === r.run_key" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px]">Mới nhất</span>
                     <span v-if="!r.has_run_id" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[9px]">Theo file nguồn</span>
                   </div>
                   <div class="text-[10px] text-slate-400 font-mono">{{ formatIsoTime(r.crawl_time) || '—' }}</div>
                 </td>
-                <td class="px-2.5 py-2 align-top uppercase font-bold text-[10px]">
-                  <span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-indigo-200">{{ (r.platforms || [r.platform]).join(', ') }}</span>
+                <td class="px-2.5 py-2 align-top text-[10px] space-y-1 max-w-[200px]">
+                  <div class="uppercase font-bold">
+                    <span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-indigo-200">{{ (r.platforms || [r.platform]).join(', ') }}</span>
+                  </div>
+                  <div v-if="r.crawl_mode" class="text-fuchsia-300 font-semibold truncate" :title="r.crawl_mode_label || r.crawl_mode">
+                    🎯 {{ r.crawl_mode_label || r.crawl_mode }}
+                  </div>
+                  <div v-if="(r.topic_labels || r.topics || []).length" class="text-violet-300/90 text-[9px] truncate" :title="(r.topic_labels || r.topics).join(', ')">
+                    🏷️ {{ (r.topic_labels || r.topics).slice(0, 2).join(', ') }}{{ (r.topic_labels || r.topics).length > 2 ? ` +${(r.topic_labels || r.topics).length - 2}` : '' }}
+                  </div>
+                  <div v-if="r.lookback_hours || r.keywords" class="text-slate-400 text-[9px] truncate" :title="r.keywords || ''">
+                    <span v-if="r.lookback_hours">🕒 {{ r.lookback_hours === 168 ? '7d' : r.lookback_hours + 'h' }}</span>
+                    <span v-if="r.lookback_hours && r.keywords"> • </span>
+                    <span v-if="r.keywords">{{ r.keywords }}</span>
+                  </div>
                 </td>
                 <td class="px-2.5 py-2 align-top space-y-0.5 max-w-xs" @click.stop>
                   <div v-for="df in (r.data_files || []).slice(0, 2)" :key="'tbl-df-'+df.file_id" class="truncate">
@@ -3071,9 +3119,9 @@ HTML_TEMPLATE = """
               </div>
             </details>
 
-            <div class="space-y-2">
+            <div class="space-y-2.5">
               <div class="flex flex-wrap xl:flex-nowrap items-center gap-2">
-                <select v-model="crawlRequestForm.platform" class="w-full sm:w-36 shrink-0 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                <select v-model="crawlRequestForm.platform" class="w-full sm:w-40 shrink-0 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
                   <option value="threads">Threads (Str 3.3 / V3.2)</option>
                   <option value="tiktok">TikTok (V2)</option>
                   <option value="shopee">Shopee (V2)</option>
@@ -3086,16 +3134,22 @@ HTML_TEMPLATE = """
                   <span class="text-[10px] text-slate-400 shrink-0">bài</span>
                 </div>
                 <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lease_minutes"
-                  title="Tùy chọn thời lượng lease an toàn (30–120 phút) cho Threads Strategy 3.3 — ưu tiên chất lượng"
+                  title="Tùy chọn thời lượng lease an toàn (30 / 60 / 120 phút) cho Threads Strategy 3.3 — ưu tiên chất lượng"
                   class="w-full sm:w-32 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
                   <option :value="30">⏱️ 30 phút</option>
-                  <option :value="45">⏱️ 45 phút</option>
                   <option :value="60">⏱️ 60 phút</option>
-                  <option :value="90">⏱️ 90 phút</option>
                   <option :value="120">⏱️ 120 phút</option>
                 </select>
-                <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa / ngách sản phẩm..."
-                  class="flex-1 min-w-[120px] glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
+                <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lookback_hours"
+                  title="Phạm vi thời gian bài viết (mặc định ưu tiên 24h, tối đa 48h)"
+                  class="w-full sm:w-44 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option :value="24">🕒 24h (tối đa 48h)</option>
+                  <option :value="48">🕒 48h gần nhất</option>
+                  <option :value="72">🕒 72h (mở rộng)</option>
+                  <option :value="168">🕒 7 ngày (mở rộng)</option>
+                </select>
+                <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa tùy chỉnh thêm (ngách / sản phẩm / format)..."
+                  class="flex-1 min-w-[140px] glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
                 <button @click="submitCrawlRequest"
                   class="shrink-0 px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold cursor-pointer whitespace-nowrap">
                   Tạo & Copy Prompt
@@ -3112,11 +3166,102 @@ HTML_TEMPLATE = """
                   </button>
                 </div>
                 <span v-if="crawlRequestForm.platform === 'threads'" class="text-indigo-300/90">
-                  🧭 Crawl Strategy 3.3 + Contract V3.2 • Lease an toàn 30–120 phút (mặc định 30p, không tự gia hạn).
+                  🧭 Crawl Strategy 3.3 + Contract V3.2 • Lease an toàn 30/60/120 phút (mặc định 30p, không tự gia hạn).
                 </span>
                 <span v-else class="text-amber-300/90">
                   ℹ️ {{ crawlRequestForm.platform.toUpperCase() }} CHƯA hỗ trợ tự động hoàn tất request đầy đủ (Completion API /api/crawl/* chỉ hỗ trợ Threads V3.2); chỉ dùng Drive Sync.
                 </span>
+              </div>
+
+              <!-- Threads Strategy 3.3 Configurator: Crawl Mode, Topic Selector (24 chủ đề) & Filters -->
+              <div v-if="crawlRequestForm.platform === 'threads'" class="p-3 rounded-xl bg-slate-900/75 border border-slate-800/90 space-y-3">
+                <!-- 1. Mục tiêu crawl (crawl_mode) -->
+                <div class="space-y-1.5">
+                  <div class="flex items-center justify-between gap-2 flex-wrap">
+                    <span class="text-[11px] font-bold text-indigo-300 uppercase tracking-wide">🎯 Mục tiêu crawl (Crawl Mode)</span>
+                    <span v-if="selectedCrawlModeObj" class="text-[10px] text-slate-400">{{ selectedCrawlModeObj.summary }}</span>
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-1.5">
+                    <button v-for="m in crawlStrategyModes" :key="'cm-' + m.id" type="button"
+                      @click="m.enabled && (crawlRequestForm.crawl_mode = m.id)"
+                      :disabled="!m.enabled"
+                      :title="m.disabled_reason || m.summary"
+                      :class="!m.enabled
+                        ? 'bg-slate-950/60 border-slate-800 text-slate-500 cursor-not-allowed opacity-75'
+                        : (crawlRequestForm.crawl_mode === m.id
+                          ? 'bg-indigo-600/30 border-indigo-400 text-white font-semibold shadow-sm'
+                          : 'bg-slate-800/70 border-slate-700/80 text-slate-300 hover:bg-slate-800 cursor-pointer')"
+                      class="px-2.5 py-1.5 rounded-lg border text-left text-[11px] transition flex items-center justify-between gap-1.5">
+                      <span class="truncate">{{ m.label }}</span>
+                      <span v-if="!m.enabled" class="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] shrink-0">Chờ V3.2</span>
+                      <span v-else-if="m.id === 'balanced'" class="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-200 text-[9px] shrink-0">40/40/20</span>
+                      <span v-else-if="m.id === 'traffic_content'" class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-200 text-[9px] shrink-0">Traffic</span>
+                    </button>
+                  </div>
+                  <div v-if="crawlStrategyModes.some(m => !m.enabled)" class="text-[10px] text-amber-300/80 bg-amber-950/20 border border-amber-500/20 rounded-lg px-2.5 py-1.5">
+                    ℹ️ <strong>Theo dõi tăng trưởng bài cũ (growth_tracking)</strong> tạm khóa: Data Contract V3.2 hiện tính mục tiêu theo <code>new_qualified_count</code> và chưa có API liệt kê bài lịch sử từ D1 Registry để đo lại.
+                  </div>
+                </div>
+
+                <!-- 2. Topic Selector (24 chủ đề chia 2 nhóm trong 1 khối) -->
+                <div class="space-y-2 pt-2 border-t border-slate-800/80">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-[11px] font-bold text-violet-300 uppercase tracking-wide">
+                      🏷️ Chủ đề mục tiêu ({{ (crawlRequestForm.topics || []).length }}/{{ crawlTopicPresets.length }} đã chọn)
+                    </span>
+                    <div class="flex flex-wrap items-center gap-1.5 text-[10px]">
+                      <button type="button" @click="selectAllTopics" class="px-2 py-0.5 rounded bg-violet-600/25 hover:bg-violet-600/40 text-violet-200 border border-violet-500/30 cursor-pointer">Chọn tất cả</button>
+                      <button type="button" @click="selectTopicGroup('commerce_lifestyle')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer">+ Đời sống/Aff (14)</button>
+                      <button type="button" @click="selectTopicGroup('traffic_entertainment')" class="px-2 py-0.5 rounded bg-fuchsia-600/20 hover:bg-fuchsia-600/35 text-fuchsia-200 border border-fuchsia-500/30 cursor-pointer">+ Giải trí/Traffic (10)</button>
+                      <button type="button" @click="clearAllTopics" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 cursor-pointer">Bỏ chọn</button>
+                    </div>
+                  </div>
+                  <div class="space-y-1.5">
+                    <div class="text-[10px] text-slate-400 font-semibold">Ngành hàng, Đời sống & Affiliate (14)</div>
+                    <div class="flex flex-wrap gap-1.5">
+                      <button v-for="t in crawlCommerceTopics" :key="'tp-' + t.id" type="button"
+                        @click="toggleTopicSelection(t.id)"
+                        :title="'Từ khóa gợi ý: ' + (t.keywords || []).join(', ')"
+                        :class="(crawlRequestForm.topics || []).includes(t.id) ? 'bg-violet-600/35 border-violet-400 text-white font-semibold' : 'bg-slate-800/70 border-slate-700 text-slate-300 hover:bg-slate-800'"
+                        class="px-2 py-1 rounded-lg border text-[10px] cursor-pointer transition">
+                        {{ (crawlRequestForm.topics || []).includes(t.id) ? '✓ ' : '' }}{{ t.label }}
+                      </button>
+                    </div>
+                  </div>
+                  <div class="space-y-1.5">
+                    <div class="text-[10px] text-fuchsia-300/90 font-semibold">Giải trí & Kéo Traffic (10)</div>
+                    <div class="flex flex-wrap gap-1.5">
+                      <button v-for="t in crawlTrafficTopics" :key="'tp-' + t.id" type="button"
+                        @click="toggleTopicSelection(t.id)"
+                        :title="'Từ khóa gợi ý: ' + (t.keywords || []).join(', ')"
+                        :class="(crawlRequestForm.topics || []).includes(t.id) ? 'bg-fuchsia-600/35 border-fuchsia-400 text-white font-semibold' : 'bg-slate-800/70 border-slate-700 text-slate-300 hover:bg-slate-800'"
+                        class="px-2 py-1 rounded-lg border text-[10px] cursor-pointer transition">
+                        {{ (crawlRequestForm.topics || []).includes(t.id) ? '✓ ' : '' }}{{ t.label }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3. Bộ lọc & Loại trừ (tất cả bật mặc định) -->
+                <div class="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-300">
+                  <span class="text-[10px] font-bold text-slate-400 uppercase">🛡️ Bộ lọc mặc định:</span>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer" title="Hạn chế người nổi tiếng/KOL lớn; KHÔNG loại người dùng bình thường chỉ vì nhắc tên người nổi tiếng">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.exclude_celebrity" class="accent-indigo-500">
+                    <span>Hạn chế người nổi tiếng (giữ user thường)</span>
+                  </label>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.exclude_fandom" class="accent-indigo-500">
+                    <span>Hạn chế fandom/thần tượng</span>
+                  </label>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.exclude_pure_ads" class="accent-indigo-500">
+                    <span>Hạn chế quảng cáo đơn thuần</span>
+                  </label>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.vn_only" class="accent-indigo-500">
+                    <span>Chỉ thu thập thị trường Việt Nam</span>
+                  </label>
+                </div>
               </div>
             </div>
 
@@ -3127,6 +3272,9 @@ HTML_TEMPLATE = """
                   <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-amber-300">{{ activePromptInfo.request_id }}</span>
                   <span v-if="activePromptInfo.strategy_version" class="px-1.5 py-0.5 rounded bg-slate-900 border border-indigo-700/70 font-mono text-[10px] text-indigo-300">Strategy: 3.3</span>
                   <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-emerald-300">Contract: {{ activePromptInfo.contract_version }}</span>
+                  <span v-if="activePromptInfo.crawl_mode_label || activePromptInfo.crawl_mode" class="px-1.5 py-0.5 rounded bg-fuchsia-950/60 border border-fuchsia-500/40 text-[10px] text-fuchsia-200 font-semibold">🎯 {{ activePromptInfo.crawl_mode_label || activePromptInfo.crawl_mode }}</span>
+                  <span v-if="(activePromptInfo.topic_labels || activePromptInfo.topics || []).length" class="px-1.5 py-0.5 rounded bg-violet-950/60 border border-violet-500/40 text-[10px] text-violet-200">🏷️ {{ (activePromptInfo.topic_labels || activePromptInfo.topics).length }} chủ đề</span>
+                  <span v-if="activePromptInfo.lookback_hours" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-slate-200">🕒 {{ activePromptInfo.lookback_hours === 168 ? '7d' : activePromptInfo.lookback_hours + 'h' }}</span>
                   <span v-if="activePromptInfo.platform === 'threads' && activePromptInfo.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-sky-300">Lease: {{ activePromptInfo.lease_minutes }}p</span>
                 </div>
                 <div class="flex items-center gap-1.5">
@@ -3153,6 +3301,9 @@ HTML_TEMPLATE = """
                     <div class="flex items-center gap-2 flex-wrap">
                       <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
                       <span class="font-mono text-[11px] text-slate-200 font-semibold">Mục tiêu: {{ crw.requested_count || 50 }} bài</span>
+                      <span v-if="crw.platform === 'threads' && (crw.crawl_mode_label || crw.crawl_mode)" class="px-1.5 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30 text-[10px]">🎯 {{ crw.crawl_mode_label || crw.crawl_mode }}</span>
+                      <span v-if="crw.platform === 'threads' && (crw.topic_labels || crw.topics || []).length" :title="(crw.topic_labels || crw.topics).join(', ')" class="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-200 border border-violet-500/30 text-[10px]">🏷️ {{ (crw.topic_labels || crw.topics).slice(0, 2).join(', ') }}{{ (crw.topic_labels || crw.topics).length > 2 ? ` +${(crw.topic_labels || crw.topics).length - 2}` : '' }}</span>
+                      <span v-if="crw.platform === 'threads' && crw.lookback_hours" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 font-mono text-[10px] border border-slate-700">🕒 {{ crw.lookback_hours === 168 ? '7d' : crw.lookback_hours + 'h' }}</span>
                       <span v-if="crw.platform === 'threads' && crw.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-sky-300 font-mono text-[10px] border border-slate-700">⏱️ {{ crw.lease_minutes }}p</span>
                       <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
                         :class="getCrawlDisplayState(crw).badgeClass">
@@ -4266,7 +4417,18 @@ HTML_TEMPLATE = """
           selectedMarketDetail: null,
           isTestingConnection: false,
           marketConnectionNotice: null,
-          crawlRequestForm: { platform: 'threads', requested_count: 50, lease_minutes: 30, keywords: '' },
+          crawlRequestForm: {
+            platform: 'threads',
+            requested_count: 50,
+            lease_minutes: 30,
+            keywords: '',
+            crawl_mode: 'balanced',
+            topics: [],
+            lookback_hours: 24,
+            exclusions: { exclude_celebrity: true, exclude_fandom: true, exclude_pure_ads: true, vn_only: true }
+          },
+          crawlStrategyModes: (typeof window !== 'undefined' && window.__THREADS_CRAWL_CONFIG__ && Array.isArray(window.__THREADS_CRAWL_CONFIG__.modes)) ? window.__THREADS_CRAWL_CONFIG__.modes : [],
+          crawlTopicPresets: (typeof window !== 'undefined' && window.__THREADS_CRAWL_CONFIG__ && Array.isArray(window.__THREADS_CRAWL_CONFIG__.topics)) ? window.__THREADS_CRAWL_CONFIG__.topics : [],
           crawlRequests: [],
           activePromptInfo: null,
           museWebUrl: 'https://muse.ai/',
@@ -4281,6 +4443,8 @@ HTML_TEMPLATE = """
           selectedRunKey: '',
           userPinnedRunKey: false,
           crawlRunsCatalog: [],
+          runCatalogModeFilter: 'all',
+          runCatalogTopicFilter: 'all',
           showCrawlRunHistory: false,
           compareBaseRunKey: '',
           compareTargetRunKey: '',
@@ -4292,6 +4456,34 @@ HTML_TEMPLATE = """
         filteredAvatars() {
           if (this.avatarTabFilter === 'all') return this.avatarGallery;
           return this.avatarGallery.filter(a => a.category === this.avatarTabFilter);
+        },
+        crawlCommerceTopics() {
+          return (this.crawlTopicPresets || []).filter(t => t.group === 'commerce_lifestyle');
+        },
+        crawlTrafficTopics() {
+          return (this.crawlTopicPresets || []).filter(t => t.group === 'traffic_entertainment');
+        },
+        selectedCrawlModeObj() {
+          return (this.crawlStrategyModes || []).find(m => m.id === this.crawlRequestForm.crawl_mode) || null;
+        },
+        filteredCrawlRunsCatalog() {
+          const runs = this.crawlRunsCatalog || [];
+          const mFilter = String(this.runCatalogModeFilter || 'all').trim().toLowerCase();
+          const tFilter = String(this.runCatalogTopicFilter || 'all').trim().toLowerCase();
+          return runs.filter(r => {
+            if (mFilter && mFilter !== 'all') {
+              if (mFilter === '__none__') {
+                if (r.crawl_mode) return false;
+              } else if (String(r.crawl_mode || '').toLowerCase() !== mFilter) {
+                return false;
+              }
+            }
+            if (tFilter && tFilter !== 'all') {
+              const runTopics = [...(r.topics || []), ...(r.topic_labels || [])].map(x => String(x).toLowerCase());
+              if (!runTopics.includes(tFilter)) return false;
+            }
+            return true;
+          });
         },
         isRenderingVideo() {
           if (!this.pipelineState) return false;
@@ -5858,6 +6050,26 @@ HTML_TEMPLATE = """
             this.notify('Lỗi tải file JSON: ' + err, 'error');
           }
         },
+        toggleTopicSelection(topicId) {
+          const cur = Array.isArray(this.crawlRequestForm.topics) ? [...this.crawlRequestForm.topics] : [];
+          const idx = cur.indexOf(topicId);
+          if (idx >= 0) cur.splice(idx, 1);
+          else cur.push(topicId);
+          this.crawlRequestForm.topics = cur;
+        },
+        selectAllTopics() {
+          this.crawlRequestForm.topics = (this.crawlTopicPresets || []).map(t => t.id);
+        },
+        clearAllTopics() {
+          this.crawlRequestForm.topics = [];
+        },
+        selectTopicGroup(groupName) {
+          const cur = new Set(Array.isArray(this.crawlRequestForm.topics) ? this.crawlRequestForm.topics : []);
+          for (const t of (this.crawlTopicPresets || [])) {
+            if (t.group === groupName) cur.add(t.id);
+          }
+          this.crawlRequestForm.topics = Array.from(cur);
+        },
         async submitCrawlRequest() {
           const parsedCount = Number.parseInt(this.crawlRequestForm.requested_count, 10);
           if (!Number.isFinite(parsedCount) || parsedCount < 1 || parsedCount > 500) {
@@ -5874,8 +6086,32 @@ HTML_TEMPLATE = """
               poll_profile: this.crawlScheduleProfile,
             };
             if (plat === 'threads') {
+              const selMode = this.crawlRequestForm.crawl_mode || 'balanced';
+              const modeMeta = (this.crawlStrategyModes || []).find(m => m.id === selMode);
+              if (modeMeta && !modeMeta.enabled) {
+                this.notify('⚠️ ' + (modeMeta.disabled_reason || 'Mode này chưa được bật.'), 'error');
+                return;
+              }
+              const selTopics = Array.isArray(this.crawlRequestForm.topics) ? [...this.crawlRequestForm.topics] : [];
+              const selLookback = [24, 48, 72, 168].includes(Number(this.crawlRequestForm.lookback_hours)) ? Number(this.crawlRequestForm.lookback_hours) : 24;
+              const excl = this.crawlRequestForm.exclusions || { exclude_celebrity: true, exclude_fandom: true, exclude_pure_ads: true, vn_only: true };
               payloadBody.lease_minutes = parsedLeaseMin;
-              payloadBody.options = { lease_seconds: parsedLeaseMin * 60 };
+              payloadBody.crawl_mode = selMode;
+              payloadBody.topics = selTopics;
+              payloadBody.lookback_hours = selLookback;
+              payloadBody.exclusions = {
+                exclude_celebrity: Boolean(excl.exclude_celebrity),
+                exclude_fandom: Boolean(excl.exclude_fandom),
+                exclude_pure_ads: Boolean(excl.exclude_pure_ads),
+                vn_only: Boolean(excl.vn_only),
+              };
+              payloadBody.options = {
+                lease_seconds: parsedLeaseMin * 60,
+                crawl_mode: selMode,
+                topics: selTopics,
+                lookback_hours: selLookback,
+                exclusions: payloadBody.exclusions,
+              };
             }
             const res = await fetch('/api/remote/crawl_requests', {
               method: 'POST',
@@ -5893,6 +6129,11 @@ HTML_TEMPLATE = """
                   platform: effPlat,
                   strategy_version: data.request?.strategy_version || (effPlat === 'threads' ? '3.3 (sửa đổi 28/11/2026)' : null),
                   contract_version: data.request?.contract_version || (effPlat === 'threads' ? '3.2' : 'v2'),
+                  crawl_mode: data.request?.crawl_mode || (effPlat === 'threads' ? payloadBody.crawl_mode : null),
+                  crawl_mode_label: data.request?.crawl_mode_label || null,
+                  topics: data.request?.topics || (effPlat === 'threads' ? payloadBody.topics : []),
+                  topic_labels: data.request?.topic_labels || [],
+                  lookback_hours: data.request?.lookback_hours || (effPlat === 'threads' ? payloadBody.lookback_hours : null),
                   lease_minutes: data.request?.lease_minutes || (effPlat === 'threads' ? parsedLeaseMin : null),
                   manual_prompt: promptText,
                 };
@@ -5939,6 +6180,11 @@ HTML_TEMPLATE = """
               platform: reqObj.platform,
               strategy_version: reqObj.strategy_version || (reqObj.platform === 'threads' ? '3.3 (sửa đổi 28/11/2026)' : null),
               contract_version: reqObj.contract_version || (reqObj.platform === 'threads' ? '3.2' : 'v2'),
+              crawl_mode: reqObj.crawl_mode || null,
+              crawl_mode_label: reqObj.crawl_mode_label || null,
+              topics: reqObj.topics || [],
+              topic_labels: reqObj.topic_labels || [],
+              lookback_hours: reqObj.lookback_hours || null,
               lease_minutes: reqObj.lease_minutes || null,
               manual_prompt: promptText,
             };
@@ -5984,7 +6230,9 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
-    return HTML_TEMPLATE, 200, {"Content-Type": "text/html; charset=utf-8"}
+    cfg_script = f"<script>window.__THREADS_CRAWL_CONFIG__ = {json.dumps(get_crawl_config_payload(), ensure_ascii=False)};</script>\n</head>"
+    html = HTML_TEMPLATE.replace("</head>", cfg_script, 1)
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/favicon.ico")
@@ -7134,6 +7382,8 @@ def api_market_report():
 def api_market_runs_catalog():
     rt = get_market_runtime()
     platform = request.args.get("platform", "all")
+    crawl_mode = request.args.get("crawl_mode") or None
+    topic = request.args.get("topic") or None
     include_archived = request.args.get("include_archived", "0") in ("1", "true", "True")
     include_remote = request.args.get("include_remote", "0") in ("1", "true", "True")
     try:
@@ -7153,6 +7403,8 @@ def api_market_runs_catalog():
         limit=limit,
         include_archived=include_archived,
         crawl_requests=remote_reqs,
+        crawl_mode=crawl_mode,
+        topic=topic,
     )
     return jsonify({
         "ok": True,
@@ -7174,6 +7426,11 @@ def api_market_runs_compare():
     if not res.get("ok"):
         return jsonify(res), 400
     return jsonify(res)
+
+
+@app.route("/api/remote/crawl_config", methods=["GET"])
+def api_remote_crawl_config():
+    return jsonify({"ok": True, **get_crawl_config_payload()})
 
 
 @app.route("/api/remote/crawl_requests", methods=["GET", "POST"])
@@ -7202,12 +7459,17 @@ def api_remote_crawl_requests():
                     if lm_int < 1 or lm_int > 120:
                         return jsonify({"ok": False, "error": "lease_minutes phải trong khoảng 1–120 phút"}), 400
                     opts["lease_seconds"] = lm_int * 60
+                    opts["lease_minutes"] = lm_int
                 elif "lease_seconds" in opts and opts["lease_seconds"] is not None:
                     try:
                         ls_int = int(opts["lease_seconds"])
                     except (TypeError, ValueError):
                         return jsonify({"ok": False, "error": "options.lease_seconds phải là số nguyên (60–7200 giây)"}), 400
                     opts["lease_seconds"] = max(60, min(ls_int, 7200))
+                try:
+                    opts = validate_threads_strategy_options(body, opts)
+                except ValueError as ve:
+                    return jsonify({"ok": False, "error": str(ve)}), 400
             res = rt["client"].create_crawl_request(
                 platform=plat,
                 keywords=str(body.get("keywords", "")).strip(),
@@ -7218,10 +7480,20 @@ def api_remote_crawl_requests():
             )
             if isinstance(res, dict):
                 res.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+                if isinstance(res.get("request"), dict):
+                    try:
+                        rt["store"].upsert_crawl_request_metadata_cache([res["request"]])
+                    except Exception:
+                        pass
             return jsonify(res)
         listing = rt["client"].list_crawl_requests()
         if isinstance(listing, dict):
             listing.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+            if isinstance(listing.get("items"), list):
+                try:
+                    rt["store"].upsert_crawl_request_metadata_cache(listing.get("items"))
+                except Exception:
+                    pass
             try:
                 rt["sync_service"].maybe_trigger_sync_for_crawl_requests(listing.get("items"))
             except Exception:

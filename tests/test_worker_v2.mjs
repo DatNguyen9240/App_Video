@@ -930,6 +930,14 @@ class MockD1Database {
           row.updated_at = updated_at;
           return { meta: { changes: 1 } };
         }
+        if (norm.startsWith("UPDATE crawl_requests SET options_json = ?, updated_at = ? WHERE id = ? AND status = 'queued'")) {
+          const [options_json, updated_at, id] = this.args;
+          const row = db.crawlRequests.find((c) => c.id === id && c.status === "queued");
+          if (!row) return { meta: { changes: 0 } };
+          row.options_json = options_json;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
         if (norm.startsWith("UPDATE crawl_requests SET status = ?, result_summary_json = ?")) {
           const [status, result_summary_json, report_file_id, error_message, updated_at, id, claimed_by, attempts, nowIso] = this.args;
           const row = db.crawlRequests.find(
@@ -6661,6 +6669,219 @@ assert.equal(v3StartBtns.length, 6);
     assert.ok(tg60Msg.body.text.length <= 4096);
     assert.match(tg60Msg.body.text, /Thời lượng lease: 60 phút/);
     assert.match(tg60Msg.body.text, /<\/pre>$/);
+
+    // 23F: Crawl Strategy 3.3 Mode + 24-Topic Presets + Lookback + Exclusions + growth_tracking gate + Telegram quick customization
+    const cfgResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-config", { headers: appHeaders }),
+      env23
+    )).json();
+    assert.equal(cfgResp.ok, true);
+    assert.equal(cfgResp.config.modes.length, 7);
+    assert.equal(cfgResp.config.topics.length, 24);
+    assert.equal(cfgResp.config.modes.find(m => m.id === "traffic_content").enabled, true);
+    const gtMode = cfgResp.config.modes.find(m => m.id === "growth_tracking");
+    assert.equal(gtMode.enabled, false);
+    assert.equal(gtMode.requires_contract_update, true);
+
+    // growth_tracking MUST be rejected cleanly with HTTP 400 until Data Contract V3.2 & Registry targets support it
+    const gtCreateRes = await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({
+          platform: "threads",
+          requested_count: 10,
+          options: { crawl_mode: "growth_tracking" },
+        }),
+      }),
+      env23
+    );
+    assert.equal(gtCreateRes.status, 400);
+    const gtCreateJson = await gtCreateRes.json();
+    assert.equal(gtCreateJson.ok, false);
+    assert.match(gtCreateJson.error, /Data Contract V3\.2/);
+
+    // Every enabled mode + topic selection creates distinct non-deduped requests with distinct prompts <= 4096 Telegram HTML
+    const modeChecks = [
+      {
+        mode: "balanced",
+        topics: ["beauty", "affiliate_tips"],
+        lookback_hours: 24,
+        expectPat: /40% Natural Viral.*40% Affiliate.*20% Market Trend/,
+      },
+      {
+        mode: "natural_viral",
+        topics: ["life_family", "relatable_content"],
+        lookback_hours: 48,
+        expectPat: /viral tự nhiên từ người thường & creator nhỏ/i,
+      },
+      {
+        mode: "affiliate",
+        topics: ["deals_vouchers", "home_living"],
+        lookback_hours: 72,
+        expectPat: /chuyển đổi giỏ hàng Affiliate/,
+      },
+      {
+        mode: "buyer_intent",
+        topics: ["tech", "beauty"],
+        lookback_hours: 168,
+        expectPat: /nhu cầu mua chủ động \(buyer_intent=true\)/,
+      },
+      {
+        mode: "market_trend",
+        topics: ["food_drink", "trend_remix"],
+        lookback_hours: 24,
+        expectPat: /Định vị vòng đời xu hướng/,
+      },
+      {
+        mode: "traffic_content",
+        topics: cfgResp.config.topics.map(t => t.id), // ALL 24 topics selected!
+        lookback_hours: 48,
+        keywords: "meme van phong cuoi tuan plot twist hai huoc",
+        exclusions: { exclude_celebrity: false, exclude_fandom: true, exclude_pure_ads: true, vn_only: true },
+        expectPat: /KHÔNG bắt buộc liên quan Affiliate hay Buyer Intent/,
+      },
+    ];
+
+    const createdModeReqs = [];
+    for (const mc of modeChecks) {
+      const mkRes = await worker.fetch(
+        new Request("https://worker.example/api/app/crawl-requests", {
+          method: "POST",
+          headers: appHeaders,
+          body: JSON.stringify({
+            platform: "threads",
+            requested_count: 20,
+            keywords: mc.keywords || "",
+            options: {
+              crawl_mode: mc.mode,
+              topics: mc.topics,
+              lookback_hours: mc.lookback_hours,
+              exclusions: mc.exclusions,
+              lease_seconds: 1800,
+            },
+          }),
+        }),
+        env23
+      );
+      assert.equal(mkRes.status, 201, `Mode ${mc.mode} should create distinct request without wrong dedup`);
+      const mkJson = await mkRes.json();
+      assert.equal(mkJson.request.crawl_mode, mc.mode);
+      assert.equal(mkJson.request.lookback_hours, mc.lookback_hours);
+      if (mc.exclusions?.exclude_celebrity === false) {
+        assert.match(mkJson.manual_prompt, /Linh hoạt người nổi tiếng/);
+        assert.match(mkJson.manual_prompt, /Strategy Version: 3\.3 \(sửa đổi 28\/11\/2026\)/);
+        assert.match(mkJson.manual_prompt, /Contract Version: 3\.2/);
+        assert.match(mkJson.manual_prompt, /@toilaai267/);
+        assert.match(mkJson.manual_prompt, /POST \/api\/crawl\/complete/);
+      } else {
+        assertThreadsStrategy33Prompt(mkJson.manual_prompt, mkJson.request.id, mc.keywords || null, 20);
+      }
+      assert.match(mkJson.manual_prompt, mc.expectPat);
+      assert.match(mkJson.manual_prompt, new RegExp(`crawl_mode="${mc.mode}"`));
+      assert.match(mkJson.manual_prompt, new RegExp(`lookback_hours=${mc.lookback_hours}`));
+      assert.ok(mkJson.manual_prompt.length <= 3850, `Prompt for ${mc.mode} (${mkJson.manual_prompt.length} chars) must stay comfortably under Telegram cap`);
+
+      // Telegram copy prompt for every mode (even all 24 topics) stays <= 4096 HTML & preserves exact text
+      const tgCbBefore = tgCalls.length;
+      const cbPromptRes = await worker.fetch(
+        new Request("https://worker.example/telegram", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-sec-23" },
+          body: JSON.stringify({
+            update_id: 2400 + createdModeReqs.length,
+            callback_query: {
+              id: `cb_mode_${mc.mode}`,
+              from: { id: 99887766 },
+              message: { message_id: 1, chat: { id: 99887766, type: "private" } },
+              data: `crawl:prompt:${mkJson.request.id}`,
+            },
+          }),
+        }),
+        env23
+      );
+      assert.equal(cbPromptRes.status, 200);
+      const tgOutMsg = tgCalls.slice(tgCbBefore).find(c => String(c.body?.text || "").includes(mkJson.request.id));
+      assert.ok(tgOutMsg, `Telegram should render prompt for mode ${mc.mode}`);
+      assert.ok(tgOutMsg.body.text.length <= 4096, `Telegram HTML exceeded 4096 (${tgOutMsg.body.text.length}) for mode ${mc.mode}`);
+      assert.ok(tgOutMsg.body.text.trim().endsWith("</pre>"));
+      const extractedPre = tgOutMsg.body.text
+        .match(/<pre>([\s\S]*)<\/pre>/)[1]
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&amp;/g, "&");
+      assert.equal(extractedPre, mkJson.manual_prompt);
+      createdModeReqs.push(mkJson.request);
+    }
+
+    // Re-fetching Copy lại Prompt for earlier affiliate request preserves affiliate config unchanged
+    const replayAff = await (await worker.fetch(
+      new Request(`https://worker.example/api/app/crawl-requests/${createdModeReqs[2].id}/prompt`, { headers: appHeaders }),
+      env23
+    )).json();
+    assert.equal(replayAff.request.crawl_mode, "affiliate");
+    assert.deepEqual(replayAff.request.topics, ["deals_vouchers", "home_living"]);
+    assert.match(replayAff.manual_prompt, /chuyển đổi giỏ hàng Affiliate/);
+
+    // Telegram /request_crawl supports mode=..., topics=..., lookback=..., 60m + keywords
+    const tgModeRes = await worker.fetch(
+      new Request("https://worker.example/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-sec-23" },
+        body: JSON.stringify({
+          update_id: 2450,
+          message: {
+            message_id: 192,
+            from: { id: 99887766 },
+            chat: { id: 99887766, type: "private" },
+            text: "/request_crawl threads 15 mode=traffic_content topics=meme_humor,hot_takes lookback=72h 60m hai van phong",
+          },
+        }),
+      }),
+      env23
+    );
+    assert.equal(tgModeRes.status, 200);
+    const tgModeReq = Array.from(env23.DB.crawlRequests.values()).find(r => r.keywords === "hai van phong");
+    assert.ok(tgModeReq, "Telegram /request_crawl with mode/topics/lookback should queue request");
+    const tgModeOpts = JSON.parse(tgModeReq.options_json);
+    assert.equal(tgModeOpts.crawl_mode, "traffic_content");
+    assert.deepEqual(tgModeOpts.topics, ["meme_humor", "hot_takes"]);
+    assert.equal(tgModeOpts.lookback_hours, 72);
+    assert.equal(tgModeOpts.lease_seconds, 3600);
+
+    // Inline quick config callback updates queued request and renders updated prompt
+    const cbSetMode = await worker.fetch(
+      new Request("https://worker.example/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-sec-23" },
+        body: JSON.stringify({
+          update_id: 2451,
+          callback_query: {
+            id: "cb_setmode_bi",
+            from: { id: 99887766 },
+            message: { message_id: 1, chat: { id: 99887766, type: "private" } },
+            data: `crawl:setmode:${tgModeReq.id}:buyer_intent`,
+          },
+        }),
+      }),
+      env23
+    );
+    assert.equal(cbSetMode.status, 200);
+    const updatedTgReq = Array.from(env23.DB.crawlRequests.values()).find(r => r.id === tgModeReq.id);
+    assert.equal(JSON.parse(updatedTgReq.options_json).crawl_mode, "buyer_intent");
+
+    // Non-threads (TikTok) keeps existing Contract V2 untouched without Strategy 3.3
+    const tkReq = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "tiktok", requested_count: 15, keywords: "tiktok test" }),
+      }),
+      env23
+    )).json();
+    assert.equal(tkReq.request.strategy_version, null);
+    assert.equal(tkReq.request.crawl_mode, null);
+    assert.doesNotMatch(tkReq.manual_prompt, /Strategy Version: 3\.3/);
   } finally {
     globalThis.fetch = prevFetch23;
   }

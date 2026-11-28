@@ -1902,6 +1902,178 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         self.assertEqual(rep_res["strategy_version"], "3.3")
         self.assertEqual(rep_res["growth_tracking"][0]["post_id"], "API_V33_G")
 
+    def test_crawl_strategy_modes_topics_validation_and_run_metadata_filtering(self):
+        class _StrategyMockClient(MockCloudflareTransportClient):
+            def create_crawl_request(self, platform: str, keywords: str = "", requested_count: int = 50, poll_profile=None, dedup_token=None, options=None):
+                req_id = f"crw_{len(self.mock_crawl_requests) + 1}"
+                opts = dict(options or {})
+                req = {
+                    "id": req_id,
+                    "platform": platform,
+                    "keywords": keywords,
+                    "requested_count": requested_count,
+                    "options": opts,
+                    "crawl_mode": opts.get("crawl_mode"),
+                    "topics": opts.get("topics") or [],
+                    "lookback_hours": opts.get("lookback_hours"),
+                    "lease_minutes": opts.get("lease_minutes", 30),
+                    "strategy_version": opts.get("strategy_version") if platform == "threads" else None,
+                    "contract_version": "3.2" if platform == "threads" else "v2",
+                    "status": "queued",
+                }
+                self.mock_crawl_requests.append(req)
+                return {
+                    "ok": True,
+                    "deduplicated": False,
+                    "request": req,
+                    "manual_prompt": f"Request ID: {req_id} | Mode: {req.get('crawl_mode')} | Topics: {req.get('topics')}",
+                }
+
+        client = _StrategyMockClient()
+        app_ui.reset_market_runtime_for_tests(data_dir=self.tmp_dir.name, client=client)
+        app_ui.app.config["TESTING"] = True
+        flask_client = app_ui.app.test_client()
+
+        # 1. HTML includes embedded strategy modes (7) & topic presets (24) & Crawl Center controls
+        html = flask_client.get("/").get_data(as_text=True)
+        for token in [
+            "window.__THREADS_CRAWL_CONFIG__",
+            "Săn content kéo Traffic",
+            "traffic_content",
+            "Theo dõi tăng trưởng bài cũ",
+            "Chọn tất cả",
+            "Bỏ chọn",
+            "Hạn chế người nổi tiếng",
+            "Hạn chế fandom/thần tượng",
+            "Chỉ thu thập thị trường Việt Nam",
+            "7 ngày",
+        ]:
+            self.assertIn(token, html)
+
+        # 2. /api/remote/crawl_config exposes 7 modes & 24 topics
+        cfg = flask_client.get("/api/remote/crawl_config").get_json()
+        self.assertTrue(cfg["ok"])
+        self.assertEqual(len(cfg["modes"]), 7)
+        self.assertEqual(len(cfg["topics"]), 24)
+        gt = next(m for m in cfg["modes"] if m["id"] == "growth_tracking")
+        self.assertFalse(gt["enabled"])
+        self.assertTrue(gt["requires_contract_update"])
+
+        # 3. growth_tracking rejected with HTTP 400 + Data Contract explanation; invalid lookback/topic rejected
+        bad_gt = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 10, "crawl_mode": "growth_tracking"},
+        )
+        self.assertEqual(bad_gt.status_code, 400)
+        self.assertIn("Data Contract V3.2", bad_gt.get_json()["error"])
+
+        bad_lb = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 10, "crawl_mode": "balanced", "lookback_hours": 99},
+        )
+        self.assertEqual(bad_lb.status_code, 400)
+
+        bad_tp = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 10, "topics": ["nonexistent_topic"]},
+        )
+        self.assertEqual(bad_tp.status_code, 400)
+
+        # 4. Valid traffic_content request with multi-group topics persists normalized options & caches metadata
+        ok_resp = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={
+                "platform": "threads",
+                "requested_count": 25,
+                "crawl_mode": "traffic_content",
+                "topics": ["beauty", "meme_humor", "wordplay_twist"],
+                "lookback_hours": 168,
+                "lease_minutes": 120,
+                "exclusions": {"exclude_celebrity": True, "exclude_fandom": True, "exclude_pure_ads": False, "vn_only": True},
+                "keywords": "plot twist",
+            },
+        )
+        self.assertEqual(ok_resp.status_code, 200)
+        opts_sent = client.mock_crawl_requests[-1]["options"]
+        self.assertEqual(opts_sent["crawl_mode"], "traffic_content")
+        self.assertEqual(opts_sent["topics"], ["beauty", "meme_humor", "wordplay_twist"])
+        self.assertEqual(opts_sent["lookback_hours"], 168)
+        self.assertEqual(opts_sent["lease_seconds"], 7200)
+        self.assertFalse(opts_sent["exclusions"]["exclude_pure_ads"])
+
+        # 5. Legacy historical run WITHOUT metadata MUST remain null (never guessed), while new runs show real metadata & filter accurately
+        rt = app_ui.get_market_runtime()
+        store = rt["store"]
+        legacy_payload = {
+            "run_id": "run_legacy_nometa",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T10:00:00Z",
+            "posts": [{
+                "post_id": "LEG_1",
+                "post_url": "https://threads.net/@old/post/LEG_1",
+                "author": {"username": "@old"},
+                "content_summary_vi": "Review son xinh đáng mua lắm",
+                "likes": 400,
+                "views": 12000,
+                "views_display": "12K",
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-27T10:00:00Z",
+                "views_evidence_url": "https://threads.net/@old/post/LEG_1",
+                "classification": "NEW",
+            }],
+        }
+        tagged_payload = {
+            "run_id": "run_traffic_20261128",
+            "request_id": client.mock_crawl_requests[-1]["id"],
+            "platform": "threads",
+            "contract_version": "3.2",
+            "strategy_version": "3.3 (sửa đổi 28/11/2026)",
+            "crawl_mode": "traffic_content",
+            "topics": ["beauty", "meme_humor", "wordplay_twist"],
+            "lookback_hours": 168,
+            "keywords": "plot twist",
+            "crawled_at": "2026-11-28T06:00:00Z",
+            "posts": [{
+                "post_id": "TRF_1",
+                "post_url": "https://threads.net/@fun/post/TRF_1",
+                "author": {"username": "@fun"},
+                "content_summary_vi": "Cú bẻ lái cuối tuần",
+                "likes": 600,
+                "views": 25000,
+                "views_display": "25K",
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-28T06:00:00Z",
+                "views_evidence_url": "https://threads.net/@fun/post/TRF_1",
+                "classification": "NEW",
+            }],
+        }
+        store.ingest_raw_file("fid_leg", "threads_legacy.json", json.dumps(legacy_payload).encode("utf-8"), modified_time="2026-11-27T10:00:00Z")
+        store.ingest_raw_file("fid_trf", "threads_trend_20261128.json", json.dumps(tagged_payload).encode("utf-8"), modified_time="2026-11-28T06:00:00Z")
+
+        all_runs = flask_client.get("/api/market/runs_catalog?platform=threads").get_json()["runs"]
+        run_trf = next(r for r in all_runs if r["run_id"] == "run_traffic_20261128")
+        run_leg = next(r for r in all_runs if r["run_id"] == "run_legacy_nometa")
+
+        self.assertEqual(run_trf["crawl_mode"], "traffic_content")
+        self.assertEqual(run_trf["crawl_mode_label"], "Săn content kéo Traffic")
+        self.assertEqual(run_trf["topics"], ["beauty", "meme_humor", "wordplay_twist"])
+        self.assertEqual(run_trf["lookback_hours"], 168)
+        self.assertEqual(run_trf["keywords"], "plot twist")
+        self.assertIsNone(run_leg["crawl_mode"])
+        self.assertEqual(run_leg["topics"], [])
+        self.assertFalse(run_leg["has_strategy_metadata"])
+
+        by_mode = flask_client.get("/api/market/runs_catalog?crawl_mode=traffic_content").get_json()["runs"]
+        self.assertEqual([r["run_id"] for r in by_mode], ["run_traffic_20261128"])
+
+        by_topic = flask_client.get("/api/market/runs_catalog?topic=wordplay_twist").get_json()["runs"]
+        self.assertEqual([r["run_id"] for r in by_topic], ["run_traffic_20261128"])
+
+        by_none = flask_client.get("/api/market/runs_catalog?crawl_mode=__none__").get_json()["runs"]
+        self.assertEqual([r["run_id"] for r in by_none], ["run_legacy_nometa"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -300,7 +300,7 @@ def extract_records(raw_obj: Any, file_role: str = "crawl_data") -> Tuple[Dict[s
     envelope_meta = {
         k: v
         for k, v in raw_obj.items()
-        if not isinstance(v, list) or k in ("files", "notable_signals_in_data", "upcoming_vouchers")
+        if not isinstance(v, list) or k in ("files", "notable_signals_in_data", "upcoming_vouchers", "topics", "topic_labels")
     }
     if file_role in NON_CRAWL_ROLES:
         return envelope_meta, []
