@@ -72,6 +72,9 @@ def _validate_item_identity(
     item_creator_id = str(raw_item.get("creator_id") or "").strip()
     content_type = raw_item.get("content_type") if "content_type" in raw_item else raw_item.get("type")
 
+    url_platform = detect_platform_from_url(raw_url)
+    if strict_identity and raw_url and not url_platform:
+        return False, "invalid_canonical_video_url", raw_url, raw_video_id
     url_kind, extracted_vid = extract_video_id_from_url(raw_url, platform)
     if _is_note_entry(raw_url, content_type, url_kind):
         return False, "note_excluded", raw_url, raw_video_id
@@ -79,13 +82,12 @@ def _validate_item_identity(
     if not raw_url:
         return False, "missing_video_url", raw_url, raw_video_id
 
-    url_platform = detect_platform_from_url(raw_url)
     if url_platform and url_platform != platform:
         return False, f"url_platform_mismatch:{url_platform}!={platform}", raw_url, raw_video_id
 
     if item_creator_id and creator_id and item_creator_id != creator_id:
         return False, "creator_id_mismatch", raw_url, raw_video_id
-    if strict_identity and (url_platform != platform or url_kind != "video" or not extracted_vid):
+    if strict_identity and (url_kind != "video" or not extracted_vid):
         return False, "invalid_canonical_video_url", raw_url, raw_video_id
     if strict_identity and (not item_creator_id or not raw_video_id or content_type != "video"):
         return False, "missing_video_identity", raw_url, raw_video_id
@@ -202,16 +204,20 @@ def _build_normalized_item(
     return normalized, None
 
 
-def _normalize_creator_header(platform: str, creator: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_creator_header(platform: str, creator: Dict[str, Any], *, strict_identity: bool = False) -> Dict[str, Any]:
     if not isinstance(creator, dict):
         raise CreatorParseError("Thiếu object `creator`.")
     profile_url = str(creator.get("profile_url") or "").strip()
     creator_id = str(creator.get("creator_id") or creator.get("sec_uid") or "").strip()
+    if strict_identity and detect_platform_from_url(profile_url) != platform:
+        raise CreatorParseError("Schema 1.1 cần profile_url chuẩn khớp nền tảng và creator_id.")
     if not profile_url and not creator_id:
         raise CreatorParseError("Thiếu cả `creator.creator_id` lẫn `creator.profile_url`.")
 
     if profile_url:
         prof_parsed = parse_profile_identifier(profile_url, platform)
+        if strict_identity and not prof_parsed["creator_id"]:
+            raise CreatorParseError("Schema 1.1 cần ID của creator trong profile_url.")
         if prof_parsed["platform"] and prof_parsed["platform"] != platform:
             raise CreatorParseError(
                 f"Creator profile_url ({prof_parsed['platform']}) không khớp platform ({platform})."
@@ -248,7 +254,8 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if platform not in SUPPORTED_PLATFORMS:
         raise CreatorParseError(f"platform không hỗ trợ: {payload.get('platform')!r}.")
 
-    creator_meta = _normalize_creator_header(platform, payload.get("creator") or {})
+    strict_identity = schema_ver == CREATOR_SCHEMA_VERSION
+    creator_meta = _normalize_creator_header(platform, payload.get("creator") or {}, strict_identity=strict_identity)
     crawl_meta = payload.get("crawl") if isinstance(payload.get("crawl"), dict) else {}
     raw_items = payload.get("items")
     if not isinstance(raw_items, list):
@@ -277,6 +284,11 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(raw_item, dict):
             invalid_excluded += 1
             continue
+        if strict_identity and platform == "douyin" and crawl_meta.get("method") == "douyin_web_ui":
+            if any(raw_item.get(key) is not None for key in ("views", "views_display", "views_approx")):
+                invalid_excluded += 1
+                excluded_items.append({"video_id": raw_item.get("video_id"), "reason": "douyin_web_views_must_be_null"})
+                continue
         norm, exc = _build_normalized_item(
             platform=platform,
             creator_meta=creator_meta,
@@ -284,7 +296,7 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             request_id=request_id,
             crawl_id=crawl_id,
             crawled_at_default=crawled_at_default,
-            strict_identity=schema_ver == CREATOR_SCHEMA_VERSION,
+            strict_identity=strict_identity,
         )
         if norm is not None:
             valid_items.append(norm)
@@ -326,7 +338,7 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "drive_folder_id": drive_folder_id,
         "stop_reason": stop_reason,
         "crawl": crawl_meta,
-        "reference_time": crawl_meta.get("crawled_at") or payload.get("measured_at"),
+        "reference_time": (crawled_at_default if strict_identity else crawl_meta.get("crawled_at")) or payload.get("measured_at"),
         "filters_hint": crawl_meta.get("filters") if isinstance(crawl_meta.get("filters"), dict) else {},
         "creators": [creator_meta],
         "items": valid_items,

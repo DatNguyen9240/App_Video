@@ -414,6 +414,28 @@ def test_muse_v11_metrics_and_sample_import_only(tmp_path):
     assert store.get_crawl_request(req["request_id"])["status"] == "awaiting_muse"
 
 
+def test_muse_v11_rejects_invalid_source_identity_and_douyin_web_views():
+    payload = _as_muse_v11(_build_douyin_v1_payload(request_id="manual_sample_douyin"))
+    payload["crawl"]["method"] = "douyin_web_ui"
+    item = payload["items"][0]
+    payload["items"] = [
+        item,
+        {**item, "views_approx": 1000},
+        {**item, "video_url": "https://[invalid/video/123"},
+        {**item, "creator_id": "wrong_creator"},
+    ]
+    parsed = parse_creator_crawl_payload(payload)
+    assert len(parsed["items"]) == 1 and parsed["stats"]["invalid_excluded"] == 3
+    assert [entry["reason"] for entry in parsed["excluded_items"]] == [
+        "douyin_web_views_must_be_null", "invalid_canonical_video_url", "creator_id_mismatch",
+    ]
+
+    for profile_url in ("https://example.com/user/wrong", "https://[invalid", "https://www.douyin.com/"):
+        invalid = {**payload, "creator": {**payload["creator"], "profile_url": profile_url}}
+        with pytest.raises(CreatorParseError):
+            parse_creator_crawl_payload(invalid)
+
+
 def test_muse_v11_request_correlation_stop_and_replay(tmp_path):
     store = CreatorReupStore(data_dir=str(tmp_path))
     profile = _build_bilibili_simulated_v1()["creator"]["profile_url"]
@@ -458,6 +480,45 @@ def test_muse_v11_request_correlation_stop_and_replay(tmp_path):
     assert store.get_crawl_request(req_a["request_id"])["matched_file_count"] == first["matched_file_count"]
     assert store.get_crawl_request(req_b["request_id"])["status"] == "awaiting_muse"
     assert len(store.query_videos()) == 1
+
+
+def test_drive_sync_accepts_both_schema_versions_and_skips_acceptance(tmp_path):
+    store = CreatorReupStore(data_dir=str(tmp_path))
+    req_a, req_b = [
+        store.create_crawl_request(build_creator_crawl_prompt(
+            profile_url=_build_douyin_v1_payload()["creator"]["profile_url"], requested_count=1,
+        ))
+        for _ in range(2)
+    ]
+    legacy = _build_douyin_v1_payload(request_id=req_a["request_id"], crawl_id=req_a["crawl_id"])
+    current = _as_muse_v11(_build_douyin_v1_payload(request_id=req_b["request_id"]))
+    sample = _as_muse_v11(_build_bilibili_simulated_v1(request_id="manual_sample_bilibili"))
+    payloads = {"legacy": legacy, "current": current, "sample": sample}
+
+    class FakeClient:
+        def reload_config(self):
+            pass
+
+        def is_configured(self):
+            return True
+
+        def list_market_files(self, **kwargs):
+            return {"scope_folder_id": "scope", "files": [
+                {"file_id": key, "name": f"creator_crawl_{key}.json", "modified_time": "2026-11-28T12:00:00Z"}
+                for key in payloads
+            ]}
+
+        def download_market_file(self, file_id):
+            return json.dumps(payloads[file_id]).encode(), {}
+
+    service = CreatorDriveSyncService(store=store, client=FakeClient())
+    result = service.sync_now(trigger_source="test")
+    assert result["status"] == "completed" and result["files_ingested"] == 2
+    assert result["videos_inserted"] == 1 and result["videos_deduped"] == 1
+    assert [v["rights_status"] for v in store.query_videos()] == ["pending_review"]
+    assert store.get_crawl_request(req_a["request_id"])["status"] == "synced"
+    assert store.get_crawl_request(req_b["request_id"])["last_result"]["stop_reason"] == "target_reached"
+    assert service.sync_now(trigger_source="test")["files_ingested"] == 0
 
 
 def test_atomic_dedup_concurrency_production_validation_and_lifecycle(tmp_path):
