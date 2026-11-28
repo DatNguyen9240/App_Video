@@ -405,6 +405,12 @@ HTML_TEMPLATE = """
           <span>4. Market Intelligence</span>
           <span v-if="marketStatus.is_syncing" class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping absolute -top-0.5 -right-0.5"></span>
         </button>
+
+        <button @click="currentTab = 'reup'" :class="currentTab === 'reup' ? 'bg-gradient-to-r from-rose-600 to-amber-600 text-white font-bold shadow-md shadow-rose-600/35' : 'text-slate-400 hover:text-slate-200'"
+          class="px-4 py-1.5 rounded-lg text-xs transition flex items-center gap-2 cursor-pointer">
+          <i class="fa-solid fa-repeat"></i>
+          <span>5. Reup &amp; Crawl Link</span>
+        </button>
       </nav>
 
       <!-- Right Action Tools -->
@@ -601,14 +607,22 @@ HTML_TEMPLATE = """
                   <i class="fa-solid fa-microphone-lines text-pink-400"></i>
                   <span>Giọng đọc dẫn chuyện chính:</span>
                 </label>
-                <select v-model="authorVoiceInput" @change="settings.voice = authorVoiceInput" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                  <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Ấm áp, rõ nét - Khuyên dùng)</option>
-                  <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh (Hồ sơ, Phóng sự)</option>
-                  <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm (Tự nhiên, cuốn hút)</option>
-                  <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén (Threads, Cà khịa nhanh)</option>
-                  <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động (Vui tươi, Gen Z)</option>
-                  <option value="gtts">🤖 Chị Google (Chỉ dùng cho meme robot)</option>
-                </select>
+                <div class="flex items-center gap-2">
+                  <select v-model="authorVoiceInput" @change="settings.voice = authorVoiceInput" class="flex-1 glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Ấm áp, rõ nét - Khuyên dùng)</option>
+                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh (Hồ sơ, Phóng sự)</option>
+                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm (Tự nhiên, cuốn hút)</option>
+                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén (Threads, Cà khịa nhanh)</option>
+                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động (Vui tươi, Gen Z)</option>
+                    <option value="gtts">🤖 Chị Google (Chỉ dùng cho meme robot)</option>
+                  </select>
+                  <button type="button" @click="previewVoice(authorVoiceInput, settings.rate, 'author')"
+                    title="Nghe thử giọng đọc này"
+                    class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-pink-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer flex items-center gap-1">
+                    <i :class="previewingVoiceKey === 'author' ? 'fa-solid fa-spinner fa-spin text-pink-400' : 'fa-solid fa-volume-high text-pink-400'"></i>
+                    <span class="hidden sm:inline">Thử</span>
+                  </button>
+                </div>
                 <span class="text-xs text-slate-400 block">Sử dụng k2-fsa/OmniVoice AI (hỗ trợ Voice Cloning từ thư mục assets/voices/)</span>
               </div>
             </div>
@@ -706,14 +720,21 @@ HTML_TEMPLATE = """
                 <label class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
                   <i class="fa-solid fa-microphone text-pink-400"></i> Giọng đọc bài chính:
                 </label>
-                <select v-model="post.voice_id" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
-                  <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
-                  <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
-                  <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
-                  <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
-                  <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
-                  <option value="gtts">🤖 Chị Google (Meme robot)</option>
-                </select>
+                <div class="flex items-center gap-1.5">
+                  <select v-model="post.voice_id" class="flex-1 glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
+                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
+                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                    <option value="gtts">🤖 Chị Google (Meme robot)</option>
+                  </select>
+                  <button type="button" @click="previewVoice(post.voice_id, settings.rate, 'post')"
+                    title="Nghe thử giọng bài chính"
+                    class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-pink-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer">
+                    <i :class="previewingVoiceKey === 'post' ? 'fa-solid fa-spinner fa-spin text-pink-400' : 'fa-solid fa-volume-high text-pink-400'"></i>
+                  </button>
+                </div>
               </div>
 
               <div class="space-y-1">
@@ -920,14 +941,21 @@ HTML_TEMPLATE = """
 
                 <div>
                   <label class="text-xs font-semibold text-slate-400 block mb-1">Giọng đọc:</label>
-                  <select v-model="cmt.voice_id" class="w-full glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
-                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
-                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
-                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
-                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
-                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
-                    <option value="gtts">🤖 Chị Google (Robot meme)</option>
-                  </select>
+                  <div class="flex items-center gap-1.5">
+                    <select v-model="cmt.voice_id" class="flex-1 glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
+                      <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                      <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
+                      <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                      <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                      <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                      <option value="gtts">🤖 Chị Google (Robot meme)</option>
+                    </select>
+                    <button type="button" @click="previewVoice(cmt.voice_id, settings.rate, 'cmt_' + idx)"
+                      title="Nghe thử giọng comment"
+                      class="px-2 py-1.5 rounded-xl bg-slate-800 hover:bg-pink-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer">
+                      <i :class="previewingVoiceKey === 'cmt_' + idx ? 'fa-solid fa-spinner fa-spin text-pink-400' : 'fa-solid fa-volume-high text-pink-400'"></i>
+                    </button>
+                  </div>
                 </div>
 
                 <div>
@@ -1304,14 +1332,21 @@ HTML_TEMPLATE = """
                   <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                     <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc chính:
                   </label>
-                  <select v-model="settings.voice" @change="authorVoiceInput = settings.voice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Khuyên dùng)</option>
-                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
-                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
-                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
-                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
-                    <option value="gtts">🤖 Chị Google (Meme robot)</option>
-                  </select>
+                  <div class="flex items-center gap-1.5">
+                    <select v-model="settings.voice" @change="authorVoiceInput = settings.voice" class="flex-1 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+                      <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Khuyên dùng)</option>
+                      <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                      <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                      <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                      <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                      <option value="gtts">🤖 Chị Google (Meme robot)</option>
+                    </select>
+                    <button type="button" @click="previewVoice(settings.voice, settings.rate, 'settings')"
+                      title="Nghe thử giọng chính"
+                      class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-emerald-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer">
+                      <i :class="previewingVoiceKey === 'settings' ? 'fa-solid fa-spinner fa-spin text-emerald-400' : 'fa-solid fa-volume-high text-emerald-400'"></i>
+                    </button>
+                  </div>
                 </div>
 
                 <!-- Tốc độ đọc -->
@@ -1915,7 +1950,7 @@ HTML_TEMPLATE = """
                   <span>Vai: {{ rkey }}</span>
                   <span class="text-[11px] text-slate-400 font-mono">{{ r.rate }} • {{ r.pitch }}</span>
                 </div>
-                <div class="grid grid-cols-3 gap-2">
+                <div class="grid grid-cols-4 gap-2">
                   <select v-model="r.voice" class="col-span-2 glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200">
                     <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
                     <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm</option>
@@ -1925,6 +1960,11 @@ HTML_TEMPLATE = """
                     <option value="gtts">🤖 Chị Google (Meme)</option>
                   </select>
                   <input v-model="r.rate" type="text" placeholder="+10%" class="glass-input rounded-lg p-1.5 text-xs font-mono text-center">
+                  <button type="button" @click="previewVoice(r.voice, r.rate || '+15%', 'role_' + rkey)"
+                    title="Nghe thử giọng vai này"
+                    class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/80 border border-slate-700 text-xs text-slate-200 transition cursor-pointer flex items-center justify-center">
+                    <i :class="previewingVoiceKey === 'role_' + rkey ? 'fa-solid fa-spinner fa-spin text-indigo-400' : 'fa-solid fa-volume-high text-indigo-400'"></i>
+                  </button>
                 </div>
               </div>
             </div>
@@ -4324,6 +4364,196 @@ HTML_TEMPLATE = """
       </div>
     </div>
 
+    <!-- TAB 5: REUP & CRAWL LINK VIDEO STUDIO -->
+    <main v-show="currentTab === 'reup'" class="flex-1 max-w-[1760px] w-full mx-auto px-4 sm:px-8 py-6 grid grid-cols-1 xl:grid-cols-12 gap-6">
+      <!-- Left: Crawl Kênh / Playlist / Từ khóa -->
+      <section class="xl:col-span-7 glass-panel rounded-2xl p-6 space-y-5 border border-rose-500/20">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div>
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-spider text-rose-400"></i>
+              <span>Crawl Video Đa Nền Tảng (TikTok / Douyin / YouTube / Bilibili / FB)</span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">Dán link kênh, link playlist hoặc nhập từ khóa để quét danh sách video về Reup tự động.</p>
+          </div>
+          <span class="px-2.5 py-1 rounded-full bg-rose-500/15 border border-rose-500/30 text-[11px] font-semibold text-rose-300">
+            yt-dlp + OmniVoice
+          </span>
+        </div>
+
+        <div class="flex flex-col sm:flex-row gap-2.5">
+          <select v-model="reup.crawlPlatform" class="glass-input rounded-xl px-3 py-2.5 text-xs text-slate-200 sm:w-40">
+            <option value="auto">🤖 Tự động / YT</option>
+            <option value="bilibili">📺 Bilibili</option>
+            <option value="douyin">🎵 Douyin</option>
+          </select>
+          <input v-model="reup.crawlQuery" @keyup.enter="crawlReupLinks" type="text"
+            placeholder="Dán link kênh/video (Douyin, Bilibili, YT, TikTok) hoặc từ khóa..."
+            class="flex-1 glass-input rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-rose-500/60">
+          <select v-model.number="reup.crawlLimit" class="glass-input rounded-xl px-3 py-2.5 text-xs text-slate-200 w-28">
+            <option :value="6">6 video</option>
+            <option :value="12">12 video</option>
+            <option :value="20">20 video</option>
+          </select>
+          <button @click="crawlReupLinks" :disabled="reup.isCrawling"
+            class="px-5 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white shadow-lg shadow-rose-600/30 transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer">
+            <i :class="reup.isCrawling ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-magnifying-glass'"></i>
+            <span>{{ reup.isCrawling ? 'Đang Crawl...' : 'Crawl Danh Sách' }}</span>
+          </button>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+          <span>Mẹo: Có thể dán nguyên đoạn text chia sẻ copy từ app Douyin/Bilibili — hệ thống tự tách link sạch.</span>
+          <div class="flex items-center gap-2">
+            <span>Cookie trình duyệt (Douyin/Bilibili):</span>
+            <select v-model="reup.browserCookies" class="glass-input rounded-lg px-2 py-1 text-[11px] text-slate-200">
+              <option value="">Không dùng / cookies.txt</option>
+              <option value="chrome">Chrome</option>
+              <option value="edge">Microsoft Edge</option>
+            </select>
+          </div>
+        </div>
+
+        <div v-if="reup.crawlError" class="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200">
+          {{ reup.crawlError }}
+        </div>
+
+        <div v-if="reup.crawledItems.length === 0" class="py-16 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-2xl">
+          <i class="fa-solid fa-cloud-arrow-down text-3xl text-slate-600 mb-2 block"></i>
+          Chưa có video crawl nào. Nhập link kênh/playlist hoặc từ khóa ở trên để quét danh sách.
+        </div>
+
+        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[560px] overflow-y-auto pr-1">
+          <div v-for="item in reup.crawledItems" :key="item.url"
+            class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 hover:border-rose-500/40 transition flex gap-3">
+            <div class="w-24 h-16 rounded-lg bg-slate-800 overflow-hidden shrink-0 relative">
+              <img v-if="item.thumbnail" :src="item.thumbnail" referrerpolicy="no-referrer" class="w-full h-full object-cover" alt="">
+              <span class="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono text-white">{{ item.duration_str }}</span>
+            </div>
+            <div class="flex-1 min-w-0 flex flex-col justify-between">
+              <div>
+                <div class="text-xs font-semibold text-slate-100 line-clamp-2">{{ item.title }}</div>
+                <div class="text-[10px] text-slate-400 mt-0.5 truncate">{{ item.platform }} • {{ item.uploader || 'Creator' }}</div>
+              </div>
+              <div class="flex items-center gap-1.5 mt-2">
+                <button @click="addReupItemToUrls(item)"
+                  class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-200 transition cursor-pointer">
+                  + Thêm vào hàng đợi
+                </button>
+                <button @click="startReupPipeline(item.url)" :disabled="pipelineState.is_running"
+                  class="px-2.5 py-1 rounded-lg bg-rose-600/90 hover:bg-rose-500 text-[11px] font-bold text-white transition disabled:opacity-50 cursor-pointer">
+                  ▶ Reup Ngay
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right: Dán Link Trực Tiếp & Cấu Hình Reup -->
+      <section class="xl:col-span-5 glass-panel rounded-2xl p-6 space-y-4 border border-amber-500/20">
+        <div class="border-b border-slate-800 pb-3">
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-link text-amber-400"></i>
+            <span>Dán Link Tạo Video Reup (Auto Lồng Tiếng &amp; Chống Trùng Lặp)</span>
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">Hỗ trợ dán 1 hoặc nhiều link (mỗi dòng 1 link). Hệ thống tự tải, nghe bóc thoại, dịch viral, lồng tiếng OmniVoice &amp; che sub cũ.</p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1.5">Danh sách Link Video nguồn (mỗi dòng 1 link):</label>
+          <textarea v-model="reup.urlsText" rows="4"
+            placeholder="https://www.tiktok.com/@.../video/...&#10;https://www.youtube.com/shorts/..."
+            class="w-full glass-input rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"></textarea>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-[11px] font-semibold text-slate-400 mb-1">Giọng đọc AI (OmniVoice)</label>
+            <div class="flex items-center gap-1.5">
+              <select v-model="reup.voice" class="flex-1 glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
+                <option value="nam_hai">🔥 Nam Hài Hước</option>
+                <option value="nu_cakhia">🌸 Nữ Cà Khịa</option>
+                <option value="nam_tram_hai">🎙️ Nam Trầm Hài</option>
+                <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh</option>
+                <option value="nam_minh">🇻🇳 Nam Minh Chuẩn</option>
+                <option value="hoai_my">🌸 Hoài My Chuẩn</option>
+              </select>
+              <button type="button" @click="previewVoice(reup.voice, '+15%', 'reup')"
+                title="Nghe thử giọng Reup"
+                class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-amber-600/80 border border-slate-700 text-xs text-slate-200 transition shrink-0 cursor-pointer flex items-center gap-1">
+                <i :class="previewingVoiceKey === 'reup' ? 'fa-solid fa-spinner fa-spin text-amber-400' : 'fa-solid fa-volume-high text-amber-400'"></i>
+                <span class="hidden sm:inline">Thử</span>
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-[11px] font-semibold text-slate-400 mb-1">Phong cách dịch / viết lại</label>
+            <select v-model="reup.translationMode" class="w-full glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
+              <option value="viral">🔥 Viral / Bắt trend VN</option>
+              <option value="natural">💬 Tự nhiên kể chuyện</option>
+              <option value="literal">📖 Sát nghĩa gốc</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] font-semibold text-slate-400 mb-1">Khung hình 9:16 (1080x1920)</label>
+            <select v-model="reup.frameMode" class="w-full glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
+              <option value="blur_bg">🌫️ Nền mờ giữ đủ khung</option>
+              <option value="fill_crop">📐 Crop đầy màn hình 9:16</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] font-semibold text-slate-400 mb-1">Âm lượng tiếng video gốc</label>
+            <select v-model.number="reup.originalVolume" class="w-full glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
+              <option :value="0.0">🔇 0% (Tắt hẳn chống bản quyền)</option>
+              <option :value="0.15">🔉 15% (Giữ tiếng nền nhẹ)</option>
+              <option :value="0.3">🔊 30% (Tiếng nền rõ)</option>
+            </select>
+          </div>
+          <div class="col-span-2">
+            <label class="block text-[11px] font-semibold text-slate-400 mb-1">Nhạc nền Reup (Auto Ducking khi đọc)</label>
+            <select v-model="reup.bgmChoice" class="w-full glass-input rounded-xl px-3 py-2 text-xs text-slate-100">
+              <option v-for="b in bgmList" :key="b.id" :value="b.id">{{ b.name }}</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+          <label class="flex items-center gap-2 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs text-slate-200 cursor-pointer">
+            <input type="checkbox" v-model="reup.maskOldSub" class="accent-rose-500">
+            <span>Che sub cũ (Blur)</span>
+          </label>
+          <label class="flex items-center gap-2 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs text-slate-200 cursor-pointer">
+            <input type="checkbox" v-model="reup.antiReup" class="accent-amber-500">
+            <span>Anti-Reup (Crop/Màu)</span>
+          </label>
+          <label class="flex items-center gap-2 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 text-xs text-slate-200 cursor-pointer">
+            <input type="checkbox" v-model="reup.mirrorVideo" class="accent-indigo-500">
+            <span>Lật gương (Mirror)</span>
+          </label>
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-semibold text-slate-400 mb-1">Ghi chú thêm cho AI viết lại lời thoại (tuỳ chọn):</label>
+          <input v-model="reup.customPrompt" type="text" placeholder="Ví dụ: Giọng kể trinh thám giật gân, xưng hô 'mình - các bạn'..."
+            class="w-full glass-input rounded-xl px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500">
+        </div>
+
+        <button @click="startReupPipeline()" :disabled="pipelineState.is_running"
+          class="w-full py-3 rounded-xl text-sm font-bold bg-gradient-to-r from-rose-600 via-amber-600 to-orange-600 hover:brightness-110 text-white shadow-xl shadow-rose-600/30 transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer">
+          <i :class="pipelineState.is_running ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-wand-magic-sparkles'"></i>
+          <span>{{ pipelineState.is_running ? '⏳ Đang chạy quy trình Reup...' : '🚀 BẮT ĐẦU REUP & DỰNG VIDEO' }}</span>
+        </button>
+
+        <div v-if="reup.lastResults.length > 0" class="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/30 space-y-1.5">
+          <div class="text-xs font-bold text-emerald-300">Video Reup vừa hoàn thành:</div>
+          <div v-for="r in reup.lastResults" :key="r.video_filename" class="flex items-center justify-between text-xs text-slate-200">
+            <span class="truncate">{{ r.video_title || r.video_filename }}</span>
+            <a :href="'/api/video/' + encodeURIComponent(r.video_filename)" target="_blank" class="text-emerald-400 hover:underline shrink-0 ml-2">Mở video</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
     <!-- Modal Chọn Avatar Người Thật Trực Quan -->
     <div v-if="showAvatarModal" :style="{ display: showAvatarModal ? 'flex' : 'none' }" style="display: none;"
       class="fixed inset-0 bg-black/85 backdrop-blur-md items-center justify-center z-50 p-4">
@@ -4394,8 +4624,30 @@ HTML_TEMPLATE = """
           currentTab: 'studio',
           topicInput: '',
           storyModeInput: 'auto',
+          reup: {
+            crawlPlatform: 'auto',
+            browserCookies: '',
+            crawlQuery: '',
+            crawlLimit: 12,
+            isCrawling: false,
+            crawlError: '',
+            crawledItems: [],
+            urlsText: '',
+            voice: 'nam_hai',
+            translationMode: 'viral',
+            frameMode: 'blur_bg',
+            originalVolume: 0.0,
+            bgmChoice: 'random',
+            maskOldSub: true,
+            antiReup: true,
+            mirrorVideo: false,
+            customPrompt: '',
+            lastResults: []
+          },
           commentCountInput: 'auto',
           authorVoiceInput: 'nam_hai',
+          previewingVoiceKey: '',
+          voicePreviewAudio: null,
           isGeneratingScript: false,
           isCrawlingTrending: false,
           previewMode: 'cards',
@@ -6611,11 +6863,124 @@ HTML_TEMPLATE = """
               body: JSON.stringify({ poll_profile: this.crawlScheduleProfile })
             });
             const data = await res.json();
-            if (data.ok) {
-              this.crawlScheduleInfo = data;
-              this.notify('ℹ️ Đã lưu cấu hình chu kỳ đề xuất trên Worker (chờ xác nhận khi Muse poll thật).', 'info');
+              if (data.ok) {
+                this.crawlScheduleInfo = data;
+                this.notify('ℹ️ Đã lưu cấu hình chu kỳ đề xuất trên Worker (chờ xác nhận khi Muse poll thật).', 'info');
+              }
+            } catch (e) {}
+          },
+        async previewVoice(voiceId, rate = '+15%', key = '') {
+          try {
+            if (this.voicePreviewAudio) {
+              this.voicePreviewAudio.pause();
+              this.voicePreviewAudio = null;
             }
-          } catch (e) {}
+            if (this.previewingVoiceKey === key && key) {
+              this.previewingVoiceKey = '';
+              return;
+            }
+            this.previewingVoiceKey = key || voiceId || 'preview';
+            const url = `/api/voice_preview?voice=${encodeURIComponent(voiceId || 'nam_hai')}&rate=${encodeURIComponent(rate || '+15%')}&t=${Date.now()}`;
+            const audio = new Audio(url);
+            this.voicePreviewAudio = audio;
+            audio.onended = () => {
+              this.previewingVoiceKey = '';
+              this.voicePreviewAudio = null;
+            };
+            audio.onerror = () => {
+              this.previewingVoiceKey = '';
+              this.voicePreviewAudio = null;
+              this.notify('Không phát được âm thanh nghe thử giọng này.', 'error');
+            };
+            await audio.play();
+          } catch (e) {
+            this.previewingVoiceKey = '';
+            this.notify('Lỗi nghe thử giọng: ' + e, 'error');
+          }
+        },
+        async crawlReupLinks() {
+          const q = (this.reup.crawlQuery || '').trim();
+          if (!q) {
+            this.notify('Vui lòng nhập link kênh/playlist hoặc từ khóa cần crawl!', 'error');
+            return;
+          }
+          this.reup.isCrawling = true;
+          this.reup.crawlError = '';
+          try {
+            const res = await fetch('/api/reup/crawl', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                query: q,
+                limit: this.reup.crawlLimit,
+                platform: this.reup.crawlPlatform,
+                browser_cookies: this.reup.browserCookies
+              })
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.reup.crawledItems = data.items || [];
+              const firstKw = this.reup.crawledItems[0]?.search_keyword;
+              const kwNote = (firstKw && firstKw !== q) ? ` (từ khóa: ${firstKw})` : '';
+              this.notify(`🕷️ Đã crawl được ${this.reup.crawledItems.length} video${kwNote}!`, 'success');
+            } else {
+              this.reup.crawlError = data.error || 'Không crawl được dữ liệu.';
+              this.notify(this.reup.crawlError, 'error');
+            }
+          } catch (e) {
+            this.reup.crawlError = 'Lỗi kết nối API crawl: ' + e;
+            this.notify(this.reup.crawlError, 'error');
+          } finally {
+            this.reup.isCrawling = false;
+          }
+        },
+        addReupItemToUrls(item) {
+          if (!item || !item.url) return;
+          const sep = String.fromCharCode(10);
+          const existing = (this.reup.urlsText || '').split(sep).map(s => s.trim()).filter(Boolean);
+          if (!existing.includes(item.url)) {
+            existing.push(item.url);
+            this.reup.urlsText = existing.join(sep);
+            this.notify('➕ Đã thêm link vào hàng đợi Reup!', 'success');
+          }
+        },
+        async startReupPipeline(singleUrl = null) {
+          const sep = String.fromCharCode(10);
+          const urls = singleUrl
+            ? [singleUrl]
+            : (this.reup.urlsText || '').split(sep).map(s => s.trim()).filter(Boolean);
+          if (urls.length === 0) {
+            this.notify('Vui lòng dán ít nhất 1 link video hoặc chọn từ danh sách Crawl!', 'error');
+            return;
+          }
+          this.currentTab = 'pipeline';
+          try {
+            const res = await fetch('/api/reup/run', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                urls,
+                voice: this.reup.voice,
+                translation_mode: this.reup.translationMode,
+                frame_mode: this.reup.frameMode,
+                original_volume: this.reup.originalVolume,
+                mask_old_sub: this.reup.maskOldSub,
+                anti_reup: this.reup.antiReup,
+                mirror_video: this.reup.mirrorVideo,
+                custom_prompt: this.reup.customPrompt,
+                browser_cookies: this.reup.browserCookies,
+                bgm_choice: this.reup.bgmChoice
+              })
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.notify(`🚀 Đã bắt đầu Reup ${urls.length} video! Theo dõi tại tab Giám Sát Quy Trình.`, 'success');
+            } else {
+              this.notify(data.error || 'Không thể khởi chạy Reup.', 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi khởi chạy Reup: ' + e, 'error');
+          }
         }
       }
     }).mount('#app');
@@ -8009,6 +8374,117 @@ def api_remote_crawl_schedule():
         return jsonify(rt["client"].set_crawl_schedule(str(body.get("poll_profile", "production_6h"))))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/api/voice_preview", methods=["GET"])
+def api_voice_preview():
+    """Tổng hợp (có cache) và trả về file MP3 ngắn để nghe thử từng giọng OmniVoice/gTTS."""
+    voice = (request.args.get("voice") or "nam_hai").strip()
+    rate = (request.args.get("rate") or "+15%").strip()
+    safe_voice = re.sub(r"[^a-zA-Z0-9_-]", "", voice) or "nam_hai"
+    safe_rate = re.sub(r"[^a-zA-Z0-9_+-]", "", rate) or "p15"
+    preview_dir = os.path.join(AUDIO_DIR, "voice_previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    cache_name = f"preview_{safe_voice}_{safe_rate}.mp3"
+    cache_path = os.path.join(preview_dir, cache_name)
+
+    if not os.path.exists(cache_path) or os.path.getsize(cache_path) < 1000:
+        sample_texts = {
+            "nam_hai": "Xin chào, đây là giọng nam kể chuyện hài hước và tự nhiên.",
+            "nam_tram_hai": "Chào bạn, đây là giọng nam trầm điện ảnh cho phim tư liệu.",
+            "hoai_my": "Xin chào, đây là giọng nữ truyền cảm và tự nhiên.",
+            "nu_cakhia": "Ơ kìa, đây là giọng nữ sắc bén chuẩn bài Threads đây nhé.",
+            "nu_nhinhanh": "Hi bạn ơi, đây là giọng nữ vui tươi năng động nè!",
+            "nam_minh": "Xin chào, đây là giọng nam chuẩn nghiêm túc và rõ nét.",
+            "gtts": "Xin chào, đây là giọng chị Google huyền thoại.",
+        }
+        sample = sample_texts.get(voice, "Xin chào, đây là mẫu giọng đọc thử nghiệm của Studio.")
+        tts_mod.text_to_speech(text=sample, output_path=cache_path, voice=voice, rate=rate)
+
+    return send_from_directory(preview_dir, cache_name, mimetype="audio/mpeg")
+
+
+@app.route("/api/reup/crawl", methods=["POST"])
+def api_reup_crawl():
+    """Crawl danh sách video từ link kênh/playlist/video hoặc từ khóa tìm kiếm (YT/Bilibili/Douyin)."""
+    body = request.get_json(silent=True) or {}
+    query = (body.get("query") or "").strip()
+    limit = int(body.get("limit") or 12)
+    platform_source = str(body.get("platform") or "auto")
+    browser_cookies = str(body.get("browser_cookies") or "")
+    if not query:
+        return jsonify({"success": False, "error": "Thiếu link hoặc từ khóa cần crawl."}), 400
+    try:
+        reup_mod = load_mod("reup_pipeline", "reup_pipeline.py")
+        items = reup_mod.crawl_video_links(
+            query,
+            limit=limit,
+            platform_source=platform_source,
+            browser_cookies=browser_cookies,
+        )
+        return jsonify({"success": True, "items": items})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/reup/run", methods=["POST"])
+def api_reup_run():
+    """Khởi chạy quy trình Reup 1 hoặc nhiều link video trong background thread."""
+    if tracker.get_state().get("is_running"):
+        return jsonify({"success": False, "error": "Hệ thống đang chạy một tiến trình render khác."}), 409
+
+    body = request.get_json(silent=True) or {}
+    urls = [str(u).strip() for u in (body.get("urls") or []) if str(u).strip()]
+    if not urls:
+        return jsonify({"success": False, "error": "Danh sách link Reup trống."}), 400
+
+    voice = str(body.get("voice") or "nam_hai")
+    translation_mode = str(body.get("translation_mode") or "viral")
+    frame_mode = str(body.get("frame_mode") or "blur_bg")
+    original_volume = float(body.get("original_volume") or 0.0)
+    mask_old_sub = bool(body.get("mask_old_sub", True))
+    anti_reup = bool(body.get("anti_reup", True))
+    mirror_video = bool(body.get("mirror_video", False))
+    custom_prompt = str(body.get("custom_prompt") or "")
+    browser_cookies = str(body.get("browser_cookies") or "")
+    bgm_choice = str(body.get("bgm_choice") or "random")
+
+    def _reup_worker():
+        tracker.reset()
+        tracker.log(f"🚀 Bắt đầu Reup {len(urls)} video...")
+        reup_mod = load_mod("reup_pipeline", "reup_pipeline.py")
+        last_res = None
+        try:
+            for idx, u in enumerate(urls, 1):
+                tracker.check_cancelled()
+                tracker.log(f"🔁 [{idx}/{len(urls)}] Đang xử lý link Reup: {u}")
+                last_res = reup_mod.run_reup_pipeline(
+                    source_url=u,
+                    voice=voice,
+                    translation_mode=translation_mode,
+                    frame_mode=frame_mode,
+                    mask_old_sub=mask_old_sub,
+                    anti_reup=anti_reup,
+                    mirror_video=mirror_video,
+                    original_volume=original_volume,
+                    custom_prompt=custom_prompt,
+                    browser_cookies=browser_cookies,
+                    bgm_choice=bgm_choice,
+                )
+            if last_res:
+                tracker.finish_pipeline(
+                    video_filename=last_res["video_filename"],
+                    caption=last_res.get("caption", ""),
+                    total_duration=last_res.get("duration_sec", 0.0),
+                )
+        except Exception as e:
+            if "PipelineCancelledError" in type(e).__name__:
+                tracker.set_error("Đã ngắt quy trình Reup theo yêu cầu.")
+            else:
+                tracker.set_error(str(e))
+
+    threading.Thread(target=_reup_worker, daemon=True).start()
+    return jsonify({"success": True, "queued": len(urls)})
 
 
 def start_studio(port=5000, auto_open=True):
