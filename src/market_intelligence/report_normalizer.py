@@ -237,10 +237,18 @@ def normalize_muse_report(
     if not isinstance(s2, dict):
         s2 = {}
 
-    raw_tiers = s2.get("tiers") if isinstance(s2.get("tiers"), dict) else {
-        k: s2.get(k) for k in ("very_hot", "hot", "emerging", "watchlist", "unverified") if k in s2
-    }
-    raw_groups = s2.get("groups") if isinstance(s2.get("groups"), dict) else {}
+    raw_tiers = (
+        s2.get("tiers")
+        or s2.get("tier_counts")
+        or {
+            k: s2.get(k) for k in ("very_hot", "hot", "emerging", "watchlist", "unverified") if k in s2
+        }
+    )
+    if not isinstance(raw_tiers, dict):
+        raw_tiers = {}
+    raw_groups = s2.get("groups") or s2.get("group_counts") or {}
+    if not isinstance(raw_groups, dict):
+        raw_groups = {}
 
     screening = {
         "requested_count": counters.get("requested_count"),
@@ -263,6 +271,7 @@ def normalize_muse_report(
         "counters_reconciled": counters.get("counters_reconciled"),
         "reconciliation_diff": counters.get("reconciliation_diff"),
         "sources": s1.get("sources"),
+        "note": s1.get("note"),
     }
     tier_distribution = {
         "tiers": {
@@ -301,7 +310,10 @@ def normalize_muse_report(
     for tv in _as_list(raw_top_viral):
         if not isinstance(tv, dict):
             continue
-        post_label = str(tv.get("post") or tv.get("title") or "").strip()
+        author_handle = str(tv.get("author") or tv.get("author_handle") or "").strip()
+        post_id_val = str(tv.get("post_id") or "").strip()
+        fallback_label = (f"@{author_handle.lstrip('@')} • {post_id_val}".strip(" •") if author_handle else post_id_val)
+        post_label = str(tv.get("post") or tv.get("title") or fallback_label or "").strip()
         tv_url = tv.get("url") or tv.get("post_url")
         if tv_url:
             for handle in re.findall(r"@[A-Za-z0-9_.]+", post_label):
@@ -309,6 +321,10 @@ def normalize_muse_report(
         top_viral.append(
             {
                 "post": post_label,
+                "post_id": post_id_val or None,
+                "author": author_handle or None,
+                "author_followers": tv.get("author_followers") if tv.get("author_followers") is not None else tv.get("followers"),
+                "tier": tv.get("tier") or tv.get("trend_tier"),
                 "url": tv_url,
                 "likes": tv.get("likes"),
                 "comments": tv.get("comments") if "comments" in tv else tv.get("comment_count"),
@@ -318,6 +334,8 @@ def normalize_muse_report(
                 "views_display": tv.get("views_display"),
                 "views_precision": tv.get("views_precision"),
                 "shares": tv.get("shares"),
+                "viral_reason": tv.get("viral_reason"),
+                "affiliate_note": tv.get("affiliate_note"),
                 "verification_status": tv.get("verification_status"),
             }
         )
@@ -354,17 +372,18 @@ def normalize_muse_report(
             ev_text = t.get("evidence") or t.get("basis")
             trending_highlights.append(
                 {
-                    "title": t.get("title") or t.get("theme") or t.get("opportunity") or t.get("topic") or t.get("summary") or str(t),
+                    "title": t.get("title") or t.get("name") or t.get("theme") or t.get("opportunity") or t.get("topic") or t.get("summary") or str(t),
                     "platform": t.get("platform") or platform,
                     "content_group": t.get("content_group") or t.get("type"),
                     "count": t.get("count") or t.get("rank"),
                     "confidence": t.get("confidence"),
                     "basis": ev_text,
+                    "note": t.get("note"),
                     "why_hot": t.get("why_hot"),
                     "evidence": ev_text,
                     "lifecycle_state": t.get("lifecycle_state"),
                     "evidence_urls": _infer_evidence_urls(ev_text, t.get("evidence_urls") or t.get("urls") or t.get("sources")),
-                    "evidence_ids": _as_list(t.get("evidence_ids") or t.get("post_ids")),
+                    "evidence_ids": _as_list(t.get("evidence_ids") or t.get("post_ids") or t.get("evidence_post_ids")),
                 }
             )
         elif isinstance(t, str) and t.strip():
@@ -399,12 +418,20 @@ def normalize_muse_report(
     if isinstance(raw_s5, dict):
         s5_emerging = [x for x in _as_list(raw_s5.get("emerging")) if isinstance(x, dict)]
         s5_signals = [x for x in _as_list(raw_s5.get("signals")) if isinstance(x, dict)]
+        s5_emerging_ids = [str(x).strip() for x in _as_list(raw_s5.get("emerging_post_ids")) if str(x or "").strip()]
+        s5_watchlist_ids = [str(x).strip() for x in _as_list(raw_s5.get("watchlist_post_ids")) if str(x or "").strip()]
     else:
         s5_emerging = [x for x in _as_list(src.get("section_5_emerging")) if isinstance(x, dict)]
         s5_signals = []
+        s5_emerging_ids = []
+        s5_watchlist_ids = []
     for entry in s5_emerging + s5_signals:
+        if not entry.get("signal") and (entry.get("topic") or entry.get("name")):
+            entry["signal"] = entry.get("topic") or entry.get("name")
+        if not entry.get("evidence") and entry.get("detail"):
+            entry["evidence"] = entry.get("detail")
         if "evidence_urls" not in entry:
-            entry["evidence_urls"] = _infer_evidence_urls(entry.get("evidence"))
+            entry["evidence_urls"] = _infer_evidence_urls(entry.get("evidence") or entry.get("detail"))
 
     # 2. Consumer needs & problems (V1/V2 + V3.1 Section 6)
     raw_needs = (
@@ -474,7 +501,7 @@ def normalize_muse_report(
     affiliate_opportunities: List[Dict[str, Any]] = []
     for a in _as_list(raw_aff):
         if isinstance(a, dict):
-            prod = a.get("product") or a.get("group") or a.get("name") or a.get("title")
+            prod = a.get("product") or a.get("angle") or a.get("group") or a.get("name") or a.get("title")
             if is_platform_or_site_name(prod):
                 continue
             ev_sum = a.get("evidence_summary") or a.get("evidence") or a.get("reason")
@@ -492,6 +519,7 @@ def normalize_muse_report(
                     "product": prod,
                     "brand_or_topic": a.get("brand_or_topic") or a.get("brand") or a.get("type") or a.get("priority"),
                     "priority": a.get("priority"),
+                    "viral_level": a.get("viral_level"),
                     "purchase_intent": a.get("purchase_intent") or a.get("evidence_strength") or a.get("priority"),
                     "price": a.get("price"),
                     "evidence_summary": ev_sum,
@@ -503,8 +531,25 @@ def normalize_muse_report(
     # 4. Content suggestions (text + short video — V1/V2 + V3.1 Section 8)
     raw_cs = sections.get("8_content_suggestions") or src.get("section_8_content_suggestions") or src.get("content_suggestions") or {}
     if isinstance(raw_cs, list):
-        text_posts = [str(x) for x in raw_cs if x]
-        short_videos: List[Any] = []
+        text_posts = []
+        short_videos = []
+        for s_item in raw_cs:
+            if isinstance(s_item, dict):
+                ch_raw = str(s_item.get("channel") or "").strip()
+                ch_low = ch_raw.lower()
+                idea = str(s_item.get("idea") or s_item.get("title") or s_item.get("text") or "").strip()
+                basis = str(s_item.get("basis_post_id") or s_item.get("basis") or "").strip()
+                formatted = f"[{ch_raw}] {idea}".strip() if ch_raw else idea
+                if basis:
+                    formatted = f"{formatted} (mẫu: {basis})"
+                if not formatted:
+                    continue
+                if any(k in ch_low for k in ("video", "tiktok", "shorts", "reels")):
+                    short_videos.append(formatted)
+                else:
+                    text_posts.append(formatted)
+            elif s_item:
+                text_posts.append(str(s_item))
     elif isinstance(raw_cs, dict):
         text_posts = _as_list(
             raw_cs.get("text_posts") or raw_cs.get("threads_facebook") or raw_cs.get("text")
@@ -699,12 +744,18 @@ def normalize_muse_report(
         or modified_time
         or _utc_now_iso()
     )
+    source_files = [
+        str(x).strip()
+        for x in _as_list(raw_obj.get("source_files") or src.get("source_files"))
+        if str(x or "").strip()
+    ]
     return {
         "report_key": report_key,
         "schema_version": "v3.2" if is_v32 else ("v3.1" if is_v3 else "v2"),
         "source_type": "muse_report_json",
         "source_label": f"Muse Report ({file_name or 'Drive JSON'})",
         "file_name": file_name,
+        "source_files": source_files,
         "title": str(title),
         "platform": platform,
         "is_corrected": is_corrected,
@@ -712,6 +763,13 @@ def normalize_muse_report(
         "source_priority": 2 if is_corrected else 1,
         "request_id": raw_obj.get("request_id"),
         "run_id": source_run.get("run_id") or raw_obj.get("run_id"),
+        "strategy_version": src.get("strategy_version") or raw_obj.get("strategy_version"),
+        "contract_version": src.get("contract_version") or raw_obj.get("contract_version"),
+        "crawl_mode": src.get("crawl_mode") or raw_obj.get("crawl_mode") or source_run.get("crawl_mode"),
+        "topics": src.get("topics") if isinstance(src.get("topics"), list) else (raw_obj.get("topics") if isinstance(raw_obj.get("topics"), list) else source_run.get("topics")),
+        "keywords": src.get("keywords") or raw_obj.get("keywords") or source_run.get("keywords"),
+        "lookback_hours": src.get("lookback_hours") or raw_obj.get("lookback_hours") or source_run.get("lookback_hours"),
+        "special_counts": src.get("special_counts") or raw_obj.get("special_counts"),
         "run_status": status_meta["run_status"],
         "run_status_label_vi": status_meta["run_status_label_vi"],
         "is_source_error": status_meta["is_source_error"],
@@ -724,7 +782,16 @@ def normalize_muse_report(
         "screening": screening if (is_v3 or any(v is not None for v in screening.values())) else None,
         "tier_distribution": tier_distribution if (tier_distribution["tiers"] or tier_distribution["groups"]) else None,
         "top_viral": top_viral,
-        "emerging_and_signals": {"emerging": s5_emerging, "signals": s5_signals} if (s5_emerging or s5_signals) else None,
+        "emerging_and_signals": (
+            {
+                "emerging": s5_emerging,
+                "signals": s5_signals,
+                "emerging_post_ids": s5_emerging_ids,
+                "watchlist_post_ids": s5_watchlist_ids,
+            }
+            if (s5_emerging or s5_signals or s5_emerging_ids or s5_watchlist_ids)
+            else None
+        ),
         "growth_tracking": growth_tracking,
         "priority_actions": priority_actions,
         "verification_detail": raw_verif_detail,

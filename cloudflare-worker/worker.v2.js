@@ -238,6 +238,343 @@ function deriveCrawlRequestDisplayState(reqRow, parsedSummary = null, hasActiveO
     };
 }
 
+const MUSE_DEFAULT_CLAIM_OWNER = "muse-ai";
+const MUSE_DEFAULT_LEASE_SECONDS = 1800;
+const MUSE_MIN_LEASE_SECONDS = 60;
+const MUSE_MAX_LEASE_SECONDS = 7200;
+const THREADS_STRATEGY_VERSION = "3.3 (sửa đổi 28/11/2026)";
+const THREADS_DEFAULT_LOOKBACK_HOURS = 24;
+const THREADS_ALLOWED_LOOKBACK_HOURS = new Set([24, 48, 72, 168]);
+
+const THREADS_CRAWL_MODES = {
+    balanced: {
+        id: "balanced",
+        label: "Toàn thị trường",
+        enabled: true,
+        requires_contract_update: false,
+        summary: "Tham khảo 40% Natural Viral, 40% Affiliate, 20% Market Trend (linh hoạt)",
+        priority_note: "~40% Natural Viral, ~40% Affiliate, ~20% Market Trend (không ép cứng, ưu tiên chất lượng).",
+        discovery_note: "Trends/Explore + chủ đề đã chọn, review thật, nhu cầu mua, deal hời & đời sống.",
+        analysis_note: "Cân bằng viral tự nhiên, Affiliate, nhu cầu mua & vòng đời trend.",
+        discovery_seeds: ["xu hướng hôm nay", "review thật", "kinh nghiệm", "đáng mua", "trải nghiệm"],
+    },
+    natural_viral: {
+        id: "natural_viral",
+        label: "Săn nội dung viral tự nhiên",
+        enabled: true,
+        requires_contract_update: false,
+        summary: "Ưu tiên bài creator nhỏ / người thường có lượt xem & lan truyền tự nhiên cao",
+        priority_note: "Ưu tiên viral tự nhiên từ người thường & creator nhỏ (views/followers cao), không đặt nặng bán hàng.",
+        discovery_note: "Chuyện đời thật, chia sẻ bất ngờ, quan điểm đồng cảm, format mới; soi kỹ author_followers.",
+        analysis_note: "Bóc tách hook, trigger natural_viral, giữ chân & cách nhân bản format.",
+        discovery_seeds: ["kể chuyện thật", "trải nghiệm bất ngờ", "không ngờ luôn", "chia sẻ thật lòng", "mọi người ơi"],
+    },
+    affiliate: {
+        id: "affiliate",
+        label: "Tìm sản phẩm Affiliate",
+        enabled: true,
+        requires_contract_update: false,
+        summary: "Săn sản phẩm review chân thực, deal/voucher dễ gắn giỏ hàng Affiliate",
+        priority_note: "Ưu tiên bài có sản phẩm cụ thể, review trước/sau, so sánh, deal/voucher chuyển đổi giỏ hàng Affiliate.",
+        discovery_note: "Chủ đề đã chọn + từ khóa mua sắm (review thật, xài ổn không, đáng tiền, deal, mua ở đâu).",
+        analysis_note: "SKU nổi bật, USP, rào cản mua, giá/voucher & góc hook Affiliate.",
+        discovery_seeds: ["review thật", "xài ổn không", "đáng tiền", "so sánh", "deal hời", "mua ở đâu"],
+    },
+    buyer_intent: {
+        id: "buyer_intent",
+        label: "Tìm nhu cầu mua hàng",
+        enabled: true,
+        requires_contract_update: false,
+        summary: "Săn bài hỏi mua, xin tư vấn, tìm giải pháp & bình luận xin link",
+        priority_note: "Ưu tiên tín hiệu nhu cầu mua chủ động (buyer_intent=true): hỏi tư vấn, tìm giải pháp, xin link/giá.",
+        discovery_note: "Câu hỏi mua sắm (nên mua gì, loại nào tốt, có ai dùng chưa, xin link) & soi reply xin mua.",
+        analysis_note: "Cụm nhu cầu, độ cấp thiết, ngân sách, purchase_intent_comments & sản phẩm khớp.",
+        discovery_seeds: ["nên mua gì", "tư vấn giúp", "loại nào tốt", "xin link", "có ai dùng chưa", "cần tìm"],
+    },
+    market_trend: {
+        id: "market_trend",
+        label: "Theo dõi xu hướng thị trường",
+        enabled: true,
+        requires_contract_update: false,
+        summary: "Theo dõi xu hướng mới nổi, slang, hành vi tiêu dùng & vòng đời trend sớm",
+        priority_note: "Ưu tiên tín hiệu mới nổi (Emerging -> Hot), slang mới, hành vi dịch chuyển & format lan rộng.",
+        discovery_note: "Threads Trends/Explore + chủ đề đã chọn, chú ý độ mới & mật độ creator hưởng ứng.",
+        analysis_note: "Định vị vòng đời xu hướng (mới nổi / đang bùng / bão hòa) & hành động đón đầu.",
+        discovery_seeds: ["trend mới", "dạo này rộ", "ai cũng nói", "mới nổi", "xu hướng mới"],
+    },
+    traffic_content: {
+        id: "traffic_content",
+        label: "Săn content kéo Traffic",
+        enabled: true,
+        requires_contract_update: false,
+        summary: "Săn meme, chơi chữ, relatable, hot takes, POV kéo reach & follow (không cần Affiliate)",
+        priority_note: "Ưu tiên content kéo Traffic, tương tác cao & tăng follower — KHÔNG bắt buộc liên quan Affiliate hay Buyer Intent.",
+        discovery_note: "Meme hài, chơi chữ & plot twist, random thoughts, relatable, hot takes, hoài niệm, châm biếm, POV, trend remix, reaction.",
+        analysis_note: "Cơ chế gây đồng cảm/bất ngờ kéo click profile & follow, tỷ lệ repost/comment.",
+        discovery_seeds: ["meme hài", "plot twist", "giống tui ghê", "suy nghĩ vẩn vơ", "quan điểm cá nhân", "pov"],
+    },
+    growth_tracking: {
+        id: "growth_tracking",
+        label: "Theo dõi tăng trưởng bài cũ",
+        enabled: false,
+        requires_contract_update: true,
+        disabled_reason: "Data Contract V3.2 hiện lấy new_qualified_count làm chuẩn hoàn thành (requested_count) và chưa có API liệt kê bài lịch sử từ D1 Registry để đo lại. Cần nâng cấp Data Contract V3.2 + Custom Connector (/api/crawl/registry/targets) trước khi bật.",
+        summary: "Đo lại bài lịch sử cần theo dõi tăng trưởng (chờ bổ sung Data Contract V3.2 & danh sách mục tiêu D1)",
+        priority_note: "Đo lại đúng danh sách bài lịch sử; KHÔNG dùng số bài mới để đánh giá hoàn thành.",
+        discovery_note: "Truy cập danh sách bài lịch sử D1 Registry cần đo lại.",
+        analysis_note: "Delta views/likes/replies/reposts trong 9_growth_tracking.",
+        discovery_seeds: [],
+    },
+};
+
+const THREADS_MODE_ALIASES = {
+    balanced: "balanced",
+    toanthitruong: "balanced",
+    natural_viral: "natural_viral",
+    viral: "natural_viral",
+    affiliate: "affiliate",
+    aff: "affiliate",
+    buyer_intent: "buyer_intent",
+    buyer: "buyer_intent",
+    market_trend: "market_trend",
+    trend: "market_trend",
+    traffic_content: "traffic_content",
+    traffic: "traffic_content",
+    growth_tracking: "growth_tracking",
+    growth: "growth_tracking",
+};
+
+const THREADS_TOPIC_PRESETS = [
+    // Commerce / Đời sống / Ngành hàng (14)
+    { id: "beauty", label: "Mỹ phẩm & Làm đẹp", group: "commerce_lifestyle", keywords: ["skincare", "kem chống nắng", "son môi", "trị mụn", "review mỹ phẩm"] },
+    { id: "fashion", label: "Thời trang", group: "commerce_lifestyle", keywords: ["phối đồ", "outfit đi làm", "local brand", "váy xinh", "giày dép"] },
+    { id: "home_living", label: "Nhà cửa & Gia dụng", group: "commerce_lifestyle", keywords: ["decor phòng", "đồ gia dụng", "dọn nhà", "máy lọc không khí", "đồ bếp"] },
+    { id: "tech", label: "Công nghệ", group: "commerce_lifestyle", keywords: ["đồ công nghệ", "tai nghe", "sạc dự phòng", "app hay", "mẹo iphone"] },
+    { id: "mom_baby", label: "Mẹ & Bé", group: "commerce_lifestyle", keywords: ["đồ cho bé", "ăn dặm", "bỉm sữa", "chăm con", "mẹ bỉm review"] },
+    { id: "food_drink", label: "Ăn uống", group: "commerce_lifestyle", keywords: ["đồ ăn vặt", "quán ngon", "cà phê", "matcha", "review đồ ăn"] },
+    { id: "health", label: "Sức khỏe", group: "commerce_lifestyle", keywords: ["giảm cân", "ngủ ngon", "vitamin", "tập gym", "chăm sóc sức khỏe"] },
+    { id: "pets", label: "Thú cưng", group: "commerce_lifestyle", keywords: ["nuôi mèo", "nuôi chó", "cát mèo", "hạt thú cưng", "chăm boss"] },
+    { id: "deals_vouchers", label: "Săn deal & Voucher", group: "commerce_lifestyle", keywords: ["săn sale", "mã giảm giá", "deal hời", "shopee live", "giá tốt"] },
+    { id: "life_family", label: "Đời sống & Gia đình", group: "commerce_lifestyle", keywords: ["tâm sự đời sống", "chuyện gia đình", "ở trọ", "tiết kiệm tiền", "cuộc sống"] },
+    { id: "entertainment_humor", label: "Giải trí & Hài hước", group: "commerce_lifestyle", keywords: ["chuyện hài", "giải trí", "clip vui", "cười xỉu", "tin giải trí"] },
+    { id: "work_income", label: "Công việc & Thu nhập", group: "commerce_lifestyle", keywords: ["đi làm", "kiếm thêm thu nhập", "freelance", "công sở", "chuyện nghề"] },
+    { id: "affiliate_tips", label: "Kinh nghiệm Affiliate", group: "commerce_lifestyle", keywords: ["làm affiliate", "gắn giỏ hàng", "kéo đơn", "hoa hồng", "chia sẻ affiliate"] },
+    { id: "useful_tips", label: "Mẹo hữu ích", group: "commerce_lifestyle", keywords: ["mẹo vặt", "mẹo hay mỗi ngày", "life hack", "kinh nghiệm thật"] },
+    // Giải trí / Traffic (10)
+    { id: "meme_humor", label: "Meme & Hài hước", group: "traffic_entertainment", keywords: ["meme hài", "ảnh chế", "cà khịa nhẹ", "dở khóc dở cười", "cười xỉu"] },
+    { id: "wordplay_twist", label: "Chơi chữ & Plot Twist", group: "traffic_entertainment", keywords: ["chơi chữ", "bẻ lái", "plot twist", "tưởng vậy mà không phải"] },
+    { id: "random_thoughts", label: "Random Thoughts", group: "traffic_entertainment", keywords: ["suy nghĩ vẩn vơ", "tự nhiên nghĩ tới", "chuyện nửa đêm", "tâm trạng vu vơ"] },
+    { id: "relatable_content", label: "Relatable Content", group: "traffic_entertainment", keywords: ["giống tui ghê", "ai cũng từng", "đúng tim đen", "chuyện đi làm đi học"] },
+    { id: "hot_takes", label: "Hot Takes", group: "traffic_entertainment", keywords: ["quan điểm cá nhân", "góc nhìn trái chiều", "nói thật lòng", "tranh luận văn minh"] },
+    { id: "childhood_nostalgia", label: "Tuổi thơ & Hoài niệm", group: "traffic_entertainment", keywords: ["tuổi thơ 8x 9x", "hoài niệm", "ngày xưa", "ký ức học trò"] },
+    { id: "satire", label: "Châm biếm", group: "traffic_entertainment", keywords: ["châm biếm hài hước", "đùa sâu cay", "hiện thực vui nhộn"] },
+    { id: "storytelling_pov", label: "Storytelling & POV", group: "traffic_entertainment", keywords: ["pov", "kể chuyện thật", "nhật ký ngắn", "tình huống bất ngờ"] },
+    { id: "trend_remix", label: "Trend Remix", group: "traffic_entertainment", keywords: ["bắt trend", "remix trend", "biến tấu trend", "trend việt"] },
+    { id: "reaction_entertainment", label: "Reaction & Nội dung giải trí", group: "traffic_entertainment", keywords: ["reaction", "bình luận hài", "giải trí nhẹ", "xem gì hôm nay"] },
+];
+
+const THREADS_TOPIC_BY_ID = new Map(THREADS_TOPIC_PRESETS.map(t => [t.id, t]));
+const THREADS_TOPIC_BY_LABEL_LOWER = new Map(THREADS_TOPIC_PRESETS.map(t => [t.label.toLowerCase(), t]));
+
+const THREADS_DEFAULT_EXCLUSIONS = {
+    exclude_celebrity: true,
+    exclude_fandom: true,
+    exclude_pure_ads: true,
+    vn_only: true,
+};
+
+function parseRequestOptionsJson(reqRow) {
+    if (!reqRow || typeof reqRow !== "object") return {};
+    if (reqRow.options && typeof reqRow.options === "object" && !Array.isArray(reqRow.options)) {
+        return { ...reqRow.options };
+    }
+    if (typeof reqRow.options_json === "string" && reqRow.options_json.trim()) {
+        try {
+            const parsed = JSON.parse(reqRow.options_json);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+        } catch {}
+    }
+    return {};
+}
+
+function normalizeThreadsCrawlMode(rawMode, { strict = false } = {}) {
+    if (rawMode === undefined || rawMode === null || String(rawMode).trim() === "") {
+        return THREADS_CRAWL_MODES.balanced;
+    }
+    const cleanKey = String(rawMode).trim().toLowerCase();
+    const mappedId = THREADS_MODE_ALIASES[cleanKey] || cleanKey;
+    const modeObj = THREADS_CRAWL_MODES[mappedId] || null;
+    if (!modeObj) {
+        if (strict) {
+            throw new Error(`crawl_mode không hợp lệ: '${rawMode}'. Chọn: balanced, natural_viral, affiliate, buyer_intent, market_trend, traffic_content.`);
+        }
+        return THREADS_CRAWL_MODES.balanced;
+    }
+    if (strict && !modeObj.enabled) {
+        throw new Error(modeObj.disabled_reason || `Mode '${modeObj.id}' chưa được bật.`);
+    }
+    return modeObj;
+}
+
+function normalizeThreadsTopics(rawTopics, { strict = false } = {}) {
+    if (rawTopics === undefined || rawTopics === null || rawTopics === "") return [];
+    const arr = Array.isArray(rawTopics)
+        ? rawTopics
+        : (typeof rawTopics === "string" ? rawTopics.split(/[,;|]+/) : []);
+    const seen = new Set();
+    const out = [];
+    for (const item of arr) {
+        const clean = String(item || "").trim();
+        if (!clean) continue;
+        const low = clean.toLowerCase();
+        const found = THREADS_TOPIC_BY_ID.get(low) || THREADS_TOPIC_BY_LABEL_LOWER.get(low) || null;
+        if (!found) {
+            if (strict) {
+                throw new Error(`Chủ đề Threads không hợp lệ: '${clean}'.`);
+            }
+            continue;
+        }
+        if (!seen.has(found.id)) {
+            seen.add(found.id);
+            out.push(found.id);
+        }
+    }
+    return out;
+}
+
+function normalizeThreadsLookbackHours(rawLookback, { strict = false } = {}) {
+    if (rawLookback === undefined || rawLookback === null || String(rawLookback).trim() === "") {
+        return THREADS_DEFAULT_LOOKBACK_HOURS;
+    }
+    const str = String(rawLookback).trim().toLowerCase();
+    if (str === "7d" || str === "7ngày" || str === "7ngay") return 168;
+    const m = str.match(/^(\d{1,3})\s*(?:h|gio|giờ)?$/i);
+    const num = m ? Number.parseInt(m[1], 10) : Number.parseInt(str, 10);
+    if (THREADS_ALLOWED_LOOKBACK_HOURS.has(num)) return num;
+    if (strict) {
+        throw new Error("lookback_hours phải là 24, 48, 72 hoặc 168 (7 ngày).");
+    }
+    return THREADS_DEFAULT_LOOKBACK_HOURS;
+}
+
+function formatThreadsLookbackLabel(hours) {
+    if (hours === 168) return "7 ngày (168h)";
+    if (hours === 72) return "72h";
+    if (hours === 48) return "48h";
+    return "24h (mở rộng tối đa 48h)";
+}
+
+function normalizeThreadsExclusions(rawExcl) {
+    const src = (rawExcl && typeof rawExcl === "object" && !Array.isArray(rawExcl)) ? rawExcl : {};
+    const readFlag = (key, defVal) => (typeof src[key] === "boolean" ? src[key] : defVal);
+    return {
+        exclude_celebrity: readFlag("exclude_celebrity", THREADS_DEFAULT_EXCLUSIONS.exclude_celebrity),
+        exclude_fandom: readFlag("exclude_fandom", THREADS_DEFAULT_EXCLUSIONS.exclude_fandom),
+        exclude_pure_ads: readFlag("exclude_pure_ads", THREADS_DEFAULT_EXCLUSIONS.exclude_pure_ads),
+        vn_only: readFlag("vn_only", THREADS_DEFAULT_EXCLUSIONS.vn_only),
+    };
+}
+
+function normalizeThreadsLeaseSeconds(rawOptions = null, fallbackSeconds = MUSE_DEFAULT_LEASE_SECONDS) {
+    if (!rawOptions || typeof rawOptions !== "object") return fallbackSeconds;
+    let rawSec = null;
+    if (rawOptions.lease_seconds !== undefined && rawOptions.lease_seconds !== null && rawOptions.lease_seconds !== "") {
+        rawSec = Number(rawOptions.lease_seconds);
+    } else {
+        const rawMin = rawOptions.lease_minutes ?? rawOptions.duration_minutes ?? rawOptions.crawl_duration_minutes;
+        if (rawMin !== undefined && rawMin !== null && rawMin !== "") {
+            rawSec = Number(rawMin) * 60;
+        }
+    }
+    if (!Number.isFinite(rawSec) || rawSec <= 0) return fallbackSeconds;
+    return Math.min(Math.max(Math.round(rawSec), MUSE_MIN_LEASE_SECONDS), MUSE_MAX_LEASE_SECONDS);
+}
+
+function getRequestLeaseInfo(reqRow) {
+    const plat = String(reqRow?.platform || "threads").trim().toLowerCase() || "threads";
+    const opts = parseRequestOptionsJson(reqRow);
+    const leaseSeconds = plat === "threads"
+        ? normalizeThreadsLeaseSeconds(opts, MUSE_DEFAULT_LEASE_SECONDS)
+        : MUSE_DEFAULT_LEASE_SECONDS;
+    const leaseMinutes = Math.max(1, Math.round(leaseSeconds / 60));
+    return {
+        leaseSeconds,
+        leaseMinutes,
+        isCustomDuration: plat === "threads" && leaseSeconds !== MUSE_DEFAULT_LEASE_SECONDS,
+    };
+}
+
+function getThreadsStrategyConfig(reqRow, { strict = false } = {}) {
+    const opts = parseRequestOptionsJson(reqRow);
+    const modeObj = normalizeThreadsCrawlMode(opts.crawl_mode ?? opts.mode, { strict });
+    const topics = normalizeThreadsTopics(opts.topics, { strict });
+    const topicObjs = topics.map(id => THREADS_TOPIC_BY_ID.get(id)).filter(Boolean);
+    const lookbackHours = normalizeThreadsLookbackHours(opts.lookback_hours ?? opts.time_range_hours, { strict });
+    const exclusions = normalizeThreadsExclusions(opts.exclusions ?? opts);
+    const leaseInfo = getRequestLeaseInfo({ platform: "threads", options: opts });
+    return {
+        strategy_version: THREADS_STRATEGY_VERSION,
+        crawl_mode: modeObj.id,
+        crawl_mode_label: modeObj.label,
+        topics,
+        topic_labels: topicObjs.map(t => t.label),
+        lookback_hours: lookbackHours,
+        lookback_label: formatThreadsLookbackLabel(lookbackHours),
+        exclusions,
+        lease_seconds: leaseInfo.leaseSeconds,
+        lease_minutes: leaseInfo.leaseMinutes,
+        is_custom_duration: leaseInfo.isCustomDuration,
+        _modeObj: modeObj,
+        _topicObjs: topicObjs,
+    };
+}
+
+function getThreadsStrategySignature(reqRow) {
+    const cfg = getThreadsStrategyConfig(reqRow, { strict: false });
+    const sortedTopics = [...cfg.topics].sort();
+    return JSON.stringify([
+        cfg.crawl_mode,
+        sortedTopics,
+        cfg.lookback_hours,
+        cfg.exclusions.exclude_celebrity,
+        cfg.exclusions.exclude_fandom,
+        cfg.exclusions.exclude_pure_ads,
+        cfg.exclusions.vn_only,
+        cfg.lease_seconds,
+    ]);
+}
+
+function getPublicCrawlConfig() {
+    return {
+        strategy_version: THREADS_STRATEGY_VERSION,
+        contract_version: "3.2",
+        default_mode: "balanced",
+        default_lookback_hours: THREADS_DEFAULT_LOOKBACK_HOURS,
+        modes: Object.values(THREADS_CRAWL_MODES).map(m => ({
+            id: m.id,
+            label: m.label,
+            enabled: m.enabled,
+            requires_contract_update: Boolean(m.requires_contract_update),
+            disabled_reason: m.disabled_reason || null,
+            summary: m.summary,
+        })),
+        topics: THREADS_TOPIC_PRESETS.map(t => ({
+            id: t.id,
+            label: t.label,
+            group: t.group,
+            keywords: t.keywords,
+        })),
+        lookback_options: [
+            { hours: 24, label: "24h (mặc định, mở rộng tối đa 48h)" },
+            { hours: 48, label: "48h" },
+            { hours: 72, label: "72h (mở rộng rõ ràng)" },
+            { hours: 168, label: "7 ngày / 168h (mở rộng rõ ràng)" },
+        ],
+        exclusion_defaults: { ...THREADS_DEFAULT_EXCLUSIONS },
+        lease_options_minutes: [30, 60, 120],
+    };
+}
+
 function getRequestContractVersion(platform) {
     const plat = String(platform || "threads").trim().toLowerCase();
     if (plat === "threads") return "3.2";
@@ -245,35 +582,113 @@ function getRequestContractVersion(platform) {
     return "threads:3.2 | tiktok/shopee:v2";
 }
 
+function buildThreadsTopicPromptLines(cfg, customKeywords) {
+    const selected = cfg._topicObjs || [];
+    const seeds = cfg._modeObj?.discovery_seeds || [];
+    const kwTrim = String(customKeywords || "").trim().slice(0, 120);
+    if (selected.length === 0) {
+        return {
+            topicHeader: "Theo chế độ & xu hướng",
+            keywordGuidance: `- Từ khóa mode: ${seeds.slice(0, 5).join(", ")}${kwTrim ? `; tùy chỉnh: ${kwTrim}` : ""} (mở rộng trong chủ đề).`,
+        };
+    }
+    if (selected.length >= THREADS_TOPIC_PRESETS.length) {
+        return {
+            topicHeader: `Tất cả ${selected.length} chủ đề (14 Đời sống/Aff + 10 Giải trí/Traffic)`,
+            keywordGuidance: `- Preset TV: 14 ngành Đời sống/Affiliate & 10 chủ đề Giải trí/Traffic (Meme, Plot Twist, Random Thoughts, Relatable, Hot Takes, Tuổi thơ, Châm biếm, POV, Trend Remix, Reaction); mode: ${seeds.slice(0, 4).join(", ")}${kwTrim ? `; từ khóa: ${kwTrim}` : ""}.`,
+        };
+    }
+    const maxSeedTopics = selected.length <= 4 ? 4 : 5;
+    const seedsPerTopic = selected.length <= 2 ? 3 : 2;
+    const topicNames = selected.length <= 5
+        ? selected.map(t => t.label).join(", ")
+        : `${selected.slice(0, 5).map(t => t.label).join(", ")} (+${selected.length - 5})`;
+    const presetSnippets = selected
+        .slice(0, maxSeedTopics)
+        .map(t => `${t.label}: ${t.keywords.slice(0, seedsPerTopic).join(", ")}`)
+        .join(" | ");
+    const extraCount = selected.length > maxSeedTopics ? ` (+${selected.length - maxSeedTopics})` : "";
+    return {
+        topicHeader: topicNames,
+        keywordGuidance: `- Preset TV: ${presetSnippets}${extraCount}${kwTrim ? `; từ khóa: ${kwTrim}` : ""} (mở rộng từ khóa trong chủ đề).`,
+    };
+}
+
 function buildMuseManualPrompt(reqRow) {
     const reqId = String(reqRow?.id || "").trim();
     const plat = String(reqRow?.platform || "threads").trim().toLowerCase() || "threads";
     const targetCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || 50);
     const keywords = String(reqRow?.keywords || "").trim();
-    const kwLine = keywords || "(mặc định theo cấu hình ngành hàng / xu hướng hiện hành)";
     const contractVersion = getRequestContractVersion(plat);
 
     if (plat === "threads") {
+        const kwLine = keywords || "Mặc định theo chủ đề & mode";
+        const cfg = getThreadsStrategyConfig(reqRow, { strict: false });
+        const modeObj = cfg._modeObj;
+        const { lease_seconds: leaseSeconds, lease_minutes: leaseMinutes, is_custom_duration: isCustomDuration } = cfg;
+        const reserveMinutes = Math.max(10, Math.ceil(leaseMinutes * 0.2));
+        const claimBodyNote = isCustomDuration
+            ? ` (lease ${leaseMinutes}p/${leaseSeconds}s, "lease_seconds":${leaseSeconds}, không tự gia hạn)`
+            : "";
+        const timeRuleLine = cfg.lookback_hours === 168
+            ? "Mở rộng tối đa 7 ngày (168h; ưu tiên 24 giờ gần nhất -> 48 giờ trước)."
+            : (cfg.lookback_hours === 72
+                ? "Mở rộng tối đa 72h (ưu tiên 24 giờ gần nhất -> 48 giờ -> 72h)."
+                : (cfg.lookback_hours === 48
+                    ? "Phạm vi 48h (ưu tiên 24 giờ gần nhất -> tối đa 48 giờ)."
+                    : "Ưu tiên 24 giờ gần nhất (tối đa 48 giờ nếu thiếu bài)."));
+
+        const ex = cfg.exclusions;
+        const filterParts = [
+            ex.exclude_celebrity
+                ? "Hạn chế người nổi tiếng, ca sĩ, thương hiệu lớn (không loại user thường chỉ nhắc tên)"
+                : "Linh hoạt người nổi tiếng",
+            ex.exclude_fandom ? "hạn chế fandom" : "mở fandom",
+            ex.exclude_pure_ads ? "hạn chế quảng cáo đơn thuần (Không loại cứng người bán hoặc thương hiệu nhỏ)" : "không loại cứng người bán hoặc thương hiệu nhỏ",
+        ];
+        const marketLine = ex.vn_only ? "chỉ thu thập thị trường Việt Nam" : "ưu tiên Việt Nam";
+        const topicPrompt = buildThreadsTopicPromptLines(cfg, keywords);
+        const topicsCompact = cfg.topics.length >= THREADS_TOPIC_PRESETS.length
+            ? `ALL(${cfg.topics.length})`
+            : JSON.stringify(cfg.topics);
+
         return [
-            `Thực hiện crawl Threads, mục tiêu ${targetCount} bài mới đạt chuẩn.`,
-            `Request ID: ${reqId}`,
-            `Platform: threads`,
-            `Requested Count: ${targetCount}`,
-            `Keywords: ${kwLine}`,
-            `Contract Version: ${contractVersion}`,
+            `Crawl Threads (${marketLine}) • Request ID: ${reqId}`,
+            `Platform: threads | Mode: ${modeObj.id} (${modeObj.label}) | Lookback: ${cfg.lookback_label}`,
+            `Topics: ${topicPrompt.topicHeader} | Keywords: ${kwLine}`,
+            `Requested Count: ${targetCount} bài mới đạt chuẩn | Strategy Version: ${THREADS_STRATEGY_VERSION} | Contract Version: ${contractVersion}`,
+            `Thời lượng lease: ${leaseMinutes} phút (${leaseSeconds}s; dự trữ max(10 phút, 20% lease) ≈ ${reserveMinutes}p)`,
             ``,
-            `Hướng dẫn thực thi bắt buộc:`,
-            `1. Claim đúng Request ID qua Custom Connector (custom.app_video): gọi POST /api/crawl/claim với {"request_id": "${reqId}"}. Tuyệt đối KHÔNG claim hoặc fallback sang request khác nếu request này không ở trạng thái queued; lưu lại attempt và dự trữ tối thiểu max(10 phút, 20% lease) trước lease_expires_at.`,
-            `2. Áp dụng Data Contract V3.2 và dùng Cloud Browser (trình duyệt thật) để xác minh views + đủ 5 trường chứng cứ (views_display, views_precision, views_source="threads_web_browser", views_measured_at, views_evidence_url).`,
-            `3. Chống trùng xuyên lượt với D1 Registry qua POST /api/crawl/registry/check.`,
-            `4. Cập nhật tiến độ thực tế định kỳ qua POST /api/crawl/progress (request_id="${reqId}", claimed_by="muse-ai", attempt, run_id, counters).`,
-            `5. Lưu ĐỦ CẶP 2 file JSON lên Google Drive (AI_WORKSPACE/01_Market_Data/):`,
-            `   - Data JSON: Threads/threads_trend_<YYYYMMDD>_<HHmm>.json (chứa mảng items/records)`,
-            `   - Report JSON: Reports/trend_report_<YYYYMMDD>_<HHmm>.json (kèm .md nếu có)`,
-            `   Cả 2 file phải ghi cùng request_id="${reqId}", run_id, attempt, claimed_by="muse-ai", platform="threads", contract_version="3.2" và counters nhất quán.`,
-            `6. Hoàn tất request qua POST /api/crawl/complete (kèm items/records, result_summary, report_file_id; được phép items: [] nếu no_qualifying_posts hợp lệ V3.2) hoặc POST /api/crawl/fail nếu gặp lỗi.`
+            `I. CLAIM`,
+            `- Kiểm tra @toilaai267, Cloud Browser, threads-cli, Custom Connector; hết hạn -> đăng nhập lại trước khi claim.`,
+            `- POST /api/crawl/claim {"request_id":"${reqId}"}${claimBodyNote}. Không fallback sang request khác.`,
+            ``,
+            `II. CHIẾN LƯỢC (${modeObj.label.toUpperCase()})`,
+            `- Crawl Strategy 3.3 (workspace & Drive). ${timeRuleLine}`,
+            `- Ưu tiên: ${modeObj.priority_note}`,
+            `- Discovery: ${modeObj.discovery_note} Mở rộng tìm kiếm ngoài trends chính thức.`,
+            topicPrompt.keywordGuidance,
+            `- Lọc: Ưu tiên viral tự nhiên từ người dùng bình thường, creator nhỏ. ${filterParts.join("; ")}.`,
+            `- Chống trùng POST /api/crawl/registry/check; mở rộng nguồn tìm kiếm nếu chưa đạt mục tiêu, không hạ chuẩn.`,
+            ``,
+            `III. XÁC MINH & PHÂN TẦNG`,
+            `- Cloud Browser @toilaai267 + threads-cli: Bắt buộc xác minh cả views và likes; không bỏ qua bước đo views chỉ vì likes thấp.`,
+            `- 5 trường chứng cứ views theo V3.2 (views_display, views_precision, views_source="threads_web_browser", views_measured_at, views_evidence_url).`,
+            `- Phân biệt rõ số 0 với null; loại thiếu views/likes; không đặt sàn views hoặc likes cho Watchlist. Không dừng giữa chừng nếu còn ứng viên phù hợp.`,
+            `- Very Hot: ≥ 1.000 likes hoặc ≥ 50.000 views. Hot: ≥ 300 likes hoặc ≥ 10.000 views. Emerging: V3.2. Watchlist: đủ views+likes. Unverified: thiếu XM. Rejected: loại.`,
+            `- Bổ sung: Followers của tác giả (followers), Views/followers, Natural Viral (natural_viral), Buyer Intent (buyer_intent), nguyên nhân viral và khả năng ứng dụng Affiliate. ${modeObj.analysis_note}`,
+            `- Đo lại bài lịch sử có tiềm năng tăng trưởng (Growth Tracking), không tính vào số bài mới. Không thu thập toàn bài Watchlist chỉ để đạt mục tiêu.`,
+            ``,
+            `IV. TIẾN ĐỘ, DRIVE & HOÀN TẤT`,
+            `- POST /api/crawl/progress (request_id="${reqId}", claimed_by="muse-ai", attempt, run_id, counters). Tuân thủ ngân sách lease. Không tự gia hạn.`,
+            `- Lưu run_id (Run-centric UI): AI_WORKSPACE/01_Market_Data/Threads/threads_trend_<YYYYMMDD>_<HHmm>.json, Reports/trend_report_<YYYYMMDD>_<HHmm>.json, Reports/trend_report_<YYYYMMDD>_<HHmm>.md.`,
+            `- Metadata: request_id="${reqId}", run_id, attempt, claimed_by="muse-ai", platform="threads", contract_version="3.2", strategy_version="${THREADS_STRATEGY_VERSION}", crawl_mode="${modeObj.id}", topics=${topicsCompact}, lookback_hours=${cfg.lookback_hours}, snapshot tương tác tại thời điểm crawl.`,
+            `- Báo cáo riêng: Very Hot, Hot, Emerging, Watchlist, Natural Viral, Buyer Intent, Growth Tracking (9_growth_tracking), trùng, chưa XM, loại.`,
+            `- POST /api/crawl/complete (items: [] nếu no_qualifying_posts V3.2) hoặc POST /api/crawl/fail. Không bật Hook, không tạo Scheduled Task, không ghi SQL trực tiếp. Báo cáo đồng bộ Registry và trạng thái Telegram Notification.`,
         ].join("\n");
     }
+
+    const kwLine = keywords || "(mặc định theo cấu hình ngành hàng / xu hướng hiện hành)";
 
     if (plat === "tiktok" || plat === "shopee") {
         const platTitle = plat === "tiktok" ? "TikTok" : "Shopee";
@@ -313,6 +728,7 @@ function buildMuseManualPrompt(reqRow) {
 
 function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
     if (!reqRow || typeof reqRow !== "object") return reqRow;
+    const plat = String(reqRow.platform || "threads").trim().toLowerCase();
     const hasOutbox = Boolean(activeOutboxReqIds && activeOutboxReqIds.has(reqRow.id));
     let parsedSummary = null;
     if (typeof reqRow.result_summary_json === "string" && reqRow.result_summary_json.trim()) {
@@ -321,9 +737,35 @@ function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
         parsedSummary = reqRow.result_summary;
     }
     const displayState = deriveCrawlRequestDisplayState(reqRow, parsedSummary, hasOutbox);
+    const leaseInfo = getRequestLeaseInfo(reqRow);
+    const strategyCfg = plat === "threads" ? getThreadsStrategyConfig(reqRow, { strict: false }) : null;
     return {
         ...reqRow,
         contract_version: getRequestContractVersion(reqRow.platform),
+        strategy_version: plat === "threads" ? THREADS_STRATEGY_VERSION : null,
+        crawl_mode: strategyCfg ? strategyCfg.crawl_mode : null,
+        crawl_mode_label: strategyCfg ? strategyCfg.crawl_mode_label : null,
+        topics: strategyCfg ? strategyCfg.topics : [],
+        topic_labels: strategyCfg ? strategyCfg.topic_labels : [],
+        lookback_hours: strategyCfg ? strategyCfg.lookback_hours : null,
+        lookback_label: strategyCfg ? strategyCfg.lookback_label : null,
+        exclusions: strategyCfg ? strategyCfg.exclusions : null,
+        strategy_config: strategyCfg
+            ? {
+                strategy_version: strategyCfg.strategy_version,
+                crawl_mode: strategyCfg.crawl_mode,
+                crawl_mode_label: strategyCfg.crawl_mode_label,
+                topics: strategyCfg.topics,
+                topic_labels: strategyCfg.topic_labels,
+                lookback_hours: strategyCfg.lookback_hours,
+                lookback_label: strategyCfg.lookback_label,
+                exclusions: strategyCfg.exclusions,
+                lease_seconds: strategyCfg.lease_seconds,
+                lease_minutes: strategyCfg.lease_minutes,
+            }
+            : null,
+        lease_seconds: leaseInfo.leaseSeconds,
+        lease_minutes: leaseInfo.leaseMinutes,
         display_status: displayState.display_status,
         display_status_label: displayState.display_status_label,
         reconcile_status: displayState.reconcile_status,
@@ -4331,6 +4773,28 @@ async function createCrawlRequestInD1(env, {
     }
     const cleanKeywords = String(keywords || "").trim().slice(0, 300);
     const count = Math.min(Math.max(Number.parseInt(requestedCount, 10) || 50, 1), 500);
+    const cleanOptions = (options && typeof options === "object" && !Array.isArray(options)) ? { ...options } : {};
+    let requestedLeaseSec = MUSE_DEFAULT_LEASE_SECONDS;
+    let targetStrategySig = null;
+    if (plat === "threads") {
+        const hasCustomLease =
+            cleanOptions.lease_seconds !== undefined ||
+            cleanOptions.lease_minutes !== undefined ||
+            cleanOptions.duration_minutes !== undefined ||
+            cleanOptions.crawl_duration_minutes !== undefined;
+        requestedLeaseSec = normalizeThreadsLeaseSeconds(cleanOptions, MUSE_DEFAULT_LEASE_SECONDS);
+        const cfg = getThreadsStrategyConfig({ platform: "threads", options: cleanOptions }, { strict: true });
+        cleanOptions.strategy_version = THREADS_STRATEGY_VERSION;
+        cleanOptions.crawl_mode = cfg.crawl_mode;
+        cleanOptions.topics = cfg.topics;
+        cleanOptions.lookback_hours = cfg.lookback_hours;
+        cleanOptions.exclusions = cfg.exclusions;
+        if (hasCustomLease) {
+            cleanOptions.lease_seconds = requestedLeaseSec;
+            cleanOptions.lease_minutes = Math.round(requestedLeaseSec / 60);
+        }
+        targetStrategySig = getThreadsStrategySignature({ platform: "threads", options: cleanOptions });
+    }
     await expireStaleLeases(env);
 
     // 1. Check explicit dedupToken
@@ -4341,12 +4805,16 @@ async function createCrawlRequestInD1(env, {
         if (byToken) return { deduplicated: true, request: byToken };
     }
 
-    // 2. Active-queue deduplication for identical platform + keywords + count
-    const existingActive = await env.DB.prepare(`
+    // 2. Active-queue deduplication for identical platform + keywords + count (+ Threads strategy/topic/lookback/lease config)
+    const activeCandidatesRes = await env.DB.prepare(`
         SELECT * FROM crawl_requests
         WHERE platform = ? AND lower(trim(keywords)) = ? AND requested_count = ? AND status IN ('queued', 'running')
-        ORDER BY created_at DESC LIMIT 1
-    `).bind(plat, cleanKeywords.toLowerCase(), count).first();
+        ORDER BY created_at DESC LIMIT 10
+    `).bind(plat, cleanKeywords.toLowerCase(), count).all();
+    const existingActive = (activeCandidatesRes?.results || []).find((row) => {
+        if (plat !== "threads") return true;
+        return getThreadsStrategySignature(row) === targetStrategySig;
+    }) || null;
     if (existingActive) {
         return { deduplicated: true, request: existingActive };
     }
@@ -4366,7 +4834,7 @@ async function createCrawlRequestInD1(env, {
         plat,
         cleanKeywords,
         count,
-        JSON.stringify(options || {}),
+        JSON.stringify(cleanOptions),
         dedupToken,
         eta.poll_profile,
         eta.expected_pickup_at,
@@ -4783,6 +5251,10 @@ async function handleAppApi(request, env, url) {
         return outboxSet;
     };
 
+    if (request.method === "GET" && path === "/api/app/crawl-config") {
+        return jsonResponse({ ok: true, config: getPublicCrawlConfig() });
+    }
+
     if (request.method === "GET" && path === "/api/app/crawl-requests") {
         await expireStaleLeases(env);
         const rows = await env.DB.prepare(`
@@ -4818,11 +5290,21 @@ async function handleAppApi(request, env, url) {
         let body = {};
         try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
         try {
+            const mergedOpts = (body.options && typeof body.options === "object" && !Array.isArray(body.options))
+                ? { ...body.options }
+                : {};
+            if (body.crawl_mode !== undefined && mergedOpts.crawl_mode === undefined) mergedOpts.crawl_mode = body.crawl_mode;
+            if (body.topics !== undefined && mergedOpts.topics === undefined) mergedOpts.topics = body.topics;
+            if (body.lookback_hours !== undefined && mergedOpts.lookback_hours === undefined) mergedOpts.lookback_hours = body.lookback_hours;
+            if (body.exclusions !== undefined && mergedOpts.exclusions === undefined) mergedOpts.exclusions = body.exclusions;
+            if (body.lease_minutes !== undefined && mergedOpts.lease_minutes === undefined && mergedOpts.lease_seconds === undefined) {
+                mergedOpts.lease_minutes = body.lease_minutes;
+            }
             const res = await createCrawlRequestInD1(env, {
                 platform: body.platform,
                 keywords: body.keywords || "",
                 requestedCount: body.requested_count || 50,
-                options: body.options || {},
+                options: mergedOpts,
                 pollProfile: body.poll_profile || null,
                 source: "app_video",
                 dedupToken: body.dedup_token || null
@@ -5261,22 +5743,39 @@ async function buildCrawlCenterMenu(env) {
 function buildTelegramPromptResponse(env, reqRow, { deduplicated = false } = {}) {
     const promptText = buildMuseManualPrompt(reqRow);
     const ds = deriveCrawlRequestDisplayState(reqRow);
-    const header =
-        `📝 <b>${deduplicated ? "ĐÃ CÓ YÊU CẦU TƯƠNG TỰ ĐANG CHỜ (DÙNG LẠI)" : "ĐÃ TẠO REQUEST CRAWL VÀO D1"}</b>\n` +
-        `• Mã Request ID: <code>${escapeTelegramHtml(reqRow.id)}</code>\n` +
-        `• Nền tảng: <b>${escapeTelegramHtml(String(reqRow.platform || "").toUpperCase())}</b> | Mục tiêu: <b>${Number(reqRow.requested_count || 50)}</b>\n` +
-        `• Trạng thái: ${escapeTelegramHtml(ds.display_status_label)} | Contract: <code>${escapeTelegramHtml(getRequestContractVersion(reqRow.platform))}</code>\n` +
-        `<i>Chạm để copy đoạn Prompt bên dưới và dán gửi Muse:</i>\n` +
-        `<pre>${escapeTelegramHtml(promptText)}</pre>`;
+    const plat = String(reqRow?.platform || "").trim().toLowerCase();
+    const cfg = plat === "threads" ? getThreadsStrategyConfig(reqRow, { strict: false }) : null;
+    const leaseInfo = getRequestLeaseInfo(reqRow);
+    const topicSummary = cfg && cfg.topics.length
+        ? (cfg.topics.length >= THREADS_TOPIC_PRESETS.length ? `Tất cả (${cfg.topics.length})` : `${cfg.topic_labels.slice(0, 2).join(", ")}${cfg.topic_labels.length > 2 ? ` +${cfg.topic_labels.length - 2}` : ""}`)
+        : "Tự do";
+    const stratPart = plat === "threads"
+        ? ` | Str:<code>3.3</code> | Mode:<code>${escapeTelegramHtml(cfg.crawl_mode)}</code> | ${escapeTelegramHtml(cfg.lookback_hours + "h")} | Chủ đề:<b>${escapeTelegramHtml(topicSummary)}</b> | Lease:<b>${leaseInfo.leaseMinutes}p</b>`
+        : "";
+    const metaHeader =
+        `📝 <b>${deduplicated ? "DÙNG LẠI REQUEST CRAWL D1" : "ĐÃ TẠO REQUEST CRAWL D1"}</b> • <code>${escapeTelegramHtml(reqRow.id)}</code>\n` +
+        `<b>${escapeTelegramHtml(plat.toUpperCase())}</b> | Mục tiêu:<b>${Number(reqRow.requested_count || 50)}</b>${stratPart} | V:${escapeTelegramHtml(getRequestContractVersion(reqRow.platform))} | ${escapeTelegramHtml(ds.display_status_label)}\n`;
+    const escapedPrompt = escapeTelegramHtml(promptText);
+    const wrappedHtml = `${metaHeader}<pre>${escapedPrompt}</pre>`;
+    let header = wrappedHtml;
+    if (wrappedHtml.length > 4096) {
+        const sliced = escapedPrompt.slice(0, 4080).replace(/&[a-z0-9#]{0,8}$/i, "");
+        header = `<pre>${sliced}</pre>`;
+    }
     const kb = {
         inline_keyboard: [
             [
                 { text: "📋 Lấy lại Prompt", callback_data: `crawl:prompt:${reqRow.id}` },
                 { text: "🌐 Mở Muse", url: getMuseWebUrl(env) },
             ],
-            reqRow.status === "queued"
-                ? [{ text: "✖️ Hủy yêu cầu này", callback_data: `crawl:cancel:${reqRow.id}` }]
-                : [],
+            plat === "threads" && reqRow.status === "queued"
+                ? [
+                    { text: "🎯 Chế độ / Chủ đề", callback_data: `crawl:cfg:${reqRow.id}` },
+                    { text: "✖️ Hủy yêu cầu này", callback_data: `crawl:cancel:${reqRow.id}` },
+                ]
+                : (reqRow.status === "queued"
+                    ? [{ text: "✖️ Hủy yêu cầu này", callback_data: `crawl:cancel:${reqRow.id}` }]
+                    : []),
             [
                 { text: "⬅️ Quay lại Crawl dữ liệu", callback_data: "crawl:menu" },
                 { text: "🏠 Trang chủ", callback_data: "menu:home" }
@@ -5284,6 +5783,53 @@ function buildTelegramPromptResponse(env, reqRow, { deduplicated = false } = {})
         ].filter(r => r.length > 0)
     };
     return { htmlText: header, replyMarkup: kb };
+}
+
+function buildTelegramCrawlConfigView(reqRow) {
+    const cfg = getThreadsStrategyConfig(reqRow, { strict: false });
+    const reqId = reqRow.id;
+    const topicLabel = cfg.topics.length
+        ? (cfg.topics.length >= THREADS_TOPIC_PRESETS.length ? `Tất cả ${cfg.topics.length} chủ đề` : cfg.topic_labels.join(", "))
+        : "Chưa giới hạn chủ đề (theo mode)";
+    const text =
+        `🎯 TÙY CHỈNH CHIẾN LƯỢC THREADS (Strategy 3.3)\n━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Request ID: ${reqId}\n` +
+        `• Mode hiện tại: ${cfg.crawl_mode_label} (${cfg.crawl_mode})\n` +
+        `• Chủ đề: ${topicLabel}\n` +
+        `• Thời gian bài: ${cfg.lookback_label}\n` +
+        `• Lease: ${cfg.lease_minutes} phút\n\n` +
+        `Chọn nhanh Mode hoặc nhóm Chủ đề bên dưới để cập nhật request đang chờ (chỉ áp dụng khi status=queued):\n` +
+        `ℹ️ growth_tracking chưa bật vì chờ nâng cấp Data Contract V3.2 & danh sách mục tiêu D1.`;
+    const modeMark = (id) => (cfg.crawl_mode === id ? "✓ " : "");
+    const kb = {
+        inline_keyboard: [
+            [
+                { text: `${modeMark("balanced")}Toàn thị trường`, callback_data: `crawl:setmode:${reqId}:balanced` },
+                { text: `${modeMark("natural_viral")}Viral tự nhiên`, callback_data: `crawl:setmode:${reqId}:natural_viral` },
+            ],
+            [
+                { text: `${modeMark("affiliate")}Sản phẩm Affiliate`, callback_data: `crawl:setmode:${reqId}:affiliate` },
+                { text: `${modeMark("buyer_intent")}Nhu cầu mua`, callback_data: `crawl:setmode:${reqId}:buyer_intent` },
+            ],
+            [
+                { text: `${modeMark("market_trend")}Xu hướng TT`, callback_data: `crawl:setmode:${reqId}:market_trend` },
+                { text: `${modeMark("traffic_content")}Kéo Traffic`, callback_data: `crawl:setmode:${reqId}:traffic_content` },
+            ],
+            [
+                { text: "🛍️ Chủ đề Đời sống/Aff", callback_data: `crawl:settop:${reqId}:commerce` },
+                { text: "🎭 Chủ đề Giải trí/Traffic", callback_data: `crawl:settop:${reqId}:traffic` },
+            ],
+            [
+                { text: "🌐 Tất cả 24 chủ đề", callback_data: `crawl:settop:${reqId}:all` },
+                { text: "🧹 Bỏ lọc chủ đề", callback_data: `crawl:settop:${reqId}:clear` },
+            ],
+            [
+                { text: "📋 Quay lại Prompt", callback_data: `crawl:prompt:${reqId}` },
+                { text: "🏠 Trang chủ", callback_data: "menu:home" },
+            ],
+        ]
+    };
+    return { text, reply_markup: kb };
 }
 
 async function buildTaskHistoryView(env) {
@@ -5547,6 +6093,77 @@ async function handleTelegramUpdate(request, env) {
             return new Response("OK");
         }
 
+        if (data.startsWith("crawl:cfg:")) {
+            const crawlId = data.slice("crawl:cfg:".length).trim();
+            const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+            if (!reqRow) {
+                await sendOrEditTelegram(env, chatId, msgId, `⚠️ Không tìm thấy request ${crawlId}.`, homeOnlyInlineKeyboard());
+                return new Response("OK");
+            }
+            if (String(reqRow.platform || "").toLowerCase() !== "threads") {
+                const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: true });
+                await sendOrEditTelegram(env, chatId, msgId, promptView.htmlText, promptView.replyMarkup, { parseMode: "HTML" });
+                return new Response("OK");
+            }
+            if (reqRow.status !== "queued") {
+                await sendOrEditTelegram(env, chatId, msgId, `⚠️ Request ${crawlId} đã ở trạng thái '${reqRow.status}', không thể đổi cấu hình.`, homeOnlyInlineKeyboard());
+                return new Response("OK");
+            }
+            const cfgView = buildTelegramCrawlConfigView(reqRow);
+            await sendOrEditTelegram(env, chatId, msgId, cfgView.text, cfgView.reply_markup);
+            return new Response("OK");
+        }
+
+        if (data.startsWith("crawl:setmode:") || data.startsWith("crawl:settop:")) {
+            const isMode = data.startsWith("crawl:setmode:");
+            const parts = data.split(":");
+            const crawlId = String(parts[2] || "").trim();
+            const val = String(parts[3] || "").trim();
+            const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+            if (!reqRow) {
+                await sendOrEditTelegram(env, chatId, msgId, `⚠️ Không tìm thấy request ${crawlId}.`, homeOnlyInlineKeyboard());
+                return new Response("OK");
+            }
+            if (reqRow.status !== "queued" || String(reqRow.platform || "").toLowerCase() !== "threads") {
+                await sendOrEditTelegram(env, chatId, msgId, `⚠️ Request ${crawlId} không ở trạng thái queued hoặc không phải Threads.`, homeOnlyInlineKeyboard());
+                return new Response("OK");
+            }
+            const curOpts = parseRequestOptionsJson(reqRow);
+            const nextOpts = { ...curOpts };
+            if (isMode) {
+                try {
+                    const modeObj = normalizeThreadsCrawlMode(val, { strict: true });
+                    nextOpts.crawl_mode = modeObj.id;
+                } catch (err) {
+                    await sendOrEditTelegram(env, chatId, msgId, `⚠️ ${err.message}`, homeOnlyInlineKeyboard());
+                    return new Response("OK");
+                }
+            } else {
+                if (val === "commerce") {
+                    nextOpts.topics = THREADS_TOPIC_PRESETS.filter(t => t.group === "commerce_lifestyle").map(t => t.id);
+                } else if (val === "traffic") {
+                    nextOpts.topics = THREADS_TOPIC_PRESETS.filter(t => t.group === "traffic_entertainment").map(t => t.id);
+                } else if (val === "all") {
+                    nextOpts.topics = THREADS_TOPIC_PRESETS.map(t => t.id);
+                } else {
+                    nextOpts.topics = [];
+                }
+            }
+            nextOpts.strategy_version = THREADS_STRATEGY_VERSION;
+            const nowIso = new Date().toISOString();
+            const upd = await env.DB.prepare(
+                "UPDATE crawl_requests SET options_json = ?, updated_at = ? WHERE id = ? AND status = 'queued'"
+            ).bind(JSON.stringify(nextOpts), nowIso, crawlId).run();
+            if (upd.meta?.changes !== 1) {
+                await sendOrEditTelegram(env, chatId, msgId, `⚠️ Request ${crawlId} vừa được claim hoặc thay đổi trạng thái.`, homeOnlyInlineKeyboard());
+                return new Response("OK");
+            }
+            const updatedRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+            const promptView = buildTelegramPromptResponse(env, updatedRow || reqRow, { deduplicated: true });
+            await sendOrEditTelegram(env, chatId, msgId, promptView.htmlText, promptView.replyMarkup, { parseMode: "HTML" });
+            return new Response("OK");
+        }
+
         if (data.startsWith("crawl:prompt:")) {
             const crawlId = data.slice("crawl:prompt:".length).trim();
             const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
@@ -5648,23 +6265,87 @@ async function handleTelegramUpdate(request, env) {
         const plat = (parts[1] || "").toLowerCase();
         const maybeCount = Number.parseInt(parts[2], 10);
         const count = Number.isFinite(maybeCount) ? maybeCount : 50;
-        const keywords = (Number.isFinite(maybeCount) ? parts.slice(3) : parts.slice(2)).join(" ").trim();
-        if (!ALLOWED_CRAWL_PLATFORMS.has(plat)) {
-            reply = "Cú pháp: /request_crawl <threads|tiktok|shopee|all> [số_lượng] [từ_khóa]";
+        const rawRest = Number.isFinite(maybeCount) ? parts.slice(3) : parts.slice(2);
+        const reqOptions = {};
+        const kwParts = [];
+        let tgParseErr = null;
+        if (plat === "threads") {
+            let leadingFlagsDone = false;
+            for (const tok of rawRest) {
+                const s = String(tok || "").trim();
+                if (!s) continue;
+                if (!leadingFlagsDone) {
+                    const durMatch = s.match(/^(\d{1,3})\s*(?:m|min|phut|p)$/i);
+                    if (durMatch && !reqOptions.lease_seconds) {
+                        const durMin = Number.parseInt(durMatch[1], 10);
+                        if (durMin >= 1 && durMin <= 120) {
+                            reqOptions.lease_seconds = durMin * 60;
+                            continue;
+                        }
+                    }
+                    const modeMatch = s.match(/^mode=([a-z0-9_]+)$/i);
+                    if (modeMatch) {
+                        try {
+                            reqOptions.crawl_mode = normalizeThreadsCrawlMode(modeMatch[1], { strict: true }).id;
+                            continue;
+                        } catch (err) {
+                            tgParseErr = err.message;
+                            break;
+                        }
+                    }
+                    const topMatch = s.match(/^topics=([a-z0-9_,]+)$/i);
+                    if (topMatch) {
+                        try {
+                            reqOptions.topics = normalizeThreadsTopics(topMatch[1], { strict: true });
+                            continue;
+                        } catch (err) {
+                            tgParseErr = err.message;
+                            break;
+                        }
+                    }
+                    const lbMatch = s.match(/^lookback=([a-z0-9]+)$/i);
+                    if (lbMatch) {
+                        try {
+                            reqOptions.lookback_hours = normalizeThreadsLookbackHours(lbMatch[1], { strict: true });
+                            continue;
+                        } catch (err) {
+                            tgParseErr = err.message;
+                            break;
+                        }
+                    }
+                    leadingFlagsDone = true;
+                }
+                kwParts.push(s);
+            }
+        } else {
+            kwParts.push(...rawRest);
+        }
+        const keywords = kwParts.join(" ").trim();
+        if (tgParseErr) {
+            reply = `⚠️ ${tgParseErr}`;
+            markup = homeOnlyInlineKeyboard();
+        } else if (!ALLOWED_CRAWL_PLATFORMS.has(plat)) {
+            reply = "Cú pháp: /request_crawl <threads|tiktok|shopee|all> [số_lượng] [mode=...] [topics=...] [lookback=24h|48h|72h|7d] [30m|60m|120m] [từ_khóa]";
             markup = homeOnlyInlineKeyboard();
         } else {
-            const res = await createCrawlRequestInD1(env, {
-                platform: plat,
-                keywords,
-                requestedCount: count,
-                chatId: String(chatId),
-                source: "telegram",
-                dedupToken: `tg_crw_msg_${msg.message_id}`
-            });
-            const reqRow = res.request;
-            const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: res.deduplicated });
-            const sentPrompt = await sendTelegramMessage(env, chatId, promptView.htmlText, promptView.replyMarkup, { parseMode: "HTML" });
-            return new Response(sentPrompt.ok ? "OK" : "Delivery failed", { status: sentPrompt.ok ? 200 : 502 });
+            try {
+                const res = await createCrawlRequestInD1(env, {
+                    platform: plat,
+                    keywords,
+                    requestedCount: count,
+                    options: reqOptions,
+                    chatId: String(chatId),
+                    source: "telegram",
+                    dedupToken: `tg_crw_msg_${msg.message_id}`
+                });
+                const reqRow = res.request;
+                const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: res.deduplicated });
+                const sentPrompt = await sendTelegramMessage(env, chatId, promptView.htmlText, promptView.replyMarkup, { parseMode: "HTML" });
+                return new Response(sentPrompt.ok ? "OK" : "Delivery failed", { status: sentPrompt.ok ? 200 : 502 });
+            } catch (err) {
+                reply = `⚠️ ${err.message}`;
+                markup = homeOnlyInlineKeyboard();
+            }
         }
     } else if (mapped === "/notifytest") {
         try {
@@ -5732,12 +6413,12 @@ function normalizeCrawlRegistryCheckItems(body) {
     return { items };
 }
 
-const MUSE_DEFAULT_CLAIM_OWNER = "muse-ai";
-const MUSE_DEFAULT_LEASE_SECONDS = 1800;
-
 async function claimNextCrawlRequestInD1(env, options = {}) {
     const workerId = String(options.workerId || MUSE_DEFAULT_CLAIM_OWNER).trim().slice(0, 64) || MUSE_DEFAULT_CLAIM_OWNER;
-    const leaseSec = Math.min(Math.max(Number(options.leaseSeconds) || MUSE_DEFAULT_LEASE_SECONDS, 60), 7200);
+    const hasExplicitLease = options.leaseSeconds !== undefined && options.leaseSeconds !== null && options.leaseSeconds !== "";
+    const explicitLeaseSec = hasExplicitLease
+        ? Math.min(Math.max(Number(options.leaseSeconds) || MUSE_DEFAULT_LEASE_SECONDS, MUSE_MIN_LEASE_SECONDS), MUSE_MAX_LEASE_SECONDS)
+        : null;
     const scheduleConfirmed = options.scheduleConfirmed === true;
     const threadsOnly = Boolean(options.threadsOnly);
     const singleFlight = Boolean(options.singleFlight);
@@ -5851,7 +6532,13 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
             return { ok: true, request: null };
         }
 
-        const leaseExpires = new Date(now.getTime() + leaseSec * 1000).toISOString();
+        const candidatePlat = String(candidate.platform || "").trim().toLowerCase();
+        const candidateLeaseSec = explicitLeaseSec !== null
+            ? explicitLeaseSec
+            : (candidatePlat === "threads"
+                ? normalizeThreadsLeaseSeconds(parseRequestOptionsJson(candidate), MUSE_DEFAULT_LEASE_SECONDS)
+                : MUSE_DEFAULT_LEASE_SECONDS);
+        const leaseExpires = new Date(now.getTime() + candidateLeaseSec * 1000).toISOString();
         const claimed = (singleFlight || threadsOnly)
             ? await env.DB.prepare(`
                 UPDATE crawl_requests
@@ -6690,7 +7377,7 @@ async function handleMuseCrawlApi(request, env, url) {
         try {
             const res = await claimNextCrawlRequestInD1(env, {
                 workerId: MUSE_DEFAULT_CLAIM_OWNER,
-                leaseSeconds: body.lease_seconds ?? MUSE_DEFAULT_LEASE_SECONDS,
+                leaseSeconds: (body.lease_seconds !== undefined && body.lease_seconds !== null) ? body.lease_seconds : null,
                 scheduleConfirmed: body.schedule_confirmed === true,
                 threadsOnly: true,
                 singleFlight: true,

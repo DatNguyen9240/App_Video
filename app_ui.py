@@ -61,6 +61,13 @@ from market_intelligence import (
     MarketSyncService,
     RemoteCommandPoller,
 )
+from market_intelligence.crawl_strategy import (
+    THREADS_CRAWL_MODES,
+    THREADS_TOPIC_PRESETS,
+    THREADS_EXCLUSION_DEFAULTS,
+    get_crawl_config_payload,
+    validate_threads_strategy_options,
+)
 
 _market_runtime_lock = threading.Lock()
 _market_runtime = None
@@ -2495,43 +2502,432 @@ HTML_TEMPLATE = """
           <button @click="marketConnectionNotice = null" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
         </div>
 
-        <!-- 5 Market Intelligence Sub-tabs -->
-        <div class="flex flex-wrap items-center gap-2 pt-1">
-          <button @click="switchMarketSubTab('overview')"
-            :class="marketSubTab === 'overview' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
-            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">📊 Tổng quan</button>
-          <button @click="switchMarketSubTab('threads')"
-            :class="marketSubTab === 'threads' ? 'bg-indigo-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
-            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
-            🧵 Threads ({{ marketStatus.stats?.by_platform?.threads ?? 0 }})
-          </button>
-          <button @click="switchMarketSubTab('tiktok')"
-            :class="marketSubTab === 'tiktok' ? 'bg-cyan-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
-            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
-            🎵 TikTok ({{ marketStatus.stats?.by_platform?.tiktok ?? 0 }})
-          </button>
-          <button @click="switchMarketSubTab('shopee')"
-            :class="marketSubTab === 'shopee' ? 'bg-orange-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
-            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
-            🛒 Shopee ({{ marketStatus.stats?.by_platform?.shopee ?? 0 }})
-          </button>
-          <button @click="switchMarketSubTab('reports')"
-            :class="marketSubTab === 'reports' ? 'bg-amber-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
-            class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">📋 Báo cáo</button>
+        <!-- Market Intelligence Context Header & History Platform Sub-tabs -->
+        <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <div v-if="marketViewMode === 'history'" class="flex flex-wrap items-center gap-2">
+            <button @click="switchMarketSubTab('overview')"
+              :class="marketSubTab === 'overview' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+              class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">📊 Tổng quan</button>
+            <button @click="switchMarketSubTab('threads')"
+              :class="marketSubTab === 'threads' ? 'bg-indigo-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+              class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
+              🧵 Threads ({{ marketStatus.stats?.by_platform?.threads ?? 0 }})
+            </button>
+            <button @click="switchMarketSubTab('tiktok')"
+              :class="marketSubTab === 'tiktok' ? 'bg-cyan-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+              class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
+              🎵 TikTok ({{ marketStatus.stats?.by_platform?.tiktok ?? 0 }})
+            </button>
+            <button @click="switchMarketSubTab('shopee')"
+              :class="marketSubTab === 'shopee' ? 'bg-orange-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+              class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">
+              🛒 Shopee ({{ marketStatus.stats?.by_platform?.shopee ?? 0 }})
+            </button>
+            <button @click="switchMarketSubTab('reports')"
+              :class="marketSubTab === 'reports' ? 'bg-amber-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800'"
+              class="px-3.5 py-1.5 rounded-xl text-xs transition cursor-pointer">📋 Báo cáo</button>
+          </div>
+          <div v-else-if="marketViewMode === 'compare'" class="text-xs font-bold uppercase tracking-wider text-cyan-300 flex items-center gap-2">
+            <span>⚖️ So sánh tăng trưởng point-in-time giữa hai lượt crawl</span>
+          </div>
+          <div v-else class="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-2">
+            <span>🎯 Quản lý Market Intelligence theo từng lượt crawl ({{ crawlRunsCatalog.length }} lượt)</span>
+          </div>
+          <div class="text-[11px] text-slate-400 flex items-center gap-2">
+            <span v-if="marketViewMode === 'by_run' && activeRunMeta" class="px-2.5 py-1 rounded-lg bg-indigo-950/60 border border-indigo-500/40 text-indigo-200 font-mono">
+              🎯 Lượt: {{ activeRunMeta.run_id || ('File: ' + (activeRunMeta.data_file?.file_name || activeRunMeta.run_key)) }}
+            </span>
+            <span v-else-if="marketViewMode === 'history'" class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300">
+              📚 Toàn bộ lịch sử ({{ marketStatus.stats?.total_items ?? 0 }})
+            </span>
+          </div>
+        </div>
+
+        <!-- Run-Centric Mode & Selector Bar (synchronized across Overview, Threads, TikTok, Shopee, Reports) -->
+        <div id="marketRunCentricAnchor" class="pt-3 mt-1 border-t border-slate-800/80 space-y-2.5">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex flex-wrap items-center gap-1.5 text-xs">
+              <button @click="switchMarketViewMode('by_run')"
+                :class="marketViewMode === 'by_run' ? 'bg-indigo-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800'"
+                class="px-3 py-1.5 rounded-xl cursor-pointer transition">🎯 Theo lượt crawl</button>
+              <button @click="switchMarketViewMode('history')"
+                :class="marketViewMode === 'history' ? 'bg-slate-100 text-slate-900 font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800'"
+                class="px-3 py-1.5 rounded-xl cursor-pointer transition">📚 Toàn bộ lịch sử</button>
+              <button @click="switchMarketViewMode('compare')"
+                :class="marketViewMode === 'compare' ? 'bg-cyan-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800'"
+                class="px-3 py-1.5 rounded-xl cursor-pointer transition">📊 So sánh tăng trưởng 2 lượt</button>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+              <template v-if="marketViewMode === 'by_run'">
+                <select v-model="selectedRunKey" @change="onSelectRunDropdown"
+                  class="glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-900 text-slate-100 max-w-md font-mono">
+                  <option v-if="!crawlRunsCatalog.length" value="">Chưa có lượt crawl nào</option>
+                  <option v-for="(r, idx) in crawlRunsCatalog" :key="'opt-'+r.run_key" :value="r.run_key">
+                    {{ idx === 0 ? '[Mới nhất] ' : '' }}{{ formatIsoTime(r.crawl_time) || '—' }} • {{ r.run_id || ('Theo file: ' + (r.data_file?.file_name || r.run_key)) }} ({{ String(r.platform || '').toUpperCase() }} • {{ r.scanned_count }} quét / {{ r.new_qualified_count }} đạt)
+                  </option>
+                </select>
+                <button v-if="crawlRunsCatalog.length && selectedRunKey !== crawlRunsCatalog[0].run_key"
+                  @click="selectCrawlRun(crawlRunsCatalog[0].run_key, false)"
+                  class="px-2.5 py-1.5 rounded-xl bg-emerald-600/80 hover:bg-emerald-500 text-white text-[11px] font-bold cursor-pointer">
+                  🆕 Về lượt mới nhất
+                </button>
+              </template>
+              <button @click="showCrawlRunHistory = !showCrawlRunHistory"
+                class="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 text-[11px] font-semibold cursor-pointer">
+                📜 Bảng lượt crawl ({{ crawlRunsCatalog.length }}) {{ showCrawlRunHistory ? '▾' : '▸' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Active Run Paired Metadata & Drive Links Strip -->
+          <div v-if="marketViewMode === 'by_run' && activeRunMeta"
+            class="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800/90 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-bold text-indigo-300 font-mono">{{ activeRunMeta.run_id || 'Không có run_id' }}</span>
+              <span v-if="!activeRunMeta.has_run_id" class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px]">
+                Nhóm theo file nguồn (không bịa run_id)
+              </span>
+              <span v-if="activeRunMeta.request_id" class="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 font-mono text-[10px]">
+                req: {{ activeRunMeta.request_id }}
+              </span>
+              <span v-if="activeRunMeta.strategy_version" class="px-2 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/40 text-indigo-200 font-mono text-[10px]">
+                Strategy {{ activeRunMeta.strategy_version }}
+              </span>
+              <span v-if="activeRunMeta.contract_version" class="px-2 py-0.5 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 font-mono text-[10px]">
+                Contract V{{ activeRunMeta.contract_version }}
+              </span>
+              <span v-if="activeRunMeta.crawl_mode" class="px-2 py-0.5 rounded bg-fuchsia-500/20 border border-fuchsia-500/40 text-fuchsia-200 text-[10px] font-semibold">
+                🎯 Mode: {{ activeRunMeta.crawl_mode_label || activeRunMeta.crawl_mode }}
+              </span>
+              <span v-if="(activeRunMeta.topic_labels || activeRunMeta.topics || []).length" class="px-2 py-0.5 rounded bg-violet-500/20 border border-violet-500/40 text-violet-200 text-[10px]">
+                🏷️ {{ (activeRunMeta.topic_labels || activeRunMeta.topics).slice(0, 3).join(', ') }}{{ (activeRunMeta.topic_labels || activeRunMeta.topics).length > 3 ? ` +${(activeRunMeta.topic_labels || activeRunMeta.topics).length - 3}` : '' }}
+              </span>
+              <span v-if="activeRunMeta.lookback_hours" class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-[10px]">
+                🕒 {{ activeRunMeta.lookback_hours === 168 ? '7 ngày' : activeRunMeta.lookback_hours + 'h' }}
+              </span>
+              <span v-if="activeRunMeta.keywords" class="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-amber-200 text-[10px] truncate max-w-[220px]" :title="activeRunMeta.keywords">
+                🔎 {{ activeRunMeta.keywords }}
+              </span>
+              <span v-if="activeRunMeta.special_counts?.natural_viral" class="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-200 font-bold text-[10px]">
+                ⚡ Natural Viral: {{ activeRunMeta.special_counts.natural_viral }}
+              </span>
+              <span v-if="activeRunMeta.special_counts?.buyer_intent" class="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 font-bold text-[10px]">
+                🛒 Buyer Intent: {{ activeRunMeta.special_counts.buyer_intent }}
+              </span>
+              <span class="text-slate-400">
+                Mục tiêu: <strong class="text-slate-200">{{ activeRunMeta.requested_count ?? '—' }}</strong> •
+                Quét: <strong class="text-white">{{ activeRunMeta.scanned_count }}</strong> •
+                Ứng viên: <strong class="text-cyan-300">{{ activeRunMeta.unique_candidate_count }}</strong> •
+                Đạt chuẩn mới: <strong class="text-emerald-300">{{ activeRunMeta.new_qualified_count }}</strong> •
+                Cập nhật: <strong class="text-sky-300">{{ activeRunMeta.updated_metrics_count }}</strong> •
+                Trùng: <strong class="text-slate-300">{{ activeRunMeta.duplicate_history_count }}</strong> •
+                Chưa XM: <strong class="text-amber-300">{{ activeRunMeta.unverified_count }}</strong> •
+                Loại: <strong class="text-rose-300">{{ activeRunMeta.rejected_count }}</strong>
+              </span>
+            </div>
+            <div class="flex flex-wrap items-center gap-1.5">
+              <a v-for="df in (activeRunMeta.data_files || [])" :key="'top-df-'+df.file_id"
+                :href="df.drive_url || '#'" target="_blank" rel="noreferrer"
+                :class="df.drive_url ? 'text-sky-300 hover:underline border-sky-500/30 bg-sky-950/30' : 'text-slate-400 border-slate-700 bg-slate-900 pointer-events-none'"
+                class="px-2 py-0.5 rounded border text-[10px] font-mono">
+                📄 {{ df.file_name }}
+              </a>
+              <a v-for="rf in (activeRunMeta.report_files || [])" :key="'top-rf-'+rf.file_id"
+                :href="rf.drive_url || '#'" target="_blank" rel="noreferrer"
+                :class="rf.drive_url ? 'text-emerald-300 hover:underline border-emerald-500/30 bg-emerald-950/30' : 'text-slate-400 border-slate-700 bg-slate-900 pointer-events-none'"
+                class="px-2 py-0.5 rounded border text-[10px] font-mono">
+                📋 {{ rf.file_name }}
+              </a>
+            </div>
+          </div>
         </div>
       </div>
 
+      <!-- CRAWL RUNS HISTORY TABLE (Requirement #1) -->
+      <div v-show="showCrawlRunHistory && marketViewMode !== 'compare'" class="glass-panel rounded-2xl p-4 shadow-xl space-y-2.5">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-2">
+            <i class="fa-solid fa-layer-group"></i> Danh Sách Lịch Sử Lượt Crawl ({{ filteredCrawlRunsCatalog.length }}/{{ crawlRunsCatalog.length }} lượt)
+          </h3>
+          <div class="flex flex-wrap items-center gap-2 text-[11px]">
+            <select v-model="runCatalogModeFilter" class="glass-input rounded-lg px-2 py-1 text-[11px] bg-slate-900 text-slate-200">
+              <option value="all">🎯 Tất cả mục tiêu</option>
+              <option v-for="m in crawlStrategyModes" :key="'flt-m-'+m.id" :value="m.id">{{ m.label }}</option>
+              <option value="__none__">Chưa gắn metadata mục tiêu</option>
+            </select>
+            <select v-model="runCatalogTopicFilter" class="glass-input rounded-lg px-2 py-1 text-[11px] bg-slate-900 text-slate-200 max-w-[200px]">
+              <option value="all">🏷️ Tất cả chủ đề</option>
+              <option v-for="t in crawlTopicPresets" :key="'flt-t-'+t.id" :value="t.id">{{ t.label }}</option>
+            </select>
+            <button v-if="runCatalogModeFilter !== 'all' || runCatalogTopicFilter !== 'all'"
+              @click="runCatalogModeFilter = 'all'; runCatalogTopicFilter = 'all'"
+              class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-[10px] cursor-pointer">
+              Xóa lọc
+            </button>
+            <button @click="showCrawlRunHistory = false" class="text-[11px] text-slate-400 hover:text-white cursor-pointer">Thu gọn</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto rounded-xl border border-slate-800 max-h-72 overflow-y-auto">
+          <table class="w-full text-left text-[11px]">
+            <thead class="bg-slate-900/95 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800 sticky top-0">
+              <tr>
+                <th class="px-3 py-2">Lượt crawl (run_id) & Thời gian</th>
+                <th class="px-2.5 py-2">Nền tảng & Chiến lược</th>
+                <th class="px-2.5 py-2">File Data & Report (Drive)</th>
+                <th class="px-2.5 py-2 text-right">Mục tiêu</th>
+                <th class="px-2.5 py-2 text-right">Quét / Ứng viên</th>
+                <th class="px-2.5 py-2 text-right">Đạt chuẩn</th>
+                <th class="px-2.5 py-2">Chi tiết V3.2</th>
+                <th class="px-2.5 py-2">Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/70 text-slate-200">
+              <tr v-if="!filteredCrawlRunsCatalog.length">
+                <td colspan="8" class="px-4 py-6 text-center text-slate-500">Không có lượt crawl phù hợp bộ lọc.</td>
+              </tr>
+              <tr v-for="(r, rIdx) in filteredCrawlRunsCatalog" :key="'row-'+r.run_key"
+                @click="selectCrawlRun(r.run_key, !(crawlRunsCatalog[0] && crawlRunsCatalog[0].run_key === r.run_key))"
+                :class="(marketViewMode === 'by_run' && selectedRunKey === r.run_key) ? 'bg-indigo-950/50 border-l-2 border-indigo-400' : 'hover:bg-slate-900/60'"
+                class="cursor-pointer transition">
+                <td class="px-3 py-2 align-top">
+                  <div class="font-mono font-bold text-white flex items-center gap-1.5 flex-wrap">
+                    <span>{{ r.run_id || ('File: ' + (r.data_file?.file_name || r.run_key)) }}</span>
+                    <span v-if="crawlRunsCatalog[0] && crawlRunsCatalog[0].run_key === r.run_key" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px]">Mới nhất</span>
+                    <span v-if="!r.has_run_id" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[9px]">Theo file nguồn</span>
+                  </div>
+                  <div class="text-[10px] text-slate-400 font-mono">{{ formatIsoTime(r.crawl_time) || '—' }}</div>
+                </td>
+                <td class="px-2.5 py-2 align-top text-[10px] space-y-1 max-w-[200px]">
+                  <div class="uppercase font-bold">
+                    <span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-indigo-200">{{ (r.platforms || [r.platform]).join(', ') }}</span>
+                  </div>
+                  <div v-if="r.crawl_mode" class="text-fuchsia-300 font-semibold truncate" :title="r.crawl_mode_label || r.crawl_mode">
+                    🎯 {{ r.crawl_mode_label || r.crawl_mode }}
+                  </div>
+                  <div v-if="(r.topic_labels || r.topics || []).length" class="text-violet-300/90 text-[9px] truncate" :title="(r.topic_labels || r.topics).join(', ')">
+                    🏷️ {{ (r.topic_labels || r.topics).slice(0, 2).join(', ') }}{{ (r.topic_labels || r.topics).length > 2 ? ` +${(r.topic_labels || r.topics).length - 2}` : '' }}
+                  </div>
+                  <div v-if="r.lookback_hours || r.keywords" class="text-slate-400 text-[9px] truncate" :title="r.keywords || ''">
+                    <span v-if="r.lookback_hours">🕒 {{ r.lookback_hours === 168 ? '7d' : r.lookback_hours + 'h' }}</span>
+                    <span v-if="r.lookback_hours && r.keywords"> • </span>
+                    <span v-if="r.keywords">{{ r.keywords }}</span>
+                  </div>
+                </td>
+                <td class="px-2.5 py-2 align-top space-y-0.5 max-w-xs" @click.stop>
+                  <div v-for="df in (r.data_files || []).slice(0, 2)" :key="'tbl-df-'+df.file_id" class="truncate">
+                    <a v-if="df.drive_url" :href="df.drive_url" target="_blank" rel="noreferrer" class="text-sky-400 hover:underline font-mono text-[10px]">📄 {{ df.file_name }}</a>
+                    <span v-else class="text-slate-300 font-mono text-[10px]">📄 {{ df.file_name }}</span>
+                  </div>
+                  <div v-if="(r.data_files || []).length > 2" class="text-[9px] text-slate-400">+{{ r.data_files.length - 2 }} file data khác</div>
+                  <div v-for="rf in (r.report_files || []).slice(0, 1)" :key="'tbl-rf-'+rf.file_id" class="truncate">
+                    <a v-if="rf.drive_url" :href="rf.drive_url" target="_blank" rel="noreferrer" class="text-emerald-400 hover:underline font-mono text-[10px]">📋 {{ rf.file_name }}</a>
+                    <span v-else class="text-emerald-300 font-mono text-[10px]">📋 {{ rf.file_name }}</span>
+                  </div>
+                </td>
+                <td class="px-2.5 py-2 align-top text-right font-mono">{{ r.requested_count ?? '—' }}</td>
+                <td class="px-2.5 py-2 align-top text-right font-mono">{{ r.scanned_count }} / {{ r.unique_candidate_count }}</td>
+                <td class="px-2.5 py-2 align-top text-right font-mono font-bold text-emerald-300">{{ r.new_qualified_count }}</td>
+                <td class="px-2.5 py-2 align-top text-[10px] font-mono text-slate-400 whitespace-nowrap space-y-0.5">
+                  <div>Upd:{{ r.updated_metrics_count }} • Trùng:{{ r.duplicate_history_count }} • Unv:{{ r.unverified_count }} • Loại:{{ r.rejected_count }}</div>
+                  <div v-if="r.strategy_version || r.contract_version" class="text-[9px] text-indigo-300/90">
+                    <span v-if="r.strategy_version">Str:{{ r.strategy_version }}</span>
+                    <span v-if="r.strategy_version && r.contract_version"> • </span>
+                    <span v-if="r.contract_version">V{{ r.contract_version }}</span>
+                    <span v-if="r.special_counts?.natural_viral"> • ⚡{{ r.special_counts.natural_viral }}</span>
+                    <span v-if="r.special_counts?.buyer_intent"> • 🛒{{ r.special_counts.buyer_intent }}</span>
+                  </div>
+                </td>
+                <td class="px-2.5 py-2 align-top">
+                  <span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] text-slate-200">{{ r.display_status_label || r.run_status || 'completed' }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- MODE 3: SO SÁNH TĂNG TRƯỞNG GIỮA HAI LƯỢT CRAWL -->
+      <div v-if="marketViewMode === 'compare'" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+          <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-cyan-300 flex items-center gap-2">
+              <i class="fa-solid fa-code-compare"></i> So Sánh Tăng Trưởng Giữa Hai Lượt Crawl
+            </h3>
+            <p class="text-xs text-slate-400">Đối chiếu point-in-time snapshot của từng bài viết (Δ Views, Δ Likes, Δ Comments, phân tầng) giữa Lượt gốc và Lượt đích.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <select v-model="compareBaseRunKey" class="glass-input rounded-xl px-2.5 py-1.5 bg-slate-900 text-slate-200 max-w-xs font-mono">
+              <option value="">Chọn lượt gốc...</option>
+              <option v-for="r in crawlRunsCatalog" :key="'cmp-b-'+r.run_key" :value="r.run_key">
+                {{ formatIsoTime(r.crawl_time) || '—' }} • {{ r.run_id || r.data_file?.file_name || r.run_key }}
+              </option>
+            </select>
+            <span class="text-slate-400 font-bold">→</span>
+            <select v-model="compareTargetRunKey" class="glass-input rounded-xl px-2.5 py-1.5 bg-slate-900 text-slate-200 max-w-xs font-mono">
+              <option value="">Chọn lượt đích...</option>
+              <option v-for="r in crawlRunsCatalog" :key="'cmp-t-'+r.run_key" :value="r.run_key">
+                {{ formatIsoTime(r.crawl_time) || '—' }} • {{ r.run_id || r.data_file?.file_name || r.run_key }}
+              </option>
+            </select>
+            <button @click="runCrawlComparison" :disabled="isComparingRuns || !compareBaseRunKey || !compareTargetRunKey"
+              class="px-3.5 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold cursor-pointer disabled:opacity-50">
+              {{ isComparingRuns ? 'Đang so sánh...' : 'So sánh ngay' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="runComparisonData?.ok" class="space-y-4">
+          <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-xs">
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div class="text-[10px] text-slate-400 uppercase">Ứng viên Gốc → Đích</div>
+              <div class="text-lg font-bold text-white font-mono">{{ runComparisonData.summary.base_count }} → {{ runComparisonData.summary.target_count }}</div>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div class="text-[10px] text-slate-400 uppercase">Bài trùng nhau (Overlap)</div>
+              <div class="text-lg font-bold text-indigo-300 font-mono">{{ runComparisonData.summary.overlap_count }}</div>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div class="text-[10px] text-slate-400 uppercase">Mới ở lượt đích</div>
+              <div class="text-lg font-bold text-emerald-300 font-mono">+{{ runComparisonData.summary.new_in_target_count }}</div>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div class="text-[10px] text-slate-400 uppercase">Đạt chuẩn Gốc → Đích</div>
+              <div class="text-lg font-bold text-amber-300 font-mono">{{ runComparisonData.summary.qualified_base }} → {{ runComparisonData.summary.qualified_target }}</div>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div class="text-[10px] text-slate-400 uppercase">Δ Tổng Views</div>
+              <div class="text-lg font-bold text-cyan-300 font-mono">{{ runComparisonData.summary.total_views_delta >= 0 ? '+' : '' }}{{ formatCompactMetric(runComparisonData.summary.total_views_delta) }}</div>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+              <div class="text-[10px] text-slate-400 uppercase">Δ Tổng Likes</div>
+              <div class="text-lg font-bold text-pink-300 font-mono">{{ runComparisonData.summary.total_likes_delta >= 0 ? '+' : '' }}{{ formatCompactMetric(runComparisonData.summary.total_likes_delta) }}</div>
+            </div>
+          </div>
+
+          <div class="overflow-x-auto rounded-xl border border-slate-800">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-900/90 text-slate-400 uppercase text-[10px] font-bold border-b border-slate-800">
+                <tr>
+                  <th class="px-3 py-2.5">Tác giả & Post ID</th>
+                  <th class="px-3 py-2.5">Nội dung tóm tắt</th>
+                  <th class="px-3 py-2.5">Views (Gốc → Đích)</th>
+                  <th class="px-3 py-2.5">Likes (Gốc → Đích)</th>
+                  <th class="px-3 py-2.5">Comments (Gốc → Đích)</th>
+                  <th class="px-3 py-2.5">Trạng thái Gốc → Đích</th>
+                  <th class="px-3 py-2.5 text-right">Raw</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-800/70 text-slate-200">
+                <tr v-if="!(runComparisonData.common_items || []).length">
+                  <td colspan="7" class="px-4 py-8 text-center text-slate-500">Không có bài viết trùng giữa 2 lượt đã chọn.</td>
+                </tr>
+                <tr v-for="ci in (runComparisonData.common_items || [])" :key="'cmp-it-'+ci.dedup_key" class="hover:bg-slate-900/60">
+                  <td class="px-3 py-2.5 align-top font-mono text-[11px] whitespace-nowrap">
+                    <div class="font-bold text-indigo-300">{{ ci.author_handle || '—' }}</div>
+                    <div class="text-[10px] text-slate-400">{{ ci.post_id || ci.dedup_key }}</div>
+                  </td>
+                  <td class="px-3 py-2.5 align-top max-w-md">
+                    <div class="line-clamp-2 text-slate-200">{{ ci.text_content || '—' }}</div>
+                    <a v-if="ci.url" :href="ci.url" target="_blank" rel="noreferrer" class="text-[10px] text-sky-400 hover:underline break-all">🔗 {{ ci.url }}</a>
+                  </td>
+                  <td class="px-3 py-2.5 align-top font-mono whitespace-nowrap">
+                    {{ formatCompactMetric(ci.base_views) }} → <strong>{{ formatCompactMetric(ci.target_views) }}</strong>
+                    <div v-if="ci.views_delta !== null" class="text-[10px]" :class="ci.views_delta > 0 ? 'text-emerald-300' : 'text-slate-400'">
+                      ({{ ci.views_delta >= 0 ? '+' : '' }}{{ formatCompactMetric(ci.views_delta) }})
+                    </div>
+                  </td>
+                  <td class="px-3 py-2.5 align-top font-mono whitespace-nowrap">
+                    {{ formatCompactMetric(ci.base_likes) }} → <strong>{{ formatCompactMetric(ci.target_likes) }}</strong>
+                    <div v-if="ci.likes_delta !== null" class="text-[10px]" :class="ci.likes_delta > 0 ? 'text-emerald-300' : 'text-slate-400'">
+                      ({{ ci.likes_delta >= 0 ? '+' : '' }}{{ formatCompactMetric(ci.likes_delta) }})
+                    </div>
+                  </td>
+                  <td class="px-3 py-2.5 align-top font-mono whitespace-nowrap">
+                    {{ formatCompactMetric(ci.base_comments) }} → <strong>{{ formatCompactMetric(ci.target_comments) }}</strong>
+                    <div v-if="ci.comments_delta !== null" class="text-[10px]" :class="ci.comments_delta > 0 ? 'text-emerald-300' : 'text-slate-400'">
+                      ({{ ci.comments_delta >= 0 ? '+' : '' }}{{ formatCompactMetric(ci.comments_delta) }})
+                    </div>
+                  </td>
+                  <td class="px-3 py-2.5 align-top text-[10px] font-mono">
+                    <div>{{ ci.base_classification || '—' }} → {{ ci.target_classification || '—' }}</div>
+                    <div v-if="ci.base_tier || ci.target_tier" class="text-amber-300">{{ ci.base_tier || '—' }} → {{ ci.target_tier || '—' }}</div>
+                  </td>
+                  <td class="px-3 py-2.5 align-top text-right">
+                    <button @click="openMarketRawModal(ci.id)" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px] cursor-pointer">Raw</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div v-else class="text-xs text-slate-400 py-6 text-center">
+          Chọn 2 lượt crawl ở trên và bấm <strong>So sánh ngay</strong> để xem chênh lệch tương tác.
+        </div>
+      </div>
+
+      <!-- 7 RUN-CENTRIC TABS (Only shown inside Theo lượt crawl mode) -->
+      <div v-if="marketViewMode === 'by_run'" class="glass-panel rounded-2xl p-2 shadow-lg flex flex-wrap items-center gap-1.5">
+        <button @click="switchRunTab('overview')"
+          :class="runTab === 'overview' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-300 hover:text-white border border-slate-800'"
+          class="px-3 py-1.5 rounded-xl text-xs transition cursor-pointer">
+          🎯 Tổng quan lượt crawl
+        </button>
+        <button @click="switchRunTab('new_qualified')"
+          :class="runTab === 'new_qualified' ? 'bg-indigo-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-300 hover:text-white border border-slate-800'"
+          class="px-3 py-1.5 rounded-xl text-xs transition cursor-pointer">
+          🆕 Bài mới đạt chuẩn ({{ activeRunTabCounts.new }})
+        </button>
+        <button @click="switchRunTab('updated')"
+          :class="runTab === 'updated' ? 'bg-sky-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-300 hover:text-white border border-slate-800'"
+          class="px-3 py-1.5 rounded-xl text-xs transition cursor-pointer">
+          📈 Bài cập nhật tương tác ({{ activeRunTabCounts.updated }})
+        </button>
+        <button @click="switchRunTab('duplicate_history')"
+          :class="runTab === 'duplicate_history' ? 'bg-amber-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-300 hover:text-white border border-slate-800'"
+          class="px-3 py-1.5 rounded-xl text-xs transition cursor-pointer">
+          🔁 Bài trùng lịch sử ({{ activeRunTabCounts.duplicate }})
+        </button>
+        <button @click="switchRunTab('unverified')"
+          :class="runTab === 'unverified' ? 'bg-slate-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-300 hover:text-white border border-slate-800'"
+          class="px-3 py-1.5 rounded-xl text-xs transition cursor-pointer">
+          ❓ Bài chưa xác minh ({{ activeRunTabCounts.unverified }})
+        </button>
+        <button @click="switchRunTab('rejected')"
+          :class="runTab === 'rejected' ? 'bg-rose-600 text-white font-bold shadow' : 'bg-slate-900/90 text-slate-300 hover:text-white border border-slate-800'"
+          class="px-3 py-1.5 rounded-xl text-xs transition cursor-pointer">
+          🚫 Bài bị loại ({{ activeRunTabCounts.rejected }})
+        </button>
+        <button @click="switchRunTab('report')"
+          :class="runTab === 'report' ? 'bg-amber-500 text-slate-950 font-bold shadow' : 'bg-slate-900/90 text-slate-300 hover:text-white border border-slate-800'"
+          class="px-3 py-1.5 rounded-xl text-xs transition cursor-pointer">
+          📋 Báo cáo phân tích
+        </button>
+      </div>
+
       <!-- SUB-TAB 1: TỔNG QUAN -->
-      <div v-show="marketSubTab === 'overview'" class="space-y-5">
+      <div v-show="(marketViewMode === 'by_run' && runTab === 'overview') || (marketViewMode === 'history' && marketSubTab === 'overview')" class="space-y-5">
         <!-- V3.1 Run Status & Source Error Distinction Banner -->
-        <div v-if="marketReport?.run_status || marketStatus.stats?.latest_v3_screening?.run_status"
+        <div v-if="marketReport?.run_status || marketStatus.stats?.latest_v3_screening?.run_status || activeRunMeta"
           class="p-4 rounded-2xl border text-xs flex flex-col md:flex-row md:items-center justify-between gap-3"
           :class="marketReport?.is_source_error ? 'bg-rose-950/60 border-rose-500/50 text-rose-200' : (marketReport?.is_empty_market_valid ? 'bg-slate-900/90 border-slate-700 text-slate-200' : 'bg-emerald-950/35 border-emerald-500/35 text-emerald-100')">
           <div class="space-y-1">
             <div class="font-bold flex items-center gap-2 flex-wrap">
-              <span>{{ marketReport?.run_status_label_vi || '✅ Threads Trend Intelligence V3.1' }}</span>
-              <span v-if="marketReport?.run_id || marketStatus.stats?.latest_v3_screening?.run_id" class="text-[10px] font-mono px-2 py-0.5 rounded bg-black/30 text-slate-300">
-                {{ marketReport?.run_id || marketStatus.stats?.latest_v3_screening?.run_id }}
+              <span>{{ marketReport?.run_status_label_vi || (marketViewMode === 'by_run' && activeRunMeta ? ('🎯 Lượt crawl ' + (activeRunMeta.run_id || activeRunMeta.data_file?.file_name || activeRunMeta.run_key)) : '✅ Threads Trend Intelligence') }}</span>
+              <span v-if="marketReport?.run_id || marketStatus.stats?.latest_v3_screening?.run_id || activeRunMeta?.run_id" class="text-[10px] font-mono px-2 py-0.5 rounded bg-black/30 text-slate-300">
+                {{ marketReport?.run_id || marketStatus.stats?.latest_v3_screening?.run_id || activeRunMeta?.run_id }}
+              </span>
+              <span v-if="activeRunMeta?.strategy_version || marketReport?.strategy_version" class="text-[10px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-200 border border-indigo-500/40 font-mono">
+                Strategy {{ activeRunMeta?.strategy_version || marketReport?.strategy_version }}
+              </span>
+              <span v-if="activeRunMeta?.contract_version || marketReport?.contract_version" class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-200 border border-cyan-500/40 font-mono">
+                Contract V{{ activeRunMeta?.contract_version || marketReport?.contract_version }}
+              </span>
+              <span v-if="activeRunMeta?.special_counts?.natural_viral" class="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 font-bold">
+                ⚡ {{ activeRunMeta.special_counts.natural_viral }} Natural Viral
+              </span>
+              <span v-if="activeRunMeta?.special_counts?.buyer_intent" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-500/40 font-bold">
+                🛒 {{ activeRunMeta.special_counts.buyer_intent }} Buyer Intent
               </span>
             </div>
             <div v-if="marketReport?.is_source_error" class="text-[11px] text-rose-300">
@@ -2540,22 +2936,29 @@ HTML_TEMPLATE = """
             <div v-else-if="marketReport?.is_empty_market_valid" class="text-[11px] text-slate-300">
               ℹ️ Nguồn chạy bình thường và đã quét đủ ứng viên nhưng không có bài đạt chuẩn V3.1 trong cửa sổ hiện tại.
             </div>
-            <div v-if="marketReport?.screening" class="text-[11px] text-slate-300 font-mono">
-              Sàng lọc: Quét {{ marketReport.screening.scanned_count ?? '—' }} • Đạt chuẩn {{ marketReport.screening.qualified_count ?? '—' }} • Loại {{ marketReport.screening.rejected_count ?? '—' }} • Xác minh chéo Web {{ marketReport.screening.cross_verified_count ?? '—' }}
+            <div v-if="marketReport?.screening || activeRunMeta" class="text-[11px] text-slate-300 font-mono">
+              Sàng lọc: Mục tiêu {{ (marketReport?.screening?.requested_count ?? activeRunMeta?.requested_count) ?? '—' }} •
+              Quét {{ (marketReport?.screening?.scanned_count ?? activeRunMeta?.scanned_count) ?? '—' }} •
+              Đạt chuẩn mới {{ (marketReport?.screening?.new_qualified_count ?? marketReport?.screening?.qualified_count ?? activeRunMeta?.new_qualified_count) ?? '—' }} •
+              Cập nhật {{ (marketReport?.screening?.updated_metrics_count ?? activeRunMeta?.updated_metrics_count) ?? 0 }} •
+              Trùng {{ (marketReport?.screening?.duplicate_history_count ?? activeRunMeta?.duplicate_history_count) ?? 0 }} •
+              Loại {{ (marketReport?.screening?.rejected_count ?? activeRunMeta?.rejected_count) ?? '—' }}
             </div>
           </div>
           <div class="flex flex-wrap gap-1.5 text-[11px]">
-            <button @click="jumpToThreadsTier('very_hot')" class="px-2.5 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-200 font-bold cursor-pointer hover:bg-rose-500/30">🔥 Very Hot: {{ marketStatus.stats?.threads_by_trend_tier?.very_hot ?? 0 }}</button>
-            <button @click="jumpToThreadsTier('hot')" class="px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-200 font-bold cursor-pointer hover:bg-amber-500/30">⚡ Hot: {{ marketStatus.stats?.threads_by_trend_tier?.hot ?? 0 }}</button>
-            <button @click="jumpToThreadsTier('emerging')" class="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 font-bold cursor-pointer hover:bg-emerald-500/30">🌱 Emerging: {{ marketStatus.stats?.threads_by_trend_tier?.emerging ?? 0 }}</button>
-            <button @click="jumpToThreadsTier('watchlist')" class="px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-200 font-bold cursor-pointer hover:bg-sky-500/30">👀 Watchlist: {{ marketStatus.stats?.threads_by_trend_tier?.watchlist ?? 0 }}</button>
-            <button @click="jumpToThreadsTier('unverified')" class="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-600 text-slate-300 font-bold cursor-pointer hover:bg-slate-700">❓ Unverified: {{ marketStatus.stats?.threads_by_trend_tier?.unverified ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('very_hot')" class="px-2.5 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-200 font-bold cursor-pointer hover:bg-rose-500/30">🔥 Very Hot: {{ activePlatformTiers.very_hot ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('hot')" class="px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-200 font-bold cursor-pointer hover:bg-amber-500/30">⚡ Hot: {{ activePlatformTiers.hot ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('emerging')" class="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 font-bold cursor-pointer hover:bg-emerald-500/30">🌱 Emerging: {{ activePlatformTiers.emerging ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('watchlist')" class="px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-200 font-bold cursor-pointer hover:bg-sky-500/30">👀 Watchlist: {{ activePlatformTiers.watchlist ?? 0 }}</button>
+            <button @click="jumpToThreadsTier('unverified')" class="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-600 text-slate-300 font-bold cursor-pointer hover:bg-slate-700">❓ Unverified: {{ activePlatformTiers.unverified ?? 0 }}</button>
           </div>
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div class="glass-panel rounded-2xl p-4 space-y-1.5">
-            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Số bản ghi theo nền tảng</div>
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+              {{ marketViewMode === 'by_run' ? 'Ứng viên trong lượt crawl' : 'Số bản ghi theo nền tảng' }}
+            </div>
             <div class="text-2xl font-extrabold text-white font-mono">{{ marketStatus.stats?.total_items ?? 0 }}</div>
             <div class="flex flex-wrap gap-1.5 text-[11px] font-bold">
               <span class="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">Threads: {{ marketStatus.stats?.by_platform?.threads ?? 0 }}</span>
@@ -2611,7 +3014,7 @@ HTML_TEMPLATE = """
             <h3 class="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
               <i class="fa-solid fa-bullseye"></i> Top Cơ Hội Có Bằng Chứng (Đã loại unverified / needs_verification & tên nền tảng)
             </h3>
-            <button @click="switchMarketSubTab('reports')" class="text-xs text-indigo-300 hover:underline cursor-pointer">Xem báo cáo đầy đủ →</button>
+            <button @click="marketViewMode === 'by_run' ? switchRunTab('report') : switchMarketSubTab('reports')" class="text-xs text-indigo-300 hover:underline cursor-pointer">Xem báo cáo đầy đủ →</button>
           </div>
           <div v-if="(marketStatus.stats?.trends_snapshot?.topics || []).length" class="flex flex-wrap items-center gap-1.5 text-[11px] pb-1">
             <span class="text-[10px] uppercase font-bold text-indigo-300 mr-1">🔥 Chủ đề Trending VN:</span>
@@ -2722,24 +3125,39 @@ HTML_TEMPLATE = """
               </div>
             </details>
 
-            <div class="space-y-2">
-              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
-                <select v-model="crawlRequestForm.platform" class="sm:col-span-3 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
-                  <option value="threads">Threads (V3.2)</option>
+            <div class="space-y-2.5">
+              <div class="flex flex-wrap xl:flex-nowrap items-center gap-2">
+                <select v-model="crawlRequestForm.platform" class="w-full sm:w-40 shrink-0 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="threads">Threads (Str 3.3 / V3.2)</option>
                   <option value="tiktok">TikTok (V2)</option>
                   <option value="shopee">Shopee (V2)</option>
                   <option value="all">Tất cả (All)</option>
                 </select>
-                <div class="sm:col-span-3 flex items-center gap-1">
+                <div class="w-24 shrink-0 flex items-center gap-1">
                   <input v-model.number="crawlRequestForm.requested_count" type="number" min="1" max="500" step="1"
                     placeholder="Số bài (1-500)" title="Nhập số bài mục tiêu muốn crawl (1–500)"
                     class="w-full glass-input rounded-lg px-2.5 py-1.5 text-xs font-mono bg-slate-800 text-slate-100">
                   <span class="text-[10px] text-slate-400 shrink-0">bài</span>
                 </div>
-                <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa / ngách sản phẩm..."
-                  class="sm:col-span-4 glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
+                <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lease_minutes"
+                  title="Tùy chọn thời lượng lease an toàn (30 / 60 / 120 phút) cho Threads Strategy 3.3 — ưu tiên chất lượng"
+                  class="w-full sm:w-32 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option :value="30">⏱️ 30 phút</option>
+                  <option :value="60">⏱️ 60 phút</option>
+                  <option :value="120">⏱️ 120 phút</option>
+                </select>
+                <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lookback_hours"
+                  title="Phạm vi thời gian bài viết (mặc định ưu tiên 24h, tối đa 48h)"
+                  class="w-full sm:w-44 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option :value="24">🕒 24h (tối đa 48h)</option>
+                  <option :value="48">🕒 48h gần nhất</option>
+                  <option :value="72">🕒 72h (mở rộng)</option>
+                  <option :value="168">🕒 7 ngày (mở rộng)</option>
+                </select>
+                <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa tùy chỉnh thêm (ngách / sản phẩm / format)..."
+                  class="flex-1 min-w-[140px] glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
                 <button @click="submitCrawlRequest"
-                  class="sm:col-span-2 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold cursor-pointer whitespace-nowrap">
+                  class="shrink-0 px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold cursor-pointer whitespace-nowrap">
                   Tạo & Copy Prompt
                 </button>
               </div>
@@ -2753,9 +3171,103 @@ HTML_TEMPLATE = """
                     {{ preset }}
                   </button>
                 </div>
-                <span v-if="crawlRequestForm.platform !== 'threads'" class="text-amber-300/90">
+                <span v-if="crawlRequestForm.platform === 'threads'" class="text-indigo-300/90">
+                  🧭 Crawl Strategy 3.3 + Contract V3.2 • Lease an toàn 30/60/120 phút (mặc định 30p, không tự gia hạn).
+                </span>
+                <span v-else class="text-amber-300/90">
                   ℹ️ {{ crawlRequestForm.platform.toUpperCase() }} CHƯA hỗ trợ tự động hoàn tất request đầy đủ (Completion API /api/crawl/* chỉ hỗ trợ Threads V3.2); chỉ dùng Drive Sync.
                 </span>
+              </div>
+
+              <!-- Threads Strategy 3.3 Configurator: Crawl Mode, Topic Selector (24 chủ đề) & Filters -->
+              <div v-if="crawlRequestForm.platform === 'threads'" class="p-3 rounded-xl bg-slate-900/75 border border-slate-800/90 space-y-3">
+                <!-- 1. Mục tiêu crawl (crawl_mode) -->
+                <div class="space-y-1.5">
+                  <div class="flex items-center justify-between gap-2 flex-wrap">
+                    <span class="text-[11px] font-bold text-indigo-300 uppercase tracking-wide">🎯 Mục tiêu crawl (Crawl Mode)</span>
+                    <span v-if="selectedCrawlModeObj" class="text-[10px] text-slate-400">{{ selectedCrawlModeObj.summary }}</span>
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-1.5">
+                    <button v-for="m in crawlStrategyModes" :key="'cm-' + m.id" type="button"
+                      @click="m.enabled && (crawlRequestForm.crawl_mode = m.id)"
+                      :disabled="!m.enabled"
+                      :title="m.disabled_reason || m.summary"
+                      :class="!m.enabled
+                        ? 'bg-slate-950/60 border-slate-800 text-slate-500 cursor-not-allowed opacity-75'
+                        : (crawlRequestForm.crawl_mode === m.id
+                          ? 'bg-indigo-600/30 border-indigo-400 text-white font-semibold shadow-sm'
+                          : 'bg-slate-800/70 border-slate-700/80 text-slate-300 hover:bg-slate-800 cursor-pointer')"
+                      class="px-2.5 py-1.5 rounded-lg border text-left text-[11px] transition flex items-center justify-between gap-1.5">
+                      <span class="truncate">{{ m.label }}</span>
+                      <span v-if="!m.enabled" class="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] shrink-0">Chờ V3.2</span>
+                      <span v-else-if="m.id === 'balanced'" class="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-200 text-[9px] shrink-0">40/40/20</span>
+                      <span v-else-if="m.id === 'traffic_content'" class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-200 text-[9px] shrink-0">Traffic</span>
+                    </button>
+                  </div>
+                  <div v-if="crawlStrategyModes.some(m => !m.enabled)" class="text-[10px] text-amber-300/80 bg-amber-950/20 border border-amber-500/20 rounded-lg px-2.5 py-1.5">
+                    ℹ️ <strong>Theo dõi tăng trưởng bài cũ (growth_tracking)</strong> tạm khóa: Data Contract V3.2 hiện tính mục tiêu theo <code>new_qualified_count</code> và chưa có API liệt kê bài lịch sử từ D1 Registry để đo lại.
+                  </div>
+                </div>
+
+                <!-- 2. Topic Selector (24 chủ đề chia 2 nhóm trong 1 khối) -->
+                <div class="space-y-2 pt-2 border-t border-slate-800/80">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-[11px] font-bold text-violet-300 uppercase tracking-wide">
+                      🏷️ Chủ đề mục tiêu ({{ (crawlRequestForm.topics || []).length }}/{{ crawlTopicPresets.length }} đã chọn)
+                    </span>
+                    <div class="flex flex-wrap items-center gap-1.5 text-[10px]">
+                      <button type="button" @click="selectAllTopics" class="px-2 py-0.5 rounded bg-violet-600/25 hover:bg-violet-600/40 text-violet-200 border border-violet-500/30 cursor-pointer">Chọn tất cả</button>
+                      <button type="button" @click="selectTopicGroup('commerce_lifestyle')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer">+ Đời sống/Aff (14)</button>
+                      <button type="button" @click="selectTopicGroup('traffic_entertainment')" class="px-2 py-0.5 rounded bg-fuchsia-600/20 hover:bg-fuchsia-600/35 text-fuchsia-200 border border-fuchsia-500/30 cursor-pointer">+ Giải trí/Traffic (10)</button>
+                      <button type="button" @click="clearAllTopics" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 cursor-pointer">Bỏ chọn</button>
+                    </div>
+                  </div>
+                  <div class="space-y-1.5">
+                    <div class="text-[10px] text-slate-400 font-semibold">Ngành hàng, Đời sống & Affiliate (14)</div>
+                    <div class="flex flex-wrap gap-1.5">
+                      <button v-for="t in crawlCommerceTopics" :key="'tp-' + t.id" type="button"
+                        @click="toggleTopicSelection(t.id)"
+                        :title="'Từ khóa gợi ý: ' + (t.keywords || []).join(', ')"
+                        :class="(crawlRequestForm.topics || []).includes(t.id) ? 'bg-violet-600/35 border-violet-400 text-white font-semibold' : 'bg-slate-800/70 border-slate-700 text-slate-300 hover:bg-slate-800'"
+                        class="px-2 py-1 rounded-lg border text-[10px] cursor-pointer transition">
+                        {{ (crawlRequestForm.topics || []).includes(t.id) ? '✓ ' : '' }}{{ t.label }}
+                      </button>
+                    </div>
+                  </div>
+                  <div class="space-y-1.5">
+                    <div class="text-[10px] text-fuchsia-300/90 font-semibold">Giải trí & Kéo Traffic (10)</div>
+                    <div class="flex flex-wrap gap-1.5">
+                      <button v-for="t in crawlTrafficTopics" :key="'tp-' + t.id" type="button"
+                        @click="toggleTopicSelection(t.id)"
+                        :title="'Từ khóa gợi ý: ' + (t.keywords || []).join(', ')"
+                        :class="(crawlRequestForm.topics || []).includes(t.id) ? 'bg-fuchsia-600/35 border-fuchsia-400 text-white font-semibold' : 'bg-slate-800/70 border-slate-700 text-slate-300 hover:bg-slate-800'"
+                        class="px-2 py-1 rounded-lg border text-[10px] cursor-pointer transition">
+                        {{ (crawlRequestForm.topics || []).includes(t.id) ? '✓ ' : '' }}{{ t.label }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3. Bộ lọc & Loại trừ (tất cả bật mặc định) -->
+                <div class="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-300">
+                  <span class="text-[10px] font-bold text-slate-400 uppercase">🛡️ Bộ lọc mặc định:</span>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer" title="Hạn chế người nổi tiếng/KOL lớn; KHÔNG loại người dùng bình thường chỉ vì nhắc tên người nổi tiếng">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.exclude_celebrity" class="accent-indigo-500">
+                    <span>Hạn chế người nổi tiếng (giữ user thường)</span>
+                  </label>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.exclude_fandom" class="accent-indigo-500">
+                    <span>Hạn chế fandom/thần tượng</span>
+                  </label>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.exclude_pure_ads" class="accent-indigo-500">
+                    <span>Hạn chế quảng cáo đơn thuần</span>
+                  </label>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" v-model="crawlRequestForm.exclusions.vn_only" class="accent-indigo-500">
+                    <span>Chỉ thu thập thị trường Việt Nam</span>
+                  </label>
+                </div>
               </div>
             </div>
 
@@ -2764,7 +3276,12 @@ HTML_TEMPLATE = """
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="font-bold text-indigo-300">📋 Prompt cho Muse</span>
                   <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-amber-300">{{ activePromptInfo.request_id }}</span>
+                  <span v-if="activePromptInfo.strategy_version" class="px-1.5 py-0.5 rounded bg-slate-900 border border-indigo-700/70 font-mono text-[10px] text-indigo-300">Strategy: 3.3</span>
                   <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-emerald-300">Contract: {{ activePromptInfo.contract_version }}</span>
+                  <span v-if="activePromptInfo.crawl_mode_label || activePromptInfo.crawl_mode" class="px-1.5 py-0.5 rounded bg-fuchsia-950/60 border border-fuchsia-500/40 text-[10px] text-fuchsia-200 font-semibold">🎯 {{ activePromptInfo.crawl_mode_label || activePromptInfo.crawl_mode }}</span>
+                  <span v-if="(activePromptInfo.topic_labels || activePromptInfo.topics || []).length" class="px-1.5 py-0.5 rounded bg-violet-950/60 border border-violet-500/40 text-[10px] text-violet-200">🏷️ {{ (activePromptInfo.topic_labels || activePromptInfo.topics).length }} chủ đề</span>
+                  <span v-if="activePromptInfo.lookback_hours" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-slate-200">🕒 {{ activePromptInfo.lookback_hours === 168 ? '7d' : activePromptInfo.lookback_hours + 'h' }}</span>
+                  <span v-if="activePromptInfo.platform === 'threads' && activePromptInfo.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-sky-300">Lease: {{ activePromptInfo.lease_minutes }}p</span>
                 </div>
                 <div class="flex items-center gap-1.5">
                   <button @click="copyTextToClipboard(activePromptInfo.manual_prompt, '📋 Đã copy Prompt gửi Muse!')"
@@ -2790,6 +3307,12 @@ HTML_TEMPLATE = """
                     <div class="flex items-center gap-2 flex-wrap">
                       <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
                       <span class="font-mono text-[11px] text-slate-200 font-semibold">Mục tiêu: {{ crw.requested_count || 50 }} bài</span>
+                      <span v-if="getCrawlProgress(crw).strategyVersion" class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 border border-indigo-500/30 font-mono text-[10px]" :title="'Strategy ' + getCrawlProgress(crw).strategyVersion">Str {{ String(getCrawlProgress(crw).strategyVersion).includes('3.3') ? '3.3' : getCrawlProgress(crw).strategyVersion }}</span>
+                      <span v-if="crw.platform === 'threads' && (getCrawlProgress(crw).crawlModeLabel || crw.crawl_mode_label || crw.crawl_mode)" class="px-1.5 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30 text-[10px]">🎯 {{ getCrawlProgress(crw).crawlModeLabel || crw.crawl_mode_label || crw.crawl_mode }}</span>
+                      <span v-if="crw.platform === 'threads' && (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length" :title="(crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).join(', ')" class="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-200 border border-violet-500/30 text-[10px]">🏷️ {{ (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).slice(0, 2).join(', ') }}{{ (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length > 2 ? ` +${(crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length - 2}` : '' }}</span>
+                      <span v-if="crw.platform === 'threads' && crw.lookback_hours" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 font-mono text-[10px] border border-slate-700">🕒 {{ crw.lookback_hours === 168 ? '7d' : crw.lookback_hours + 'h' }}</span>
+                      <span v-if="crw.platform === 'threads' && crw.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-sky-300 font-mono text-[10px] border border-slate-700" title="Ngân sách lease phiên">⏱️ {{ crw.lease_minutes }}p</span>
+                      <span v-if="getCrawlProgress(crw).actualDurationLabel" class="px-1.5 py-0.5 rounded bg-slate-900 text-cyan-300 font-mono text-[10px] border border-cyan-500/30" :title="getCrawlProgress(crw).actualDurationTitle || 'Thời lượng xử lý thực tế'">⏳ Xử lý: {{ getCrawlProgress(crw).actualDurationLabel }}</span>
                       <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
                         :class="getCrawlDisplayState(crw).badgeClass">
                         {{ getCrawlDisplayState(crw).label }}
@@ -2805,11 +3328,17 @@ HTML_TEMPLATE = """
                           {{ getCrawlProgress(crw).newQualified }}/{{ getCrawlProgress(crw).target }} • {{ getCrawlProgress(crw).reached ? 'Đủ mục tiêu' : 'Chưa đạt mục tiêu' }}
                         </span>
                       </template>
-                      <span v-if="getCrawlProgress(crw).stopReason" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 text-[10px] font-mono">{{ getCrawlProgress(crw).stopReason }}</span>
+                      <span v-if="getCrawlProgress(crw).stopReason"
+                        :title="'Mã kỹ thuật: ' + getCrawlProgress(crw).stopReason"
+                        class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-200 border border-slate-700 text-[10px]">
+                        {{ formatStopReasonLabel(getCrawlProgress(crw).stopReason) }}
+                      </span>
                       <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
                     </div>
                     <div class="text-[10px] text-slate-400 truncate mt-0.5">
-                      <span class="font-mono text-slate-500">{{ crw.id }}</span> • {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
+                      <span class="font-mono text-slate-500">{{ crw.id }}</span>
+                      <span v-if="getCrawlProgress(crw).runId" class="text-indigo-300/90 font-mono"> • {{ getCrawlProgress(crw).runId }}</span>
+                      • {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
                     </div>
                     <div v-if="crw.reconcile_message && crw.reconcile_status && crw.reconcile_status !== 'ok'" class="text-[10px] text-amber-300/90 mt-0.5">
                       ↳ {{ crw.reconcile_message }}
@@ -2819,6 +3348,10 @@ HTML_TEMPLATE = """
                     </div>
                   </div>
                   <div class="flex items-center gap-1.5 shrink-0">
+                    <button v-if="canOpenCrawlResultRun(crw)" @click="openCrawlResultRun(crw)"
+                      class="px-2.5 py-1 rounded-lg bg-emerald-600/25 hover:bg-emerald-600/45 text-emerald-200 border border-emerald-500/40 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
+                      🔍 Xem kết quả crawl
+                    </button>
                     <button v-if="crw.status === 'queued'" @click="copyExistingRequestPrompt(crw)"
                       class="px-2 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
                       Copy lại Prompt
@@ -2840,7 +3373,9 @@ HTML_TEMPLATE = """
                   <div class="flex flex-wrap gap-1.5 text-[10px] font-mono">
                     <span v-if="getCrawlProgress(crw).scanned !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200">Quét: {{ getCrawlProgress(crw).scanned }}</span>
                     <span v-if="getCrawlProgress(crw).uniqueCandidates !== null" class="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700">Ứng viên: {{ getCrawlProgress(crw).uniqueCandidates }}</span>
-                    <span v-if="getCrawlProgress(crw).newCount !== null && getCrawlProgress(crw).newCount !== getCrawlProgress(crw).newQualified" class="px-1.5 py-0.5 rounded bg-teal-950/50 text-teal-300 border border-teal-500/30">Mới (tổng): {{ getCrawlProgress(crw).newCount }}</span>
+                    <span v-if="getCrawlProgress(crw).newCount !== null && getCrawlProgress(crw).newCount !== getCrawlProgress(crw).newQualified"
+                      title="Tổng ứng viên lần đầu xuất hiện trong Registry (gồm bài đạt chuẩn, chưa xác minh và bị loại)"
+                      class="px-1.5 py-0.5 rounded bg-teal-950/50 text-teal-300 border border-teal-500/30">Ứng viên mới phát hiện: {{ getCrawlProgress(crw).newCount }}</span>
                     <span v-if="getCrawlProgress(crw).newQualified !== null" class="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-500/30">Mới đạt chuẩn: {{ getCrawlProgress(crw).newQualified }}</span>
                     <span v-if="getCrawlProgress(crw).duplicate !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">Trùng: {{ getCrawlProgress(crw).duplicate }}</span>
                     <span v-if="getCrawlProgress(crw).updated !== null" class="px-1.5 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-500/30">Cập nhật tương tác: {{ getCrawlProgress(crw).updated }}</span>
@@ -2859,13 +3394,23 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
-      <!-- SUB-TAB 2: THREADS (V3.1 TIERS & LEGACY V1/V2 BACKWARD COMPATIBLE) -->
-      <div v-show="marketSubTab === 'threads'" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+      <!-- SUB-TAB 2: THREADS / RUN-LEVEL THREADS ITEMS -->
+      <div v-show="(marketViewMode === 'by_run' && isRunItemTab && activeItemViewPlatform === 'threads') || (marketViewMode === 'history' && marketSubTab === 'threads')" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+        <!-- Multi-platform switcher inside a multi-platform crawl run -->
+        <div v-if="marketViewMode === 'by_run' && (activeRunMeta?.platforms || []).length > 1"
+          class="flex flex-wrap items-center gap-1.5 text-xs pb-2 border-b border-slate-800">
+          <span class="text-[11px] text-slate-400 mr-1">Nền tảng trong lượt:</span>
+          <button v-for="rp in activeRunMeta.platforms" :key="'rp-th-'+rp"
+            @click="switchRunPlatformFilter(rp)"
+            :class="activeItemViewPlatform === rp ? 'bg-indigo-600 text-white font-bold' : 'bg-slate-900 text-slate-300 border border-slate-800'"
+            class="px-2.5 py-1 rounded-lg uppercase text-[11px] cursor-pointer">{{ rp }} ({{ marketStatus.stats?.by_platform?.[rp] ?? 0 }})</button>
+        </div>
+
         <!-- Trending Themes Snapshot from Threads -->
         <div v-if="(marketStatus.stats?.trends_snapshot?.topics || []).length" class="p-3.5 rounded-xl bg-indigo-950/35 border border-indigo-500/30 space-y-2">
           <div class="flex items-center justify-between gap-2 flex-wrap text-xs">
-            <span class="font-bold text-indigo-300 uppercase tracking-wider">🔥 Chủ đề đang thịnh hành trên Threads ({{ formatIsoTime(marketStatus.stats.trends_snapshot.captured_at) || 'mới nhất' }})</span>
-            <span v-if="marketStatus.stats?.latest_v3_screening?.run_id" class="text-[10px] font-mono text-slate-400">{{ marketStatus.stats.latest_v3_screening.run_id }}</span>
+            <span class="font-bold text-indigo-300 uppercase tracking-wider">🔥 Chủ đề đang thịnh hành ({{ formatIsoTime(marketStatus.stats.trends_snapshot.captured_at) || (marketViewMode === 'by_run' && activeRunMeta ? formatIsoTime(activeRunMeta.crawl_time) : 'mới nhất') }})</span>
+            <span v-if="marketStatus.stats?.latest_v3_screening?.run_id || activeRunMeta?.run_id" class="text-[10px] font-mono text-slate-400">{{ marketStatus.stats?.latest_v3_screening?.run_id || activeRunMeta?.run_id }}</span>
           </div>
           <div class="flex flex-wrap gap-1.5 text-[11px]">
             <button v-for="(tp, idx) in marketStatus.stats.trends_snapshot.topics" :key="'th-tp-'+idx"
@@ -2876,43 +3421,77 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
-        <!-- Activity Filter Pills: Bài mới / Tăng trưởng / Toàn bộ lịch sử -->
-        <div class="flex flex-wrap items-center gap-1.5 text-xs">
+        <!-- Activity Filter Pills (in History mode; in By-Run mode the 7 Run tabs select the stream) -->
+        <div v-if="marketViewMode === 'history'" class="flex flex-wrap items-center gap-1.5 text-xs">
           <button @click="marketFilters.activity_filter = 'all'; loadMarketItems(0);"
             :class="marketFilters.activity_filter === 'all' ? 'bg-slate-100 text-slate-900 font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800'"
-            class="px-3 py-1 rounded-lg cursor-pointer transition">📚 Toàn bộ lịch sử ({{ marketStatus.stats?.total_items ?? 0 }})</button>
+            class="px-3 py-1 rounded-lg cursor-pointer transition">📚 Toàn bộ lịch sử ({{ activePlatformActivity.total ?? 0 }})</button>
           <button @click="marketFilters.activity_filter = 'new'; loadMarketItems(0);"
             :class="marketFilters.activity_filter === 'new' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
-            class="px-3 py-1 rounded-lg cursor-pointer transition">🆕 Bài mới ({{ marketStatus.stats?.by_activity?.new ?? 0 }})</button>
+            class="px-3 py-1 rounded-lg cursor-pointer transition">🆕 Bài mới ({{ activePlatformActivity.new ?? 0 }})</button>
           <button @click="marketFilters.activity_filter = 'growth'; loadMarketItems(0);"
             :class="marketFilters.activity_filter === 'growth' ? 'bg-sky-600 text-white font-bold shadow' : 'bg-sky-950/40 text-sky-200 border border-sky-500/30'"
-            class="px-3 py-1 rounded-lg cursor-pointer transition">📈 Tăng trưởng ({{ marketStatus.stats?.by_activity?.growth ?? 0 }})</button>
+            class="px-3 py-1 rounded-lg cursor-pointer transition">📈 Cập nhật tương tác ({{ activePlatformActivity.growth ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'duplicate'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'duplicate' ? 'bg-purple-600 text-white font-bold shadow' : 'bg-purple-950/40 text-purple-200 border border-purple-500/30'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">🔁 Trùng lịch sử ({{ activePlatformActivity.multi_run ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'unverified'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'unverified' ? 'bg-amber-600 text-white font-bold shadow' : 'bg-amber-950/40 text-amber-200 border border-amber-500/30'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">❓ Chưa xác minh ({{ activePlatformActivity.unverified ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'rejected'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'rejected' ? 'bg-rose-600 text-white font-bold shadow' : 'bg-rose-950/40 text-rose-200 border border-rose-500/30'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">🚫 Bị loại ({{ activePlatformActivity.rejected ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'missing_views'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'missing_views' ? 'bg-slate-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-700'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">👁️ Thiếu views ({{ activePlatformActivity.missing_views ?? 0 }})</button>
+        </div>
+
+        <!-- V3.3 Signal Filters: Natural Viral & Buyer Intent -->
+        <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button @click="marketFilters.special_filter = 'all'; loadMarketItems(0);"
+              :class="marketFilters.special_filter === 'all' ? 'bg-slate-200 text-slate-900 font-bold' : 'bg-slate-900 text-slate-300 border border-slate-800'"
+              class="px-2.5 py-1 rounded-lg cursor-pointer transition">Mọi tín hiệu V3.3</button>
+            <button @click="marketFilters.special_filter = 'natural_viral'; loadMarketItems(0);"
+              :class="marketFilters.special_filter === 'natural_viral' ? 'bg-amber-500 text-slate-950 font-bold shadow' : 'bg-amber-950/40 text-amber-200 border border-amber-500/30'"
+              class="px-2.5 py-1 rounded-lg cursor-pointer transition">
+              ⚡ Natural Viral<span v-if="activeRunMeta?.special_counts?.natural_viral !== undefined"> ({{ activeRunMeta.special_counts.natural_viral }})</span>
+            </button>
+            <button @click="marketFilters.special_filter = 'buyer_intent'; loadMarketItems(0);"
+              :class="marketFilters.special_filter === 'buyer_intent' ? 'bg-emerald-500 text-slate-950 font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
+              class="px-2.5 py-1 rounded-lg cursor-pointer transition">
+              🛒 Buyer Intent<span v-if="activeRunMeta?.special_counts?.buyer_intent !== undefined"> ({{ activeRunMeta.special_counts.buyer_intent }})</span>
+            </button>
+          </div>
+          <div v-if="marketViewMode === 'by_run'" class="text-[11px] font-mono text-slate-400">
+            Hiển thị <strong class="text-white">{{ marketTotal }}</strong> bài thuộc luồng này • Snapshot tại thời điểm crawl
+          </div>
         </div>
 
         <!-- Tier Quick Filter Pills (Very Hot, Hot, Emerging, Watchlist, Unverified + Legacy V1/V2) -->
-        <div class="flex flex-wrap items-center gap-1.5 text-xs">
+        <div v-if="marketViewMode === 'history' || runTab === 'new_qualified' || runTab === 'unverified'" class="flex flex-wrap items-center gap-1.5 text-xs">
           <button @click="marketFilters.trend_tier = 'all'; loadMarketItems(0);"
             :class="marketFilters.trend_tier === 'all' ? 'bg-indigo-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800'"
             class="px-3 py-1.5 rounded-xl cursor-pointer transition">Tất cả theo 5 phân tầng</button>
           <button @click="marketFilters.trend_tier = 'very_hot'; loadMarketItems(0);"
             :class="marketFilters.trend_tier === 'very_hot' ? 'bg-rose-600 text-white font-bold shadow' : 'bg-rose-950/40 text-rose-200 border border-rose-500/30'"
-            class="px-3 py-1.5 rounded-xl cursor-pointer transition">🔥 Very Hot ({{ marketStatus.stats?.threads_by_trend_tier?.very_hot ?? 0 }})</button>
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">🔥 Very Hot ({{ activePlatformTiers.very_hot ?? 0 }})</button>
           <button @click="marketFilters.trend_tier = 'hot'; loadMarketItems(0);"
             :class="marketFilters.trend_tier === 'hot' ? 'bg-amber-600 text-white font-bold shadow' : 'bg-amber-950/40 text-amber-200 border border-amber-500/30'"
-            class="px-3 py-1.5 rounded-xl cursor-pointer transition">⚡ Hot ({{ marketStatus.stats?.threads_by_trend_tier?.hot ?? 0 }})</button>
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">⚡ Hot ({{ activePlatformTiers.hot ?? 0 }})</button>
           <button @click="marketFilters.trend_tier = 'emerging'; loadMarketItems(0);"
             :class="marketFilters.trend_tier === 'emerging' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
-            class="px-3 py-1.5 rounded-xl cursor-pointer transition">🌱 Emerging ({{ marketStatus.stats?.threads_by_trend_tier?.emerging ?? 0 }})</button>
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">🌱 Emerging ({{ activePlatformTiers.emerging ?? 0 }})</button>
           <button @click="marketFilters.trend_tier = 'watchlist'; loadMarketItems(0);"
             :class="marketFilters.trend_tier === 'watchlist' ? 'bg-sky-600 text-white font-bold shadow' : 'bg-sky-950/40 text-sky-200 border border-sky-500/30'"
-            class="px-3 py-1.5 rounded-xl cursor-pointer transition">👀 Watchlist ({{ marketStatus.stats?.threads_by_trend_tier?.watchlist ?? 0 }})</button>
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">👀 Watchlist ({{ activePlatformTiers.watchlist ?? 0 }})</button>
           <button @click="marketFilters.trend_tier = 'unverified'; loadMarketItems(0);"
             :class="marketFilters.trend_tier === 'unverified' ? 'bg-slate-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-700'"
-            class="px-3 py-1.5 rounded-xl cursor-pointer transition">❓ Unverified ({{ marketStatus.stats?.threads_by_trend_tier?.unverified ?? 0 }})</button>
-          <button v-if="(marketStatus.stats?.threads_by_trend_tier?.legacy ?? 0) > 0"
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">❓ Unverified ({{ activePlatformTiers.unverified ?? 0 }})</button>
+          <button v-if="(activePlatformTiers.legacy ?? 0) > 0"
             @click="marketFilters.trend_tier = 'legacy'; loadMarketItems(0);"
             :class="marketFilters.trend_tier === 'legacy' ? 'bg-purple-600 text-white font-bold shadow' : 'bg-slate-900 text-slate-400 border border-slate-800'"
-            class="px-3 py-1.5 rounded-xl cursor-pointer transition">📜 Lịch sử V1/V2 ({{ marketStatus.stats?.threads_by_trend_tier?.legacy ?? 0 }})</button>
+            class="px-3 py-1.5 rounded-xl cursor-pointer transition">📜 Lịch sử V1/V2 ({{ activePlatformTiers.legacy ?? 0 }})</button>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
@@ -2984,18 +3563,35 @@ HTML_TEMPLATE = """
                   <tr v-for="item in sec.items" :key="item.id" class="hover:bg-slate-900/60">
                     <td class="px-3 py-3 align-top whitespace-nowrap space-y-1">
                       <div class="font-bold text-indigo-200">{{ item.author_handle || '—' }}</div>
-                      <div class="text-[10px] text-slate-400">Loại: {{ item.extra_meta?.author_type || '—' }}</div>
+                      <div class="text-[10px] text-slate-400">
+                        Loại: {{ item.extra_meta?.author_type || '—' }}
+                        <span v-if="item.author_followers !== null && item.author_followers !== undefined" class="ml-1 text-cyan-300 font-mono font-semibold">
+                          • 👥 {{ formatCompactMetric(item.author_followers) }} flw
+                        </span>
+                      </div>
+                      <div v-if="item.natural_viral === true || item.buyer_intent === true" class="flex flex-wrap gap-1 pt-0.5">
+                        <span v-if="item.natural_viral === true" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold">
+                          ⚡ Natural Viral
+                        </span>
+                        <span v-if="item.buyer_intent === true" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold">
+                          🛒 Buyer Intent
+                        </span>
+                      </div>
                       <div v-if="item.trend_group" class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                         {{ item.trend_group }}
                       </div>
                       <div v-else-if="item.extra_meta?.crawl_bucket" class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
                         {{ item.extra_meta.crawl_bucket }}
                       </div>
-                      <div>
+                      <div v-if="item.purchase_intent && item.purchase_intent !== 'True' && item.purchase_intent !== 'False'">
                         <span class="px-1.5 py-0.5 rounded-full text-[10px] border"
                           :class="item.purchase_intent === 'cao' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : (item.purchase_intent === 'trung_binh' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800 text-slate-300 border-slate-700')">
-                          intent: {{ item.purchase_intent || 'null' }}
+                          intent: {{ item.purchase_intent }}
                         </span>
+                      </div>
+                      <div v-if="item.strategy_version || item.contract_version" class="text-[9px] font-mono text-slate-500">
+                        <span v-if="item.strategy_version">Str {{ item.strategy_version }}</span>
+                        <span v-if="item.contract_version"> • V{{ item.contract_version }}</span>
                       </div>
                     </td>
                     <td class="px-3 py-3 align-top max-w-md space-y-1.5">
@@ -3013,8 +3609,8 @@ HTML_TEMPLATE = """
                       </div>
                     </td>
                     <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
-                      <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_likes_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_likes_delta) }})</span></div>
-                      <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_comments_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_comments_delta) }})</span></div>
+                      <div>❤️ <span :class="(item.likes_count === null || item.likes_count === undefined) ? 'text-slate-500 italic' : 'text-slate-200'" :title="(item.likes_count === null || item.likes_count === undefined) ? 'Thiếu dữ liệu likes (null, không phải 0)' : ''">{{ formatMetricOrMissing(item.likes_count) }}</span> <span v-if="item.last_likes_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_likes_delta) }})</span></div>
+                      <div>💬 <span :class="(item.comments_count === null || item.comments_count === undefined) ? 'text-slate-500 italic' : 'text-slate-200'" :title="(item.comments_count === null || item.comments_count === undefined) ? 'Thiếu dữ liệu bình luận (null, không phải 0)' : ''">{{ formatMetricOrMissing(item.comments_count) }}</span> <span v-if="item.last_comments_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_comments_delta) }})</span></div>
                       <div v-if="item.shares_count !== null && item.shares_count !== undefined">📤 Shares: {{ item.shares_count.toLocaleString('vi-VN') }} <span v-if="item.last_shares_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_shares_delta) }})</span></div>
                       <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ item.reposts_count.toLocaleString('vi-VN') }} <span v-if="item.last_reposts_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_reposts_delta) }})</span></div>
                       <div v-if="item.quotes_count !== null && item.quotes_count !== undefined">🗣️ Quotes: {{ item.quotes_count.toLocaleString('vi-VN') }}</div>
@@ -3023,6 +3619,9 @@ HTML_TEMPLATE = """
                         <span v-if="item.views_precision === 'display_approx'" class="text-[9px] text-amber-300/90">(≈ hiển thị)</span>
                         <a v-if="item.views_evidence_url" :href="item.views_evidence_url" target="_blank" rel="noreferrer" class="text-[9px] text-sky-400 hover:underline ml-0.5" title="Bằng chứng views">🔗</a>
                         <span v-if="item.last_views_delta > 0" class="text-[10px] text-emerald-300"> (+{{ formatCompactMetric(item.last_views_delta) }})</span>
+                      </div>
+                      <div v-if="item.views_to_followers_ratio !== null && item.views_to_followers_ratio !== undefined" class="text-[10px] text-amber-300 font-mono">
+                        📊 Views/Followers: <strong>{{ formatRatioMetric(item.views_to_followers_ratio) }}x</strong>
                       </div>
                       <div v-if="(item.snapshot_count || 1) > 1" class="pt-0.5">
                         <span class="px-1.5 py-0.5 rounded text-[10px] font-sans bg-sky-500/20 text-sky-300 border border-sky-500/30">
@@ -3077,7 +3676,25 @@ HTML_TEMPLATE = """
       </div>
 
       <!-- SUB-TAB 3: TIKTOK -->
-      <div v-show="marketSubTab === 'tiktok'" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+      <div v-show="(marketViewMode === 'by_run' && isRunItemTab && activeItemViewPlatform === 'tiktok') || (marketViewMode === 'history' && marketSubTab === 'tiktok')" class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+        <div v-if="marketViewMode === 'by_run' && (activeRunMeta?.platforms || []).length > 1"
+          class="flex flex-wrap items-center gap-1.5 text-[11px] pb-2 border-b border-slate-800">
+          <span class="text-slate-400 mr-1">Nền tảng trong lượt này:</span>
+          <button v-for="pl in activeRunMeta.platforms" :key="'run-pl-tt-'+pl" @click="switchRunPlatformFilter(pl)"
+            :class="activeItemViewPlatform === pl ? 'bg-cyan-600 text-white font-bold' : 'bg-slate-900 text-slate-300 border border-slate-700'"
+            class="px-2.5 py-1 rounded-lg uppercase cursor-pointer">{{ pl }}</button>
+        </div>
+        <div v-if="marketViewMode !== 'by_run'" class="flex flex-wrap items-center gap-1.5 text-xs">
+          <button @click="marketFilters.activity_filter = 'all'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'all' ? 'bg-slate-100 text-slate-900 font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">📚 {{ marketViewMode === 'by_run' ? 'Trong lượt' : 'Toàn bộ TikTok' }} ({{ activePlatformActivity.total ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'new'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'new' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">🆕 Bài mới ({{ activePlatformActivity.new ?? 0 }})</button>
+          <button @click="marketFilters.activity_filter = 'growth'; loadMarketItems(0);"
+            :class="marketFilters.activity_filter === 'growth' ? 'bg-sky-600 text-white font-bold shadow' : 'bg-sky-950/40 text-sky-200 border border-sky-500/30'"
+            class="px-3 py-1 rounded-lg cursor-pointer transition">📈 Tăng trưởng ({{ activePlatformActivity.growth ?? 0 }})</button>
+        </div>
         <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
           <div class="md:col-span-4 relative">
             <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
@@ -3087,9 +3704,12 @@ HTML_TEMPLATE = """
           </div>
           <select v-model="marketFilters.activity_filter" @change="loadMarketItems(0)"
             class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-            <option value="all">Toàn bộ lịch sử</option>
+            <option value="all">Mọi phân loại</option>
             <option value="new">🆕 Bài mới</option>
-            <option value="growth">📈 Tăng trưởng</option>
+            <option value="growth">📈 Cập nhật tương tác</option>
+            <option value="duplicate">🔁 Trùng lịch sử</option>
+            <option value="unverified">❓ Chưa xác minh</option>
+            <option value="rejected">🚫 Bị loại</option>
           </select>
           <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
             class="md:col-span-3 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
@@ -3150,8 +3770,8 @@ HTML_TEMPLATE = """
                 </td>
                 <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
                   <div :title="formatViewsTooltip(item)">👁️ Views: <strong class="text-cyan-300">{{ formatViewsDisplay(item) }}</strong> <span v-if="item.views_precision === 'display_approx'" class="text-[9px] text-amber-300/90">(≈ hiển thị)</span></div>
-                  <div>❤️ Likes: {{ formatCompactMetric(item.likes_count) }}</div>
-                  <div>💬 Comments: {{ formatCompactMetric(item.comments_count) }}</div>
+                  <div>❤️ Likes: <span :title="(item.likes_count === null || item.likes_count === undefined) ? 'Thiếu dữ liệu likes (null, không phải 0)' : ''">{{ formatMetricOrMissing(item.likes_count) }}</span></div>
+                  <div>💬 Comments: {{ formatMetricOrMissing(item.comments_count) }}</div>
                   <div>📤 Shares: {{ formatCompactMetric(item.shares_count) }}</div>
                   <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ formatCompactMetric(item.reposts_count) }}</div>
                 </td>
@@ -3183,8 +3803,26 @@ HTML_TEMPLATE = """
       </div>
 
       <!-- SUB-TAB 4: SHOPEE -->
-      <div v-show="marketSubTab === 'shopee'" class="space-y-4">
+      <div v-show="(marketViewMode === 'by_run' && isRunItemTab && activeItemViewPlatform === 'shopee') || (marketViewMode === 'history' && marketSubTab === 'shopee')" class="space-y-4">
         <div class="glass-panel rounded-2xl p-5 shadow-xl space-y-4">
+          <div v-if="marketViewMode === 'by_run' && (activeRunMeta?.platforms || []).length > 1"
+            class="flex flex-wrap items-center gap-1.5 text-[11px] pb-2 border-b border-slate-800">
+            <span class="text-slate-400 mr-1">Nền tảng trong lượt này:</span>
+            <button v-for="pl in activeRunMeta.platforms" :key="'run-pl-sp-'+pl" @click="switchRunPlatformFilter(pl)"
+              :class="activeItemViewPlatform === pl ? 'bg-orange-600 text-white font-bold' : 'bg-slate-900 text-slate-300 border border-slate-700'"
+              class="px-2.5 py-1 rounded-lg uppercase cursor-pointer">{{ pl }}</button>
+          </div>
+          <div v-if="marketViewMode !== 'by_run'" class="flex flex-wrap items-center gap-1.5 text-xs">
+            <button @click="marketFilters.activity_filter = 'all'; loadMarketItems(0);"
+              :class="marketFilters.activity_filter === 'all' ? 'bg-slate-100 text-slate-900 font-bold shadow' : 'bg-slate-900 text-slate-300 border border-slate-800'"
+              class="px-3 py-1 rounded-lg cursor-pointer transition">📚 {{ marketViewMode === 'by_run' ? 'Trong lượt' : 'Toàn bộ Shopee' }} ({{ activePlatformActivity.total ?? 0 }})</button>
+            <button @click="marketFilters.activity_filter = 'new'; loadMarketItems(0);"
+              :class="marketFilters.activity_filter === 'new' ? 'bg-emerald-600 text-white font-bold shadow' : 'bg-emerald-950/40 text-emerald-200 border border-emerald-500/30'"
+              class="px-3 py-1 rounded-lg cursor-pointer transition">🆕 Mới ({{ activePlatformActivity.new ?? 0 }})</button>
+            <button @click="marketFilters.activity_filter = 'growth'; loadMarketItems(0);"
+              :class="marketFilters.activity_filter === 'growth' ? 'bg-sky-600 text-white font-bold shadow' : 'bg-sky-950/40 text-sky-200 border border-sky-500/30'"
+              class="px-3 py-1 rounded-lg cursor-pointer transition">📈 Tăng trưởng ({{ activePlatformActivity.growth ?? 0 }})</button>
+          </div>
           <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
             <div class="md:col-span-4 relative">
               <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
@@ -3194,9 +3832,11 @@ HTML_TEMPLATE = """
             </div>
             <select v-model="marketFilters.activity_filter" @change="loadMarketItems(0)"
               class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-              <option value="all">Toàn bộ lịch sử</option>
+              <option value="all">Mọi phân loại</option>
               <option value="new">🆕 Bài mới</option>
-              <option value="growth">📈 Tăng trưởng</option>
+              <option value="growth">📈 Cập nhật chỉ số</option>
+              <option value="duplicate">🔁 Trùng lịch sử</option>
+              <option value="unverified">❓ Chưa xác minh</option>
             </select>
             <select v-model="marketFilters.data_quality" @change="loadMarketItems(0)"
               class="md:col-span-2 glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
@@ -3290,20 +3930,24 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
-      <!-- SUB-TAB 5: BÁO CÁO -->
-      <div v-show="marketSubTab === 'reports'" class="glass-panel rounded-2xl p-6 shadow-xl space-y-4">
+      <!-- SUB-TAB 5: BÁO CÁO PHÂN TÍCH -->
+      <div v-show="(marketViewMode === 'by_run' && runTab === 'report') || (marketViewMode === 'history' && marketSubTab === 'reports')" class="glass-panel rounded-2xl p-6 shadow-xl space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3.5">
           <div>
             <h3 class="text-sm font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2 flex-wrap">
               <i class="fa-solid fa-file-chart-column"></i>
               <span>{{ marketReport?.latest_muse_report?.title || marketReport?.title || 'Báo Cáo Phân Tích Thị Trường' }}</span>
-              <span v-if="marketReport?.schema_version === 'v3.1'"
-                class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">THREADS V3.1</span>
+              <span v-if="marketReport?.run_id" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-cyan-300 border border-slate-700">{{ marketReport.run_id }}</span>
+              <span v-if="marketReport?.strategy_version" class="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/40 font-mono">Strategy {{ marketReport.strategy_version }}</span>
+              <span v-if="marketReport?.contract_version || marketReport?.schema_version"
+                class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-mono">Contract {{ marketReport.contract_version ? ('V' + marketReport.contract_version) : String(marketReport.schema_version).toUpperCase() }}</span>
+              <span v-if="marketReport?.special_counts?.natural_viral !== undefined" class="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">⚡ Natural Viral: {{ marketReport.special_counts.natural_viral }}</span>
+              <span v-if="marketReport?.special_counts?.buyer_intent !== undefined" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">🛒 Buyer Intent: {{ marketReport.special_counts.buyer_intent }}</span>
               <span v-if="marketReport?.is_corrected || marketReport?.latest_muse_report?.is_corrected"
-                class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">CORRECTED V2</span>
+                class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">CORRECTED</span>
             </h3>
             <p class="text-xs text-slate-400 mt-0.5">
-              {{ marketReport?.source_label || 'Ưu tiên báo cáo Muse mới nhất' }}
+              {{ marketReport?.source_label || 'Báo cáo phân tích theo lượt crawl' }}
               <span v-if="marketReport?.run_status">
                 • Trạng thái: <strong :class="marketReport?.is_source_error ? 'text-rose-300' : 'text-emerald-300'">{{ marketReport.run_status }}</strong>
               </span>
@@ -3312,6 +3956,16 @@ HTML_TEMPLATE = """
                 • Chất lượng dữ liệu: <strong class="text-amber-300">{{ marketReport.data_quality_status || '—' }}</strong>
               </span>
             </p>
+            <div v-if="(marketReport?.data_files || []).length || (marketReport?.report_files || []).length" class="flex flex-wrap gap-1.5 mt-1.5">
+              <a v-for="df in (marketReport.data_files || [])" :key="'rep-df-'+df.file_id"
+                :href="df.drive_url || '#'" target="_blank" rel="noreferrer"
+                :class="df.drive_url ? 'text-sky-300 hover:underline border-sky-500/30 bg-sky-950/30' : 'text-slate-400 border-slate-700 pointer-events-none'"
+                class="text-[10px] px-2 py-0.5 rounded border font-mono">📄 Data: {{ df.file_name }}</a>
+              <a v-for="rf in (marketReport.report_files || [])" :key="'rep-rf-'+rf.file_id"
+                :href="rf.drive_url || '#'" target="_blank" rel="noreferrer"
+                :class="rf.drive_url ? 'text-emerald-300 hover:underline border-emerald-500/30 bg-emerald-950/30' : 'text-slate-400 border-slate-700 pointer-events-none'"
+                class="text-[10px] px-2 py-0.5 rounded border font-mono">📋 Report: {{ rf.file_name }}</a>
+            </div>
           </div>
           <div class="flex items-center gap-2">
             <select v-model="marketReportPlatform" @change="loadMarketReport"
@@ -3328,6 +3982,11 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
+        <div v-if="marketViewMode === 'by_run' && marketReport && marketReport.has_muse_report === false"
+          class="p-3 rounded-xl bg-amber-950/30 border border-amber-500/35 text-xs text-amber-200">
+          ℹ️ Lượt crawl này chưa có file <span class="font-mono">market_report / trend_report</span> riêng trên Drive — đang hiển thị tổng hợp bằng chứng từ snapshot của lượt này.
+        </div>
+
         <div v-if="marketReport?.run_status_label_vi" class="p-3 rounded-xl border text-xs"
           :class="marketReport?.is_source_error ? 'bg-rose-950/50 border-rose-500/40 text-rose-200' : (marketReport?.is_empty_market_valid ? 'bg-slate-900 border-slate-700 text-slate-300' : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200')">
           <strong>{{ marketReport.run_status_label_vi }}</strong>
@@ -3338,16 +3997,23 @@ HTML_TEMPLATE = """
           {{ marketReport.telegram_summary }}
         </div>
 
-        <!-- V3.1 Screening & Tier Distribution -->
+        <!-- V3.1/V3.2 Screening & Tier Distribution -->
         <div v-if="marketReport?.screening || marketReport?.tier_distribution" class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
           <div v-if="marketReport?.screening" class="p-4 rounded-xl bg-slate-900/75 border border-slate-800 space-y-1.5">
-            <div class="font-bold text-indigo-300 uppercase text-[11px]">Sàng lọc dữ liệu V3.1</div>
-            <div class="font-mono text-slate-200">
+            <div class="font-bold text-indigo-300 uppercase text-[11px]">Sàng lọc dữ liệu ({{ String(marketReport?.schema_version || 'V3.2').toUpperCase() }})</div>
+            <div class="font-mono text-slate-200 leading-relaxed">
+              Mục tiêu: <strong>{{ marketReport.screening.requested_count ?? '—' }}</strong> •
               Quét: <strong>{{ marketReport.screening.scanned_count ?? '—' }}</strong> •
-              Đạt chuẩn: <strong class="text-emerald-300">{{ marketReport.screening.qualified_count ?? '—' }}</strong> •
+              Ứng viên: <strong class="text-cyan-300">{{ marketReport.screening.unique_candidate_count ?? '—' }}</strong> •
+              Đạt chuẩn mới: <strong class="text-emerald-300">{{ marketReport.screening.new_qualified_count ?? marketReport.screening.qualified_count ?? '—' }}</strong> •
+              Cập nhật: <strong class="text-sky-300">{{ marketReport.screening.updated_metrics_count ?? 0 }}</strong> •
+              Trùng lịch sử: <strong class="text-slate-300">{{ marketReport.screening.duplicate_history_count ?? 0 }}</strong> •
+              Chưa XM: <strong class="text-amber-300">{{ marketReport.screening.unverified_count ?? 0 }}</strong> •
               Loại: <strong class="text-rose-300">{{ marketReport.screening.rejected_count ?? '—' }}</strong> •
-              Xác minh chéo Web: <strong class="text-cyan-300">{{ marketReport.screening.cross_verified_count ?? '—' }}</strong>
+              Thiếu views: <strong class="text-amber-200">{{ marketReport.screening.missing_views_count ?? 0 }}</strong>
             </div>
+            <div v-if="marketReport.screening.stop_reason" class="text-[11px] text-slate-400 font-mono">stop_reason: {{ marketReport.screening.stop_reason }}</div>
+            <div v-if="marketReport.screening.note" class="text-[11px] text-slate-300">{{ marketReport.screening.note }}</div>
             <div v-if="marketReport.screening.sources" class="text-[11px] text-slate-400">Nguồn: {{ marketReport.screening.sources }}</div>
             <div v-if="Object.keys(marketReport.screening.rejected_reasons || {}).length" class="flex flex-wrap gap-1.5 pt-1">
               <span v-for="(cnt, rsn) in marketReport.screening.rejected_reasons" :key="'rr-'+rsn"
@@ -3355,7 +4021,7 @@ HTML_TEMPLATE = """
             </div>
           </div>
           <div v-if="marketReport?.tier_distribution" class="p-4 rounded-xl bg-slate-900/75 border border-slate-800 space-y-2">
-            <div class="font-bold text-amber-300 uppercase text-[11px]">Phân bố 5 phân tầng & 3 nhóm Trend</div>
+            <div class="font-bold text-amber-300 uppercase text-[11px]">Phân bố 5 phân tầng & Nhóm Trend</div>
             <div class="flex flex-wrap gap-1.5 text-[11px]">
               <span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-200 border border-rose-500/30">🔥 Very Hot: {{ marketReport.tier_distribution.tiers?.very_hot ?? 0 }}</span>
               <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/30">⚡ Hot: {{ marketReport.tier_distribution.tiers?.hot ?? 0 }}</span>
@@ -3388,18 +4054,27 @@ HTML_TEMPLATE = """
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
             <div class="font-bold text-amber-300 uppercase text-[11px]">1. Xu hướng nổi bật (Đủ điều kiện Trend)</div>
             <ul class="space-y-2 text-slate-200" v-if="(marketReport.trending_highlights || []).length">
-              <li v-for="(t, i) in marketReport.trending_highlights.slice(0, 6)" :key="'tr-'+i" class="space-y-0.5">
-                <div class="font-semibold">• {{ t.title || t }}</div>
-                <div v-if="t.why_hot" class="text-[11px] text-slate-300 pl-3">{{ t.why_hot }}</div>
-                <div v-if="t.evidence" class="text-[10px] text-slate-400 pl-3">{{ t.evidence }}</div>
+              <li v-for="(t, i) in marketReport.trending_highlights.slice(0, 8)" :key="'tr-'+i" class="space-y-0.5">
+                <div class="font-semibold">• {{ t.title || t.topic || t.name || t }}</div>
+                <div v-if="t.why_hot || t.note" class="text-[11px] text-slate-300 pl-3">{{ t.why_hot || t.note }}</div>
+                <div v-if="t.evidence || (t.evidence_post_ids || []).length" class="text-[10px] text-slate-400 pl-3 font-mono">
+                  {{ t.evidence || ('Bằng chứng: ' + (t.evidence_post_ids || []).join(', ')) }}
+                </div>
               </li>
             </ul>
             <div v-else class="text-slate-500 italic">Chưa có xu hướng nổi bật từ dữ liệu hiện tại.</div>
             <div v-if="(marketReport.top_viral || []).length" class="pt-2 border-t border-slate-800 space-y-1.5">
               <div class="font-bold text-rose-300 uppercase text-[10px]">Top bài Viral (ghi rõ mức xác minh)</div>
               <div v-for="(tv, i) in marketReport.top_viral.slice(0, 5)" :key="'tv-'+i" class="p-2 rounded bg-slate-950/60 border border-slate-800/80 space-y-0.5">
-                <div class="font-semibold text-white">{{ tv.post }}</div>
-                <div class="text-[10px] font-mono text-slate-300">❤️ {{ tv.likes ?? '—' }} • 💬 {{ tv.comments ?? '—' }} • 🔁 {{ tv.reposts ?? '—' }} • 🗣️ {{ tv.quotes ?? '—' }}</div>
+                <div class="font-semibold text-white">
+                  {{ tv.post || (tv.author ? ('@' + String(tv.author).replace(/^@/, '') + (tv.post_id ? ' • ' + tv.post_id : '')) : (tv.post_id || 'Bài viral')) }}
+                  <span v-if="tv.tier" class="ml-1.5 px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[9px] uppercase">{{ tv.tier }}</span>
+                </div>
+                <div class="text-[10px] font-mono text-slate-300">
+                  <span v-if="tv.views_display || tv.views !== undefined">👁️ {{ tv.views_display ?? tv.views ?? '— (thiếu DL)' }} • </span>
+                  ❤️ {{ formatMetricOrMissing(tv.likes) }} • 💬 {{ formatMetricOrMissing(tv.comments) }} • 🔁 {{ formatMetricOrMissing(tv.reposts) }} • 📤 {{ formatMetricOrMissing(tv.shares) }}
+                </div>
+                <div v-if="tv.viral_reason" class="text-[10px] text-slate-300">{{ tv.viral_reason }}</div>
                 <div class="text-[10px] text-cyan-300">{{ tv.verification_status }}</div>
                 <a v-if="tv.url" :href="tv.url" target="_blank" rel="noreferrer" class="text-[10px] text-sky-400 hover:underline break-all">🔗 {{ tv.url }}</a>
               </div>
@@ -3417,13 +4092,17 @@ HTML_TEMPLATE = """
             <div v-else class="text-slate-500 italic">Chưa phát hiện nhóm vấn đề/phàn nàn nổi bật.</div>
             <div v-if="marketReport.emerging_and_signals" class="pt-2 border-t border-slate-800 space-y-1.5">
               <div class="font-bold text-emerald-300 uppercase text-[10px]">Mới nổi & Tín hiệu đơn lẻ (chưa phải Trend)</div>
-              <div v-for="(sig, i) in (marketReport.emerging_and_signals.signals || []).slice(0, 3)" :key="'sg-'+i" class="p-2 rounded bg-emerald-950/40 border border-emerald-500/30 space-y-0.5">
-                <div class="font-semibold text-emerald-200">[TÍN HIỆU] {{ sig.signal || sig.topic }}</div>
-                <div class="text-[10px] text-slate-300">{{ sig.evidence }}</div>
+              <div v-for="(sig, i) in (marketReport.emerging_and_signals.signals || []).slice(0, 4)" :key="'sg-'+i" class="p-2 rounded bg-emerald-950/40 border border-emerald-500/30 space-y-0.5">
+                <div class="font-semibold text-emerald-200">[TÍN HIỆU] {{ sig.signal || sig.topic || sig.name || 'Tín hiệu mới' }}</div>
+                <div v-if="sig.evidence || sig.detail" class="text-[10px] text-slate-300">{{ sig.evidence || sig.detail }}</div>
               </div>
-              <div v-for="(em, i) in (marketReport.emerging_and_signals.emerging || []).slice(0, 3)" :key="'em-'+i" class="p-2 rounded bg-slate-950/60 border border-slate-800 space-y-0.5">
-                <div class="font-semibold text-sky-200">[MỚI NỔI] {{ em.topic }}</div>
-                <div class="text-[10px] text-slate-400">{{ em.evidence }}</div>
+              <div v-for="(em, i) in (marketReport.emerging_and_signals.emerging || []).slice(0, 4)" :key="'em-'+i" class="p-2 rounded bg-slate-950/60 border border-slate-800 space-y-0.5">
+                <div class="font-semibold text-sky-200">[MỚI NỔI] {{ em.topic || em.name || em.post_id || em }}</div>
+                <div v-if="em.evidence || em.detail" class="text-[10px] text-slate-400">{{ em.evidence || em.detail }}</div>
+              </div>
+              <div v-if="!(marketReport.emerging_and_signals.emerging || []).length && (marketReport.emerging_and_signals.emerging_post_ids || []).length"
+                class="text-[10px] text-slate-300 font-mono">
+                Bài Emerging trong lượt: {{ marketReport.emerging_and_signals.emerging_post_ids.join(', ') }}
               </div>
             </div>
           </div>
@@ -3435,9 +4114,9 @@ HTML_TEMPLATE = """
                 class="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80 space-y-1">
                 <div class="font-semibold text-white flex items-center justify-between gap-2">
                   <span>{{ a.product || a.brand_or_topic }}</span>
-                  <span v-if="a.priority" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 shrink-0">{{ a.priority }}</span>
+                  <span v-if="a.priority || a.viral_level" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 shrink-0">{{ a.priority || a.viral_level }}</span>
                 </div>
-                <div v-if="a.evidence_summary" class="text-[11px] text-slate-400">{{ a.evidence_summary }}</div>
+                <div v-if="a.evidence_summary || a.angle" class="text-[11px] text-slate-400">{{ a.evidence_summary || a.angle }}</div>
                 <a v-if="(a.evidence_urls || []).length" :href="a.evidence_urls[0]" target="_blank" rel="noreferrer" class="text-[10px] text-sky-400 hover:underline">{{ a.evidence_urls[0] }}</a>
               </div>
             </div>
@@ -3453,15 +4132,43 @@ HTML_TEMPLATE = """
           <div class="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
             <div class="space-y-1.5">
               <div class="font-bold text-indigo-300 uppercase text-[11px]">4. Gợi ý Text Content & Short Video</div>
-              <div v-for="(txt, i) in (marketReport.content_suggestions?.text_posts || []).slice(0, 4)" :key="'tp-'+i"
+              <div v-for="(txt, i) in (marketReport.content_suggestions?.text_posts || []).slice(0, 5)" :key="'tp-'+i"
                 class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-950/50 border border-slate-800">
-                <span class="text-slate-200 line-clamp-2">✍️ {{ txt }}</span>
-                <button @click="topicInput = txt; currentTab = 'studio';" class="px-2 py-1 rounded bg-indigo-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo bài</button>
+                <span class="text-slate-200 line-clamp-2">✍️ {{ typeof txt === 'object' && txt !== null ? ((txt.channel ? '[' + txt.channel + '] ' : '') + (txt.idea || txt.title || JSON.stringify(txt))) : txt }}</span>
+                <button @click="topicInput = (typeof txt === 'object' && txt !== null ? (txt.idea || txt.title || '') : txt); currentTab = 'studio';" class="px-2 py-1 rounded bg-indigo-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo bài</button>
               </div>
-              <div v-for="(vid, i) in (marketReport.content_suggestions?.short_videos || []).slice(0, 4)" :key="'sv-'+i"
+              <div v-for="(vid, i) in (marketReport.content_suggestions?.short_videos || []).slice(0, 5)" :key="'sv-'+i"
                 class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-950/50 border border-slate-800">
-                <span class="text-slate-200 line-clamp-2">🎬 {{ vid }}</span>
-                <button @click="topicInput = vid; currentTab = 'studio';" class="px-2 py-1 rounded bg-pink-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo Video</button>
+                <span class="text-slate-200 line-clamp-2">🎬 {{ typeof vid === 'object' && vid !== null ? ((vid.channel ? '[' + vid.channel + '] ' : '') + (vid.idea || vid.title || JSON.stringify(vid))) : vid }}</span>
+                <button @click="topicInput = (typeof vid === 'object' && vid !== null ? (vid.idea || vid.title || '') : vid); currentTab = 'studio';" class="px-2 py-1 rounded bg-pink-600 text-white text-[10px] font-semibold shrink-0 cursor-pointer">Tạo Video</button>
+              </div>
+            </div>
+            <div v-if="(marketReport.growth_tracking || []).length" class="pt-2 border-t border-slate-800 space-y-2">
+              <div class="font-bold text-sky-300 uppercase text-[11px]">📈 Theo dõi tăng trưởng giữa các lượt (9_growth_tracking)</div>
+              <div class="overflow-x-auto rounded-lg border border-slate-800">
+                <table class="w-full text-left text-[11px]">
+                  <thead class="bg-slate-950/90 text-slate-400 text-[10px] uppercase border-b border-slate-800">
+                    <tr>
+                      <th class="px-2 py-1.5">Bài viết & Tác giả</th>
+                      <th class="px-2 py-1.5 text-right">Followers</th>
+                      <th class="px-2 py-1.5 text-right">Likes (Trước → Sau)</th>
+                      <th class="px-2 py-1.5 text-right">Cmt (Trước → Sau)</th>
+                      <th class="px-2 py-1.5 text-right">Views hiện tại</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-800/70">
+                    <tr v-for="(gt, gi) in (marketReport.growth_tracking || [])" :key="'gt-'+gi" class="hover:bg-slate-950/50">
+                      <td class="px-2 py-1.5">
+                        <div class="font-semibold text-white">{{ gt.author || '—' }} <span class="text-[10px] font-mono text-slate-400">{{ gt.post_id }}</span></div>
+                        <div v-if="gt.theme" class="text-[10px] text-slate-400">{{ gt.theme }}</div>
+                      </td>
+                      <td class="px-2 py-1.5 text-right font-mono text-slate-300">{{ gt.author_followers !== null && gt.author_followers !== undefined ? formatCompactMetric(gt.author_followers) : '—' }}</td>
+                      <td class="px-2 py-1.5 text-right font-mono text-sky-300">{{ gt.likes_before ?? '—' }} → <strong>{{ gt.likes_after ?? '—' }}</strong></td>
+                      <td class="px-2 py-1.5 text-right font-mono text-emerald-300">{{ gt.comments_before ?? '—' }} → <strong>{{ gt.comments_after ?? '—' }}</strong></td>
+                      <td class="px-2 py-1.5 text-right font-mono font-bold text-cyan-300">{{ gt.views_now_display || '—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
             <div class="pt-2 border-t border-slate-800 space-y-1">
@@ -3504,7 +4211,7 @@ HTML_TEMPLATE = """
                 <td class="py-1 pr-2 truncate max-w-[140px]">{{ sn.run_id || sn.source_file_name || '—' }}</td>
                 <td class="py-1 pr-2">{{ formatIsoTime(sn.measured_at || sn.snapshot_at) }}</td>
                 <td class="py-1 pr-2">{{ formatViewsDisplay(sn) }} <span v-if="sn.views_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.views_delta) }})</span></td>
-                <td class="py-1 pr-2">{{ formatCompactMetric(sn.likes_count) }} <span v-if="sn.likes_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.likes_delta) }})</span></td>
+                <td class="py-1 pr-2">{{ formatMetricOrMissing(sn.likes_count) }} <span v-if="sn.likes_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.likes_delta) }})</span></td>
                 <td class="py-1 pr-2">{{ formatCompactMetric(sn.comments_count) }} <span v-if="sn.comments_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.comments_delta) }})</span></td>
                 <td class="py-1 pr-2">📤 {{ formatCompactMetric(sn.shares_count) }} / 🔁 {{ formatCompactMetric(sn.reposts_count) }}</td>
                 <td class="py-1">{{ sn.change_type }}</td>
@@ -3919,13 +4626,24 @@ HTML_TEMPLATE = """
           marketOffset: 0,
           marketLimit: 25,
           marketConfigInterval: 300,
-          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', trend_tier: 'all', trend_group: 'all', verification_status: 'all', activity_filter: 'all', sort_by: 'recent', search: '' },
+          marketFilters: { platform: 'all', content_group: 'all', purchase_intent: 'all', data_quality: 'all', trend_tier: 'all', trend_group: 'all', verification_status: 'all', activity_filter: 'all', special_filter: 'all', sort_by: 'recent', search: '' },
           marketSubTab: 'overview',
           shopeeAffiliateOnly: false,
           selectedMarketDetail: null,
           isTestingConnection: false,
           marketConnectionNotice: null,
-          crawlRequestForm: { platform: 'threads', requested_count: 50, keywords: '' },
+          crawlRequestForm: {
+            platform: 'threads',
+            requested_count: 50,
+            lease_minutes: 30,
+            keywords: '',
+            crawl_mode: 'balanced',
+            topics: [],
+            lookback_hours: 24,
+            exclusions: { exclude_celebrity: true, exclude_fandom: true, exclude_pure_ads: true, vn_only: true }
+          },
+          crawlStrategyModes: (typeof window !== 'undefined' && window.__THREADS_CRAWL_CONFIG__ && Array.isArray(window.__THREADS_CRAWL_CONFIG__.modes)) ? window.__THREADS_CRAWL_CONFIG__.modes : [],
+          crawlTopicPresets: (typeof window !== 'undefined' && window.__THREADS_CRAWL_CONFIG__ && Array.isArray(window.__THREADS_CRAWL_CONFIG__.topics)) ? window.__THREADS_CRAWL_CONFIG__.topics : [],
           crawlRequests: [],
           activePromptInfo: null,
           museWebUrl: 'https://muse.ai/',
@@ -3933,7 +4651,20 @@ HTML_TEMPLATE = """
           crawlScheduleProfile: 'production_6h',
           crawlScheduleInfo: null,
           marketReport: null,
-          marketReportPlatform: 'all'
+          marketReportPlatform: 'all',
+          marketViewMode: 'by_run',
+          runTab: 'overview',
+          runPlatformOverride: '',
+          selectedRunKey: '',
+          userPinnedRunKey: false,
+          crawlRunsCatalog: [],
+          runCatalogModeFilter: 'all',
+          runCatalogTopicFilter: 'all',
+          showCrawlRunHistory: false,
+          compareBaseRunKey: '',
+          compareTargetRunKey: '',
+          runComparisonData: null,
+          isComparingRuns: false
         }
       },
       computed: {
@@ -3941,10 +4672,110 @@ HTML_TEMPLATE = """
           if (this.avatarTabFilter === 'all') return this.avatarGallery;
           return this.avatarGallery.filter(a => a.category === this.avatarTabFilter);
         },
+        crawlCommerceTopics() {
+          return (this.crawlTopicPresets || []).filter(t => t.group === 'commerce_lifestyle');
+        },
+        crawlTrafficTopics() {
+          return (this.crawlTopicPresets || []).filter(t => t.group === 'traffic_entertainment');
+        },
+        selectedCrawlModeObj() {
+          return (this.crawlStrategyModes || []).find(m => m.id === this.crawlRequestForm.crawl_mode) || null;
+        },
+        filteredCrawlRunsCatalog() {
+          const runs = this.crawlRunsCatalog || [];
+          const mFilter = String(this.runCatalogModeFilter || 'all').trim().toLowerCase();
+          const tFilter = String(this.runCatalogTopicFilter || 'all').trim().toLowerCase();
+          return runs.filter(r => {
+            if (mFilter && mFilter !== 'all') {
+              if (mFilter === '__none__') {
+                if (r.crawl_mode) return false;
+              } else if (String(r.crawl_mode || '').toLowerCase() !== mFilter) {
+                return false;
+              }
+            }
+            if (tFilter && tFilter !== 'all') {
+              const runTopics = [...(r.topics || []), ...(r.topic_labels || [])].map(x => String(x).toLowerCase());
+              if (!runTopics.includes(tFilter)) return false;
+            }
+            return true;
+          });
+        },
         isRenderingVideo() {
           if (!this.pipelineState) return false;
           const runningSteps = ['tts', 'audio', 'composite', 'export'];
           return Boolean(this.pipelineState.is_running && runningSteps.includes(this.pipelineState.current_step_id));
+        },
+        activeRunKey() {
+          return (this.marketViewMode === 'by_run' && this.selectedRunKey) ? this.selectedRunKey : '';
+        },
+        activeRunMeta() {
+          if (this.marketViewMode !== 'by_run') return null;
+          if (this.selectedRunKey) {
+            const hit = (this.crawlRunsCatalog || []).find(r => r.run_key === this.selectedRunKey);
+            if (hit) return hit;
+          }
+          return this.marketStatus?.stats?.run_summary || null;
+        },
+        isRunItemTab() {
+          return this.marketViewMode === 'by_run' && ['new_qualified', 'updated', 'duplicate_history', 'unverified', 'rejected'].includes(this.runTab);
+        },
+        activeItemViewPlatform() {
+          if (this.marketViewMode === 'history') {
+            return ['threads', 'tiktok', 'shopee'].includes(this.marketSubTab)
+              ? this.marketSubTab
+              : (this.marketFilters?.platform && this.marketFilters.platform !== 'all' ? this.marketFilters.platform : 'threads');
+          }
+          if (this.runPlatformOverride && ['threads', 'tiktok', 'shopee'].includes(this.runPlatformOverride)) {
+            return this.runPlatformOverride;
+          }
+          const m = this.activeRunMeta;
+          const plats = Array.isArray(m?.platforms) && m.platforms.length ? m.platforms : (m?.platform ? [m.platform] : []);
+          if (plats.includes('threads')) return 'threads';
+          if (plats.length && ['threads', 'tiktok', 'shopee'].includes(plats[0])) return plats[0];
+          return 'threads';
+        },
+        activeRunTabCounts() {
+          const m = this.activeRunMeta || {};
+          const s = this.marketStatus?.stats || {};
+          const bpa = s.by_platform_activity || {};
+          const act = (this.runPlatformOverride && bpa[this.runPlatformOverride]) ? bpa[this.runPlatformOverride] : (bpa.all || s.by_activity || {});
+          return {
+            new: this.runPlatformOverride && bpa[this.runPlatformOverride] ? (act.new ?? 0) : (m.new_qualified_count ?? act.new ?? 0),
+            updated: this.runPlatformOverride && bpa[this.runPlatformOverride] ? (act.growth ?? 0) : (m.updated_metrics_count ?? act.growth ?? 0),
+            duplicate: this.runPlatformOverride && bpa[this.runPlatformOverride] ? (act.duplicate ?? 0) : (m.duplicate_history_count ?? act.duplicate ?? 0),
+            unverified: this.runPlatformOverride && bpa[this.runPlatformOverride] ? (act.unverified ?? 0) : (m.unverified_count ?? act.unverified ?? 0),
+            rejected: this.runPlatformOverride && bpa[this.runPlatformOverride] ? (act.rejected ?? 0) : (m.rejected_count ?? act.rejected ?? 0),
+          };
+        },
+        activePlatformActivity() {
+          const s = this.marketStatus?.stats || {};
+          const bpa = s.by_platform_activity || {};
+          if (this.marketViewMode === 'by_run') {
+            const pKey = this.runPlatformOverride || (this.isRunItemTab ? this.activeItemViewPlatform : 'all');
+            if (bpa[pKey]) return bpa[pKey];
+            if (s.by_activity) return s.by_activity;
+            return { total: 0, new: 0, growth: 0, duplicate: 0, multi_run: 0, missing_views: 0, unverified: 0, rejected: 0 };
+          }
+          const pKey = ['threads', 'tiktok', 'shopee'].includes(this.marketSubTab)
+            ? this.marketSubTab
+            : (this.marketFilters?.platform || 'all');
+          if (bpa[pKey]) return bpa[pKey];
+          if (pKey === 'all' && s.by_activity) return s.by_activity;
+          return { total: 0, new: 0, growth: 0, duplicate: 0, multi_run: 0, missing_views: 0, unverified: 0, rejected: 0 };
+        },
+        activePlatformTiers() {
+          const s = this.marketStatus?.stats || {};
+          const bpt = s.by_platform_trend_tier || {};
+          if (this.marketViewMode === 'by_run') {
+            if (!this.runPlatformOverride && this.activeRunMeta?.tier_counts) {
+              return this.activeRunMeta.tier_counts;
+            }
+            return bpt.threads || s.threads_by_trend_tier || s.by_trend_tier || {};
+          }
+          if (bpt.threads && (this.marketSubTab === 'threads' || this.marketSubTab === 'overview')) {
+            return bpt.threads;
+          }
+          return s.threads_by_trend_tier || s.by_trend_tier || {};
         },
         visibleThreadsTierSections() {
           const defs = [
@@ -3984,22 +4815,93 @@ HTML_TEMPLATE = """
               headerClass: 'bg-slate-900 text-slate-300',
             },
           ];
-          const byTier = { very_hot: [], hot: [], emerging: [], watchlist: [], unverified: [], legacy: [] };
+          const byTier = { very_hot: [], hot: [], emerging: [], watchlist: [], unverified: [], history_match: [], rejected: [], legacy: [] };
           for (const it of (this.marketItems || [])) {
+            const cls = String(it.classification || '').toUpperCase();
             const vs = String(it.verification_status || '').toLowerCase();
             const tt = String(it.trend_tier || '').toLowerCase();
-            if (vs === 'unverified' || tt === 'unverified') {
+            if (cls === 'REJECTED') {
+              byTier.rejected.push(it);
+            } else if (vs === 'unverified' || tt === 'unverified' || cls === 'UNVERIFIED') {
               byTier.unverified.push(it);
             } else if (tt && byTier[tt] !== undefined) {
               byTier[tt].push(it);
+            } else if (cls === 'UPDATED_METRICS' || cls === 'DUPLICATE_HISTORY') {
+              byTier.history_match.push(it);
             } else {
               byTier.legacy.push(it);
             }
           }
+          const items = this.marketItems || [];
+          if (this.marketViewMode === 'by_run') {
+            if (this.runTab === 'updated') {
+              return [{
+                key: 'updated_metrics',
+                label: '📈 BÀI CẬP NHẬT TƯƠNG TÁC (UPDATED_METRICS)',
+                subtitle: 'Bài viết đã tồn tại trước đó và có thay đổi chỉ số tương tác trong lượt crawl này',
+                borderClass: 'border-sky-500/40',
+                headerClass: 'bg-sky-950/45 text-sky-200',
+                items,
+              }];
+            }
+            if (this.runTab === 'duplicate_history') {
+              return [{
+                key: 'duplicate_history',
+                label: '🔁 BÀI TRÙNG LỊCH SỬ (DUPLICATE_HISTORY)',
+                subtitle: 'Bài viết đã xuất hiện trong D1 Registry và chỉ số không thay đổi đáng kể ở lượt này',
+                borderClass: 'border-amber-500/40',
+                headerClass: 'bg-amber-950/40 text-amber-200',
+                items,
+              }];
+            }
+            if (this.runTab === 'unverified') {
+              return [{
+                key: 'unverified',
+                label: '❓ BÀI CHƯA XÁC MINH (UNVERIFIED)',
+                subtitle: 'Bài chưa xác minh được views/metrics — không tính vào danh sách đạt chuẩn',
+                borderClass: 'border-slate-700',
+                headerClass: 'bg-slate-900 text-slate-300',
+                items,
+              }];
+            }
+            if (this.runTab === 'rejected') {
+              return [{
+                key: 'rejected',
+                label: '🚫 BÀI BỊ LOẠI (REJECTED)',
+                subtitle: 'Bài không đạt ngưỡng lọc hoặc điều kiện Data Contract trong lượt này',
+                borderClass: 'border-rose-500/35',
+                headerClass: 'bg-rose-950/35 text-rose-200',
+                items,
+              }];
+            }
+          }
           const activeFilter = String(this.marketFilters?.trend_tier || 'all').toLowerCase();
-          const sections = defs
+          const tierDefs = (this.marketViewMode === 'by_run' && this.runTab === 'new_qualified')
+            ? defs.filter(d => d.key !== 'unverified')
+            : defs;
+          const sections = tierDefs
             .filter(d => activeFilter === 'all' || activeFilter === d.key)
             .map(d => ({ ...d, items: byTier[d.key] || [] }));
+          if (this.marketViewMode !== 'by_run' && activeFilter === 'all' && byTier.history_match.length > 0) {
+            sections.push({
+              key: 'history_match',
+              label: '🔁 CẬP NHẬT CHỈ SỐ / TRÙNG LỊCH SỬ (V3.2)',
+              subtitle: 'Bài viết đã xuất hiện trong D1 Registry (UPDATED_METRICS / DUPLICATE_HISTORY)',
+              borderClass: 'border-sky-500/35',
+              headerClass: 'bg-sky-950/35 text-sky-200',
+              items: byTier.history_match,
+            });
+          }
+          if (this.marketViewMode !== 'by_run' && activeFilter === 'all' && byTier.rejected.length > 0) {
+            sections.push({
+              key: 'rejected',
+              label: '🚫 BÀI BỊ LOẠI (REJECTED V3.2)',
+              subtitle: 'Bài không đạt chuẩn lọc / ngoài cửa sổ thời gian / không đủ điều kiện',
+              borderClass: 'border-rose-500/30',
+              headerClass: 'bg-rose-950/30 text-rose-200',
+              items: byTier.rejected,
+            });
+          }
           if ((activeFilter === 'all' && byTier.legacy.length > 0) || activeFilter === 'legacy') {
             sections.push({
               key: 'legacy',
@@ -4108,7 +5010,9 @@ HTML_TEMPLATE = """
                 await this.loadMarketStatus();
                 const nextSig = this.getMarketSyncSignature(this.marketStatus);
                 if ((prevSig && nextSig !== prevSig) || (wasSyncing && !this.marketStatus.is_syncing)) {
+                  await this.loadMarketRunsCatalog({ preserveSelection: true });
                   await Promise.all([
+                    this.loadMarketStatus(),
                     this.loadMarketItems(this.marketOffset),
                     this.loadMarketReport(),
                     this.loadCrawlRequests(),
@@ -4824,7 +5728,160 @@ HTML_TEMPLATE = """
             return String(val);
           }
         },
+        async loadMarketRunsCatalog({ preserveSelection = true } = {}) {
+          try {
+            const res = await fetch('/api/market/runs_catalog?limit=60&platform=all');
+            const data = await res.json();
+            if (!data.ok) return;
+            const prevLatest = this.crawlRunsCatalog[0]?.run_key || '';
+            const runs = data.runs || [];
+            this.crawlRunsCatalog = runs;
+            const newLatest = runs[0]?.run_key || '';
+            if (!this.selectedRunKey && newLatest) {
+              this.selectedRunKey = newLatest;
+            } else if (prevLatest && newLatest && prevLatest !== newLatest) {
+              // Never yank view away if user explicitly selected/is viewing a historical run
+              if (!preserveSelection || (!this.userPinnedRunKey && this.selectedRunKey === prevLatest)) {
+                this.selectedRunKey = newLatest;
+              } else {
+                const newestLabel = runs[0]?.run_id || runs[0]?.data_file?.file_name || newLatest;
+                this.notify(`🆕 Có lượt crawl mới (${newestLabel}) — đã thêm vào danh sách.`, 'info');
+              }
+            }
+            if (!this.compareTargetRunKey && newLatest) {
+              this.compareTargetRunKey = newLatest;
+            }
+            if (!this.compareBaseRunKey && runs.length >= 2) {
+              this.compareBaseRunKey = runs[1].run_key;
+            } else if (!this.compareBaseRunKey && newLatest) {
+              this.compareBaseRunKey = newLatest;
+            }
+          } catch (e) {}
+        },
+        _applyRunTabFilters(tab) {
+          const map = {
+            new_qualified: 'new',
+            updated: 'growth',
+            duplicate_history: 'duplicate',
+            unverified: 'unverified',
+            rejected: 'rejected',
+          };
+          if (map[tab]) {
+            this.marketFilters.platform = this.activeItemViewPlatform;
+            this.marketFilters.activity_filter = map[tab];
+            this.marketFilters.sort_by = tab === 'new_qualified'
+              ? (this.activeItemViewPlatform === 'tiktok' ? 'views' : (this.activeItemViewPlatform === 'threads' ? 'tier' : 'recent'))
+              : 'recent';
+          }
+        },
+        async switchRunTab(tab, opts = {}) {
+          this.runTab = tab;
+          if (!opts.keepTier) this.marketFilters.trend_tier = 'all';
+          if (!opts.keepSpecial) this.marketFilters.special_filter = 'all';
+          if (['new_qualified', 'updated', 'duplicate_history', 'unverified', 'rejected'].includes(tab)) {
+            this._applyRunTabFilters(tab);
+            await this.loadMarketItems(0);
+          } else if (tab === 'report') {
+            await this.loadMarketReport();
+          } else {
+            await Promise.all([this.loadMarketStatus(), this.loadMarketReport()]);
+          }
+        },
+        async switchRunPlatformFilter(plat) {
+          this.runPlatformOverride = plat || '';
+          if (this.isRunItemTab) {
+            this._applyRunTabFilters(this.runTab);
+            await Promise.all([this.loadMarketItems(0), this.loadMarketReport()]);
+          } else {
+            await Promise.all([this.loadMarketStatus(), this.loadMarketReport()]);
+          }
+        },
+        async selectCrawlRun(runKey, userInitiated = true) {
+          if (!runKey) return;
+          this.marketViewMode = 'by_run';
+          this.selectedRunKey = runKey;
+          this.userPinnedRunKey = Boolean(userInitiated);
+          this.runPlatformOverride = '';
+          this.marketFilters.trend_tier = 'all';
+          this.marketFilters.special_filter = 'all';
+          if (this.isRunItemTab) {
+            this._applyRunTabFilters(this.runTab);
+          }
+          await Promise.all([
+            this.loadMarketStatus(),
+            this.loadMarketItems(0),
+            this.loadMarketReport(),
+          ]);
+        },
+        onSelectRunDropdown() {
+          const newestKey = this.crawlRunsCatalog[0]?.run_key || '';
+          const pinned = Boolean(this.selectedRunKey && this.selectedRunKey !== newestKey);
+          this.selectCrawlRun(this.selectedRunKey, pinned);
+        },
+        async switchMarketViewMode(mode) {
+          if (!['by_run', 'history', 'compare'].includes(mode)) return;
+          this.marketViewMode = mode;
+          this.runPlatformOverride = '';
+          this.marketFilters.trend_tier = 'all';
+          this.marketFilters.special_filter = 'all';
+          if (mode === 'by_run') {
+            if (!this.selectedRunKey && this.crawlRunsCatalog.length) {
+              this.selectedRunKey = this.crawlRunsCatalog[0].run_key;
+              this.userPinnedRunKey = false;
+            }
+            if (!this.runTab) this.runTab = 'overview';
+            this._applyRunTabFilters(this.runTab);
+            await Promise.all([
+              this.loadMarketStatus(),
+              this.loadMarketItems(0),
+              this.loadMarketReport(),
+            ]);
+          } else if (mode === 'history') {
+            this.marketFilters.activity_filter = 'all';
+            if (!['overview', 'threads', 'tiktok', 'shopee', 'reports'].includes(this.marketSubTab)) {
+              this.marketSubTab = 'overview';
+            }
+            this.marketFilters.platform = ['threads', 'tiktok', 'shopee'].includes(this.marketSubTab) ? this.marketSubTab : 'all';
+            await Promise.all([
+              this.loadMarketStatus(),
+              this.loadMarketItems(0),
+              this.loadMarketReport(),
+            ]);
+          } else if (mode === 'compare') {
+            if (!this.compareTargetRunKey && this.crawlRunsCatalog.length) {
+              this.compareTargetRunKey = this.crawlRunsCatalog[0].run_key;
+            }
+            if (!this.compareBaseRunKey && this.crawlRunsCatalog.length >= 2) {
+              this.compareBaseRunKey = this.crawlRunsCatalog[1].run_key;
+            }
+            if (this.compareBaseRunKey && this.compareTargetRunKey) {
+              await this.runCrawlComparison();
+            }
+          }
+        },
+        async runCrawlComparison() {
+          if (!this.compareBaseRunKey || !this.compareTargetRunKey) return;
+          this.isComparingRuns = true;
+          try {
+            const qs = new URLSearchParams({
+              base_run_key: this.compareBaseRunKey,
+              target_run_key: this.compareTargetRunKey,
+              platform: 'all',
+            });
+            const res = await fetch('/api/market/runs/compare?' + qs.toString());
+            const data = await res.json();
+            this.runComparisonData = data;
+            if (!data.ok && data.error) {
+              this.notify(data.error, 'error');
+            }
+          } catch (e) {
+            this.notify('Lỗi so sánh 2 lượt crawl: ' + e, 'error');
+          } finally {
+            this.isComparingRuns = false;
+          }
+        },
         async loadMarketDashboard() {
+          await this.loadMarketRunsCatalog({ preserveSelection: true });
           await Promise.all([
             this.loadMarketStatus(),
             this.loadMarketItems(this.marketOffset),
@@ -4834,7 +5891,20 @@ HTML_TEMPLATE = """
         },
         async loadMarketReport() {
           try {
-            const res = await fetch('/api/market/report?platform=' + encodeURIComponent(this.marketReportPlatform || 'all'));
+            let effPlatform = this.marketReportPlatform || 'all';
+            if (this.marketViewMode === 'by_run') {
+              if (this.runPlatformOverride) {
+                effPlatform = this.runPlatformOverride;
+              } else {
+                const mPlat = this.activeRunMeta?.platform;
+                effPlatform = (mPlat && mPlat !== 'mixed') ? mPlat : 'all';
+              }
+            }
+            const qs = new URLSearchParams({
+              platform: effPlatform,
+            });
+            if (this.activeRunKey) qs.set('run_key', this.activeRunKey);
+            const res = await fetch('/api/market/report?' + qs.toString());
             const data = await res.json();
             if (data.report) this.marketReport = data.report;
           } catch (e) {}
@@ -4893,6 +5963,85 @@ HTML_TEMPLATE = """
             eng.with_shares ?? 0,
           ].join('|');
         },
+        formatStopReasonLabel(reason) {
+          const clean = String(reason || '').trim().toLowerCase();
+          if (!clean) return '';
+          const map = {
+            time_budget: 'Hết ngân sách thời gian',
+            target_achieved: 'Đạt mục tiêu',
+            source_exhausted: 'Cạn nguồn phù hợp',
+            exhausted: 'Cạn nguồn phù hợp',
+            no_qualifying_posts: 'Không có bài đạt chuẩn',
+            insufficient_data: 'Thiếu dữ liệu xác minh',
+            rate_limited: 'Giới hạn nền tảng',
+            platform_limit: 'Giới hạn nền tảng',
+            captcha_blocked: 'Gặp CAPTCHA / xác minh',
+            captcha: 'Gặp CAPTCHA / xác minh',
+          };
+          return map[clean] || String(reason);
+        },
+        formatActualProcessingDuration(seconds) {
+          if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds)) || Number(seconds) < 0) return '';
+          const totalSec = Math.round(Number(seconds));
+          const h = Math.floor(totalSec / 3600);
+          const m = Math.floor((totalSec % 3600) / 60);
+          const s = totalSec % 60;
+          if (h > 0) return `${h}g ${m}p`;
+          if (m > 0) return s > 0 ? `${m}p ${s}s` : `${m}p`;
+          return `${s}s`;
+        },
+        findMatchingRunKeyForRequest(crw) {
+          if (!crw || typeof crw !== 'object') return null;
+          const prog = this.getCrawlProgress(crw);
+          const targetRunId = prog.runId || null;
+          const reqId = String(crw.id || '').trim();
+          const repFileId = String(crw.report_file_id || prog.reportFileId || '').trim();
+          const catalog = Array.isArray(this.crawlRunsCatalog) ? this.crawlRunsCatalog : [];
+          for (const r of catalog) {
+            if (targetRunId && r.run_id && String(r.run_id).trim() === targetRunId) return r.run_key;
+          }
+          for (const r of catalog) {
+            if (reqId && r.request_id && String(r.request_id).trim() === reqId) return r.run_key;
+          }
+          if (repFileId) {
+            for (const r of catalog) {
+              const repFiles = Array.isArray(r.report_files) ? r.report_files : [];
+              if (repFiles.some(rf => String(rf.file_id || '').trim() === repFileId)) return r.run_key;
+            }
+          }
+          return null;
+        },
+        canOpenCrawlResultRun(crw) {
+          if (!crw || String(crw.status || '').toLowerCase() !== 'completed') return false;
+          const prog = this.getCrawlProgress(crw);
+          return Boolean(prog.runId || this.findMatchingRunKeyForRequest(crw));
+        },
+        async openCrawlResultRun(crw) {
+          if (!crw) return;
+          let runKey = this.findMatchingRunKeyForRequest(crw);
+          if (!runKey) {
+            await this.loadMarketRunsCatalog({ preserveSelection: true });
+            runKey = this.findMatchingRunKeyForRequest(crw);
+          }
+          if (!runKey) {
+            const prog = this.getCrawlProgress(crw);
+            this.notify(
+              `⏳ Lượt crawl ${prog.runId || crw.id} chưa đồng bộ từ Drive về máy — hãy bấm "Đồng bộ Drive ngay" trước.`,
+              'warning'
+            );
+            return;
+          }
+          this.currentTab = 'market';
+          this.marketViewMode = 'by_run';
+          this.runTab = 'overview';
+          await this.selectCrawlRun(runKey, true);
+          this.$nextTick(() => {
+            const el = document.getElementById('marketRunCentricAnchor');
+            if (el && typeof el.scrollIntoView === 'function') {
+              el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          });
+        },
         getCrawlDisplayState(crw) {
           const pm = (crw?.progress_metrics && typeof crw.progress_metrics === 'object') ? crw.progress_metrics : {};
           const raw = String(crw?.status || 'queued').toLowerCase();
@@ -4907,11 +6056,20 @@ HTML_TEMPLATE = """
             else if (raw === 'completed') code = (regSt === 'pending' || regSt === 'error' ? 'syncing' : 'completed');
             else code = raw;
           }
+          let completedMeta = { label: label || 'Hoàn tất', badgeClass: 'bg-emerald-500/20 text-emerald-300' };
+          if (code === 'completed') {
+            const prog = this.getCrawlProgress(crw);
+            if (prog.reached === true) {
+              completedMeta = { label: 'Hoàn tất — Đạt mục tiêu', badgeClass: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' };
+            } else if (prog.reached === false) {
+              completedMeta = { label: 'Hoàn tất — Chưa đạt mục tiêu', badgeClass: 'bg-amber-500/20 text-amber-300 border border-amber-500/40' };
+            }
+          }
           const map = {
             waiting_prompt: { label: label || 'Chờ gửi prompt', badgeClass: 'bg-amber-500/20 text-amber-300' },
             crawling: { label: label || 'Đang crawl', badgeClass: 'bg-cyan-500/20 text-cyan-300' },
             syncing: { label: label || 'Đang đồng bộ', badgeClass: 'bg-indigo-500/25 text-indigo-300' },
-            completed: { label: label || 'Hoàn tất', badgeClass: 'bg-emerald-500/20 text-emerald-300' },
+            completed: completedMeta,
             failed: { label: label || 'Lỗi', badgeClass: 'bg-rose-500/20 text-rose-300' },
             cancelled: { label: label || 'Đã hủy', badgeClass: 'bg-slate-800 text-slate-400' },
           };
@@ -4937,6 +6095,7 @@ HTML_TEMPLATE = """
           this.isCrawlCenterRefreshing = true;
           try {
             const prevSig = this.lastMarketSyncSignature;
+            await this.loadMarketRunsCatalog({ preserveSelection: true });
             await Promise.all([
               this.loadCrawlRequests(),
               this.loadMarketStatus(),
@@ -4984,18 +6143,51 @@ HTML_TEMPLATE = """
           const missingViews = pickInt(pm.missing_views_count, summary.missing_views_count, summary.views_missing_count, s1.missing_views_count);
           const rejected = pickInt(pm.rejected_count, summary.rejected_count, summary.rejected_posts, s1.rejected_count);
           const similarContent = pickInt(pm.similar_content_count, summary.similar_content_count, s1.similar_content_count);
-          const stopReason = pm.stop_reason || summary.stop_reason || null;
+          const stopReason = pm.stop_reason || summary.stop_reason || s1.stop_reason || null;
+          const runId = String(summary.run_id || summary.drive_reconcile?.run_id || s1.run_id || crw?.run_id || '').trim() || null;
+          const reportFileId = String(summary.report_file_id || summary.drive_reconcile?.report_file_id || crw?.report_file_id || '').trim() || null;
+          const strategyVersion = crw?.strategy_version || summary.strategy_version || null;
+          const crawlModeLabel = crw?.crawl_mode_label || summary.crawl_mode_label || summary.crawl_mode || null;
+          const topics = Array.isArray(crw?.topics) && crw.topics.length ? crw.topics : (Array.isArray(summary.topics) ? summary.topics : []);
+
+          let actualDurationSec = pickInt(
+            summary.duration_seconds,
+            summary.execution_duration_sec,
+            summary.elapsed_seconds,
+            pm.duration_seconds
+          );
+          let actualDurationTitle = '';
+          if (actualDurationSec === null) {
+            const startRaw = summary.started_at || crw?.claimed_at || null;
+            const endRaw = summary.ended_at || summary.crawled_at || summary.generated_at || (['completed', 'failed'].includes(String(crw?.status || '').toLowerCase()) ? crw?.updated_at : null);
+            if (startRaw && endRaw) {
+              const sMs = Date.parse(startRaw);
+              const eMs = Date.parse(endRaw);
+              if (Number.isFinite(sMs) && Number.isFinite(eMs) && eMs >= sMs) {
+                actualDurationSec = Math.round((eMs - sMs) / 1000);
+                actualDurationTitle = `${this.formatIsoTime(startRaw)} → ${this.formatIsoTime(endRaw)}`;
+              }
+            }
+          }
+          const actualDurationLabel = this.formatActualProcessingDuration(actualDurationSec);
+
           const hasRealMetrics = [scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified, missingViews, rejected].some(v => v !== null);
           const explicitTargetAchieved = (typeof pm.target_achieved === 'boolean') ? pm.target_achieved : ((typeof summary.target_achieved === 'boolean') ? summary.target_achieved : null);
           const reached = explicitTargetAchieved !== null ? explicitTargetAchieved : (newQualified !== null ? newQualified >= target : null);
           return {
             target, scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified,
-            missingViews, rejected, similarContent, stopReason, hasRealMetrics, reached,
+            missingViews, rejected, similarContent, stopReason, runId, reportFileId,
+            strategyVersion, crawlModeLabel, topics,
+            actualDurationSec, actualDurationLabel, actualDurationTitle,
+            hasRealMetrics, reached,
           };
         },
         async loadMarketStatus() {
           try {
-            const res = await fetch('/api/market/status');
+            const qs = new URLSearchParams();
+            if (this.activeRunKey) qs.set('run_key', this.activeRunKey);
+            const url = qs.toString() ? ('/api/market/status?' + qs.toString()) : '/api/market/status';
+            const res = await fetch(url);
             const data = await res.json();
             this.marketStatus = data;
             this.lastMarketSyncSignature = this.getMarketSyncSignature(data);
@@ -5037,9 +6229,36 @@ HTML_TEMPLATE = """
           if (num >= 1000000) return (num / 1000000).toFixed(1).replace(/\\.0$/, '') + 'M (' + num.toLocaleString('vi-VN') + ')';
           return num.toLocaleString('vi-VN');
         },
+        formatMetricOrMissing(val) {
+          if (val === null || val === undefined || val === '') return '— (thiếu DL)';
+          return this.formatCompactMetric(val);
+        },
+        formatRatioMetric(val) {
+          if (val === null || val === undefined || val === '') return '—';
+          const num = Number(val);
+          if (!Number.isFinite(num)) return String(val);
+          if (num >= 100) return Math.round(num).toLocaleString('vi-VN');
+          return num.toFixed(1).replace(/\\.0$/, '');
+        },
         jumpToThreadsTier(tier) {
+          this.runPlatformOverride = 'threads';
+          if (this.marketViewMode === 'by_run') {
+            if (tier === 'unverified') {
+              return this.switchRunTab('unverified');
+            }
+            this.runTab = 'new_qualified';
+            this.marketFilters.platform = 'threads';
+            this.marketFilters.activity_filter = 'new';
+            this.marketFilters.special_filter = 'all';
+            this.marketFilters.trend_tier = tier || 'all';
+            this.marketFilters.sort_by = 'tier';
+            this.loadMarketItems(0);
+            return;
+          }
           this.marketSubTab = 'threads';
           this.marketFilters.platform = 'threads';
+          this.marketFilters.activity_filter = 'all';
+          this.marketFilters.special_filter = 'all';
           this.marketFilters.trend_tier = tier || 'all';
           this.marketFilters.sort_by = 'tier';
           this.loadMarketItems(0);
@@ -5059,10 +6278,13 @@ HTML_TEMPLATE = """
         },
         async loadMarketItems(offset = 0) {
           this.marketOffset = Math.max(0, offset);
-          const effLimit = this.marketSubTab === 'threads' ? Math.max(this.marketLimit, 100) : this.marketLimit;
+          const effLimit = (this.marketViewMode === 'by_run' || this.marketSubTab === 'threads') ? Math.max(this.marketLimit, 200) : this.marketLimit;
+          const effPlatform = (this.marketViewMode === 'by_run' && this.isRunItemTab)
+            ? this.activeItemViewPlatform
+            : (this.marketFilters.platform || 'all');
           try {
             const qs = new URLSearchParams({
-              platform: this.marketFilters.platform || 'all',
+              platform: effPlatform,
               content_group: this.marketFilters.content_group || 'all',
               purchase_intent: this.marketFilters.purchase_intent || 'all',
               data_quality: this.marketFilters.data_quality || 'all',
@@ -5070,8 +6292,10 @@ HTML_TEMPLATE = """
               trend_group: this.marketFilters.trend_group || 'all',
               verification_status: this.marketFilters.verification_status || 'all',
               activity_filter: this.marketFilters.activity_filter || 'all',
+              special_filter: this.marketFilters.special_filter || 'all',
+              run_key: this.activeRunKey || '',
               sort_by: this.marketFilters.sort_by || 'recent',
-              affiliate_only: (this.marketSubTab === 'shopee' && this.shopeeAffiliateOnly) ? '1' : '0',
+              affiliate_only: (effPlatform === 'shopee' && this.shopeeAffiliateOnly) ? '1' : '0',
               search: this.marketFilters.search || '',
               limit: String(effLimit),
               offset: String(this.marketOffset),
@@ -5163,6 +6387,26 @@ HTML_TEMPLATE = """
             this.notify('Lỗi tải file JSON: ' + err, 'error');
           }
         },
+        toggleTopicSelection(topicId) {
+          const cur = Array.isArray(this.crawlRequestForm.topics) ? [...this.crawlRequestForm.topics] : [];
+          const idx = cur.indexOf(topicId);
+          if (idx >= 0) cur.splice(idx, 1);
+          else cur.push(topicId);
+          this.crawlRequestForm.topics = cur;
+        },
+        selectAllTopics() {
+          this.crawlRequestForm.topics = (this.crawlTopicPresets || []).map(t => t.id);
+        },
+        clearAllTopics() {
+          this.crawlRequestForm.topics = [];
+        },
+        selectTopicGroup(groupName) {
+          const cur = new Set(Array.isArray(this.crawlRequestForm.topics) ? this.crawlRequestForm.topics : []);
+          for (const t of (this.crawlTopicPresets || [])) {
+            if (t.group === groupName) cur.add(t.id);
+          }
+          this.crawlRequestForm.topics = Array.from(cur);
+        },
         async submitCrawlRequest() {
           const parsedCount = Number.parseInt(this.crawlRequestForm.requested_count, 10);
           if (!Number.isFinite(parsedCount) || parsedCount < 1 || parsedCount > 500) {
@@ -5170,25 +6414,64 @@ HTML_TEMPLATE = """
             return;
           }
           try {
+            const plat = this.crawlRequestForm.platform || 'threads';
+            const parsedLeaseMin = Math.min(Math.max(Number.parseInt(this.crawlRequestForm.lease_minutes, 10) || 30, 1), 120);
+            const payloadBody = {
+              platform: plat,
+              requested_count: parsedCount,
+              keywords: this.crawlRequestForm.keywords || '',
+              poll_profile: this.crawlScheduleProfile,
+            };
+            if (plat === 'threads') {
+              const selMode = this.crawlRequestForm.crawl_mode || 'balanced';
+              const modeMeta = (this.crawlStrategyModes || []).find(m => m.id === selMode);
+              if (modeMeta && !modeMeta.enabled) {
+                this.notify('⚠️ ' + (modeMeta.disabled_reason || 'Mode này chưa được bật.'), 'error');
+                return;
+              }
+              const selTopics = Array.isArray(this.crawlRequestForm.topics) ? [...this.crawlRequestForm.topics] : [];
+              const selLookback = [24, 48, 72, 168].includes(Number(this.crawlRequestForm.lookback_hours)) ? Number(this.crawlRequestForm.lookback_hours) : 24;
+              const excl = this.crawlRequestForm.exclusions || { exclude_celebrity: true, exclude_fandom: true, exclude_pure_ads: true, vn_only: true };
+              payloadBody.lease_minutes = parsedLeaseMin;
+              payloadBody.crawl_mode = selMode;
+              payloadBody.topics = selTopics;
+              payloadBody.lookback_hours = selLookback;
+              payloadBody.exclusions = {
+                exclude_celebrity: Boolean(excl.exclude_celebrity),
+                exclude_fandom: Boolean(excl.exclude_fandom),
+                exclude_pure_ads: Boolean(excl.exclude_pure_ads),
+                vn_only: Boolean(excl.vn_only),
+              };
+              payloadBody.options = {
+                lease_seconds: parsedLeaseMin * 60,
+                crawl_mode: selMode,
+                topics: selTopics,
+                lookback_hours: selLookback,
+                exclusions: payloadBody.exclusions,
+              };
+            }
             const res = await fetch('/api/remote/crawl_requests', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                platform: this.crawlRequestForm.platform || 'threads',
-                requested_count: parsedCount,
-                keywords: this.crawlRequestForm.keywords || '',
-                poll_profile: this.crawlScheduleProfile
-              })
+              body: JSON.stringify(payloadBody)
             });
             const data = await res.json();
             if (data.ok) {
               if (data.muse_web_url) this.museWebUrl = data.muse_web_url;
               const promptText = data.manual_prompt || data.request?.manual_prompt || '';
               if (promptText) {
+                const effPlat = data.request?.platform || plat;
                 this.activePromptInfo = {
                   request_id: data.request?.id || '',
-                  platform: data.request?.platform || this.crawlRequestForm.platform || 'threads',
-                  contract_version: data.request?.contract_version || ((data.request?.platform || 'threads') === 'threads' ? '3.2' : 'v2'),
+                  platform: effPlat,
+                  strategy_version: data.request?.strategy_version || (effPlat === 'threads' ? '3.3 (sửa đổi 28/11/2026)' : null),
+                  contract_version: data.request?.contract_version || (effPlat === 'threads' ? '3.2' : 'v2'),
+                  crawl_mode: data.request?.crawl_mode || (effPlat === 'threads' ? payloadBody.crawl_mode : null),
+                  crawl_mode_label: data.request?.crawl_mode_label || null,
+                  topics: data.request?.topics || (effPlat === 'threads' ? payloadBody.topics : []),
+                  topic_labels: data.request?.topic_labels || [],
+                  lookback_hours: data.request?.lookback_hours || (effPlat === 'threads' ? payloadBody.lookback_hours : null),
+                  lease_minutes: data.request?.lease_minutes || (effPlat === 'threads' ? parsedLeaseMin : null),
                   manual_prompt: promptText,
                 };
                 await this.copyTextToClipboard(
@@ -5232,7 +6515,14 @@ HTML_TEMPLATE = """
             this.activePromptInfo = {
               request_id: reqObj.id,
               platform: reqObj.platform,
+              strategy_version: reqObj.strategy_version || (reqObj.platform === 'threads' ? '3.3 (sửa đổi 28/11/2026)' : null),
               contract_version: reqObj.contract_version || (reqObj.platform === 'threads' ? '3.2' : 'v2'),
+              crawl_mode: reqObj.crawl_mode || null,
+              crawl_mode_label: reqObj.crawl_mode_label || null,
+              topics: reqObj.topics || [],
+              topic_labels: reqObj.topic_labels || [],
+              lookback_hours: reqObj.lookback_hours || null,
+              lease_minutes: reqObj.lease_minutes || null,
               manual_prompt: promptText,
             };
             await this.copyTextToClipboard(promptText, `📋 Đã copy lại Prompt của ${reqObj.id} (không tạo request mới).`);
@@ -5360,7 +6650,9 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
-    return HTML_TEMPLATE, 200, {"Content-Type": "text/html; charset=utf-8"}
+    cfg_script = f"<script>window.__THREADS_CRAWL_CONFIG__ = {json.dumps(get_crawl_config_payload(), ensure_ascii=False)};</script>\n</head>"
+    html = HTML_TEMPLATE.replace("</head>", cfg_script, 1)
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/favicon.ico")
@@ -6357,9 +7649,12 @@ def api_open_folder():
 def api_market_status():
     rt = get_market_runtime()
     store = rt["store"]
+    run_key = request.args.get("run_key") or None
+    platform = request.args.get("platform") or None
     return jsonify({
         "is_syncing": rt["sync_service"].is_syncing,
-        "stats": store.get_stats(),
+        "run_key": run_key,
+        "stats": store.get_stats(run_key=run_key, platform=platform),
         "filter_options": store.get_filter_options(),
         "recent_runs": store.list_sync_runs(limit=15),
         "cloudflare": rt["client"].get_public_config_summary(),
@@ -6411,6 +7706,8 @@ def api_market_items():
     trend_group = request.args.get("trend_group", "all")
     verification_status = request.args.get("verification_status", "all")
     activity_filter = request.args.get("activity_filter", "all")
+    special_filter = request.args.get("special_filter", "all")
+    run_key = request.args.get("run_key") or None
     sort_by = request.args.get("sort_by", "recent")
     affiliate_only = request.args.get("affiliate_only", "0") in ("1", "true", "True")
     search = request.args.get("search", "")
@@ -6432,6 +7729,8 @@ def api_market_items():
             trend_group=trend_group,
             verification_status=verification_status,
             activity_filter=activity_filter,
+            special_filter=special_filter,
+            run_key=run_key,
             search=search,
             sort_by=sort_by,
             affiliate_only=affiliate_only,
@@ -6493,9 +7792,65 @@ def api_remote_status():
 def api_market_report():
     rt = get_market_runtime()
     platform = request.args.get("platform", "all")
-    report = rt["store"].build_evidence_report(platform=platform)
+    run_key = request.args.get("run_key") or None
+    report = rt["store"].build_evidence_report(platform=platform, run_key=run_key)
     saved = rt["store"].list_reports(limit=10)
-    return jsonify({"report": report, "saved_reports": saved})
+    return jsonify({"report": report, "saved_reports": saved, "run_key": run_key})
+
+
+@app.route("/api/market/runs_catalog", methods=["GET"])
+def api_market_runs_catalog():
+    rt = get_market_runtime()
+    platform = request.args.get("platform", "all")
+    crawl_mode = request.args.get("crawl_mode") or None
+    topic = request.args.get("topic") or None
+    include_archived = request.args.get("include_archived", "0") in ("1", "true", "True")
+    include_remote = request.args.get("include_remote", "0") in ("1", "true", "True")
+    try:
+        limit = int(request.args.get("limit", "50"))
+    except ValueError:
+        limit = 50
+    remote_reqs = None
+    if include_remote and rt["client"].is_configured():
+        try:
+            rc = rt["client"].list_crawl_requests(limit=50)
+            if isinstance(rc, dict) and isinstance(rc.get("items"), list):
+                remote_reqs = rc["items"]
+        except Exception:
+            remote_reqs = None
+    runs = rt["store"].list_crawl_runs(
+        platform=platform,
+        limit=limit,
+        include_archived=include_archived,
+        crawl_requests=remote_reqs,
+        crawl_mode=crawl_mode,
+        topic=topic,
+    )
+    return jsonify({
+        "ok": True,
+        "runs": runs,
+        "total": len(runs),
+        "latest_run_key": runs[0]["run_key"] if runs else None,
+    })
+
+
+@app.route("/api/market/runs/compare", methods=["GET"])
+def api_market_runs_compare():
+    rt = get_market_runtime()
+    base_run_key = (request.args.get("base_run_key") or "").strip()
+    target_run_key = (request.args.get("target_run_key") or "").strip()
+    platform = request.args.get("platform", "all")
+    if not base_run_key or not target_run_key:
+        return jsonify({"ok": False, "error": "Cần chọn đủ 2 lượt crawl để so sánh (base_run_key và target_run_key)."}), 400
+    res = rt["store"].compare_crawl_runs(base_run_key, target_run_key, platform=platform)
+    if not res.get("ok"):
+        return jsonify(res), 400
+    return jsonify(res)
+
+
+@app.route("/api/remote/crawl_config", methods=["GET"])
+def api_remote_crawl_config():
+    return jsonify({"ok": True, **get_crawl_config_payload()})
 
 
 @app.route("/api/remote/crawl_requests", methods=["GET", "POST"])
@@ -6512,20 +7867,53 @@ def api_remote_crawl_requests():
                 return jsonify({"ok": False, "error": "requested_count phải là số nguyên (1–500)"}), 400
             if req_count < 1 or req_count > 500:
                 return jsonify({"ok": False, "error": "requested_count phải trong khoảng 1–500"}), 400
+            plat = str(body.get("platform", "")).lower().strip()
+            opts = dict(body.get("options")) if isinstance(body.get("options"), dict) else {}
+            if plat == "threads":
+                raw_lm = body.get("lease_minutes")
+                if raw_lm is not None and raw_lm != "":
+                    try:
+                        lm_int = int(raw_lm)
+                    except (TypeError, ValueError):
+                        return jsonify({"ok": False, "error": "lease_minutes phải là số nguyên (1–120 phút)"}), 400
+                    if lm_int < 1 or lm_int > 120:
+                        return jsonify({"ok": False, "error": "lease_minutes phải trong khoảng 1–120 phút"}), 400
+                    opts["lease_seconds"] = lm_int * 60
+                    opts["lease_minutes"] = lm_int
+                elif "lease_seconds" in opts and opts["lease_seconds"] is not None:
+                    try:
+                        ls_int = int(opts["lease_seconds"])
+                    except (TypeError, ValueError):
+                        return jsonify({"ok": False, "error": "options.lease_seconds phải là số nguyên (60–7200 giây)"}), 400
+                    opts["lease_seconds"] = max(60, min(ls_int, 7200))
+                try:
+                    opts = validate_threads_strategy_options(body, opts)
+                except ValueError as ve:
+                    return jsonify({"ok": False, "error": str(ve)}), 400
             res = rt["client"].create_crawl_request(
-                platform=str(body.get("platform", "")).lower().strip(),
+                platform=plat,
                 keywords=str(body.get("keywords", "")).strip(),
                 requested_count=req_count,
                 poll_profile=body.get("poll_profile"),
                 dedup_token=body.get("dedup_token"),
-                options=body.get("options") if isinstance(body.get("options"), dict) else {},
+                options=opts,
             )
             if isinstance(res, dict):
                 res.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+                if isinstance(res.get("request"), dict):
+                    try:
+                        rt["store"].upsert_crawl_request_metadata_cache([res["request"]])
+                    except Exception:
+                        pass
             return jsonify(res)
         listing = rt["client"].list_crawl_requests()
         if isinstance(listing, dict):
             listing.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+            if isinstance(listing.get("items"), list):
+                try:
+                    rt["store"].upsert_crawl_request_metadata_cache(listing.get("items"))
+                except Exception:
+                    pass
             try:
                 rt["sync_service"].maybe_trigger_sync_for_crawl_requests(listing.get("items"))
             except Exception:
