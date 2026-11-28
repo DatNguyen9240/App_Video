@@ -3194,14 +3194,14 @@ HTML_TEMPLATE = """
               <div class="space-y-0.5">
                 <div class="font-semibold flex items-center gap-2 flex-wrap">
                   <span v-if="helperCompatibility?.v33_compatible">✅ Muse Helper V3.3 Sẵn sàng (Hot &amp; Very Hot Only • Đa phiên không giới hạn tổng thời gian • Skill v1.1)</span>
-                  <span v-else>⏳ Chưa xác nhận Muse Helper V3.3 — Threads đang giữ mặc định tương thích V3.2 (30p)</span>
+                  <span v-else>🚫 Muse Helper chưa nâng cấp / xác nhận tương thích V3.3 (Skill v1.1) — Khóa tạo request Threads mới (chỉ hỗ trợ Rollback có chủ đích V3.2)</span>
                   <span v-if="helperCompatibility?.helper_version" class="px-1.5 py-0.5 rounded bg-black/30 font-mono text-[10px]">
                     {{ helperCompatibility.helper_version }}
                   </span>
                 </div>
                 <div class="text-[10px] opacity-85">
                   <span v-if="helperCompatibility?.note">{{ helperCompatibility.note }}</span>
-                  <span v-else>Sau khi nâng cấp Muse Helper hỗ trợ /lease/renew và /checkpoint, hệ thống tự mở khóa mặc định V3.3.</span>
+                  <span v-else>V3.3 (Hot &amp; Very Hot Only • Skill v1.1 • /lease/renew &amp; /checkpoint) bị khóa gate cho tới khi Muse Helper xác nhận tương thích. Không tự fallback ngầm sang V3.2.</span>
                 </div>
               </div>
               <div class="flex items-center gap-1.5 shrink-0">
@@ -3233,10 +3233,9 @@ HTML_TEMPLATE = """
                 </div>
                 <select v-if="crawlRequestForm.platform === 'threads'" v-model="crawlRequestForm.contract_version"
                   title="Chế độ Data Contract cho lượt crawl Threads"
-                  class="w-full sm:w-36 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
-                  <option value="auto">{{ helperCompatibility?.v33_compatible ? '🛡️ Auto (V3.3)' : '🛡️ Auto (V3.2)' }}</option>
-                  <option value="3.3" :disabled="!helperCompatibility?.v33_compatible">⭐ V3.3 (Hot &amp; Very Hot)</option>
-                  <option value="3.2">📜 V3.2 (Legacy)</option>
+                  class="w-full sm:w-44 shrink-0 glass-input rounded-lg px-2 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="3.3">⭐ V3.3 (Mặc định • Hot &amp; Very Hot)</option>
+                  <option value="3.2">📜 Rollback có chủ đích (V3.2 Legacy)</option>
                 </select>
                 <select v-if="crawlRequestForm.platform === 'threads'" v-model.number="crawlRequestForm.lookback_hours"
                   title="Phạm vi thời gian bài viết (mặc định ưu tiên 24h, tối đa 48h)"
@@ -3264,11 +3263,14 @@ HTML_TEMPLATE = """
                   </button>
                 </div>
                 <span v-if="crawlRequestForm.platform === 'threads'" class="text-indigo-300/90">
-                  <template v-if="(crawlRequestForm.contract_version === '3.3') || (crawlRequestForm.contract_version === 'auto' && helperCompatibility?.v33_compatible)">
+                  <template v-if="crawlRequestForm.contract_version !== '3.2' && helperCompatibility?.v33_compatible">
                     🧭 Crawl Strategy 3.3 + Contract V3.3 (Hot &amp; Very Hot Only • Đa phiên không giới hạn tổng thời gian • Tự động checkpoint).
                   </template>
+                  <template v-else-if="crawlRequestForm.contract_version === '3.2'">
+                    📜 Đang chọn Rollback có chủ đích V3.2 (Legacy) — dữ liệu V3.2 lịch sử được bảo toàn nguyên vẹn.
+                  </template>
                   <template v-else>
-                    🧭 Crawl Strategy 3.3 + Contract V3.2 (Khuyến nghị bật Helper V3.3 để kích hoạt Hot &amp; Very Hot Only đa phiên).
+                    ⚠️ Yêu cầu nâng cấp Muse Helper (Skill threads_crawl v1.1 + /checkpoint) để tạo request Threads V3.3 — không tự fallback sang V3.2.
                   </template>
                 </span>
                 <span v-else class="text-amber-300/90">
@@ -4773,7 +4775,7 @@ HTML_TEMPLATE = """
           crawlRequestForm: {
             platform: 'threads',
             requested_count: 50,
-            contract_version: 'auto',
+            contract_version: '3.3',
             keywords: '',
             crawl_mode: 'balanced',
             topics: [],
@@ -6178,7 +6180,7 @@ HTML_TEMPLATE = """
                 this.notify(
                   data.helper_compatibility.v33_compatible
                     ? '✅ Muse Helper V3.3 đã xác nhận sẵn sàng (Hot & Very Hot Only • Đa phiên không giới hạn tổng thời gian).'
-                    : 'ℹ️ Muse Helper chưa báo cáo sẵn sàng V3.3 — giữ mặc định tương thích V3.2.',
+                    : '⚠️ Muse Helper chưa xác nhận tương thích V3.3 (Skill v1.1) — đang khóa tạo request Threads V3.3 (không tự fallback V3.2).',
                   data.helper_compatibility.v33_compatible ? 'success' : 'info'
                 );
               }
@@ -6198,7 +6200,7 @@ HTML_TEMPLATE = """
               body: JSON.stringify({
                 v33_compatible: true,
                 contract_version: '3.3',
-                skill_version: '1.0',
+                skill_version: '1.1',
                 source: 'app_video_manual_confirm',
                 note: 'Đã xác nhận từ Crawl Center (App_Video)',
               }),
@@ -6641,10 +6643,8 @@ HTML_TEMPLATE = """
               const selTopics = Array.isArray(this.crawlRequestForm.topics) ? [...this.crawlRequestForm.topics] : [];
               const selLookback = [24, 48, 72, 168].includes(Number(this.crawlRequestForm.lookback_hours)) ? Number(this.crawlRequestForm.lookback_hours) : 24;
               const excl = this.crawlRequestForm.exclusions || { exclude_celebrity: true, exclude_fandom: true, exclude_pure_ads: true, vn_only: true };
-              const selContract = String(this.crawlRequestForm.contract_version || 'auto').trim().toLowerCase();
-              if (selContract === '3.2' || selContract === '3.3') {
-                payloadBody.contract_version = selContract;
-              }
+              const selContract = String(this.crawlRequestForm.contract_version || '3.3').trim().toLowerCase();
+              payloadBody.contract_version = selContract === '3.2' ? '3.2' : '3.3';
               payloadBody.crawl_mode = selMode;
               payloadBody.topics = selTopics;
               payloadBody.lookback_hours = selLookback;
@@ -6655,12 +6655,11 @@ HTML_TEMPLATE = """
                 vn_only: Boolean(excl.vn_only),
               };
               payloadBody.options = {
-                lease_seconds: parsedLeaseMin * 60,
                 crawl_mode: selMode,
                 topics: selTopics,
                 lookback_hours: selLookback,
                 exclusions: payloadBody.exclusions,
-                ...(selContract === '3.2' || selContract === '3.3' ? { contract_version: selContract } : {}),
+                contract_version: payloadBody.contract_version,
               };
             }
             const res = await fetch('/api/remote/crawl_requests', {

@@ -1486,7 +1486,7 @@ class _PromptCapableMockClient(MockCloudflareTransportClient):
         self.helper_compatibility = {
             "v33_compatible": False,
             "v33_ready": False,
-            "default_contract_version": "3.2",
+            "default_contract_version": "3.3",
         }
 
     def get_public_config_summary(self):
@@ -1501,8 +1501,9 @@ class _PromptCapableMockClient(MockCloudflareTransportClient):
         self.helper_compatibility = {
             "v33_compatible": ready,
             "v33_ready": ready,
-            "default_contract_version": "3.3" if ready else "3.2",
+            "default_contract_version": "3.3",
             "helper_version": p.get("helper_version") or "muse-helper/3.3.0",
+            "skill_version": p.get("skill_version") or "1.1",
             "note": p.get("note"),
         }
         return {"ok": True, "helper_compatibility": dict(self.helper_compatibility)}
@@ -1539,12 +1540,12 @@ class _PromptCapableMockClient(MockCloudflareTransportClient):
         opts = dict(options) if isinstance(options, dict) else {}
         plat = str(platform or "threads").lower().strip()
         req_cv = str(opts.get("contract_version") or "").strip().lower()
-        if plat == "threads" and req_cv == "3.3" and not self.helper_compatibility.get("v33_compatible"):
+        if plat == "threads" and req_cv != "3.2" and not self.helper_compatibility.get("v33_compatible"):
             return {
                 "ok": False,
                 "status_code": 409,
                 "code": "muse_helper_incompatible",
-                "error": "Muse Helper chưa xác nhận tương thích V3.3",
+                "error": "Muse Helper chưa nâng cấp/xác nhận tương thích Data Contract V3.3 & Skill threads_crawl v1.1 (không tự fallback V3.2).",
             }
         res = super().create_crawl_request(
             platform=platform,
@@ -1555,7 +1556,7 @@ class _PromptCapableMockClient(MockCloudflareTransportClient):
             options=opts,
         )
         req = res["request"]
-        cv = ("3.3" if (req_cv == "3.3" or (req_cv != "3.2" and self.helper_compatibility.get("v33_compatible"))) else "3.2") if plat == "threads" else "v2"
+        cv = ("3.2" if req_cv == "3.2" else "3.3") if plat == "threads" else "v2"
         req["display_status"] = "waiting_prompt"
         req["display_status_label"] = "Chờ gửi prompt"
         req["contract_version"] = cv
@@ -1610,6 +1611,8 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
             "Đang đồng bộ",
             "Hoàn tất",
             "platform: 'threads'",
+            "contract_version: '3.3'",
+            "Rollback có chủ đích (V3.2 Legacy)",
             "Hot &amp; Very Hot Only",
             "Crawl Strategy 3.3",
             "24h (tối đa 48h)",
@@ -1619,6 +1622,8 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         ]:
             self.assertIn(token, html)
         for removed in (
+            "parsedLeaseMin",
+            "Auto (V3.2)",
             "crawlRequestForm.lease_minutes",
             "⏱️ 30 phút",
             "⏱️ 60 phút",
@@ -1627,13 +1632,23 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         ):
             self.assertNotIn(removed, html)
 
-        create_resp = flask_client.post(
+        # Unverified helper blocks omitted contract_version too (no silent V3.2 fallback)
+        blocked_default = flask_client.post(
             "/api/remote/crawl_requests",
             json={"platform": "threads", "requested_count": 10, "keywords": "serum vitamin c"},
+        )
+        self.assertEqual(blocked_default.status_code, 409)
+        self.assertEqual(blocked_default.get_json()["code"], "muse_helper_incompatible")
+
+        # Explicit V3.2 intentional rollback succeeds cleanly
+        create_resp = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 10, "keywords": "serum vitamin c", "contract_version": "3.2"},
         )
         self.assertEqual(create_resp.status_code, 200)
         created = create_resp.get_json()
         self.assertTrue(created["ok"])
+        self.assertEqual(created["request"]["contract_version"], "3.2")
         self.assertEqual(created["muse_web_url"], "https://muse.ai/")
         req_id = created["request"]["id"]
         first_prompt = created["manual_prompt"]
@@ -1652,14 +1667,14 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         # Invalid Threads lease duration rejected with 400
         bad_dur = flask_client.post(
             "/api/remote/crawl_requests",
-            json={"platform": "threads", "requested_count": 10, "lease_minutes": 999, "keywords": "test"},
+            json={"platform": "threads", "requested_count": 10, "lease_minutes": 999, "keywords": "test", "contract_version": "3.2"},
         )
         self.assertEqual(bad_dur.status_code, 400)
 
         # Valid Threads duration (60 phút -> 3600s) forwarded cleanly inside options
         dur_resp = flask_client.post(
             "/api/remote/crawl_requests",
-            json={"platform": "threads", "requested_count": 15, "lease_minutes": 60, "keywords": "skincare"},
+            json={"platform": "threads", "requested_count": 15, "lease_minutes": 60, "keywords": "skincare", "contract_version": "3.2"},
         )
         self.assertEqual(dur_resp.status_code, 200)
         self.assertEqual(self.client.mock_crawl_requests[-1]["options"].get("lease_seconds"), 3600)
@@ -1669,15 +1684,17 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         app_ui.app.config["TESTING"] = True
         flask_client = app_ui.app.test_client()
 
-        # Helper incompatible initially -> explicit 3.3 returns HTTP 409 cleanly
+        # Helper incompatible initially -> BOTH omitted and explicit 3.3 return HTTP 409 cleanly (no silent V3.2 fallback)
         h_before = flask_client.get("/api/remote/helper_compatibility").get_json()
         self.assertFalse(h_before["helper_compatibility"]["v33_compatible"])
-        r409 = flask_client.post(
-            "/api/remote/crawl_requests",
-            json={"platform": "threads", "requested_count": 50, "contract_version": "3.3"},
-        )
-        self.assertEqual(r409.status_code, 409)
-        self.assertEqual(r409.get_json()["code"], "muse_helper_incompatible")
+        self.assertEqual(h_before["helper_compatibility"]["default_contract_version"], "3.3")
+        for blocked_payload in (
+            {"platform": "threads", "requested_count": 50},
+            {"platform": "threads", "requested_count": 50, "contract_version": "3.3"},
+        ):
+            r409 = flask_client.post("/api/remote/crawl_requests", json=blocked_payload)
+            self.assertEqual(r409.status_code, 409)
+            self.assertEqual(r409.get_json()["code"], "muse_helper_incompatible")
 
         # Confirm helper compatibility -> creates 3.3 request, pauses & resumes with resume_prompt
         h_after = flask_client.post(
@@ -1715,7 +1732,7 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         self.assertTrue(cat["ok"])
         self.assertIn("bundles", cat)
 
-        # Live CloudflareBridgeClient.get_helper_compatibility gracefully degrades on HTTP 404 (pre-deploy prod Worker)
+        # Live CloudflareBridgeClient preserves HTTP 409 muse_helper_incompatible & degrades without silent V3.2 fallback on 404
         import types
         from unittest import mock
 
@@ -1729,7 +1746,22 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         self.assertTrue(fallback["ok"])
         self.assertTrue(fallback["worker_endpoint_missing"])
         self.assertFalse(fallback["helper_compatibility"]["v33_compatible"])
-        self.assertEqual(fallback["helper_compatibility"]["default_contract_version"], "3.2")
+        self.assertEqual(fallback["helper_compatibility"]["default_contract_version"], "3.3")
+
+        with mock.patch.object(
+            live_client,
+            "_request_with_retry",
+            return_value=types.SimpleNamespace(
+                ok=False,
+                status_code=409,
+                text="incompatible",
+                json=lambda: {"ok": False, "code": "muse_helper_incompatible", "error": "Cần nâng cấp Muse Helper"},
+            ),
+        ):
+            res_409 = live_client.create_crawl_request("threads", requested_count=10)
+        self.assertFalse(res_409["ok"])
+        self.assertEqual(res_409["status_code"], 409)
+        self.assertEqual(res_409["code"], "muse_helper_incompatible")
 
     def test_desktop_auto_sync_triggers_on_metrics_only_change_and_debounces(self):
         initial_post = {

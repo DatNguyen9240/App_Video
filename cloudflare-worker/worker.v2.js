@@ -684,9 +684,9 @@ function getRequestContractVersion(platform, reqRow = null) {
     if (reqRow && plat === "threads") {
         return getEffectiveCrawlRequestContract(reqRow).contract_version;
     }
-    if (plat === "threads") return THREADS_CONTRACT_V32;
+    if (plat === "threads") return THREADS_CONTRACT_V33;
     if (plat === "tiktok" || plat === "shopee") return "v2";
-    return "threads:3.2/3.3 | tiktok/shopee:v2";
+    return "threads:3.3 | tiktok/shopee:v2";
 }
 
 function buildThreadsTopicPromptLines(cfg, customKeywords) {
@@ -968,6 +968,19 @@ async function setRuntimeState(env, key, value) {
     }
 }
 
+function compareDottedSemver(a, b) {
+    const pa = String(a || "").trim().replace(/^v/i, "").split(".").map(n => Number.parseInt(n, 10) || 0);
+    const pb = String(b || "").trim().replace(/^v/i, "").split(".").map(n => Number.parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const da = pa[i] || 0;
+        const db = pb[i] || 0;
+        if (da > db) return 1;
+        if (da < db) return -1;
+    }
+    return 0;
+}
+
 function evaluateMuseHelperCompatibilityPayload(raw) {
     const obj = (raw && typeof raw === "object") ? raw : {};
     const contracts = Array.isArray(obj.supported_contracts)
@@ -975,24 +988,46 @@ function evaluateMuseHelperCompatibilityPayload(raw) {
         : (Array.isArray(obj.supported_contract_versions) ? obj.supported_contract_versions.map(v => String(v || "").trim()) : []);
     const skills = Array.isArray(obj.supported_skills) ? obj.supported_skills : [];
     const caps = Array.isArray(obj.capabilities) ? obj.capabilities.map(v => String(v || "").trim()) : [];
-    const explicitVerified = obj.verified === true || obj.v33_compatible === true || obj.v33_ready === true;
+    const explicitRevoked = obj.verified === false || obj.v33_compatible === false || obj.v33_ready === false;
     const hasV33Contract = contracts.some(v => v.startsWith("3.3"));
+
+    let declaredSkillVersion = obj.skill_version ? String(obj.skill_version).trim() : null;
+    if (!declaredSkillVersion) {
+        for (const s of skills) {
+            if (typeof s === "string") {
+                const sm = s.match(/threads_crawl[@:\s]+v?(\d+(?:\.\d+)*)/i);
+                if (sm) {
+                    declaredSkillVersion = sm[1];
+                    break;
+                }
+            } else if (s && typeof s === "object" && String(s.name || "") === THREADS_SKILL_NAME && s.version) {
+                declaredSkillVersion = String(s.version).trim();
+                break;
+            }
+        }
+    }
     const hasSkill = Boolean(
-        obj.skill_version
+        declaredSkillVersion
         || skills.some(s => (typeof s === "string" ? s.includes("threads_crawl") : String(s?.name || "") === THREADS_SKILL_NAME))
     );
+    const hasRequiredSkillVersion = Boolean(declaredSkillVersion && compareDottedSemver(declaredSkillVersion, THREADS_SKILL_VERSION) >= 0);
+    const hasOutdatedDeclaredSkill = Boolean(declaredSkillVersion && !hasRequiredSkillVersion);
     const missingCaps = MUSE_REQUIRED_V33_CAPABILITIES.filter(c => !caps.includes(c));
     const hasAllCaps = missingCaps.length === 0 && caps.length > 0;
-    const v33Ready = explicitVerified || (hasV33Contract && hasSkill && (hasAllCaps || caps.length === 0));
+    const explicitVerified = !explicitRevoked && !hasOutdatedDeclaredSkill && (
+        obj.verified === true || obj.v33_compatible === true || obj.v33_ready === true || obj.explicit_verified === true
+    );
+    const v33Ready = !explicitRevoked && (explicitVerified || (hasV33Contract && hasRequiredSkillVersion && hasAllCaps));
     return {
         v33_ready: v33Ready,
         v33_compatible: v33Ready,
-        default_contract_version: v33Ready ? THREADS_CONTRACT_V33 : THREADS_CONTRACT_V32,
+        explicit_verified: explicitVerified,
+        default_contract_version: THREADS_CONTRACT_V33,
         helper_name: obj.helper_name ? String(obj.helper_name).trim() : null,
         helper_version: obj.helper_version ? String(obj.helper_version).trim() : null,
         supported_contracts: contracts,
         skill_name: obj.skill_name ? String(obj.skill_name).trim() : (hasSkill ? THREADS_SKILL_NAME : null),
-        skill_version: obj.skill_version ? String(obj.skill_version).trim() : null,
+        skill_version: declaredSkillVersion,
         capabilities: caps,
         missing_capabilities: missingCaps,
         verified_by: obj.verified_by ? String(obj.verified_by).trim() : null,
@@ -1020,10 +1055,19 @@ async function getMuseHelperCompatibility(env) {
 
 async function setMuseHelperCompatibility(env, payload) {
     const current = await getMuseHelperCompatibility(env);
+    const p = (payload && typeof payload === "object") ? payload : {};
     const merged = {
-        ...current,
-        ...(payload && typeof payload === "object" ? payload : {}),
-        verified_at: (payload && payload.verified_at) || new Date().toISOString(),
+        helper_name: current.helper_name,
+        helper_version: current.helper_version,
+        supported_contracts: current.supported_contracts,
+        skill_name: current.skill_name,
+        skill_version: current.skill_version,
+        capabilities: current.capabilities,
+        explicit_verified: current.explicit_verified,
+        verified_by: current.verified_by,
+        note: current.note,
+        ...p,
+        verified_at: p.verified_at || new Date().toISOString(),
     };
     const evaluated = evaluateMuseHelperCompatibilityPayload(merged);
     await setRuntimeState(env, "muse_helper_compatibility_json", JSON.stringify(evaluated));
@@ -2306,6 +2350,7 @@ async function queryAuthoritativeRequestQualityTotals(env, reqId) {
             SELECT
                 SUM(CASE WHEN quality_qualified = 1 THEN 1 ELSE 0 END) AS quality_qualified_count,
                 SUM(CASE WHEN quality_qualified = 0 AND trend_tier = 'watchlist' THEN 1 ELSE 0 END) AS watchlist_count,
+                SUM(CASE WHEN quality_qualified = 0 AND trend_tier = 'below_hot' THEN 1 ELSE 0 END) AS below_hot_count,
                 SUM(CASE WHEN quality_qualified = 1 AND is_traffic_content = 1 THEN 1 ELSE 0 END) AS traffic_content_count,
                 COUNT(*) AS total_tracked_items
             FROM crawl_request_quality_items
@@ -2315,6 +2360,7 @@ async function queryAuthoritativeRequestQualityTotals(env, reqId) {
         return {
             quality_qualified_count: Number(row.quality_qualified_count || 0),
             watchlist_count: Number(row.watchlist_count || 0),
+            below_hot_count: Number(row.below_hot_count || 0),
             traffic_content_count: Number(row.traffic_content_count || 0),
             total_tracked_items: Number(row.total_tracked_items || 0),
         };
@@ -2338,6 +2384,7 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
     let newQualifiedCount = 0;
     let qualityQualifiedCount = 0;
     let watchlistCount = 0;
+    let belowHotCount = 0;
     let trafficContentCount = 0;
     let duplicateCount = 0;
     let updatedCount = 0;
@@ -2365,6 +2412,22 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                 let row = await lookupRegistryRow(env, meta.key, meta.plat, meta.cUrl, meta.postId);
 
                 if (!row) {
+                    // Policy 3.3-hot-only-20261128: V3.3 below-Hot / unverified / unqualified new candidates store ONLY minimal audit metadata
+                    // in crawl_request_quality_items and MUST NEVER enter market_post_registry or market_post_snapshots.
+                    if (reqContext?.isV33 === true && !meta.isQualityQualified) {
+                        if (reqId) {
+                            await recordRequestQualityItemInD1(env, reqId, meta, rawItem, sessionSeq, nowIso);
+                        }
+                        if (meta.qualityTierBasis === "below_hot") {
+                            belowHotCount += 1;
+                        } else if (meta.isUnverified) {
+                            unverifiedCount += 1;
+                        } else {
+                            rejectedCount += 1;
+                        }
+                        continue;
+                    }
+
                     const firstSeen = meta.measuredAt || nowIso;
                     const idempKey = buildSnapshotIdempotencyKey({
                         dedupKey: meta.key,
@@ -2480,11 +2543,25 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
 
                 row = await promoteOrMergeUrlToPostIdInD1(env, row, meta);
                 const targetDedupKey = row.dedup_key;
+                if (reqContext?.isV33 === true && reqId) {
+                    const dupMeta = {
+                        ...meta,
+                        isQualityQualified: false,
+                        qualityExclusionReason: meta.qualityExclusionReason || "duplicate_registry",
+                    };
+                    await recordRequestQualityItemInD1(env, reqId, dupMeta, rawItem, sessionSeq, nowIso);
+                }
 
                 const incomingObsTs = parseObsTimeMs(meta.measuredAt);
                 const existingLastTs = parseObsTimeMs(row.last_seen_at);
                 const existingFirstTs = parseObsTimeMs(row.first_seen_at);
                 const isOlderLateSnapshot = incomingObsTs > 0 && existingLastTs > 0 && incomingObsTs < existingLastTs;
+
+                if (reqContext?.isV33 === true && meta.qualityTierBasis === "below_hot" && meta.classification !== "UPDATED_METRICS") {
+                    belowHotCount += 1;
+                    duplicateCount += 1;
+                    continue;
+                }
 
                 if (meta.isRejected) {
                     const rejInserted = await insertMeasurementSnapshotInD1(env, targetDedupKey, meta, "REJECTED", nowIso);
@@ -2619,6 +2696,7 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
         new_qualified_count: newQualifiedCount,
         quality_qualified_count: qualityQualifiedCount,
         watchlist_count: watchlistCount,
+        below_hot_count: belowHotCount,
         traffic_content_count: trafficContentCount,
         duplicate_count: duplicateCount,
         duplicate_history_count: duplicateCount,
@@ -2642,6 +2720,7 @@ function createEmptyDedupStats() {
         new_qualified_count: 0,
         quality_qualified_count: 0,
         watchlist_count: 0,
+        below_hot_count: 0,
         traffic_content_count: 0,
         duplicate_count: 0,
         duplicate_history_count: 0,
@@ -2735,6 +2814,7 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes, authTotals = null) {
         summaryObj.new_qualified_count = agg.new_qualified_count;
         summaryObj.quality_qualified_count = authTotals ? authTotals.quality_qualified_count : agg.quality_qualified_count;
         summaryObj.watchlist_count = authTotals ? authTotals.watchlist_count : agg.watchlist_count;
+        summaryObj.below_hot_count = authTotals ? Number(authTotals.below_hot_count || 0) : Number(agg.below_hot_count || 0);
         summaryObj.traffic_content_count = authTotals ? authTotals.traffic_content_count : agg.traffic_content_count;
         summaryObj.duplicate_history_count = agg.duplicate_history_count;
         summaryObj.duplicate_count = agg.duplicate_count;
@@ -2748,6 +2828,7 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes, authTotals = null) {
             summaryObj.counters.new_qualified_count = agg.new_qualified_count;
             summaryObj.counters.quality_qualified_count = summaryObj.quality_qualified_count;
             summaryObj.counters.watchlist_count = summaryObj.watchlist_count;
+            summaryObj.counters.below_hot_count = summaryObj.below_hot_count;
             summaryObj.counters.traffic_content_count = summaryObj.traffic_content_count;
             summaryObj.counters.duplicate_history_count = agg.duplicate_history_count;
             summaryObj.counters.duplicate_count = agg.duplicate_count;
@@ -2766,12 +2847,16 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes, authTotals = null) {
         summaryObj.watchlist_count = authTotals
             ? authTotals.watchlist_count
             : (summaryObj.watchlist_count !== undefined ? summaryObj.watchlist_count : agg.watchlist_count);
+        summaryObj.below_hot_count = authTotals
+            ? Number(authTotals.below_hot_count || 0)
+            : (summaryObj.below_hot_count !== undefined ? summaryObj.below_hot_count : Number(agg.below_hot_count || 0));
         summaryObj.traffic_content_count = authTotals
             ? authTotals.traffic_content_count
             : (summaryObj.traffic_content_count !== undefined ? summaryObj.traffic_content_count : agg.traffic_content_count);
         if (summaryObj.counters && typeof summaryObj.counters === "object" && authTotals) {
             summaryObj.counters.quality_qualified_count = authTotals.quality_qualified_count;
             summaryObj.counters.watchlist_count = authTotals.watchlist_count;
+            summaryObj.counters.below_hot_count = Number(authTotals.below_hot_count || 0);
             summaryObj.counters.traffic_content_count = authTotals.traffic_content_count;
         }
         if (summaryObj.duplicate_history_count === undefined && summaryObj.duplicate_count === undefined) {
@@ -2790,6 +2875,7 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes, authTotals = null) {
         ...agg,
         quality_qualified_count: summaryObj.quality_qualified_count ?? agg.quality_qualified_count,
         watchlist_count: summaryObj.watchlist_count ?? agg.watchlist_count,
+        below_hot_count: summaryObj.below_hot_count ?? agg.below_hot_count ?? 0,
         traffic_content_count: summaryObj.traffic_content_count ?? agg.traffic_content_count,
     };
     return summaryObj.dedup_stats;
@@ -3032,14 +3118,44 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
     }
 
     try {
-        await env.DB.prepare(`
-            UPDATE crawl_requests
-            SET accumulated_quality_count = ?,
-                accumulated_new_qualified_count = ?,
-                accumulated_watchlist_count = ?,
-                execution_phase = CASE WHEN execution_phase = 'syncing_checkpoint' THEN 'paused' ELSE execution_phase END
-            WHERE id = ?
-        `).bind(nextAccQuality, nextAccNewQual, nextAccWatchlist, crawlId).run();
+        let cpMeta = {};
+        if (prevFreshRow?.checkpoint_json) {
+            try { cpMeta = JSON.parse(prevFreshRow.checkpoint_json || "{}"); } catch {}
+        }
+        const prLower = String(cpMeta?.pause_reason || prevFreshRow?.pause_reason || "").trim().toLowerCase();
+        const recoveredPhase = (cpMeta?.blocked === true || prLower === "captcha_blocked" || prLower === "rate_limited")
+            ? "blocked"
+            : "paused";
+        const wasSyncingCheckpoint = String(prevFreshRow?.execution_phase || "").trim().toLowerCase() === "syncing_checkpoint";
+        if (drainOpts?.keepSyncingPhase) {
+            await env.DB.prepare(`
+                UPDATE crawl_requests
+                SET accumulated_quality_count = ?,
+                    accumulated_new_qualified_count = ?,
+                    accumulated_watchlist_count = ?
+                WHERE id = ?
+            `).bind(nextAccQuality, nextAccNewQual, nextAccWatchlist, crawlId).run();
+        } else {
+            await env.DB.prepare(`
+                UPDATE crawl_requests
+                SET accumulated_quality_count = ?,
+                    accumulated_new_qualified_count = ?,
+                    accumulated_watchlist_count = ?,
+                    status = CASE WHEN execution_phase = 'syncing_checkpoint' THEN 'queued' ELSE status END,
+                    claimed_by = CASE WHEN execution_phase = 'syncing_checkpoint' THEN NULL ELSE claimed_by END,
+                    claimed_at = CASE WHEN execution_phase = 'syncing_checkpoint' THEN NULL ELSE claimed_at END,
+                    lease_expires_at = CASE WHEN execution_phase = 'syncing_checkpoint' THEN NULL ELSE lease_expires_at END,
+                    execution_phase = CASE WHEN execution_phase = 'syncing_checkpoint' THEN ? ELSE execution_phase END
+                WHERE id = ?
+            `).bind(nextAccQuality, nextAccNewQual, nextAccWatchlist, recoveredPhase, crawlId).run();
+            if (wasSyncingCheckpoint) {
+                await env.DB.prepare(`
+                    UPDATE crawl_request_sessions
+                    SET status = ?, ended_at = COALESCE(ended_at, ?), stop_reason = COALESCE(stop_reason, ?), updated_at = ?
+                    WHERE request_id = ? AND status = 'running'
+                `).bind(recoveredPhase, finIso, prLower || "checkpoint_recovered", finIso, crawlId).run();
+            }
+        }
     } catch {}
 
     return {
@@ -4634,7 +4750,15 @@ function validateDriveArtifactPairForRequest(reqRow, dataEntry, reportEntry, exi
     if (reqSessSeq > 0) {
         const rawDataSess = dataObj.session_seq ?? dataObj.execution?.session_seq;
         const rawRepSess = repObj.session_seq ?? repObj.execution?.session_seq;
-        if (rawDataSess != null && rawRepSess != null) {
+        if (contractInfo.isV33) {
+            if (rawDataSess == null || rawRepSess == null || Number(rawDataSess) !== Number(rawRepSess) || Number(rawDataSess) !== reqSessSeq) {
+                return {
+                    ok: false,
+                    status: "stale_session_rejected",
+                    reason: `Artifact V3.3 thiếu hoặc lệch session_seq (Data=${rawDataSess ?? "null"}, Report=${rawRepSess ?? "null"}, kỳ vọng ${reqSessSeq})`,
+                };
+            }
+        } else if (rawDataSess != null && rawRepSess != null) {
             if (Number(rawDataSess) !== Number(rawRepSess) || Number(rawDataSess) !== reqSessSeq) {
                 return {
                     ok: false,
@@ -4788,7 +4912,9 @@ async function reconcileDriveArtifactsForRequests(env) {
         const res = await env.DB.prepare(
             "SELECT * FROM crawl_requests WHERE status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 50"
         ).all();
-        activeReqs = (res?.results || []).filter(r => r && ["queued", "running"].includes(String(r.status || "").toLowerCase()));
+        activeReqs = (res?.results || []).filter(
+            r => r && ["queued", "running"].includes(String(r.status || "").toLowerCase()) && String(r.execution_phase || "").toLowerCase() !== "syncing_checkpoint"
+        );
     } catch {
         return;
     }
@@ -4927,10 +5053,54 @@ async function reconcileDriveArtifactsForRequests(env) {
         const crawledAt = validation.summaryBase?.crawled_at || validation.summaryBase?.generated_at || bestPair.d.data?.crawled_at || nowIso;
         const contractInfo = getEffectiveCrawlRequestContract(reqRow);
         const stopReasonRaw = String(validation.summaryBase?.counters?.stop_reason || validation.summaryBase?.stop_reason || "").trim().toLowerCase();
-        const treatAsCheckpoint = Boolean(
+        const terminalStopAllowed = new Set([
+            "source_exhausted",
+            "no_qualifying_posts",
+            "insufficient_data",
+            "user_cancelled",
+            "manual_stop",
+        ]).has(stopReasonRaw);
+
+        let treatAsCheckpoint = Boolean(
             validation.isCheckpoint ||
             (contractInfo.isV33 && (stopReasonRaw === "time_budget" || stopReasonRaw === "session_budget_reached"))
         );
+        let forcedDrivePauseReason = null;
+
+        if (contractInfo.isV33 && !treatAsCheckpoint && !terminalStopAllowed) {
+            const targetCount = Math.max(1, Number.parseInt(reqRow.requested_count, 10) || 50);
+            const curAccQual = Math.max(0, Number.parseInt(reqRow.accumulated_quality_count, 10) || 0);
+            const strategyCfg = getThreadsStrategyConfig(reqRow, { strict: false });
+            const reqCtx = {
+                requestId: reqRow.id,
+                sessionSeq: validation.sessionSeq ?? (Number.parseInt(reqRow.session_seq, 10) || 1),
+                isV33: true,
+                exclusions: strategyCfg?.exclusions || {},
+                lookback_hours: strategyCfg?.lookback_hours || null,
+                crawledAt,
+            };
+            const existingKeys = new Set();
+            try {
+                const kRes = await env.DB.prepare("SELECT dedup_key FROM crawl_request_quality_items WHERE request_id = ?").bind(reqRow.id).all();
+                for (const kr of (kRes?.results || [])) {
+                    if (kr?.dedup_key) existingKeys.add(kr.dedup_key);
+                }
+            } catch {}
+            let batchNewQuality = 0;
+            for (const it of items) {
+                const meta = extractRegistryItemMeta(it, validation.runId, crawledAt, reqCtx);
+                if (!meta.key || existingKeys.has(meta.key)) continue;
+                existingKeys.add(meta.key);
+                if (!meta.isQualityQualified) continue;
+                const prevReg = await lookupRegistryRow(env, meta.key, meta.plat, meta.cUrl, meta.postId);
+                if (!prevReg) batchNewQuality += 1;
+            }
+            const projectedTotal = curAccQual + batchNewQuality;
+            if (projectedTotal < targetCount) {
+                treatAsCheckpoint = true;
+                forcedDrivePauseReason = stopReasonRaw || "drive_target_incomplete";
+            }
+        }
 
         const summaryObj = {
             ...validation.summaryBase,
@@ -4945,7 +5115,9 @@ async function reconcileDriveArtifactsForRequests(env) {
             drive_reconcile: {
                 status: treatAsCheckpoint ? "checkpoint_reconciled" : "ok",
                 reason: treatAsCheckpoint
-                    ? "Đã đồng bộ checkpoint từ Drive và đưa request về trạng thái tạm dừng (chưa kết thúc)"
+                    ? (forcedDrivePauseReason
+                        ? "Artifact Drive V3.3 chưa đủ mục tiêu chất lượng — tự động chuyển về checkpoint tạm dừng để crawl tiếp"
+                        : "Đã đồng bộ checkpoint từ Drive và đưa request về trạng thái tạm dừng (chưa kết thúc)")
                     : "Đồng bộ an toàn từ cặp Data + Report trên Google Drive",
                 run_id: validation.runId,
                 attempt: validation.attempt,
@@ -4967,7 +5139,7 @@ async function reconcileDriveArtifactsForRequests(env) {
             : [];
 
         const pauseReason = treatAsCheckpoint
-            ? (String(validation.summaryBase?.pause_reason || stopReasonRaw || "session_budget_reached").trim())
+            ? (forcedDrivePauseReason || String(validation.summaryBase?.pause_reason || stopReasonRaw || "session_budget_reached").trim())
             : null;
         const nextPausedPhase = (pauseReason === "captcha_blocked" || pauseReason === "rate_limited") ? "blocked" : "paused";
 
@@ -4977,6 +5149,7 @@ async function reconcileDriveArtifactsForRequests(env) {
                 SET status = 'running', execution_phase = 'syncing_checkpoint', pause_reason = ?, result_summary_json = ?, updated_at = ?
                 WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
                   AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+                  AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
             `).bind(
                 pauseReason,
                 JSON.stringify(summaryObj),
@@ -4991,6 +5164,7 @@ async function reconcileDriveArtifactsForRequests(env) {
                 SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
                 WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
                   AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+                  AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
             `).bind(
                 "completed",
                 JSON.stringify(summaryObj),
@@ -5019,6 +5193,7 @@ async function reconcileDriveArtifactsForRequests(env) {
                 await drainRegistryOutboxForRequest(env, reqRow.id, summaryObj, crawledAt, {
                     sessionSeq: validation.sessionSeq,
                     isCheckpoint: treatAsCheckpoint,
+                    keepSyncingPhase: treatAsCheckpoint,
                     forceRecompute: true,
                 });
             } catch {
@@ -5490,18 +5665,24 @@ async function expireStaleLeases(env) {
     } catch {}
 
     // 2. crawl_requests: V3.3 tracks error_attempts separately from clean session_seq; legacy V3.2 keeps attempts < max_attempts
+    // Never expire requests currently in atomic `syncing_checkpoint` drain phase.
     let expiredReqs = [];
     try {
         const expRes = await env.DB.prepare(`
             SELECT * FROM crawl_requests
-            WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
+            WHERE status = 'running'
+              AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
+              AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
         `).bind(nowIso).all();
-        expiredReqs = expRes?.results || [];
+        expiredReqs = (expRes?.results || []).filter(
+            r => String(r?.execution_phase || "").trim().toLowerCase() !== "syncing_checkpoint"
+        );
     } catch {
         return;
     }
 
     for (const reqRow of expiredReqs) {
+        if (String(reqRow?.execution_phase || "").trim().toLowerCase() === "syncing_checkpoint") continue;
         const contractInfo = getEffectiveCrawlRequestContract(reqRow);
         const maxAtt = Math.max(1, Number.parseInt(reqRow.max_attempts, 10) || 3);
         if (contractInfo.isV33) {
@@ -5518,7 +5699,7 @@ async function expireStaleLeases(env) {
                             error_attempts = ?,
                             error_message = 'Execution lease expired before completion',
                             updated_at = ?
-                        WHERE id = ? AND status = 'running' AND lease_expires_at < ?
+                        WHERE id = ? AND status = 'running' AND COALESCE(execution_phase, '') != 'syncing_checkpoint' AND lease_expires_at < ?
                     `).bind(nextErr, nowIso, reqRow.id, nowIso).run();
                 } else {
                     await env.DB.prepare(`
@@ -5532,7 +5713,7 @@ async function expireStaleLeases(env) {
                             lease_expires_at = NULL,
                             error_message = 'Session lease expired cleanly recoverable',
                             updated_at = ?
-                        WHERE id = ? AND status = 'running' AND lease_expires_at < ?
+                        WHERE id = ? AND status = 'running' AND COALESCE(execution_phase, '') != 'syncing_checkpoint' AND lease_expires_at < ?
                     `).bind(nextErr, nowIso, reqRow.id, nowIso).run();
                 }
                 await env.DB.prepare(`
@@ -5773,21 +5954,26 @@ async function createCrawlRequestInD1(env, {
 
     if (plat === "threads") {
         const helperCompat = await getMuseHelperCompatibility(env);
-        const explicitCvRaw = String(cleanOptions.contract_version || cleanOptions.schema_version || "").trim();
-        if (explicitCvRaw.startsWith("3.3")) {
+        const explicitCvRaw = String(cleanOptions.contract_version || cleanOptions.schema_version || "").trim().toLowerCase();
+        if (explicitCvRaw.startsWith("3.2")) {
+            // Intentional rollback to V3.2 Legacy
+            lockedContractVersion = THREADS_CONTRACT_V32;
+        } else {
+            const wantsDefaultOrV33 = !explicitCvRaw || explicitCvRaw === "auto" || explicitCvRaw.startsWith("3.3");
+            if (!wantsDefaultOrV33) {
+                const badCvErr = new Error(`contract_version không hợp lệ cho Threads: '${explicitCvRaw}'. Chỉ hỗ trợ '3.3' hoặc rollback có chủ đích '3.2'.`);
+                badCvErr.statusCode = 400;
+                throw badCvErr;
+            }
             if (!helperCompat.v33_ready) {
                 const incompatErr = new Error(
-                    "Muse Helper chưa xác nhận tương thích Data Contract V3.3 & Skill threads_crawl v1.0. Vui lòng kiểm tra / xác nhận Muse Helper trước khi bật V3.3."
+                    `Muse Helper chưa nâng cấp/xác nhận tương thích Data Contract V3.3 & Skill ${THREADS_SKILL_NAME} v${THREADS_SKILL_VERSION} (${THREADS_QUALITY_POLICY_VERSION}). Không tự fallback sang V3.2; vui lòng nâng cấp Muse Helper trước khi tạo request Threads mới (chỉ cho phép V3.2 khi chọn rollback có chủ đích).`
                 );
                 incompatErr.statusCode = 409;
                 incompatErr.code = "muse_helper_incompatible";
                 throw incompatErr;
             }
             lockedContractVersion = THREADS_CONTRACT_V33;
-        } else if (explicitCvRaw.startsWith("3.2")) {
-            lockedContractVersion = THREADS_CONTRACT_V32;
-        } else {
-            lockedContractVersion = helperCompat.v33_ready ? THREADS_CONTRACT_V33 : THREADS_CONTRACT_V32;
         }
 
         const isV33Req = lockedContractVersion.startsWith("3.3");
@@ -6111,6 +6297,7 @@ async function handleAppApi(request, env, url) {
         let body = {};
         try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
         const requestId = body.request_id ? String(body.request_id).trim() : null;
+        let dedupReqContext = null;
         if (requestId) {
             const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(requestId).first();
             if (!reqRow) {
@@ -6131,10 +6318,25 @@ async function handleAppApi(request, env, url) {
                 await expireStaleLeases(env);
                 return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
             }
+            const ci = getEffectiveCrawlRequestContract(reqRow);
+            const sCfg = String(reqRow.platform || "").trim().toLowerCase() === "threads"
+                ? getThreadsStrategyConfig(reqRow, { strict: false })
+                : null;
+            dedupReqContext = {
+                requestId,
+                sessionSeq: Number.parseInt(reqRow.session_seq, 10) || null,
+                isV33: ci.isV33,
+                exclusions: sCfg?.exclusions || {},
+                lookback_hours: sCfg?.lookback_hours || null,
+                crawledAt: body.crawled_at || body.measured_at || null,
+            };
         }
         try {
             const res = await recordCrossRunDedupInD1(env, body.items || [], body.run_id || null, {
                 crawledAt: body.crawled_at || body.measured_at || null,
+                requestId,
+                sessionSeq: dedupReqContext?.sessionSeq ?? null,
+                reqContext: dedupReqContext,
             });
             return jsonResponse({ ok: true, ...res });
         } catch (err) {
@@ -6463,13 +6665,16 @@ async function handleAppApi(request, env, url) {
         try { body = await request.json(); } catch { body = {}; }
         const row = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
         if (!row) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+        if (String(row.execution_phase || "").trim().toLowerCase() === "syncing_checkpoint") {
+            return jsonResponse({ ok: false, error: "Request đang đồng bộ checkpoint outbox, không thể tạm dừng chồng chéo.", conflict: true }, 409);
+        }
         if (!["queued", "running"].includes(row.status)) {
             return jsonResponse({ ok: false, error: "Only queued or running requests can be paused" }, 409);
         }
         const nowIso = new Date().toISOString();
         const pauseReason = String(body.pause_reason || "operator_paused").trim().slice(0, 120) || "operator_paused";
         try {
-            await env.DB.prepare(`
+            const updPause = await env.DB.prepare(`
                 UPDATE crawl_requests
                 SET status = 'queued',
                     execution_phase = 'paused',
@@ -6478,8 +6683,11 @@ async function handleAppApi(request, env, url) {
                     claimed_at = NULL,
                     lease_expires_at = NULL,
                     updated_at = ?
-                WHERE id = ? AND status IN ('queued', 'running')
+                WHERE id = ? AND status IN ('queued', 'running') AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
             `).bind(pauseReason, nowIso, crawlId).run();
+            if (Number(updPause?.meta?.changes || 0) !== 1) {
+                return jsonResponse({ ok: false, error: "Pause conflict: request đang đồng bộ checkpoint hoặc đã thay đổi trạng thái", conflict: true }, 409);
+            }
             await env.DB.prepare(`
                 UPDATE crawl_request_sessions
                 SET status = 'paused', ended_at = ?, stop_reason = ?, updated_at = ?
@@ -6504,14 +6712,41 @@ async function handleAppApi(request, env, url) {
         if (!crawlId) return jsonResponse({ ok: false, error: "Missing crawl request ID" }, 400);
         let body = {};
         try { body = await request.json(); } catch { body = {}; }
-        const row = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+        let row = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
         if (!row) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
         if (["completed", "failed", "cancelled"].includes(row.status)) {
-            return jsonResponse({ ok: false, error: `Cannot resume finalized request (${row.status})` }, 409);
+            return jsonResponse({ ok: false, error: `Cannot resume finalized request (${row.status})`, conflict: true }, 409);
+        }
+        if (String(row.execution_phase || "").trim().toLowerCase() === "syncing_checkpoint") {
+            return jsonResponse({ ok: false, error: "Request đang đồng bộ checkpoint D1 Registry, vui lòng chờ hoàn tất trước khi resume.", conflict: true, registry_sync_pending: true }, 409);
         }
         if (row.status === "running" && (!row.lease_expires_at || Date.parse(row.lease_expires_at) >= Date.now())) {
-            return jsonResponse({ ok: false, error: "Request currently has an active running session lease" }, 409);
+            return jsonResponse({ ok: false, error: "Request currently has an active running session lease", conflict: true }, 409);
         }
+
+        let outboxCnt = 0;
+        try {
+            const cRow = await env.DB.prepare("SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?").bind(crawlId).first();
+            outboxCnt = Number(cRow?.cnt || 0);
+        } catch {}
+        let rowSum = {};
+        try { rowSum = JSON.parse(row.result_summary_json || "{}"); } catch {}
+        if (outboxCnt > 0 || ["pending", "error"].includes(String(rowSum?.registry_sync_status || "").toLowerCase())) {
+            try {
+                const drainRes = await drainRegistryOutboxForRequest(env, crawlId, rowSum, rowSum.crawled_at || new Date().toISOString(), {
+                    sessionSeq: Number.parseInt(row.session_seq, 10) || 0,
+                    isCheckpoint: true,
+                    forceRecompute: true,
+                });
+                if (!drainRes?.completed || drainRes?.inProgress) {
+                    return jsonResponse({ ok: false, error: "Registry sync chưa hoàn tất cho checkpoint trước", registry_sync_pending: true, conflict: true }, 409);
+                }
+            } catch (err) {
+                return jsonResponse({ ok: false, error: `Không thể đồng bộ Registry trước khi resume: ${err?.message || "outbox error"}`, registry_sync_pending: true, conflict: true }, 503);
+            }
+            row = (await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first()) || row;
+        }
+
         const nowIso = new Date().toISOString();
         let nextOpts = parseRequestOptionsJson(row);
         if (body.lease_minutes !== undefined || body.lease_seconds !== undefined) {
@@ -6519,7 +6754,7 @@ async function handleAppApi(request, env, url) {
             nextOpts = { ...nextOpts, lease_seconds: leaseSec, lease_minutes: Math.round(leaseSec / 60) };
         }
         try {
-            await env.DB.prepare(`
+            const updResume = await env.DB.prepare(`
                 UPDATE crawl_requests
                 SET status = 'queued',
                     execution_phase = 'paused',
@@ -6530,7 +6765,17 @@ async function handleAppApi(request, env, url) {
                     lease_expires_at = NULL,
                     updated_at = ?
                 WHERE id = ?
-            `).bind(JSON.stringify(nextOpts), nowIso, crawlId).run();
+                  AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
+                  AND (status = 'queued' OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))
+            `).bind(JSON.stringify(nextOpts), nowIso, crawlId, nowIso).run();
+            if (Number(updResume?.meta?.changes || 0) !== 1) {
+                return jsonResponse({ ok: false, error: "Resume conflict: request vừa được claim hoặc đang xử lý ở phiên khác", conflict: true }, 409);
+            }
+            await env.DB.prepare(`
+                UPDATE crawl_request_sessions
+                SET status = 'expired', ended_at = COALESCE(ended_at, ?), stop_reason = COALESCE(stop_reason, 'resumed_after_lease_expiry'), updated_at = ?
+                WHERE request_id = ? AND status = 'running'
+            `).bind(nowIso, nowIso, crawlId).run();
         } catch (err) {
             return jsonResponse({ ok: false, error: err?.message || "Resume update failed" }, 500);
         }
@@ -6962,7 +7207,7 @@ async function buildCrawlCenterMenu(env) {
 
     const inlineRows = [
         [
-            { text: compat.v33_ready ? "🧵 Threads (V3.3)" : "🧵 Threads (V3.2)", callback_data: "crawl:plat:threads" },
+            { text: compat.v33_ready ? "🧵 Threads (V3.3)" : "🧵 Threads (Cần Helper v1.1)", callback_data: "crawl:plat:threads" },
             { text: "🎵 TikTok", callback_data: "crawl:plat:tiktok" }
         ],
         [
@@ -6987,7 +7232,7 @@ async function buildCrawlCenterMenu(env) {
 
     const text =
         "🕷️ CRAWL DỮ LIỆU — MANUAL PROMPT TRIGGER\n━━━━━━━━━━━━━━━━━━━━\n" +
-        `• Threads Contract hiện hành: ${compat.v33_ready ? "V3.3 (Skill threads_crawl v1.1 • Hot & Very Hot • Multi-session)" : "V3.2 (Kiểm tra Muse Helper để bật V3.3)"}.\n` +
+        `• Threads Contract hiện hành: ${compat.v33_ready ? "V3.3 (Skill threads_crawl v1.1 • Hot & Very Hot • Đa phiên)" : "⚠️ Tạm khóa V3.3 — Yêu cầu nâng cấp Muse Helper (Skill threads_crawl v1.1) trước khi tạo request mới (hỗ trợ Rollback V3.2 có chủ đích qua /request_crawl threads ... contract=3.2)"}.\n` +
         "• Chọn nền tảng để tạo request D1 và nhận Prompt copy gửi sang Muse (desktop không cần bật).\n" +
         "• Yêu cầu giữ trạng thái CHỜ GỬI PROMPT / TẠM DỪNG cho đến khi Muse claim đúng Request ID.\n\n" +
         (summaryLines.length ? `Gần đây:\n${summaryLines.join("\n")}` : "Chưa có yêu cầu nào.");
@@ -7332,26 +7577,36 @@ async function handleTelegramUpdate(request, env) {
                 plat = data.slice("crawl:queue:".length);
             }
             if (ALLOWED_CRAWL_PLATFORMS.has(plat)) {
-                const res = await createCrawlRequestInD1(env, {
-                    platform: plat,
-                    keywords: "",
-                    requestedCount: count,
-                    chatId,
-                    source: "telegram",
-                    dedupToken: `tg_crw_${update.update_id}`
-                });
-                const reqRow = res.request;
-                const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: res.deduplicated });
-                const edited = await sendOrEditTelegram(
-                    env,
-                    chatId,
-                    msgId,
-                    promptView.htmlText,
-                    promptView.replyMarkup,
-                    { parseMode: "HTML" }
-                );
-                if (edited.ok && (msgId || edited.data?.result?.message_id)) {
-                    await setRuntimeState(env, "tg_primary_status_msg_id", String(msgId || edited.data.result.message_id));
+                try {
+                    const res = await createCrawlRequestInD1(env, {
+                        platform: plat,
+                        keywords: "",
+                        requestedCount: count,
+                        chatId,
+                        source: "telegram",
+                        dedupToken: `tg_crw_${update.update_id}`
+                    });
+                    const reqRow = res.request;
+                    const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: res.deduplicated });
+                    const edited = await sendOrEditTelegram(
+                        env,
+                        chatId,
+                        msgId,
+                        promptView.htmlText,
+                        promptView.replyMarkup,
+                        { parseMode: "HTML" }
+                    );
+                    if (edited.ok && (msgId || edited.data?.result?.message_id)) {
+                        await setRuntimeState(env, "tg_primary_status_msg_id", String(msgId || edited.data.result.message_id));
+                    }
+                } catch (err) {
+                    await sendOrEditTelegram(
+                        env,
+                        chatId,
+                        msgId,
+                        `⚠️ ${err?.message || "Không thể tạo yêu cầu crawl."}`,
+                        homeOnlyInlineKeyboard()
+                    );
                 }
             }
             return new Response("OK");
@@ -8343,6 +8598,75 @@ async function renewCrawlLeaseInD1(env, { crawlId, body, defaultOwner = "", enfo
     });
 }
 
+function canonicalizeObjectStable(obj) {
+    if (Array.isArray(obj)) {
+        return obj.map(canonicalizeObjectStable);
+    }
+    if (obj && typeof obj === "object") {
+        const out = {};
+        for (const k of Object.keys(obj).sort()) {
+            if (obj[k] !== undefined) {
+                out[k] = canonicalizeObjectStable(obj[k]);
+            }
+        }
+        return out;
+    }
+    return obj ?? null;
+}
+
+async function computeCheckpointPayloadDigest({
+    requestId,
+    sessionSeq,
+    attempt,
+    claimedBy,
+    runId = null,
+    pauseReason = null,
+    blocked = false,
+    cursor = null,
+    note = null,
+    items = [],
+    counters = null,
+}) {
+    const canonItems = (Array.isArray(items) ? items : []).map((it) => {
+        const key = buildCanonicalDedupKey(it) || null;
+        const cUrl = canonicalizeSocialUrl(it?.canonical_url || it?.post_url || it?.video_url || it?.product_url || it?.url);
+        const postId = it?.post_id ? String(it.post_id).trim() : null;
+        const m = extractRegistryMetrics(it);
+        return {
+            key,
+            post_id: postId,
+            url: cUrl,
+            classification: it?.classification ? String(it.classification).trim().toUpperCase() : null,
+            trend_tier: it?.trend_tier ? String(it.trend_tier).trim().toLowerCase() : null,
+            views: m.views ?? null,
+            likes: m.likes ?? null,
+            comments: m.comments ?? null,
+            shares: m.shares ?? null,
+            reposts: m.reposts ?? null,
+            quotes: m.quotes ?? null,
+        };
+    });
+    const canonCounters = counters && typeof counters === "object" && !Array.isArray(counters)
+        ? canonicalizeObjectStable(counters)
+        : null;
+    const rawStr = JSON.stringify({
+        request_id: String(requestId || "").trim(),
+        session_seq: Number(sessionSeq || 0),
+        attempt: Number(attempt || 0),
+        claimed_by: String(claimedBy || "").trim(),
+        run_id: runId ? String(runId).trim() : null,
+        pause_reason: pauseReason ? String(pauseReason).trim().toLowerCase() : null,
+        blocked: Boolean(blocked),
+        cursor: canonicalizeObjectStable(cursor),
+        note: note ? String(note).trim() : null,
+        counters: canonCounters,
+        items: canonItems,
+    });
+    const bytes = new TextEncoder().encode(rawStr);
+    const hashBuf = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, requireThreads = false }) {
     const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
     if (parsed.errorResponse) return parsed.errorResponse;
@@ -8358,17 +8682,138 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
 
     let existingSummary = {};
     try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
+    let existingCp = {};
+    try { existingCp = JSON.parse(existing.checkpoint_json || "{}"); } catch {}
+
+    const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
+        ? { ...body.result_summary }
+        : { ...body };
+    let bodyDedupItems = Array.isArray(bodySummaryObj.items)
+        ? bodySummaryObj.items
+        : (Array.isArray(bodySummaryObj.records)
+            ? bodySummaryObj.records
+            : (Array.isArray(body.items) ? body.items : (Array.isArray(body.records) ? body.records : [])));
+
+    if (requireThreads) {
+        const itemsCheck = validateThreadsOnlyCompletionItems(bodyDedupItems);
+        if (itemsCheck.errorResponse) return itemsCheck.errorResponse;
+        bodyDedupItems = itemsCheck.items;
+    }
+
+    const rawPauseReason = String(body.pause_reason || body.stop_reason || bodySummaryObj.pause_reason || bodySummaryObj.stop_reason || "session_budget_reached")
+        .trim().toLowerCase().slice(0, 120) || "session_budget_reached";
+    const isSafetyBlock = rawPauseReason === "captcha_blocked" || rawPauseReason === "rate_limited" || body.blocked === true;
+    const nextPhase = isSafetyBlock ? "blocked" : "paused";
 
     const existingSessSeq = Number.parseInt(existing.session_seq, 10) || 0;
-    const rawBodySess = body.session_seq !== undefined && body.session_seq !== null ? Number.parseInt(body.session_seq, 10) : null;
+    const rawBodySess = (body.session_seq !== undefined && body.session_seq !== null && body.session_seq !== "")
+        ? Number.parseInt(body.session_seq, 10)
+        : null;
     const curExecPhase = String(existing.execution_phase || "").trim().toLowerCase();
+    const incomingCursor = body.checkpoint?.cursor ?? body.resume_cursor ?? null;
+    const incomingNote = body.checkpoint?.note ?? body.note ?? null;
+    const incomingRunId = (bodySummaryObj.run_id || body.run_id) ? String(bodySummaryObj.run_id || body.run_id).trim() : null;
+    const effSessionSeq = existingSessSeq > 0 ? existingSessSeq : 1;
+    const resolvedRunId = incomingRunId || existingSummary.run_id || `${cleanId}_s${effSessionSeq}`;
+    const incomingBodyCrawledAt = (bodySummaryObj.crawled_at || bodySummaryObj.generated_at || body.crawled_at || null)
+        ? String(bodySummaryObj.crawled_at || bodySummaryObj.generated_at || body.crawled_at).trim()
+        : null;
 
-    // Idempotent replay handling for already-checkpointed session
-    if (
-        existing.status === "queued" &&
-        ["paused", "blocked"].includes(curExecPhase) &&
-        ((rawBodySess !== null && rawBodySess === existingSessSeq) || parsedAttempt === Number(existing.attempts || 0))
-    ) {
+    const incomingPayloadDigest = await computeCheckpointPayloadDigest({
+        requestId: cleanId,
+        sessionSeq: rawBodySess ?? effSessionSeq,
+        attempt: parsedAttempt,
+        claimedBy: callerOwner,
+        runId: resolvedRunId,
+        pauseReason: rawPauseReason,
+        blocked: isSafetyBlock,
+        cursor: incomingCursor,
+        note: incomingNote,
+        items: bodyDedupItems,
+        counters: (bodySummaryObj.counters && typeof bodySummaryObj.counters === "object") ? bodySummaryObj.counters : null,
+    });
+
+    // Guard concurrent checkpoint attempts while syncing_checkpoint is in progress
+    if (existing.status === "running" && curExecPhase === "syncing_checkpoint") {
+        const storedOwnerSync = String(existingCp?.claimed_by || existing.claimed_by || "").trim();
+        const storedDigestSync = existingCp?.payload_digest ? String(existingCp.payload_digest) : null;
+        const tupleMatchSync = Boolean(
+            rawBodySess !== null &&
+            Number.isInteger(rawBodySess) &&
+            rawBodySess === existingSessSeq &&
+            parsedAttempt === Number(existing.attempts || 0) &&
+            storedOwnerSync === callerOwner &&
+            storedDigestSync &&
+            storedDigestSync === incomingPayloadDigest
+        );
+        if (!tupleMatchSync) {
+            return jsonResponse({
+                ok: false,
+                error: "Checkpoint conflict: request đang đồng bộ checkpoint ở phiên/owner/payload khác",
+                conflict: true,
+            }, 409);
+        }
+        try {
+            const drainRes = await drainRegistryOutboxForRequest(env, cleanId, existingSummary, existingSummary.crawled_at || nowIso, {
+                sessionSeq: existingSessSeq,
+                isCheckpoint: true,
+                forceRecompute: true,
+            });
+            if (!drainRes?.completed || drainRes?.inProgress) {
+                return jsonResponse({ ok: false, registry_sync_in_progress: true, checkpoint_sync_pending: true }, 503);
+            }
+        } catch (err) {
+            return jsonResponse({ ok: false, registry_unavailable: true, checkpoint_sync_pending: true, error: String(err?.message || "D1 registry unavailable") }, 503);
+        }
+        const recoveredRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+        const enrichedRec = enrichCrawlRequestRow(recoveredRow || existing, env);
+        return jsonResponse({
+            ok: true,
+            idempotent_replay: true,
+            request_id: cleanId,
+            status: "queued",
+            execution_phase: recoveredRow?.execution_phase || nextPhase,
+            pause_reason: recoveredRow?.pause_reason || rawPauseReason,
+            session_seq: existingSessSeq,
+            accumulated_quality_count: enrichedRec.accumulated_quality_count,
+            remaining_target: enrichedRec.remaining_target,
+            registry_sync_status: "ok",
+            resume_prompt: enrichedRec.resume_prompt || enrichedRec.manual_prompt,
+        });
+    }
+
+    // Strict idempotent replay: MUST match ALL of (request_id, session_seq, attempt, owner, payload_digest) — NEVER `||`
+    if (existing.status === "queued" && ["paused", "blocked"].includes(curExecPhase)) {
+        let sessRow = null;
+        try {
+            const sessAll = await env.DB.prepare("SELECT * FROM crawl_request_sessions WHERE request_id = ?").bind(cleanId).all();
+            sessRow = (sessAll?.results || []).find(
+                s => Number(s.session_seq || 0) === existingSessSeq && Number(s.attempt || 0) === Number(existing.attempts || 0)
+            ) || null;
+        } catch {}
+        let sessCp = {};
+        if (sessRow?.checkpoint_json) {
+            try { sessCp = JSON.parse(sessRow.checkpoint_json || "{}"); } catch {}
+        }
+        const storedCp = existingCp?.payload_digest ? existingCp : sessCp;
+        const storedOwner = String(storedCp?.claimed_by || sessRow?.claimed_by || existing.claimed_by || "").trim();
+        const storedDigest = storedCp?.payload_digest ? String(storedCp.payload_digest) : null;
+        const storedCrawledAtInput = storedCp?.crawled_at_input ? String(storedCp.crawled_at_input).trim() : null;
+
+        const sessMatches = rawBodySess !== null && Number.isInteger(rawBodySess) && rawBodySess > 0 && rawBodySess === existingSessSeq;
+        const attMatches = parsedAttempt === Number(existing.attempts || 0);
+        const ownerMatches = Boolean(storedOwner && storedOwner === callerOwner);
+        const crawledAtMatches = !(storedCrawledAtInput && incomingBodyCrawledAt && storedCrawledAtInput !== incomingBodyCrawledAt);
+        const digestMatches = Boolean(storedDigest && incomingPayloadDigest === storedDigest && crawledAtMatches);
+
+        if (!(sessMatches && attMatches && ownerMatches && digestMatches)) {
+            return jsonResponse({
+                ok: false,
+                error: "Checkpoint conflict: idempotent replay yêu cầu khớp đồng thời request_id, session_seq, attempt, owner và payload",
+                conflict: true,
+            }, 409);
+        }
+
         let outboxCnt = 0;
         try {
             const cRow = await env.DB.prepare("SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?").bind(cleanId).first();
@@ -8417,43 +8862,26 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
     if (parsedAttempt !== Number(existing.attempts || 0)) {
         return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
     }
-    if (rawBodySess !== null && existingSessSeq > 0 && rawBodySess !== existingSessSeq) {
-        return jsonResponse({ ok: false, error: `Stale crawl session_seq (${rawBodySess} != ${existingSessSeq})`, conflict: true }, 409);
+    if (existingSessSeq > 0 && (rawBodySess === null || rawBodySess !== existingSessSeq)) {
+        return jsonResponse({ ok: false, error: `Stale or missing crawl session_seq (${rawBodySess} != ${existingSessSeq})`, conflict: true }, 409);
     }
     if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
         await expireStaleLeases(env);
         return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
     }
 
-    const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
-        ? { ...body.result_summary }
-        : { ...body };
-    let bodyDedupItems = Array.isArray(bodySummaryObj.items)
-        ? bodySummaryObj.items
-        : (Array.isArray(bodySummaryObj.records)
-            ? bodySummaryObj.records
-            : (Array.isArray(body.items) ? body.items : (Array.isArray(body.records) ? body.records : [])));
-
-    if (requireThreads) {
-        const itemsCheck = validateThreadsOnlyCompletionItems(bodyDedupItems);
-        if (itemsCheck.errorResponse) return itemsCheck.errorResponse;
-        bodyDedupItems = itemsCheck.items;
-    }
-
-    const rawPauseReason = String(body.pause_reason || body.stop_reason || bodySummaryObj.pause_reason || bodySummaryObj.stop_reason || "session_budget_reached")
-        .trim().toLowerCase().slice(0, 120) || "session_budget_reached";
-    const isSafetyBlock = rawPauseReason === "captcha_blocked" || rawPauseReason === "rate_limited" || body.blocked === true;
-    const nextPhase = isSafetyBlock ? "blocked" : "paused";
-    const effSessionSeq = existingSessSeq > 0 ? existingSessSeq : 1;
-
     const cpPayload = {
+        request_id: cleanId,
         session_seq: effSessionSeq,
         attempt: parsedAttempt,
+        claimed_by: callerOwner,
         pause_reason: rawPauseReason,
         blocked: isSafetyBlock,
-        note: body.checkpoint?.note || body.note || null,
-        cursor: body.checkpoint?.cursor || body.resume_cursor || null,
-        run_id: bodySummaryObj.run_id || body.run_id || existingSummary.run_id || null,
+        note: incomingNote,
+        cursor: incomingCursor,
+        run_id: resolvedRunId,
+        crawled_at_input: incomingBodyCrawledAt,
+        payload_digest: incomingPayloadDigest,
         checkpoint_at: nowIso,
     };
 
@@ -8468,8 +8896,8 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
         updated_at: nowIso,
     };
 
-    const crawledAt = summaryObj.crawled_at || summaryObj.generated_at || nowIso;
-    const runId = summaryObj.run_id || `${cleanId}_s${effSessionSeq}`;
+    const crawledAt = incomingBodyCrawledAt || summaryObj.crawled_at || summaryObj.generated_at || nowIso;
+    const runId = resolvedRunId;
     summaryObj.run_id = runId;
 
     const outboxStmts = bodyDedupItems.length > 0
@@ -8492,7 +8920,8 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
             checkpoint_json = ?,
             result_summary_json = ?,
             updated_at = ?
-        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+        WHERE id = ? AND status = 'running' AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
+          AND claimed_by = ? AND attempts = ?
           AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
     `).bind(
         rawPauseReason,
@@ -8522,6 +8951,7 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
             const drainRes = await drainRegistryOutboxForRequest(env, cleanId, summaryObj, crawledAt, {
                 sessionSeq: effSessionSeq,
                 isCheckpoint: true,
+                keepSyncingPhase: true,
                 forceRecompute: true,
             });
             if (drainRes?.inProgress || !drainRes?.completed) {
@@ -8550,7 +8980,7 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
     };
 
     const releaseIso = new Date().toISOString();
-    await env.DB.prepare(`
+    const finCheckpointUpd = await env.DB.prepare(`
         UPDATE crawl_requests
         SET status = 'queued',
             execution_phase = ?,
@@ -8561,7 +8991,7 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
             claimed_at = NULL,
             lease_expires_at = NULL,
             updated_at = ?
-        WHERE id = ? AND status = 'running' AND attempts = ?
+        WHERE id = ? AND status = 'running' AND execution_phase = 'syncing_checkpoint' AND attempts = ? AND claimed_by = ?
     `).bind(
         nextPhase,
         rawPauseReason,
@@ -8569,8 +8999,12 @@ async function checkpointCrawlRequestInD1(env, { crawlId, body, defaultOwner = "
         JSON.stringify(summaryObj),
         releaseIso,
         cleanId,
-        parsedAttempt
+        parsedAttempt,
+        callerOwner
     ).run();
+    if (Number(finCheckpointUpd?.meta?.changes || 0) !== 1) {
+        return jsonResponse({ ok: false, error: "Checkpoint release conflict: state changed during outbox drain", conflict: true }, 409);
+    }
 
     try {
         await env.DB.prepare(`
@@ -8819,6 +9253,9 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
     if (existing.status !== "running") {
         return jsonResponse({ ok: false, error: "Crawl lease expired or request is not running", conflict: true }, 409);
     }
+    if (String(existing.execution_phase || "").trim().toLowerCase() === "syncing_checkpoint") {
+        return jsonResponse({ ok: false, error: "Crawl request is currently syncing checkpoint outbox", conflict: true }, 409);
+    }
     if (existing.claimed_by && callerOwner !== existing.claimed_by) {
         return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
     }
@@ -8914,7 +9351,8 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
     const updateReqStmt = env.DB.prepare(`
         UPDATE crawl_requests
         SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
-        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+        WHERE id = ? AND status = 'running' AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
+          AND claimed_by = ? AND attempts = ?
           AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
     `).bind(
         nextStatus,
@@ -9091,6 +9529,9 @@ async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enf
     if (existing.status !== "running") {
         return jsonResponse({ ok: false, error: "Crawl request is no longer running", conflict: true }, 409);
     }
+    if (String(existing.execution_phase || "").trim().toLowerCase() === "syncing_checkpoint") {
+        return jsonResponse({ ok: false, error: "Crawl request is currently syncing checkpoint outbox", conflict: true }, 409);
+    }
     if (existing.claimed_by && callerOwner !== existing.claimed_by) {
         return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
     }
@@ -9126,7 +9567,8 @@ async function failCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enf
     const upd = await env.DB.prepare(`
         UPDATE crawl_requests
         SET status = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, error_message = ?, updated_at = ?
-        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+        WHERE id = ? AND status = 'running' AND COALESCE(execution_phase, '') != 'syncing_checkpoint'
+          AND claimed_by = ? AND attempts = ?
           AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
     `).bind(errMsg, nowIso, cleanId, callerOwner, parsedAttempt, nowIso).run();
 
@@ -9544,16 +9986,16 @@ export default {
             console.error("Scheduled reconcileDriveArtifactsForRequests failed:", err?.message || err);
         }
         try {
-            await notifyNewCrawl(env);
-        } catch (err) {
-            notifyErr = err;
-            console.error("Scheduled notifyNewCrawl failed:", err?.message || err);
-        }
-        try {
             await expireStaleLeases(env);
         } catch (err) {
             leaseErr = err;
             console.error("Scheduled expireStaleLeases failed:", err?.message || err);
+        }
+        try {
+            await notifyNewCrawl(env);
+        } catch (err) {
+            notifyErr = err;
+            console.error("Scheduled notifyNewCrawl failed:", err?.message || err);
         }
         if (notifyErr || leaseErr) {
             throw new Error(`Scheduled check failed (${notifyErr ? "notify" : ""}${leaseErr ? " lease" : ""})`.trim());

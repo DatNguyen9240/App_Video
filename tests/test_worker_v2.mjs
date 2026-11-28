@@ -259,6 +259,7 @@ class MockD1Database {
           return {
             quality_qualified_count: rows.filter((x) => Number(x.quality_qualified || 0) === 1).length,
             watchlist_count: rows.filter((x) => Number(x.quality_qualified || 0) === 0 && x.trend_tier === "watchlist").length,
+            below_hot_count: rows.filter((x) => Number(x.quality_qualified || 0) === 0 && x.trend_tier === "below_hot").length,
             traffic_content_count: rows.filter((x) => Number(x.quality_qualified || 0) === 1 && Number(x.is_traffic_content || 0) === 1).length,
             total_tracked_items: rows.length,
           };
@@ -1086,6 +1087,7 @@ class MockD1Database {
               (c) =>
                 c.id === id &&
                 c.status === "running" &&
+                String(c.execution_phase || "") !== "syncing_checkpoint" &&
                 c.claimed_by === claimed_by &&
                 Number(c.attempts || 0) === Number(attempts) &&
                 (!nowIso || !c.lease_expires_at || String(c.lease_expires_at) >= String(nowIso))
@@ -1103,6 +1105,7 @@ class MockD1Database {
             (c) =>
               c.id === id &&
               c.status === "running" &&
+              String(c.execution_phase || "") !== "syncing_checkpoint" &&
               c.claimed_by === claimed_by &&
               Number(c.attempts || 0) === Number(attempts) &&
               (!nowIso || !c.lease_expires_at || String(c.lease_expires_at) >= String(nowIso))
@@ -1115,8 +1118,13 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = 'paused', pause_reason = NULL, options_json = ?")) {
-          const [options_json, updated_at, id] = this.args;
-          const row = db.crawlRequests.find((c) => c.id === id);
+          const [options_json, updated_at, id, nowIso] = this.args;
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              String(c.execution_phase || "") !== "syncing_checkpoint" &&
+              (c.status === "queued" || (c.status === "running" && (!nowIso || (c.lease_expires_at && String(c.lease_expires_at) < String(nowIso)))))
+          );
           if (!row) return { meta: { changes: 0 } };
           row.status = "queued";
           row.execution_phase = "paused";
@@ -1129,8 +1137,15 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = ?, pause_reason = ?, checkpoint_json = ?, result_summary_json = ?")) {
-          const [execution_phase, pause_reason, checkpoint_json, result_summary_json, updated_at, id, attempts] = this.args;
-          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && Number(c.attempts || 0) === Number(attempts));
+          const [execution_phase, pause_reason, checkpoint_json, result_summary_json, updated_at, id, attempts, claimed_by] = this.args;
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              String(c.execution_phase || "") === "syncing_checkpoint" &&
+              Number(c.attempts || 0) === Number(attempts) &&
+              (!claimed_by || c.claimed_by === claimed_by)
+          );
           if (!row) return { meta: { changes: 0 } };
           row.status = "queued";
           row.execution_phase = execution_phase;
@@ -1159,7 +1174,14 @@ class MockD1Database {
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = 'paused', pause_reason = 'lease_expired_recovered'")) {
           const [error_attempts, updated_at, id, nowIso] = this.args;
-          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && c.lease_expires_at && String(c.lease_expires_at) < String(nowIso));
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              String(c.execution_phase || "") !== "syncing_checkpoint" &&
+              c.lease_expires_at &&
+              String(c.lease_expires_at) < String(nowIso)
+          );
           if (!row) return { meta: { changes: 0 } };
           row.status = "queued";
           row.execution_phase = "paused";
@@ -1174,7 +1196,7 @@ class MockD1Database {
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'queued', execution_phase = 'paused', pause_reason = ?")) {
           const [pause_reason, updated_at, id] = this.args;
-          const row = db.crawlRequests.find((c) => c.id === id && ["queued", "running"].includes(c.status));
+          const row = db.crawlRequests.find((c) => c.id === id && ["queued", "running"].includes(c.status) && String(c.execution_phase || "") !== "syncing_checkpoint");
           if (!row) return { meta: { changes: 0 } };
           row.status = "queued";
           row.execution_phase = "paused";
@@ -1187,7 +1209,14 @@ class MockD1Database {
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'failed', execution_phase = 'failed', pause_reason = 'lease_expired_max_errors'")) {
           const [error_attempts, updated_at, id, nowIso] = this.args;
-          const row = db.crawlRequests.find((c) => c.id === id && c.status === "running" && c.lease_expires_at && String(c.lease_expires_at) < String(nowIso));
+          const row = db.crawlRequests.find(
+            (c) =>
+              c.id === id &&
+              c.status === "running" &&
+              String(c.execution_phase || "") !== "syncing_checkpoint" &&
+              c.lease_expires_at &&
+              String(c.lease_expires_at) < String(nowIso)
+          );
           if (!row) return { meta: { changes: 0 } };
           row.status = "failed";
           row.execution_phase = "failed";
@@ -1222,13 +1251,22 @@ class MockD1Database {
           return { meta: { changes: row ? 1 : 0 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET accumulated_quality_count = ?, accumulated_new_qualified_count = ?, accumulated_watchlist_count = ?")) {
-          const [qCnt, nqCnt, wCnt, id] = this.args;
+          const hasCaseTransition = norm.includes("status = CASE WHEN execution_phase = 'syncing_checkpoint'");
+          const [qCnt, nqCnt, wCnt, recoveredPhase, id] = hasCaseTransition
+            ? this.args
+            : [this.args[0], this.args[1], this.args[2], null, this.args[3]];
           const row = db.crawlRequests.find((c) => c.id === id);
           if (!row) return { meta: { changes: 0 } };
           row.accumulated_quality_count = Number(qCnt || 0);
           row.accumulated_new_qualified_count = Number(nqCnt || 0);
           row.accumulated_watchlist_count = Number(wCnt || 0);
-          if (row.execution_phase === "syncing_checkpoint") row.execution_phase = "paused";
+          if (hasCaseTransition && row.execution_phase === "syncing_checkpoint") {
+            row.status = "queued";
+            row.claimed_by = null;
+            row.claimed_at = null;
+            row.lease_expires_at = null;
+            row.execution_phase = recoveredPhase || "paused";
+          }
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE crawl_requests SET status = 'running'")) {
@@ -1364,6 +1402,7 @@ class MockD1Database {
             (c) =>
               c.id === id &&
               c.status === "running" &&
+              String(c.execution_phase || "") !== "syncing_checkpoint" &&
               c.claimed_by === claimed_by &&
               c.attempts === attempts &&
               (!nowIso || !c.lease_expires_at || c.lease_expires_at >= nowIso)
@@ -3653,12 +3692,23 @@ assert.equal(v3StartBtns.length, 6);
       ["crawl:go:threads:20", "crawl:go:threads:50", "crawl:go:threads:100", "crawl:menu", "menu:home"]
     );
 
-    const queuedMsg = await sendCallback(8006, "crawl:go:threads:50");
+    // Before helper V3.3 verification, inline Threads shortcut blocks cleanly without falling back to V3.2
+    const blockedInlineMsg = await sendCallback(8006, "crawl:go:threads:50");
+    assert.match(blockedInlineMsg.text, /Muse Helper chưa nâng cấp|Skill threads_crawl/);
+    assert.equal(env14.DB.crawlRequests.length, 0);
+
+    // Once Helper V3.3 is verified, inline shortcut creates Threads V3.3 request in D1
+    env14.DB.runtimeState.set(
+      "muse_helper_compatibility_json",
+      JSON.stringify({ v33_compatible: true, verified: true, skill_version: "1.1", supported_contracts: ["3.2", "3.3"], capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"] })
+    );
+    const queuedMsg = await sendCallback(80060, "crawl:go:threads:50");
     assertNoMainMenuDuplicateInInline(queuedMsg, "Sau khi tạo Crawl");
     assert.equal(env14.DB.crawlRequests.length, 1);
     assert.equal(env14.DB.crawlRequests[0].platform, "threads");
     assert.equal(env14.DB.crawlRequests[0].requested_count, 50);
     assert.equal(env14.DB.crawlRequests[0].status, "queued");
+    assert.equal(env14.DB.crawlRequests[0].contract_version, "3.3");
 
     // 14d: Reply Button "⏰ Lịch tự động"
     const schedMsg = await sendUserText(8007, "⏰ Lịch tự động");
@@ -3808,7 +3858,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://example.workers.dev/api/app/crawl-requests", {
         method: "POST",
         headers: authHeaders15,
-        body: JSON.stringify({ platform: "threads", requested_count: 50, keywords: "skincare" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 50, keywords: "skincare", contract_version: "3.2" }),
       }),
       env15
     );
@@ -4059,7 +4109,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://example.workers.dev/api/app/crawl-requests", {
         method: "POST",
         headers: laptopAHeaders,
-        body: JSON.stringify({ platform: "threads", requested_count: 20, keywords: "expired_lease" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 20, keywords: "expired_lease", contract_version: "3.2" }),
       }),
       env16
     );
@@ -4193,7 +4243,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://example.workers.dev/api/app/crawl-requests", {
         method: "POST",
         headers: laptopAHeaders,
-        body: JSON.stringify({ platform: "threads", requested_count: 50, keywords: "v32_test" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 50, keywords: "v32_test", contract_version: "3.2" }),
       }),
       env16
     )).json()).request;
@@ -4331,7 +4381,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://example.workers.dev/api/app/crawl-requests", {
         method: "POST",
         headers: h17,
-        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "recovery_test" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "recovery_test", contract_version: "3.2" }),
       }),
       env17
     )).json()).request;
@@ -4428,7 +4478,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://example.workers.dev/api/app/crawl-requests", {
         method: "POST",
         headers: h17,
-        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "cron_outbox" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "cron_outbox", contract_version: "3.2" }),
       }),
       env17
     )).json()).request;
@@ -4658,7 +4708,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://example.workers.dev/api/app/crawl-requests", {
         method: "POST",
         headers: h18,
-        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "concurrent_outbox_18a" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "concurrent_outbox_18a", contract_version: "3.2" }),
       }),
       env18
     )).json()).request;
@@ -4753,7 +4803,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://example.workers.dev/api/app/crawl-requests", {
         method: "POST",
         headers: h18,
-        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "split_race_18" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 150, keywords: "split_race_18", contract_version: "3.2" }),
       }),
       env18
     )).json()).request;
@@ -6272,12 +6322,23 @@ assert.equal(v3StartBtns.length, 6);
       Authorization: "Bearer muse-token-23",
     };
 
-    // 23A: Shared Manual Prompt Trigger + Display States + Non-duplication + Platform contracts
-    const createThreadsResp = await (await worker.fetch(
+    // 23A: Shared Manual Prompt Trigger (with explicit V3.2 intentional rollback; default without Helper rejected 409)
+    const blockedGate23 = await worker.fetch(
       new Request("https://worker.example/api/app/crawl-requests", {
         method: "POST",
         headers: appHeaders,
         body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "serum vitamin c" }),
+      }),
+      env23
+    );
+    assert.equal(blockedGate23.status, 409);
+    assert.equal((await blockedGate23.json()).code, "muse_helper_incompatible");
+
+    const createThreadsResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "serum vitamin c", contract_version: "3.2" }),
       }),
       env23
     )).json();
@@ -6396,7 +6457,7 @@ assert.equal(v3StartBtns.length, 6);
             message_id: 11,
             from: { id: 99887766 },
             chat: { id: 99887766, type: "private" },
-            text: "/request_crawl threads 12 retinol",
+            text: "/request_crawl threads 12 contract=3.2 retinol",
           },
         }),
       }),
@@ -6586,7 +6647,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://worker.example/api/app/crawl-requests", {
         method: "POST",
         headers: appHeaders,
-        body: JSON.stringify({ platform: "threads", requested_count: 5, keywords: "cancel check" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 5, keywords: "cancel check", contract_version: "3.2" }),
       }),
       env23
     )).json();
@@ -6760,7 +6821,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://worker.example/api/app/crawl-requests", {
         method: "POST",
         headers: appHeaders,
-        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "e2e1622" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "e2e1622", contract_version: "3.2" }),
       }),
       env23
     )).json();
@@ -6908,7 +6969,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://worker.example/api/app/crawl-requests", {
         method: "POST",
         headers: appHeaders,
-        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "zero_valid" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "zero_valid", contract_version: "3.2" }),
       }),
       env23
     )).json();
@@ -6969,7 +7030,7 @@ assert.equal(v3StartBtns.length, 6);
       new Request("https://worker.example/api/app/crawl-requests", {
         method: "POST",
         headers: appHeaders,
-        body: JSON.stringify({ platform: "threads", requested_count: 20, keywords: "gia dung thong minh" }),
+        body: JSON.stringify({ platform: "threads", requested_count: 20, keywords: "gia dung thong minh", contract_version: "3.2" }),
       }),
       env23
     )).json();
@@ -6986,6 +7047,7 @@ assert.equal(v3StartBtns.length, 6);
           platform: "threads",
           requested_count: 20,
           keywords: "gia dung thong minh",
+          contract_version: "3.2",
           options: { lease_seconds: 5400 },
         }),
       }),
@@ -7008,6 +7070,7 @@ assert.equal(v3StartBtns.length, 6);
           platform: "threads",
           requested_count: 25,
           keywords: "clamp cap test",
+          contract_version: "3.2",
           options: { lease_seconds: 99999 },
         }),
       }),
@@ -7041,7 +7104,7 @@ assert.equal(v3StartBtns.length, 6);
             message_id: 91,
             from: { id: 99887766 },
             chat: { id: 99887766, type: "private" },
-            text: "/request_crawl threads 20 60m my pham binh dan",
+            text: "/request_crawl threads 20 60m contract=3.2 my pham binh dan",
           },
         }),
       }),
@@ -7077,7 +7140,7 @@ assert.equal(v3StartBtns.length, 6);
         body: JSON.stringify({
           platform: "threads",
           requested_count: 10,
-          options: { crawl_mode: "growth_tracking" },
+          options: { contract_version: "3.2", crawl_mode: "growth_tracking" },
         }),
       }),
       env23
@@ -7140,6 +7203,7 @@ assert.equal(v3StartBtns.length, 6);
             requested_count: 20,
             keywords: mc.keywords || "",
             options: {
+              contract_version: "3.2",
               crawl_mode: mc.mode,
               topics: mc.topics,
               lookback_hours: mc.lookback_hours,
@@ -7220,7 +7284,7 @@ assert.equal(v3StartBtns.length, 6);
             message_id: 192,
             from: { id: 99887766 },
             chat: { id: 99887766, type: "private" },
-            text: "/request_crawl threads 15 mode=traffic_content topics=meme_humor,hot_takes lookback=72h 60m hai van phong",
+            text: "/request_crawl threads 15 mode=traffic_content topics=meme_humor,hot_takes lookback=72h 60m contract=3.2 hai van phong",
           },
         }),
       }),
@@ -7338,12 +7402,13 @@ function makeV33Env() {
     "Content-Type": "application/json",
   };
 
-  // 1. Before helper handshake -> V3.2 remains default for Threads, explicit 3.3 returns 409
+  // 1. Before helper handshake -> MUST NOT silently fall back omitted/"auto" to V3.2; explicit "3.2" rollback preserved
   const cfgBefore = await (await worker.fetch(
     new Request("https://worker.example/api/app/crawl-config", { headers: appHeaders }),
     env24
   )).json();
   assert.equal(cfgBefore.config.helper_compatibility.v33_compatible, false);
+  assert.equal(cfgBefore.config.helper_compatibility.default_contract_version, "3.3");
   assert.equal(cfgBefore.config.contract_version, "3.3");
   assert.equal(cfgBefore.config.legacy_contract_version, "3.2");
   assert.equal(cfgBefore.config.hot_only, true);
@@ -7351,53 +7416,59 @@ function makeV33Env() {
   assert.equal(cfgBefore.config.internal_lease_minutes, 60);
   assert.equal(cfgBefore.config.lease_options_minutes, undefined);
 
-  const blocked33Res = await worker.fetch(
-    new Request("https://worker.example/api/app/crawl-requests", {
-      method: "POST",
-      headers: appHeaders,
-      body: JSON.stringify({ platform: "threads", requested_count: 50, contract_version: "3.3" }),
-    }),
-    env24
-  );
-  assert.equal(blocked33Res.status, 409);
-  assert.equal((await blocked33Res.json()).code, "muse_helper_incompatible");
+  for (const blockedBody of [
+    { platform: "threads", requested_count: 50, contract_version: "3.3" },
+    { platform: "threads", requested_count: 50 },
+    { platform: "threads", requested_count: 50, contract_version: "auto" },
+  ]) {
+    const blockedRes = await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify(blockedBody),
+      }),
+      env24
+    );
+    assert.equal(blockedRes.status, 409, `Expected 409 without silent V3.2 fallback for ${JSON.stringify(blockedBody)}`);
+    assert.equal((await blockedRes.json()).code, "muse_helper_incompatible");
+  }
 
-  const defaultBeforeRes = await (await worker.fetch(
+  // Intentional explicit V3.2 rollback STILL succeeds cleanly and preserves V3.2 semantics
+  const rollback32Res = await (await worker.fetch(
     new Request("https://worker.example/api/app/crawl-requests", {
       method: "POST",
       headers: appHeaders,
-      body: JSON.stringify({ platform: "threads", requested_count: 25, keywords: "legacy gate" }),
+      body: JSON.stringify({ platform: "threads", requested_count: 25, keywords: "legacy rollback", contract_version: "3.2" }),
     }),
     env24
   )).json();
-  assert.equal(defaultBeforeRes.request.contract_version, "3.2");
-  assert.equal(defaultBeforeRes.request.lease_minutes, 30);
+  assert.equal(rollback32Res.request.contract_version, "3.2");
+  assert.equal(rollback32Res.request.lease_minutes, 30);
   await worker.fetch(
-    new Request(`https://worker.example/api/app/crawl-requests/${defaultBeforeRes.request.id}/cancel`, {
+    new Request(`https://worker.example/api/app/crawl-requests/${rollback32Res.request.id}/cancel`, {
       method: "POST",
       headers: appHeaders,
     }),
     env24
   );
 
-  // 2a. Partial capabilities handshake must NOT enable V3.3 yet
-  const partialHs = await (await worker.fetch(
+  // 2a. Outdated skill_version (<1.1), empty capabilities, or partial capabilities MUST NOT enable V3.3
+  const emptyCapsHs = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/helper/handshake", {
       method: "POST",
       headers: museHeaders,
       body: JSON.stringify({
-        helper_version: "muse-helper/3.2.5",
+        helper_version: "muse-helper/3.3.0",
         supported_contracts: ["3.2", "3.3"],
-        skill_version: "1.0",
-        capabilities: ["lease_renew"],
+        skill_version: "1.1",
+        capabilities: [],
       }),
     }),
     env24
   )).json();
-  assert.equal(partialHs.helper_compatibility.v33_compatible, false);
+  assert.equal(emptyCapsHs.helper_compatibility.v33_compatible, false);
 
-  // 2b. Complete V3.3 handshake activates V3.3 + 60m default lease + Skill prompt
-  const hsRes = await (await worker.fetch(
+  const outdatedSkillHs = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/helper/handshake", {
       method: "POST",
       headers: museHeaders,
@@ -7405,6 +7476,37 @@ function makeV33Env() {
         helper_version: "muse-helper/3.3.0",
         supported_contracts: ["3.2", "3.3"],
         skill_version: "1.0",
+        capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
+      }),
+    }),
+    env24
+  )).json();
+  assert.equal(outdatedSkillHs.helper_compatibility.v33_compatible, false);
+
+  const partialHs = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/helper/handshake", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({
+        helper_version: "muse-helper/3.2.5",
+        supported_contracts: ["3.2", "3.3"],
+        skill_version: "1.1",
+        capabilities: ["lease_renew"],
+      }),
+    }),
+    env24
+  )).json();
+  assert.equal(partialHs.helper_compatibility.v33_compatible, false);
+
+  // 2b. Complete V3.3 handshake (Skill v1.1 + all 4 capabilities) activates V3.3 + 60m default lease + Skill prompt
+  const hsRes = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/helper/handshake", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({
+        helper_version: "muse-helper/3.3.0",
+        supported_contracts: ["3.2", "3.3"],
+        skill_version: "1.1",
         capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
       }),
     }),
@@ -7555,6 +7657,16 @@ function makeV33Env() {
   assert.equal(cp24.accumulated_quality_count, 2);
   assert.equal(cp24.accumulated_watchlist_count, 0);
   assert.equal(cp24.remaining_target, 2);
+  // Policy 3.3-hot-only-20261128: below-Hot (23 views), Emerging (1800 views), Watchlist (450 views), and Unverified MUST NEVER enter research registry/snapshots
+  assert.equal(env24.DB.postRegistry.size, 2, "Only the 2 Hot/Very Hot posts may enter market_post_registry");
+  assert.equal(env24.DB.postSnapshots.size, 2, "Only the 2 Hot/Very Hot posts may enter market_post_snapshots");
+  assert.equal(env24.DB.postRegistry.has("threads:post:V33Post_0002"), false);
+  assert.equal(env24.DB.postRegistry.has("threads:post:V33Post_0003"), false);
+  assert.equal(env24.DB.postRegistry.has("threads:post:V33Post_0005"), true);
+  assert.equal(env24.DB.postRegistry.has("threads:post:V33Post_0006"), true);
+  assert.equal(env24.DB.requestQualityItems.get(`${req33Res.request.id}::threads:post:V33Post_0002`)?.quality_qualified, 0);
+  assert.equal(env24.DB.requestQualityItems.get(`${req33Res.request.id}::threads:post:V33Post_0002`)?.trend_tier, "below_hot");
+  assert.equal(env24.DB.requestQualityItems.get(`${req33Res.request.id}::threads:post:V33Post_0003`)?.trend_tier, "below_hot");
 }
 
 // ─── Test 25: Multi-Session 100-Post Crawl, Lease Renewals, Dedup, CAPTCHA Block & Drive Checkpoint ─
@@ -7932,9 +8044,10 @@ function makeV33Env() {
       env25
     )).json();
     const driveRunId = `${capId}_s2_drive`;
+    const driveTs25 = new Date(Date.now() + 5000).toISOString();
     mockDriveFiles = [
-      { id: "df_cp_1", name: `threads_trend_${driveRunId}.json`, parents: ["fld_threads_25"], modifiedTime: "2026-11-28T09:30:00Z" },
-      { id: "rf_cp_1", name: `trend_report_${driveRunId}.json`, parents: ["fld_reports_25"], modifiedTime: "2026-11-28T09:31:00Z" },
+      { id: "df_cp_1", name: `threads_trend_${driveRunId}.json`, parents: ["fld_threads_25"], modifiedTime: driveTs25 },
+      { id: "rf_cp_1", name: `trend_report_${driveRunId}.json`, parents: ["fld_reports_25"], modifiedTime: driveTs25 },
     ];
     mockDrivePayloads = {
       df_cp_1: {
@@ -7971,6 +8084,350 @@ function makeV33Env() {
     assert.equal(telegramCount, tgBeforeReconcile);
   } finally {
     globalThis.fetch = prevFetch25;
+  }
+}
+
+// ─── Test 26: Preflight Audit Regression Guards (Replay, Races, Incomplete Drive V3.3, Historical/Below-Hot Isolation) ─
+{
+  const env26 = makeV33Env();
+  const appHeaders = {
+    Authorization: `Bearer ${env26.APP_VIDEO_API_TOKEN}`,
+    "Content-Type": "application/json",
+    "X-Client-Id": "app-video-test",
+  };
+  const museHeaders = {
+    Authorization: `Bearer ${env26.MUSE_APP_VIDEO_TOKEN}`,
+    "Content-Type": "application/json",
+  };
+  const prevFetch26 = globalThis.fetch;
+  let tgCount26 = 0;
+  let mockDriveFiles26 = [];
+  let mockDrivePayloads26 = {};
+
+  globalThis.fetch = async (url, init = {}) => {
+    const s = String(url);
+    if (s.includes("oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "drive-tok-26", expires_in: 3600 }), { status: 200 });
+    }
+    if (s.includes("www.googleapis.com/drive/v3/files?")) {
+      const u = new URL(s);
+      const q = u.searchParams.get("q") || "";
+      if (q.includes(`'${WORKSPACE_ID}' in parents`)) {
+        return new Response(JSON.stringify({ files: [{ id: "fld_market_26", name: "01_Market_Data", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200 });
+      }
+      if (q.includes("'fld_market_26' in parents")) {
+        return new Response(JSON.stringify({
+          files: [
+            { id: "fld_threads_26", name: "Threads", mimeType: "application/vnd.google-apps.folder" },
+            { id: "fld_reports_26", name: "Reports", mimeType: "application/vnd.google-apps.folder" },
+          ],
+        }), { status: 200 });
+      }
+      if (q.includes("'fld_threads_26' in parents")) {
+        return new Response(JSON.stringify({ files: mockDriveFiles26.filter(f => (f.parents || []).includes("fld_threads_26")) }), { status: 200 });
+      }
+      if (q.includes("'fld_reports_26' in parents")) {
+        return new Response(JSON.stringify({ files: mockDriveFiles26.filter(f => (f.parents || []).includes("fld_reports_26")) }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ files: mockDriveFiles26 }), { status: 200 });
+    }
+    if (s.includes("www.googleapis.com/drive/v3/files/") && s.includes("alt=media")) {
+      const m = s.match(/files\/([^?]+)/);
+      const fid = m ? m[1] : "";
+      if (mockDrivePayloads26[fid] !== undefined) {
+        return new Response(JSON.stringify(mockDrivePayloads26[fid]), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    }
+    if (s.includes("api.telegram.org")) {
+      tgCount26 += 1;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 2600 + tgCount26 } }), { status: 200 });
+    }
+    return prevFetch26(url, init);
+  };
+
+  try {
+    // Seed historical V3.2 row & below-Hot legacy registry entry -> must NEVER be lost or converted to V3.3
+    env26.DB.postRegistry.set("threads:post:HIST_V32_KEEP", {
+      dedup_key: "threads:post:HIST_V32_KEEP",
+      platform: "threads",
+      post_id: "HIST_V32_KEEP",
+      canonical_url: "https://www.threads.com/@legacy/post/HIST_V32_KEEP",
+      first_seen_at: "2026-11-27T08:00:00Z",
+      last_seen_at: "2026-11-27T08:00:00Z",
+      snapshot_count: 1,
+      latest_metrics_json: JSON.stringify({ views: 3500, likes: 40 }),
+    });
+
+    // Verify Helper V3.3 via handshake with Skill v1.1 + 4 capabilities
+    const hsOk = await worker.fetch(
+      new Request("https://worker.example/api/crawl/helper/handshake", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          helper_version: "muse-helper/3.3.1",
+          supported_contracts: ["3.2", "3.3"],
+          skill_version: "1.1",
+          capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
+        }),
+      }),
+      env26
+    );
+    assert.equal(hsOk.status, 200);
+
+    // Create 20-post V3.3 request & claim Session 1 (attempt=1, session_seq=1)
+    const mk26 = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 20, crawl_mode: "balanced" }),
+      }),
+      env26
+    )).json();
+    const id26 = mk26.request.id;
+    const cl26S1 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: id26 }),
+      }),
+      env26
+    )).json();
+    assert.equal(cl26S1.request.session_seq, 1);
+    assert.equal(cl26S1.request.attempt, 1);
+
+    // 26A: Checkpoint with Hot + Below-Hot items -> Below-Hot NEVER enters postRegistry/postSnapshots
+    const s1Body = {
+      request_id: id26,
+      attempt: 1,
+      session_seq: 1,
+      pause_reason: "session_budget_reached",
+      run_id: `${id26}_s1`,
+      crawled_at: "2026-11-28T08:00:00Z",
+      items: [
+        makeV33ThreadsItem(801, { views: 14500, likes: 350 }),
+        makeV33ThreadsItem(802, { trend_tier: "hot", views: 55, likes: 1, metrics: { views: 55, likes: 1, comments: 0 }, quality_qualified: true }),
+      ],
+    };
+    const cp26S1 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify(s1Body),
+      }),
+      env26
+    )).json();
+    assert.equal(cp26S1.ok, true);
+    assert.equal(cp26S1.accumulated_quality_count, 1);
+    assert.equal(env26.DB.postRegistry.has("threads:post:HIST_V32_KEEP"), true, "Historical V3.2 entry preserved");
+    assert.equal(env26.DB.postRegistry.has("threads:post:V33Post_0801"), true);
+    assert.equal(env26.DB.postRegistry.has("threads:post:V33Post_0802"), false, "Below-Hot MUST NOT enter market_post_registry");
+    assert.equal(env26.DB.postSnapshots.has([...env26.DB.postSnapshots.keys()].find(k => k.includes("V33Post_0802")) || "__none__"), false);
+    assert.equal(env26.DB.requestQualityItems.get(`${id26}::threads:post:V33Post_0802`)?.trend_tier, "below_hot");
+
+    // 26B: Strict Idempotent Replay matrix (NEVER accept `session_seq || attempt`)
+    // 1) matching session_seq=1 + wrong attempt=2 -> MUST reject 409
+    const badAttReplay = await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ ...s1Body, attempt: 2 }),
+      }),
+      env26
+    );
+    assert.equal(badAttReplay.status, 409);
+
+    // 2) matching attempt=1 + wrong session_seq=2 or missing session_seq -> MUST reject 409
+    const badSessReplay = await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ ...s1Body, session_seq: 2 }),
+      }),
+      env26
+    );
+    assert.equal(badSessReplay.status, 409);
+    const missingSessBody = { ...s1Body };
+    delete missingSessBody.session_seq;
+    const missingSessReplay = await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify(missingSessBody),
+      }),
+      env26
+    );
+    assert.equal(missingSessReplay.status, 409);
+
+    // 3) matching (request_id, session_seq=1, attempt=1, owner=muse-ai) + tampered payload -> MUST reject 409
+    const tamperedReplay = await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          ...s1Body,
+          items: [makeV33ThreadsItem(803, { views: 22000, likes: 400 })],
+        }),
+      }),
+      env26
+    );
+    assert.equal(tamperedReplay.status, 409);
+
+    // 4) exact replay (omitting only optional crawled_at timestamp or identical payload) -> MUST return 200 idempotent_replay: true
+    const exactReplay = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify(s1Body),
+      }),
+      env26
+    )).json();
+    assert.equal(exactReplay.ok, true);
+    assert.equal(exactReplay.idempotent_replay, true);
+    assert.equal(exactReplay.accumulated_quality_count, 1);
+
+    // 26C: Concurrency & syncing_checkpoint race protection across /complete, /pause, /resume, expireStaleLeases, Drive reconcile & cron recovery
+    const cl26S2 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: id26 }),
+      }),
+      env26
+    )).json();
+    assert.equal(cl26S2.request.session_seq, 2);
+    assert.equal(cl26S2.request.attempt, 2);
+
+    // Simulate transient D1 outage during Session 2 checkpoint drain -> leaves request cleanly in 'syncing_checkpoint' + outbox row
+    env26.DB.failRegistry = true;
+    const interruptedCp = await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: id26,
+          attempt: 2,
+          session_seq: 2,
+          pause_reason: "session_budget_reached",
+          run_id: `${id26}_s2`,
+          crawled_at: "2026-11-28T08:15:00Z",
+          items: [makeV33ThreadsItem(804, { views: 25000, likes: 500 })],
+        }),
+      }),
+      env26
+    );
+    assert.equal(interruptedCp.status, 503);
+    const syncingRow = env26.DB.crawlRequests.find(r => r.id === id26);
+    assert.equal(syncingRow.execution_phase, "syncing_checkpoint");
+
+    // While in syncing_checkpoint, /complete, /pause, /resume, /fail MUST ALL reject 409!
+    for (const rCall of [
+      worker.fetch(new Request("https://worker.example/api/crawl/complete", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: id26,
+          attempt: 2,
+          session_seq: 2,
+          items: [],
+          result_summary: {
+            run_id: `${id26}_s2`,
+            contract_version: "3.3",
+            run_status: "partial",
+            stop_reason: "source_exhausted",
+            counters: { scanned_count: 1, quality_qualified_count: 0, new_qualified_count: 0 },
+            sections: { "1_screening": { scanned: 1 } },
+            telegram_summary: "Concurrent complete guard",
+          },
+        }),
+      }), env26),
+      worker.fetch(new Request("https://worker.example/api/crawl/fail", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: id26, attempt: 2, error_message: "concurrent fail guard" }),
+      }), env26),
+      worker.fetch(new Request(`https://worker.example/api/app/crawl-requests/${id26}/pause`, {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({}),
+      }), env26),
+      worker.fetch(new Request(`https://worker.example/api/app/crawl-requests/${id26}/resume`, {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({}),
+      }), env26),
+    ]) {
+      const rResp = await rCall;
+      assert.equal(rResp.status, 409, "syncing_checkpoint must block concurrent mutations");
+    }
+
+    // Even if lease_expires_at is in the past while syncing_checkpoint, expireStaleLeases must NOT mark it failed/error_attempts
+    syncingRow.lease_expires_at = new Date(Date.now() - 120000).toISOString();
+    env26.DB.failRegistry = false; // D1 recovers; scheduled() drains pending outbox cleanly back to queued/paused!
+    await worker.scheduled({}, env26, { waitUntil() {} });
+    const afterCronSync = env26.DB.crawlRequests.find(r => r.id === id26);
+    assert.equal(afterCronSync.status, "queued");
+    assert.equal(afterCronSync.execution_phase, "paused");
+    assert.equal(afterCronSync.claimed_by, null);
+    assert.equal(afterCronSync.error_attempts, 0, "syncing_checkpoint must NEVER be penalized by expireStaleLeases");
+    assert.equal(afterCronSync.accumulated_quality_count, 2);
+
+    // 26D: Drive Reconciliation rejects missing session_seq on V3.3 and converts incomplete V3.3 Drive uploads (< requested_count without terminal stop_reason) to checkpoint (NEVER completed)
+    const cl26S3 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: id26 }),
+      }),
+      env26
+    )).json();
+    assert.equal(cl26S3.request.session_seq, 3);
+    assert.equal(cl26S3.request.attempt, 3);
+
+    const driveRunId26 = `${id26}_s3_drive_inc`;
+    const driveTs26 = new Date(Date.now() + 5000).toISOString();
+    mockDriveFiles26 = [
+      { id: "df_26_bad_sess", name: `threads_trend_${driveRunId26}.json`, parents: ["fld_threads_26"], modifiedTime: driveTs26 },
+      { id: "rf_26_bad_sess", name: `trend_report_${driveRunId26}.json`, parents: ["fld_reports_26"], modifiedTime: driveTs26 },
+    ];
+    mockDrivePayloads26 = {
+      df_26_bad_sess: {
+        request_id: id26,
+        run_id: driveRunId26,
+        attempt: 3,
+        contract_version: "3.3",
+        crawled_at: "2026-11-28T09:00:00Z",
+        records: [makeV33ThreadsItem(805, { views: 30000, likes: 600 })],
+      },
+      rf_26_bad_sess: {
+        request_id: id26,
+        run_id: driveRunId26,
+        attempt: 3,
+        contract_version: "3.3",
+        run_status: "completed",
+        sections: { "1_screening": { scanned: 1 } },
+        telegram_summary: "Missing session_seq on V3.3 should reject",
+      },
+    };
+    await worker.scheduled({}, env26, { waitUntil() {} });
+    const rowMissingSess = env26.DB.crawlRequests.find(r => r.id === id26);
+    assert.equal(rowMissingSess.status, "running");
+    assert.equal(JSON.parse(rowMissingSess.result_summary_json).drive_reconcile.status, "stale_session_rejected");
+
+    // Supply valid session_seq=3 with only 1/20 quality item & NO is_checkpoint & NO terminal stop_reason -> MUST pause cleanly as checkpoint (3/20 total, NEVER completed!)
+    mockDrivePayloads26.df_26_bad_sess.session_seq = 3;
+    mockDrivePayloads26.rf_26_bad_sess.session_seq = 3;
+    mockDrivePayloads26.rf_26_bad_sess.counters = { requested_count: 20, scanned_count: 1, new_qualified_count: 1, quality_qualified_count: 1 };
+    const tgBeforeDriveInc = tgCount26;
+    await worker.scheduled({}, env26, { waitUntil() {} });
+    const rowAfterDriveInc = env26.DB.crawlRequests.find(r => r.id === id26);
+    assert.equal(rowAfterDriveInc.status, "queued", "Incomplete V3.3 Drive upload MUST NOT mark completed");
+    assert.equal(rowAfterDriveInc.execution_phase, "paused");
+    assert.equal(rowAfterDriveInc.pause_reason, "drive_target_incomplete");
+    assert.equal(rowAfterDriveInc.accumulated_quality_count, 3);
+    assert.equal(tgCount26, tgBeforeDriveInc, "Incomplete Drive V3.3 pause MUST NOT send completion Telegram");
+  } finally {
+    globalThis.fetch = prevFetch26;
   }
 }
 

@@ -358,6 +358,17 @@ class CloudflareBridgeClient:
             json_body=payload,
             max_attempts=2,
         )
+        if resp.status_code == 409:
+            try:
+                err_data = resp.json()
+            except Exception:
+                err_data = {}
+            return {
+                "ok": False,
+                "status_code": 409,
+                "code": err_data.get("code") or "conflict",
+                "error": err_data.get("error") or resp.text[:250],
+            }
         if not resp.ok:
             try:
                 err_data = resp.json()
@@ -368,7 +379,7 @@ class CloudflareBridgeClient:
         return resp.json()
 
     def get_helper_compatibility(self) -> Dict[str, Any]:
-        """Query Muse Helper V3.3 compatibility state, degrading gracefully if Worker lacks the endpoint."""
+        """Query Muse Helper V3.3 compatibility state, degrading without silent V3.2 fallback if Worker lacks endpoint."""
         resp = self._request_with_retry("GET", "/api/app/muse-helper/compatibility", max_attempts=2)
         if resp.status_code in (404, 405, 501):
             return {
@@ -380,10 +391,9 @@ class CloudflareBridgeClient:
                     "v33_compatible": False,
                     "supported_contracts": ["3.2"],
                     "capabilities": [],
-                    "default_contract_version": "3.2",
-                    "default_lease_minutes": 30,
+                    "default_contract_version": "3.3",
                     "worker_endpoint_missing": True,
-                    "note": f"Worker chưa deploy endpoint V3.3 (/api/app/muse-helper/compatibility -> HTTP {resp.status_code}); giữ mặc định V3.2 an toàn.",
+                    "note": f"Worker chưa deploy endpoint V3.3 (/api/app/muse-helper/compatibility -> HTTP {resp.status_code}); cần nâng cấp Worker/Muse Helper v1.1 (chỉ hỗ trợ Rollback có chủ đích V3.2, không tự fallback V3.2).",
                 },
             }
         if not resp.ok:
