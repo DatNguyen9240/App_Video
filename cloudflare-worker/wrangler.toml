@@ -6,6 +6,7 @@ compatibility_date = "2026-11-26"
 GOOGLE_DRIVE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g"
 MUSE_POLL_PROFILE = "production_6h"
 MUSE_WEB_URL = "https://muse.ai/"
+TELEGRAM_ALLOWED_USERS = "8873018672,8704148998"
 
 [[d1_databases]]
 binding = "DB"

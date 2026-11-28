@@ -18,6 +18,14 @@ def resolve_filter_config(
         return cfg
 
     plat_block = overrides.get(plat) if isinstance(overrides.get(plat), dict) else overrides
+    plat_block = dict(plat_block)
+    if "published_within_days" in plat_block:
+        plat_block.setdefault("max_age_days", plat_block["published_within_days"])
+    old_video = plat_block.get("old_video_exception")
+    if isinstance(old_video, dict):
+        for field in ("min_likes", "min_views"):
+            if field in old_video:
+                plat_block.setdefault(f"old_video_exception_{field}", old_video[field])
     int_keys = (
         "min_likes",
         "min_views",
@@ -79,13 +87,8 @@ def evaluate_video_filters(
 
     duration_seconds = item.get("duration_seconds")
     published_at = item.get("published_at")
-    metrics_precision = str(item.get("metrics_precision") or "exact").lower()
-    likes_is_rounded = metrics_precision == "display_rounded" or (
-        item.get("likes") is None and item.get("likes_display") is not None
-    )
-    views_is_rounded = metrics_precision == "display_rounded" or (
-        item.get("views") is None and item.get("views_display") is not None
-    )
+    likes_is_rounded = item.get("likes") is None and effective_likes is not None
+    views_is_rounded = item.get("views") is None and effective_views is not None
 
     exclusion_reasons: List[str] = []
     verification_reasons: List[str] = []

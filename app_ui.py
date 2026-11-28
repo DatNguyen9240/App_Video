@@ -4587,12 +4587,12 @@ HTML_TEMPLATE = """
         <!-- Manual JSON Import Drawer -->
         <div v-if="creatorCrawler.showManualImport" class="p-4 rounded-xl bg-amber-950/20 border border-amber-500/35 space-y-2.5 text-xs">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="font-bold text-amber-300">Import JSON Thủ Công (Muse Schema v1 hoặc Discovery Sample)</span>
+            <span class="font-bold text-amber-300">Import JSON Muse (Schema 1.0 hoặc 1.1)</span>
             <div class="flex flex-wrap items-center gap-2">
               <select v-model="creatorCrawler.manualImportRequestId" class="glass-input rounded-lg px-2.5 py-1 text-[11px] text-slate-200">
                 <option value="">Tự ghép theo request_id / profile_url trong JSON</option>
                 <option v-for="rq in creatorCrawler.requests" :key="rq.request_id" :value="rq.request_id">
-                  {{ rq.request_id }} ({{ rq.platform }})
+                  {{ rq.request_id }} ({{ rq.platform }}{{ rq.last_result?.stop_reason ? ' · ' + rq.last_result.stop_reason : '' }})
                 </option>
               </select>
               <input type="file" accept=".json,application/json" @change="onCreatorJsonFileSelected"
@@ -7497,7 +7497,12 @@ HTML_TEMPLATE = """
               const r = data.import_result || {};
               this.creatorCrawler.manualJsonText = '';
               await this.loadCreatorCrawlerAll();
-              this.notify(`📥 Đã nhập ${r.valid_videos_count || 0} video (loại ${r.notes_excluded || 0} note, đạt lọc ${r.passed_count || 0}).`, 'success');
+              if (r.acceptance_only) {
+                this.notify(`Đã kiểm tra mẫu ${r.platform}: ${r.valid_videos_count} video, ${r.passed_count} đạt lọc. Dữ liệu mẫu chỉ dùng nghiệm thu.`, 'success');
+              } else {
+                const reason = r.stop_reason ? ` · ${r.stop_reason}` : '';
+                this.notify(`📥 Đã nhập ${r.valid_videos_count || 0} video (loại ${r.notes_excluded || 0} note, đạt lọc ${r.passed_count || 0})${reason}.`, 'success');
+              }
             } else {
               this.notify(data.error || 'Import JSON thất bại.', 'error');
             }

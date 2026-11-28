@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from market_intelligence.cloudflare_client import CloudflareBridgeClient
 
-from .models import CREATOR_SCHEMA_VERSION, is_creator_crawler_file_payload, is_market_filename, utc_now_iso
+from .models import SUPPORTED_CREATOR_SCHEMA_VERSIONS, is_creator_crawler_file_payload, is_market_filename, utc_now_iso
+from .parser import is_acceptance_sample
 from .storage import CreatorReupStore
 
 CREATOR_DRIVE_SYNC_BLOCKER = (
@@ -232,13 +233,15 @@ class CreatorDriveSyncService:
                             file_errors.append(f"{fname}: JSON lỗi ({json_exc})")
                             continue
 
-                        # Drive sync only ingests strict Muse v1 (`schema_version == "1.0"`); discovery samples are manual-only.
-                        is_strict_v1 = (
+                        is_production_result = (
                             isinstance(parsed_preview, dict)
-                            and str(parsed_preview.get("schema_version") or "").strip() == CREATOR_SCHEMA_VERSION
+                            and str(parsed_preview.get("schema_version") or "").strip() in SUPPORTED_CREATOR_SCHEMA_VERSIONS
                             and is_creator_crawler_file_payload(parsed_preview, file_name=fname, folder_path=folder_path)
+                            and isinstance(parsed_preview.get("creator"), dict)
+                            and isinstance(parsed_preview.get("items"), list)
+                            and not is_acceptance_sample(parsed_preview)
                         )
-                        if not is_strict_v1:
+                        if not is_production_result:
                             files_skipped_market += 1
                             self.store.mark_ignored_remote_file(
                                 file_id=fid,
@@ -259,7 +262,7 @@ class CreatorDriveSyncService:
                             source_kind="drive",
                             modified_time=mtime or dl_meta.get("modified_time"),
                             md5_checksum=md5 or dl_meta.get("md5_checksum"),
-                            drive_folder_id=folder_path or scope_folder_id,
+                            drive_folder_id=fmeta.get("folder_id") or scope_folder_id,
                         )
                         if not res.get("idempotent_skip"):
                             files_ingested += 1

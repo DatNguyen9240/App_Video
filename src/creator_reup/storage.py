@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .filters import evaluate_video_filters, sort_and_filter_videos
 from .models import (
+    CREATOR_BLOCKED_STOP_REASONS,
+    CREATOR_SCHEMA_VERSION,
     RIGHTS_STATUSES,
     SUPPORTED_PLATFORMS,
     canonicalize_video_url,
@@ -19,7 +21,7 @@ from .models import (
     utc_now_iso,
     verify_local_mp4_output,
 )
-from .parser import CreatorParseError, parse_creator_crawl_payload
+from .parser import CreatorParseError, is_acceptance_sample, normalize_item_metrics, parse_creator_crawl_payload
 
 
 class CreatorRequestCorrelationError(ValueError):
@@ -210,6 +212,7 @@ class CreatorReupStore:
             )
             self._ensure_column(conn, "creator_videos", "secondary_video_key", "TEXT")
             self._ensure_column(conn, "creator_reup_jobs", "secondary_video_key", "TEXT")
+            self._ensure_column(conn, "creator_raw_files", "result_json", "TEXT")
             conn.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_cv_platform_filter
@@ -335,7 +338,11 @@ class CreatorReupStore:
     def get_crawl_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM creator_crawl_requests WHERE request_id = ?",
+                """SELECT r.*, (
+                       SELECT f.result_json FROM creator_raw_files f
+                       WHERE f.request_id = r.request_id AND f.result_json IS NOT NULL
+                       ORDER BY f.imported_at DESC, f.rowid DESC LIMIT 1
+                   ) AS result_json FROM creator_crawl_requests r WHERE r.request_id = ?""",
                 (request_id,),
             ).fetchone()
             return self._row_to_request(row) if row else None
@@ -343,7 +350,11 @@ class CreatorReupStore:
     def list_crawl_requests(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM creator_crawl_requests ORDER BY created_at DESC LIMIT ?",
+                """SELECT r.*, (
+                       SELECT f.result_json FROM creator_raw_files f
+                       WHERE f.request_id = r.request_id AND f.result_json IS NOT NULL
+                       ORDER BY f.imported_at DESC, f.rowid DESC LIMIT 1
+                   ) AS result_json FROM creator_crawl_requests r ORDER BY r.created_at DESC LIMIT ?""",
                 (max(1, min(int(limit), 200)),),
             ).fetchall()
             return [self._row_to_request(r) for r in rows]
@@ -361,6 +372,9 @@ class CreatorReupStore:
             d["filters"] = json.loads(d.pop("filters_json") or "{}")
         except json.JSONDecodeError:
             d["filters"] = {}
+        result_json = d.pop("result_json", None)
+        if result_json:
+            d["last_result"] = json.loads(result_json)
         return d
 
     def _assert_request_matches_bundle(
@@ -371,8 +385,9 @@ class CreatorReupStore:
         creator_ids: List[str],
         profile_urls: List[str],
         explicit_crawl_id: Optional[str],
+        muse_crawl_id: bool = False,
     ) -> None:
-        if explicit_crawl_id and req.get("crawl_id") != explicit_crawl_id:
+        if explicit_crawl_id and not muse_crawl_id and req.get("crawl_id") != explicit_crawl_id:
             raise CreatorRequestCorrelationError(
                 f"crawl_id không khớp với request_id {req['request_id']}: nhận {explicit_crawl_id!r}, cần {req.get('crawl_id')!r}."
             )
@@ -388,7 +403,8 @@ class CreatorReupStore:
             raise CreatorRequestCorrelationError(
                 f"creator_id trong JSON ({sorted(clean_creator_ids)}) không khớp request {req['request_id']} ({req_creator})."
             )
-        if req_prof and norm_bundle_urls and req_prof not in norm_bundle_urls:
+        same_creator = req_creator and req_creator in clean_creator_ids
+        if req_prof and norm_bundle_urls and req_prof not in norm_bundle_urls and not (muse_crawl_id and same_creator):
             raise CreatorRequestCorrelationError(
                 f"profile_url trong JSON không khớp request {req['request_id']}."
             )
@@ -404,6 +420,7 @@ class CreatorReupStore:
         drive_folder_id: Optional[str],
         creator_ids: List[str],
         creator_profile_urls: List[str],
+        muse_crawl_id: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Resolve matching crawl request strictly without falling back across mismatched IDs."""
         if explicit_request_id:
@@ -420,7 +437,20 @@ class CreatorReupStore:
                 creator_ids=creator_ids,
                 profile_urls=creator_profile_urls,
                 explicit_crawl_id=explicit_crawl_id,
+                muse_crawl_id=muse_crawl_id,
             )
+            if muse_crawl_id:
+                conflicting = conn.execute(
+                    """
+                    SELECT 1 FROM creator_raw_files WHERE crawl_id = ? AND request_id != ?
+                    UNION ALL
+                    SELECT 1 FROM creator_crawl_requests WHERE crawl_id = ? AND request_id != ?
+                    LIMIT 1
+                    """,
+                    (explicit_crawl_id, explicit_request_id, explicit_crawl_id, explicit_request_id),
+                ).fetchone()
+                if conflicting:
+                    raise CreatorRequestCorrelationError("crawl_id đã được gắn với request khác.")
             return req
 
         if explicit_crawl_id:
@@ -607,6 +637,39 @@ class CreatorReupStore:
             raise CreatorParseError(
                 "JSON discovery sample chỉ dùng để import thủ công, không tự đồng bộ từ Drive."
             )
+        result_meta = {
+            "schema_version": bundle["schema_version"],
+            "crawl_id": bundle.get("crawl_id"),
+            "stop_reason": bundle.get("stop_reason"),
+            "crawl": bundle.get("crawl", {}),
+            "stats": bundle["stats"],
+        }
+        if is_acceptance_sample(bundle) or bundle["source_format"] == "discovery_sample":
+            sample_items = [
+                evaluate_video_filters(
+                    item,
+                    filter_overrides=filter_overrides if filter_overrides is not None else bundle["filters_hint"],
+                    reference_time=bundle["reference_time"],
+                )
+                for item in bundle["items"]
+            ]
+            return {
+                **result_meta,
+                "acceptance_only": True,
+                "source_format": bundle["source_format"],
+                "platform": bundle["platform"],
+                "request_id": bundle["request_id"],
+                "valid_videos_count": len(sample_items),
+                "notes_excluded": bundle["stats"]["notes_excluded"],
+                "videos_inserted": 0,
+                "videos_deduped": 0,
+                "passed_count": sum(item["passed_filter"] for item in sample_items),
+                "needs_verification_count": sum(item["needs_verification"] for item in sample_items),
+            }
+
+        for key, supplied in (("request_id", request_id), ("crawl_id", crawl_id)):
+            if supplied and bundle.get(key) and supplied != bundle[key]:
+                raise CreatorRequestCorrelationError(f"{key} nhập tay không khớp JSON.")
 
         with self._lock:
             if self.is_file_unchanged(
@@ -621,6 +684,7 @@ class CreatorReupStore:
                         (effective_file_id,),
                     ).fetchone()
                     return {
+                        **(json.loads(existing_file["result_json"]) if existing_file and existing_file["result_json"] else result_meta),
                         "idempotent_skip": True,
                         "file_id": effective_file_id,
                         "file_name": file_name,
@@ -642,8 +706,10 @@ class CreatorReupStore:
 
             creator_ids = [c.get("creator_id") or "" for c in bundle["creators"]]
             creator_urls = [c.get("profile_url") or "" for c in bundle["creators"]]
+            muse_crawl_id = bundle["schema_version"] == CREATOR_SCHEMA_VERSION
 
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 matched_req = self._find_matching_request(
                     conn,
                     platform=platform,
@@ -653,11 +719,26 @@ class CreatorReupStore:
                     drive_folder_id=eff_folder_id,
                     creator_ids=creator_ids,
                     creator_profile_urls=creator_urls,
+                    muse_crawl_id=muse_crawl_id,
                 )
                 if matched_req:
                     eff_req_id = eff_req_id or matched_req["request_id"]
                     eff_crawl_id = eff_crawl_id or matched_req["crawl_id"]
-                    active_filter_overrides = filter_overrides if filter_overrides is not None else matched_req.get("filters")
+                    active_filter_overrides = matched_req["filters"] if muse_crawl_id or filter_overrides is None else filter_overrides
+                    if muse_crawl_id and bundle["stats"]["target_count"] != matched_req["requested_count"]:
+                        raise CreatorRequestCorrelationError("target_count trong JSON không khớp request.")
+                    if muse_crawl_id and source_kind == "drive" and matched_req.get("drive_folder_id") and (
+                        matched_req["drive_folder_id"] != drive_folder_id
+                    ):
+                        raise CreatorRequestCorrelationError("Thư mục Drive của file không khớp request.")
+                    if muse_crawl_id:
+                        ref_time = bundle["reference_time"]
+                        prior = conn.execute(
+                            "SELECT request_id, crawl_id FROM creator_raw_files WHERE file_id = ? AND request_id IS NOT NULL",
+                            (effective_file_id,),
+                        ).fetchone()
+                        if prior and (prior["request_id"], prior["crawl_id"]) != (eff_req_id, eff_crawl_id):
+                            raise CreatorRequestCorrelationError("File Drive đã liên kết với kết quả crawl khác.")
                 else:
                     active_filter_overrides = filter_overrides
 
@@ -673,8 +754,8 @@ class CreatorReupStore:
                             creator_handle = COALESCE(excluded.creator_handle, creator_profiles.creator_handle),
                             creator_name = COALESCE(excluded.creator_name, creator_profiles.creator_name),
                             profile_url = excluded.profile_url,
-                            followers_display = COALESCE(excluded.followers_display, creator_profiles.followers_display),
-                            followers = COALESCE(excluded.followers, creator_profiles.followers),
+                            followers_display = excluded.followers_display,
+                            followers = excluded.followers,
                             request_id = COALESCE(excluded.request_id, creator_profiles.request_id),
                             last_crawled_at = excluded.last_crawled_at,
                             updated_at = excluded.updated_at
@@ -698,6 +779,7 @@ class CreatorReupStore:
                 videos_deduped = 0
                 passed_count = 0
                 needs_verification_count = 0
+                qualified_keys = set()
 
                 for item in bundle["items"]:
                     evaluated = evaluate_video_filters(
@@ -760,15 +842,15 @@ class CreatorReupStore:
                                 title = COALESCE(?, title),
                                 thumbnail = COALESCE(?, thumbnail),
                                 views = ?,
-                                views_display = COALESCE(?, views_display),
+                                views_display = ?,
                                 effective_views = ?,
                                 likes = ?,
-                                likes_display = COALESCE(?, likes_display),
+                                likes_display = ?,
                                 effective_likes = ?,
                                 metrics_precision = ?,
-                                comments = COALESCE(?, comments),
-                                shares = COALESCE(?, shares),
-                                favorites = COALESCE(?, favorites),
+                                comments = ?,
+                                shares = ?,
+                                favorites = ?,
                                 duration_seconds = COALESCE(?, duration_seconds),
                                 published_at = COALESCE(?, published_at),
                                 published_at_display = COALESCE(?, published_at_display),
@@ -889,15 +971,29 @@ class CreatorReupStore:
                                 raw_item_json,
                             ),
                         )
+                    resolved_key = existing_video["video_key"] if existing_video else vkey
+                    if evaluated["filter_status"] == "passed":
+                        qualified_keys.add(resolved_key)
+                    else:
+                        qualified_keys.discard(resolved_key)
 
+                result_meta["qualified_local"] = len(qualified_keys)
+                result_meta["passed_count"] = passed_count
+                result_meta["needs_verification_count"] = needs_verification_count
+                stop_reason = bundle.get("stop_reason")
+                result_is_terminal = matched_req and stop_reason not in CREATOR_BLOCKED_STOP_REASONS
+                if muse_crawl_id and matched_req and stop_reason == "target_reached":
+                    result_is_terminal = len(qualified_keys) >= matched_req["requested_count"]
+                    if not result_is_terminal:
+                        result_meta["completion_note"] = "target_not_met_locally"
                 conn.execute(
                     """
                     INSERT INTO creator_raw_files (
                         file_id, file_name, source_kind, drive_folder_id, modified_time,
                         md5_checksum, sha256_checksum, request_id, crawl_id, platform,
                         schema_version, items_parsed, notes_excluded, videos_inserted,
-                        videos_deduped, status, error_message, imported_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?)
+                        videos_deduped, status, error_message, imported_at, result_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL, ?, ?)
                     ON CONFLICT(file_id) DO UPDATE SET
                         file_name = excluded.file_name,
                         source_kind = excluded.source_kind,
@@ -915,7 +1011,8 @@ class CreatorReupStore:
                         videos_deduped = excluded.videos_deduped,
                         status = 'synced',
                         error_message = NULL,
-                        imported_at = excluded.imported_at
+                        imported_at = excluded.imported_at,
+                        result_json = excluded.result_json
                     """,
                     (
                         effective_file_id,
@@ -934,23 +1031,24 @@ class CreatorReupStore:
                         videos_inserted,
                         videos_deduped,
                         now,
+                        json.dumps(result_meta, ensure_ascii=False),
                     ),
                 )
 
-                # Only close production requests from authentic schema v1 files, NEVER discovery fixtures.
                 if matched_req and bundle["source_format"] == "muse_v1":
                     conn.execute(
                         """
                         UPDATE creator_crawl_requests SET
-                            status = 'synced',
-                            matched_file_count = matched_file_count + 1,
+                            status = CASE WHEN ? THEN 'synced' ELSE status END,
+                            matched_file_count = (SELECT COUNT(DISTINCT sha256_checksum) FROM creator_raw_files WHERE request_id = ? AND status = 'synced'),
                             updated_at = ?
                         WHERE request_id = ?
                         """,
-                        (now, matched_req["request_id"]),
+                        (bool(result_is_terminal), matched_req["request_id"], now, matched_req["request_id"]),
                     )
 
             return {
+                **result_meta,
                 "idempotent_skip": False,
                 "file_id": effective_file_id,
                 "file_name": file_name,
@@ -1045,6 +1143,12 @@ class CreatorReupStore:
                 d[dst_key] = json.loads(raw_s) if raw_s else default_val
             except json.JSONDecodeError:
                 d[dst_key] = default_val
+        raw_item = d["raw_item"]
+        for key, value in normalize_item_metrics(raw_item).items():
+            if key not in d:
+                d[key] = value
+        for key in ("metrics_source", "crawled_at"):
+            d[key] = raw_item.get(key)
         return d
 
     def query_videos(

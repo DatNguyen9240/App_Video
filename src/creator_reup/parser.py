@@ -1,4 +1,4 @@
-"""Strict Muse Schema v1 parser and Douyin discovery sample adapter."""
+"""Muse Schema v1.0/v1.1 parser and Douyin discovery sample adapter."""
 
 import json
 import re
@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .models import (
     CREATOR_SCHEMA_VERSION,
+    CREATOR_STOP_REASONS,
+    SUPPORTED_CREATOR_SCHEMA_VERSIONS,
     SUPPORTED_PLATFORMS,
     canonicalize_video_url,
     coerce_exact_int,
@@ -25,6 +27,26 @@ class CreatorParseError(ValueError):
     """Raised when an input JSON file violates Creator Crawler structural rules."""
 
 
+def is_acceptance_sample(bundle: Dict[str, Any]) -> bool:
+    """Muse marks the acceptance exports with the reserved manual_sample_ request ID."""
+    return str(bundle.get("request_id") or "").strip().lower().startswith("manual_sample_")
+
+
+def normalize_item_metrics(raw_item: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep exact counts, display labels, and estimates independently."""
+    metrics = {}
+    for field in ("views", "likes", "comments", "shares", "favorites"):
+        exact = coerce_exact_int(raw_item.get(field))
+        display = str(raw_item.get(f"{field}_display") or "").strip() or None
+        estimate = parse_display_count(display)
+        if estimate is None:
+            estimate = coerce_exact_int(raw_item.get(f"{field}_approx"))
+        metrics.update({field: exact, f"{field}_display": display, f"{field}_approx": estimate})
+        if field in ("views", "likes"):
+            metrics[f"effective_{field}"] = exact if exact is not None else estimate
+    return metrics
+
+
 def _is_note_entry(raw_url: str, content_type: Any, url_kind: Optional[str]) -> bool:
     ct = str(content_type or "").strip().lower()
     if url_kind == "note" or "/note/" in str(raw_url or "").lower():
@@ -39,6 +61,7 @@ def _validate_item_identity(
     platform: str,
     creator_id: str,
     raw_item: Dict[str, Any],
+    strict_identity: bool = False,
 ) -> Tuple[bool, str, str, str]:
     """Validate URL/platform/video_id/creator_id consistency for one item.
 
@@ -62,6 +85,10 @@ def _validate_item_identity(
 
     if item_creator_id and creator_id and item_creator_id != creator_id:
         return False, "creator_id_mismatch", raw_url, raw_video_id
+    if strict_identity and (url_platform != platform or url_kind != "video" or not extracted_vid):
+        return False, "invalid_canonical_video_url", raw_url, raw_video_id
+    if strict_identity and (not item_creator_id or not raw_video_id or content_type != "video"):
+        return False, "missing_video_identity", raw_url, raw_video_id
 
     if not raw_video_id and not extracted_vid:
         return False, "missing_video_id", raw_url, ""
@@ -89,6 +116,7 @@ def _build_normalized_item(
     request_id: Optional[str],
     crawl_id: Optional[str],
     crawled_at_default: Optional[str],
+    strict_identity: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Normalize a single item, returning `(valid_video_or_none, excluded_entry_or_none)`."""
     creator_id = str(creator_meta.get("creator_id") or "").strip()
@@ -96,6 +124,7 @@ def _build_normalized_item(
         platform=platform,
         creator_id=creator_id,
         raw_item=raw_item,
+        strict_identity=strict_identity,
     )
     if not is_valid:
         return None, {
@@ -117,33 +146,15 @@ def _build_normalized_item(
         norm_sec = str(raw_secondary or "").strip() or None
         secondary_video_key = None
 
-    exact_likes = coerce_exact_int(raw_item.get("likes")) if "likes" in raw_item else None
-    likes_display = str(raw_item.get("likes_display")).strip() if raw_item.get("likes_display") not in (None, "") else None
-    # Keep exact `likes: None` when only rounded display string is available.
-    display_likes_num = parse_display_count(likes_display) if likes_display is not None else None
-    effective_likes = exact_likes if exact_likes is not None else display_likes_num
-
-    exact_views = coerce_exact_int(raw_item.get("views")) if "views" in raw_item else None
-    views_display = str(raw_item.get("views_display")).strip() if raw_item.get("views_display") not in (None, "") else None
-    effective_views = exact_views if exact_views is not None else parse_display_count(views_display)
+    metrics = normalize_item_metrics(raw_item)
 
     raw_precision = str(raw_item.get("metrics_precision") or "").strip().lower()
     if raw_precision in ("exact", "display_rounded"):
         metrics_precision = raw_precision
-    elif exact_likes is None and likes_display is not None:
+    elif any(metrics[field] is None and metrics[f"{field}_approx"] is not None for field in ("likes", "views")):
         metrics_precision = "display_rounded"
     else:
         metrics_precision = "exact"
-
-    comments = coerce_exact_int(raw_item.get("comments"))
-    shares = coerce_exact_int(raw_item.get("shares"))
-    favorites = coerce_exact_int(raw_item.get("favorites"))
-    if comments is None and raw_item.get("comments_display"):
-        comments = parse_display_count(raw_item.get("comments_display"))
-    if shares is None and raw_item.get("shares_display"):
-        shares = parse_display_count(raw_item.get("shares_display"))
-    if favorites is None and raw_item.get("favorites_display"):
-        favorites = parse_display_count(raw_item.get("favorites_display"))
 
     dur_raw = raw_item.get("duration_seconds")
     if dur_raw is None and "duration_display" in raw_item:
@@ -178,16 +189,8 @@ def _build_normalized_item(
         "content_type": "video",
         "title": (str(raw_item.get("title") or "").strip() or None),
         "thumbnail": (str(raw_item.get("thumbnail") or "").strip() or None),
-        "views": exact_views,
-        "views_display": views_display,
-        "effective_views": effective_views,
-        "likes": exact_likes,
-        "likes_display": likes_display,
-        "effective_likes": effective_likes,
+        **metrics,
         "metrics_precision": metrics_precision,
-        "comments": comments,
-        "shares": shares,
-        "favorites": favorites,
         "duration_seconds": duration_seconds,
         "published_at": published_at,
         "published_at_display": published_at_display,
@@ -232,14 +235,14 @@ def _normalize_creator_header(platform: str, creator: Dict[str, Any]) -> Dict[st
         "creator_name": (str(creator.get("creator_name") or creator.get("name") or "").strip() or creator_id),
         "profile_url": profile_url,
         "followers_display": followers_display,
-        "followers": followers if followers is not None else parse_display_count(followers_display),
+        "followers": followers,
     }
 
 
 def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     schema_ver = str(payload.get("schema_version") or "").strip()
-    if schema_ver != CREATOR_SCHEMA_VERSION:
-        raise CreatorParseError(f"schema_version không hợp lệ: {schema_ver!r} (cần '1.0').")
+    if schema_ver not in SUPPORTED_CREATOR_SCHEMA_VERSIONS:
+        raise CreatorParseError(f"schema_version không hỗ trợ: {schema_ver!r} (cần '1.0' hoặc '1.1').")
 
     platform = normalize_platform(payload.get("platform"))
     if platform not in SUPPORTED_PLATFORMS:
@@ -253,6 +256,13 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     request_id = str(payload.get("request_id") or crawl_meta.get("request_id") or "").strip() or None
     crawl_id = str(payload.get("crawl_id") or crawl_meta.get("crawl_id") or "").strip() or None
+    for key in ("request_id", "crawl_id"):
+        if payload.get(key) and crawl_meta.get(key) and str(payload[key]).strip() != str(crawl_meta[key]).strip():
+            raise CreatorParseError(f"{key} trong root và crawl không khớp.")
+    if schema_ver == CREATOR_SCHEMA_VERSION and not all(
+        isinstance(payload.get(key), str) and payload[key].strip() for key in ("request_id", "crawl_id")
+    ):
+        raise CreatorParseError("Schema 1.1 cần request_id và crawl_id ở root.")
     drive_folder_id = str(
         payload.get("drive_folder_id") or crawl_meta.get("drive_folder_id") or ""
     ).strip() or None
@@ -274,6 +284,7 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             request_id=request_id,
             crawl_id=crawl_id,
             crawled_at_default=crawled_at_default,
+            strict_identity=schema_ver == CREATOR_SCHEMA_VERSION,
         )
         if norm is not None:
             valid_items.append(norm)
@@ -285,14 +296,36 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 invalid_excluded += 1
 
     raw_stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+    crawl_stop = crawl_meta.get("stop_reason")
+    stats_stop = raw_stats.get("stop_reason")
+    stop_reason = str(crawl_stop or stats_stop or payload.get("stop_reason") or "").strip() or None
+    if schema_ver == CREATOR_SCHEMA_VERSION:
+        if stop_reason not in CREATOR_STOP_REASONS:
+            raise CreatorParseError(f"stop_reason không hợp lệ: {stop_reason!r}.")
+        if crawl_stop and stats_stop and crawl_stop != stats_stop:
+            raise CreatorParseError("stop_reason trong crawl và stats không khớp.")
+        if not parse_published_at(crawled_at_default, platform)[0]:
+            raise CreatorParseError("Schema 1.1 cần crawl.crawled_at hợp lệ.")
+        if not coerce_exact_int(raw_stats.get("target_count")):
+            raise CreatorParseError("Schema 1.1 cần stats.target_count là số dương.")
+
+    def count(*keys: str, default: Optional[int] = None) -> Optional[int]:
+        for key in keys:
+            value = coerce_exact_int(raw_stats.get(key))
+            if value is not None:
+                return value
+        return default
+
+    listed_count = count("listed_count", "scanned_count", "grid_items_seen", default=len(raw_items))
     return {
-        "schema_version": CREATOR_SCHEMA_VERSION,
+        "schema_version": schema_ver,
         "source_format": "muse_v1",
         "platform": platform,
         "request_id": request_id,
         "crawl_id": crawl_id,
         "drive_folder_id": drive_folder_id,
-        "stop_reason": str(crawl_meta.get("stop_reason") or payload.get("stop_reason") or "").strip() or None,
+        "stop_reason": stop_reason,
+        "crawl": crawl_meta,
         "reference_time": crawl_meta.get("crawled_at") or payload.get("measured_at"),
         "filters_hint": crawl_meta.get("filters") if isinstance(crawl_meta.get("filters"), dict) else {},
         "creators": [creator_meta],
@@ -300,12 +333,23 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "excluded_items": excluded_items,
         "stats": {
             "total_input_items": len(raw_items),
-            "scanned_count": int(raw_stats.get("scanned_count") or raw_stats.get("grid_items_seen") or len(raw_items)),
-            "qualified_count": int(raw_stats.get("qualified_count") or raw_stats.get("videos_kept") or len(valid_items)),
+            "scanned_count": listed_count,
+            "listed_count": listed_count,
+            "enriched_count": count("enriched_count"),
+            "qualified_count": count("qualified_count", "videos_kept", default=len(valid_items)),
+            "qualified_beyond_target": count("qualified_beyond_target"),
+            "target_count": count("target_count"),
+            "filter_excluded": count("filter_excluded", "below_filter_excluded"),
+            "filter_exclusion_reasons": {
+                key: coerce_exact_int(value) for key, value in
+                (raw_stats["filter_exclusion_reasons"].items() if isinstance(raw_stats.get("filter_exclusion_reasons"), dict) else ())
+            },
+            "duplicates_in_registry": count("duplicates_in_registry"),
             "valid_videos_count": len(valid_items),
-            "notes_excluded": notes_excluded,
+            "notes_excluded": max(count("notes_excluded", default=0), notes_excluded),
             "invalid_excluded": invalid_excluded,
-            "grid_items_diagnostic": int(raw_stats.get("grid_items_seen") or 0),
+            "grid_items_diagnostic": count("grid_items_seen", default=0),
+            "stop_reason": stop_reason,
         },
     }
 
@@ -407,4 +451,4 @@ def parse_creator_crawl_payload(raw_payload: Any) -> Dict[str, Any]:
         return _parse_v1_payload(payload)
     if isinstance(payload.get("creators"), list):
         return _parse_discovery_sample_payload(payload)
-    raise CreatorParseError("Không nhận diện được định dạng JSON Creator Crawler (thiếu schema_version='1.0' hoặc creators[]).")
+    raise CreatorParseError("Không nhận diện được JSON Creator Crawler (cần schema_version 1.0/1.1 hoặc mẫu creators[]).")

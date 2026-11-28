@@ -8506,4 +8506,201 @@ function makeV33Env() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 27. TELEGRAM MULTI-USER AUTHORIZATION & ID 8704148998 VERIFICATION
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  console.log("--> RUNNING TEST 27: Telegram Multi-User Authorization & ID 8704148998 Access");
+  const tgSentMessages = [];
+  const prevFetch27 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url || "");
+    if (sUrl.includes("api.telegram.org")) {
+      let bodyObj = {};
+      try { bodyObj = JSON.parse(init.body || "{}"); } catch {}
+      tgSentMessages.push({ url: sUrl, body: bodyObj });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 88800 + tgSentMessages.length } }), { status: 200 });
+    }
+    return prevFetch27(url, init);
+  };
+
+  try {
+    const db27 = new MockD1Database();
+    db27.runtimeState.set(
+      "muse_helper_compatibility_json",
+      JSON.stringify({ v33_compatible: true, verified: true, skill_version: "1.2", quality_policy_version: "3.3-hot-only-r2-20261128", supported_contracts: ["3.2", "3.3"], capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"] })
+    );
+    const env27 = {
+      DB: db27,
+      TELEGRAM_BOT_TOKEN_VIDEO: "tg-bot-token-27",
+      TELEGRAM_WEBHOOK_SECRET: "tg-secret-27",
+      TELEGRAM_OWNER_ID: "8873018672",
+      TELEGRAM_ALLOWED_USERS: "8873018672,8704148998,99912345",
+      APP_VIDEO_API_TOKEN: "app-tok-27",
+    };
+
+    // 1. Newly added Telegram User ID 8704148998 sends /start -> authorized & receives menu
+    const startReq87 = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7001,
+        message: {
+          message_id: 101,
+          from: { id: 8704148998, is_bot: false, first_name: "NewUser" },
+          chat: { id: 8704148998, type: "private" },
+          text: "/start",
+        },
+      }),
+    });
+    const startRes87 = await worker.fetch(startReq87, env27);
+    assert.equal(startRes87.status, 200);
+    const lastTg87 = tgSentMessages[tgSentMessages.length - 1];
+    assert.ok(lastTg87, "Telegram message must be delivered to user 8704148998");
+    assert.equal(String(lastTg87.body.chat_id), "8704148998");
+    assert.ok(String(lastTg87.body.text).includes("HỆ THỐNG QUẢN LÝ VIDEO") || String(lastTg87.body.text).includes("bàn phím"), "Should receive bot menu");
+
+    // 2. User 8704148998 triggers inline callback query -> authorized & creates command in D1
+    const cbReq87 = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7002,
+        callback_query: {
+          id: "cq_8704148998",
+          from: { id: 8704148998 },
+          message: { message_id: 101, chat: { id: 8704148998, type: "private" } },
+          data: "cmd:sync_now",
+        },
+      }),
+    });
+    const cbRes87 = await worker.fetch(cbReq87, env27);
+    assert.equal(cbRes87.status, 200);
+    assert.equal(db27.commands.length, 1);
+    assert.equal(db27.commands[0].requested_by_chat_id, "8704148998");
+
+    // 3. User 8704148998 sends /request_crawl -> creates crawl request tagged with 8704148998
+    const crwReq87 = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7003,
+        message: {
+          message_id: 102,
+          from: { id: 8704148998 },
+          chat: { id: 8704148998, type: "private" },
+          text: "/request_crawl threads 20 skintific",
+        },
+      }),
+    });
+    const crwRes87 = await worker.fetch(crwReq87, env27);
+    assert.equal(crwRes87.status, 200);
+    assert.equal(db27.crawlRequests.length, 1);
+    assert.equal(db27.crawlRequests[0].requested_by_chat_id, "8704148998");
+
+    // 4. Primary owner 8873018672 continues to work seamlessly
+    const startReqOwner = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7004,
+        message: {
+          message_id: 201,
+          from: { id: 8873018672 },
+          chat: { id: 8873018672, type: "private" },
+          text: "/start",
+        },
+      }),
+    });
+    const startResOwner = await worker.fetch(startReqOwner, env27);
+    assert.equal(startResOwner.status, 200);
+    const lastTgOwner = tgSentMessages[tgSentMessages.length - 1];
+    assert.equal(String(lastTgOwner.body.chat_id), "8873018672");
+
+    // 5. Unauthorized random user 11223344 is blocked (returns OK but does nothing)
+    const countBeforeUnauth = tgSentMessages.length;
+    const cmdCountBeforeUnauth = db27.commands.length;
+    const unauthReq = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7005,
+        message: {
+          message_id: 999,
+          from: { id: 11223344 },
+          chat: { id: 11223344, type: "private" },
+          text: "/start",
+        },
+      }),
+    });
+    const unauthRes = await worker.fetch(unauthReq, env27);
+    assert.equal(unauthRes.status, 200);
+    assert.equal(tgSentMessages.length, countBeforeUnauth, "Unauthorized user should not receive any Telegram reply");
+    assert.equal(db27.commands.length, cmdCountBeforeUnauth, "Unauthorized user should not enqueue any commands");
+
+    // 6. Group chat from authorized user is blocked (chat type must be private)
+    const groupReq = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7006,
+        message: {
+          message_id: 1000,
+          from: { id: 8704148998 },
+          chat: { id: -100123456789, type: "group" },
+          text: "/start",
+        },
+      }),
+    });
+    const groupRes = await worker.fetch(groupReq, env27);
+    assert.equal(groupRes.status, 200);
+    assert.equal(tgSentMessages.length, countBeforeUnauth, "Group chat must be rejected for security");
+
+    // 7. Spoofed / mismatched from.id and chat.id is blocked
+    const spoofReq = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7007,
+        message: {
+          message_id: 1001,
+          from: { id: 8704148998 },
+          chat: { id: 11223344, type: "private" },
+          text: "/start",
+        },
+      }),
+    });
+    const spoofRes = await worker.fetch(spoofReq, env27);
+    assert.equal(spoofRes.status, 200);
+    assert.equal(tgSentMessages.length, countBeforeUnauth, "Spoofed/mismatched chat.id must be rejected");
+
+    // 8. Hardcoded fallback works even if env variables are empty
+    const envMinimal = {
+      DB: db27,
+      TELEGRAM_BOT_TOKEN_VIDEO: "tg-bot-token-27",
+      TELEGRAM_WEBHOOK_SECRET: "tg-secret-27",
+    };
+    const startReqHardcoded = new Request("https://worker.example/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "tg-secret-27" },
+      body: JSON.stringify({
+        update_id: 7008,
+        message: {
+          message_id: 103,
+          from: { id: 8704148998 },
+          chat: { id: 8704148998, type: "private" },
+          text: "/start",
+        },
+      }),
+    });
+    const startResHardcoded = await worker.fetch(startReqHardcoded, envMinimal);
+    assert.equal(startResHardcoded.status, 200);
+    assert.equal(tgSentMessages.length, countBeforeUnauth + 1, "Hardcoded fallback must authorize 8704148998 even without env");
+
+    console.log("--> TEST 27 PASSED: ID 8704148998 and multi-user Telegram authorization fully verified!");
+  } finally {
+    globalThis.fetch = prevFetch27;
+  }
+}
+
 console.log("WORKER_V2_CONTRACT_TESTS_OK");

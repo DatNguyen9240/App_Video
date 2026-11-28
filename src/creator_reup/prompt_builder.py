@@ -1,11 +1,12 @@
 """Muse prompt builder and ID generator for Creator Crawler (Douyin / Bilibili)."""
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from .filters import resolve_filter_config
-from .models import CREATOR_SCHEMA_VERSION, detect_platform_from_url, normalize_platform, parse_profile_identifier
+from .models import CREATOR_SCHEMA_VERSION, CREATOR_STOP_REASONS, detect_platform_from_url, normalize_platform, parse_profile_identifier
 
 
 def generate_crawl_ids(now: Optional[datetime] = None) -> Tuple[str, str]:
@@ -72,25 +73,42 @@ def build_creator_crawl_prompt(
 
     plat_title = "Douyin" if plat == "douyin" else "Bilibili"
     id_hint = creator_id or "<creator_id>"
+    muse_filters = {
+        "min_likes": cfg["min_likes"],
+        "min_views": cfg["min_views"] if plat == "bilibili" else cfg["min_views"] or None,
+        "max_duration_seconds": cfg["max_duration_seconds"],
+        "published_within_days": cfg["max_age_days"],
+        "old_video_exception": {
+            "min_likes": cfg["old_video_exception_min_likes"],
+            "min_views": cfg["old_video_exception_min_views"] if plat == "bilibili" else None,
+            "logic": "OR" if plat == "bilibili" else "likes_only",
+        },
+        "target_count": count_val,
+        "sort": "views desc, likes desc" if plat == "bilibili" else "likes_approx desc",
+    }
     prompt_text = (
         f"[MUSE CREATOR CRAWLER — {plat_title.upper()}]\n"
         f"request_id: {request_id}\n"
-        f"crawl_id: {crawl_id}\n"
+        f"crawl_id: Muse tự sinh theo mẫu ccr_<YYYYMMDD>_<HHmm>_<platform>_<creator_id_rút_gọn>.\n"
+        f"Mã nội bộ chỉ dùng cho bản 1.0 cũ, không đưa vào crawl_id của 1.1: {crawl_id}\n"
         f"platform: {plat}\n"
         f"profile_url: {clean_url}\n"
-        f"target_qualified_count: {count_val}\n"
+        f"target_count: {count_val}\n"
         f"{folder_note}\n"
+        f"filters: {json.dumps(muse_filters, ensure_ascii=False)}\n"
         f"YÊU CẦU THU THẬP & LỌC VIDEO:\n"
         f"1. Mục tiêu là tìm ĐỦ {count_val} video ĐẠT CHUẨN từ trang creator `{clean_url}` (`qualified_count = {count_val}`). "
-        f"`scanned_count` (tổng bài đã quét) và `qualified_count` (số bài đạt chuẩn) là HAI bộ đếm riêng — có thể phải quét nhiều hơn {count_val} bài để lọc ra đủ {count_val} bài đạt chuẩn.\n"
+        f"`listed_count` (scanned_count trong bản cũ) và `qualified_count` là hai bộ đếm riêng.\n"
         f"2. Loại bỏ toàn bộ bài ảnh/chữ (`/note/`, `note_image_text`). Chỉ lấy `content_type: \"video\"`.\n"
         f"3. Mở chi tiết video để lấy chính xác `published_at`, `duration_seconds` (hoặc `MM:SS`), `likes`/`likes_display`, `views`, `comments`, `shares`, `thumbnail`, `video_url`.\n"
         f"{threshold_lines}\n"
-        f"4. KHÔNG TỰ Ý HẠ NGƯỠNG LỌC: Nếu hết nguồn/cuộn hết profile, bị rate limit hoặc CAPTCHA mà chưa đủ {count_val} video ĐẠT CHUẨN, PHẢI dừng lại và ghi rõ `stop_reason` trong `crawl` cùng `stats.scanned_count` và `stats.qualified_count`.\n\n"
+        f"4. KHÔNG TỰ Ý HẠ NGƯỠNG LỌC. Ghi cùng `stop_reason` vào `crawl` và `stats`: {', '.join(CREATOR_STOP_REASONS)}. "
+        f"Chỉ thu thập metadata bằng phương thức được phép. Dừng khi bị chặn hoặc cần đăng nhập/CAPTCHA.\n\n"
         f"QUY TẮC DỮ LIỆU & SCHEMA (BẮT BUỘC):\n"
         f"- Tuân thủ `CREATOR_CRAWL_OUTPUT_SCHEMA_v1` với `schema_version: \"{CREATOR_SCHEMA_VERSION}\"`.\n"
-        f"- Gắn đúng `request_id: \"{request_id}\"` và `crawl_id: \"{crawl_id}\"` ở cả root JSON và trong `crawl`.\n"
-        f"- Giữ đúng `0` vs `null` (KHÔNG thay `null` bằng `0`, KHÔNG suy diễn số nguyên từ nhãn làm tròn như `77.4K` — giữ `likes: null`, `likes_display: \"77.4K\"`, `metrics_precision: \"display_rounded\"`).\n"
+        f"- Ghi `request_id: \"{request_id}\"` và `crawl_id` do Muse sinh ở root JSON. Ghi bộ lọc thực tế vào `crawl.filters`.\n"
+        f"- `stats` gồm `listed_count`, `enriched_count`, `notes_excluded`, `filter_excluded`, `filter_exclusion_reasons`, `qualified_count`, `target_count`, `duplicates_in_registry` (null nếu chưa kiểm tra) và `stop_reason`.\n"
+        f"- Phân biệt `0` và `null`. Với nhãn `77.4K`, giữ `likes: null`, `likes_display: \"77.4K\"`, `likes_approx: 77400` và `metrics_precision: \"display_rounded\"`. Giá trị xấp xỉ chỉ dùng để lọc, xếp hạng.\n"
         f"- Đặt tên file JSON: `creator_crawl_{plat}_{id_hint}_<YYYYMMDD>_<HHmm>.json`."
     )
 

@@ -97,6 +97,49 @@ function timingSafeEqualStr(a, b) {
     return diff === 0;
 }
 
+const HARDCODED_ALLOWED_TELEGRAM_IDS = ["8704148998"];
+
+function getAuthorizedTelegramIds(env) {
+    const ids = new Set(HARDCODED_ALLOWED_TELEGRAM_IDS);
+    const rawSources = [
+        env?.TELEGRAM_OWNER_ID,
+        env?.TELEGRAM_ALLOWED_USERS,
+        env?.TELEGRAM_ADMIN_IDS,
+        env?.TELEGRAM_CHAT_ID
+    ];
+    for (const source of rawSources) {
+        if (!source) continue;
+        const parts = String(source).split(/[\s,;|]+/);
+        for (const p of parts) {
+            const trimmed = p.trim();
+            if (trimmed && /^\d+$/.test(trimmed)) {
+                ids.add(trimmed);
+            }
+        }
+    }
+    return ids;
+}
+
+function getPrimaryTelegramOwnerId(env) {
+    if (env?.TELEGRAM_OWNER_ID) {
+        const parts = String(env.TELEGRAM_OWNER_ID).split(/[\s,;|]+/);
+        for (const p of parts) {
+            const trimmed = p.trim();
+            if (trimmed && /^\d+$/.test(trimmed)) return trimmed;
+        }
+    }
+    const all = Array.from(getAuthorizedTelegramIds(env));
+    return all.length > 0 ? all[0] : null;
+}
+
+function isAuthorizedTelegramUser(env, fromId, chatId) {
+    const sFrom = String(fromId || "").trim();
+    const sChat = String(chatId || "").trim();
+    if (!sFrom || !sChat || sFrom !== sChat) return false;
+    const allowed = getAuthorizedTelegramIds(env);
+    return allowed.has(sFrom);
+}
+
 function isValidDriveId(id) {
     return typeof id === "string" && /^[a-zA-Z0-9_-]{10,128}$/.test(id);
 }
@@ -3224,7 +3267,7 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
             );
             if (!drainRes?.completed || drainRes?.inProgress || !isTerminal) continue;
             const freshReq = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(reqId).first();
-            const notifyChatId = freshReq ? (freshReq.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null) : null;
+            const notifyChatId = freshReq ? (freshReq.requested_by_chat_id || getPrimaryTelegramOwnerId(env) || null) : null;
             if (
                 freshReq &&
                 notifyChatId &&
@@ -5260,7 +5303,7 @@ async function reconcileDriveArtifactsForRequests(env) {
 }
 
 async function notifyNewCrawl(env) {
-    if (!env.TELEGRAM_OWNER_ID || !env.TELEGRAM_BOT_TOKEN_VIDEO) return;
+    if (!getPrimaryTelegramOwnerId(env) || !env.TELEGRAM_BOT_TOKEN_VIDEO) return;
     const cutoffMs = Date.parse("2026-11-26T12:25:00+07:00");
     const batchSize = Math.min(Math.max(Number(env?.NOTIFY_BATCH_SIZE) || DEFAULT_NOTIFY_BATCH_SIZE, 1), 25);
     const notifiedRequestIds = new Set();
@@ -5381,7 +5424,7 @@ async function notifyNewCrawl(env) {
                     const recCount = Number(stats.newQualifiedCount ?? stats.qualified ?? stats.scanned ?? d.totals?.records ?? 0);
                     const summaryText = buildMuseTelegramNotificationText(d, item.file?.name, item.isCorr);
 
-                    const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText, {
+                    const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, getPrimaryTelegramOwnerId(env), summaryText, {
                         aliasKeys,
                         requestId: reqId,
                         bypassRequestClaim: item.isCorr,
@@ -5478,7 +5521,7 @@ async function notifyNewCrawl(env) {
             ].filter(Boolean);
 
             const recCount = resolveAuthoritativeSummaryRecCount(summary);
-            const chatId = req.requested_by_chat_id || env.TELEGRAM_OWNER_ID;
+            const chatId = req.requested_by_chat_id || getPrimaryTelegramOwnerId(env);
             const text = buildDirectD1CrawlNotificationText(req, summary);
 
             const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, chatId, text, {
@@ -5649,7 +5692,7 @@ async function notifyNewCrawl(env) {
                   `🕒 Hoàn thành: ${time}\n\n` +
                   "🔄 Auto Sync đang chạy ngầm (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).";
 
-            const delivery = await deliverWithUncertaintyGuard(env, notifKey, postsLen, env.TELEGRAM_OWNER_ID, text, {
+            const delivery = await deliverWithUncertaintyGuard(env, notifKey, postsLen, getPrimaryTelegramOwnerId(env), text, {
                 aliasKeys,
                 requestId: data.request_id || null,
                 bypassRequestClaim: isCorr,
@@ -7416,7 +7459,7 @@ async function handleTelegramUpdate(request, env) {
         const fromId = String(cq.from?.id || "");
         const chatId = String(cq.message?.chat?.id || "");
         const msgId = cq.message?.message_id || null;
-        if (!env.TELEGRAM_OWNER_ID || fromId !== env.TELEGRAM_OWNER_ID || chatId !== env.TELEGRAM_OWNER_ID) {
+        if (!isAuthorizedTelegramUser(env, fromId, chatId)) {
             return new Response("OK");
         }
         const data = String(cq.data || "");
@@ -7758,10 +7801,8 @@ async function handleTelegramUpdate(request, env) {
     const msg = update.message;
     if (
         !msg ||
-        !env.TELEGRAM_OWNER_ID ||
         msg.chat?.type !== "private" ||
-        String(msg.from?.id) !== env.TELEGRAM_OWNER_ID ||
-        String(msg.chat?.id) !== env.TELEGRAM_OWNER_ID
+        !isAuthorizedTelegramUser(env, msg.from?.id, msg.chat?.id)
     ) {
         return new Response("OK");
     }
@@ -9212,7 +9253,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
                 }
                 const recoveredStats = drainRes.dedup_stats || existingSummary.dedup_stats;
                 const freshAfter = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
-                const recNotifyChatId = freshAfter ? (freshAfter.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null) : null;
+                const recNotifyChatId = freshAfter ? (freshAfter.requested_by_chat_id || getPrimaryTelegramOwnerId(env) || null) : null;
                 if (
                     freshAfter &&
                     recNotifyChatId &&
@@ -9477,7 +9518,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
     } catch {}
 
     let telegramNotified = false;
-    const notifyChatId = existing.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null;
+    const notifyChatId = existing.requested_by_chat_id || getPrimaryTelegramOwnerId(env) || null;
     if (
         notifyChatId &&
         !existing.notified_at &&

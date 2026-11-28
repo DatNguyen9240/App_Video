@@ -1,4 +1,47 @@
 
+const HARDCODED_ALLOWED_TELEGRAM_IDS = ["8704148998"];
+
+function getAuthorizedTelegramIds(env) {
+    const ids = new Set(HARDCODED_ALLOWED_TELEGRAM_IDS);
+    const rawSources = [
+        env?.TELEGRAM_OWNER_ID,
+        env?.TELEGRAM_ALLOWED_USERS,
+        env?.TELEGRAM_ADMIN_IDS,
+        env?.TELEGRAM_CHAT_ID
+    ];
+    for (const source of rawSources) {
+        if (!source) continue;
+        const parts = String(source).split(/[\s,;|]+/);
+        for (const p of parts) {
+            const trimmed = p.trim();
+            if (trimmed && /^\d+$/.test(trimmed)) {
+                ids.add(trimmed);
+            }
+        }
+    }
+    return ids;
+}
+
+function getPrimaryTelegramOwnerId(env) {
+    if (env?.TELEGRAM_OWNER_ID) {
+        const parts = String(env.TELEGRAM_OWNER_ID).split(/[\s,;|]+/);
+        for (const p of parts) {
+            const trimmed = p.trim();
+            if (trimmed && /^\d+$/.test(trimmed)) return trimmed;
+        }
+    }
+    const all = Array.from(getAuthorizedTelegramIds(env));
+    return all.length > 0 ? all[0] : null;
+}
+
+function isAuthorizedTelegramUser(env, fromId, chatId) {
+    const sFrom = String(fromId || "").trim();
+    const sChat = String(chatId || "").trim();
+    if (!sFrom || !sChat || sFrom !== sChat) return false;
+    const allowed = getAuthorizedTelegramIds(env);
+    return allowed.has(sFrom);
+}
+
 async function getDriveToken(env) {
     const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
     const encoder = new TextEncoder();
@@ -218,7 +261,7 @@ async function notifyNewCrawl(env) {
                     "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
-                    chat_id: env.TELEGRAM_OWNER_ID,
+                    chat_id: getPrimaryTelegramOwnerId(env),
                     text
                 })
             }
@@ -283,10 +326,9 @@ export default {
             const update = await request.json();
             const msg = update.message;
 
-            if (!msg || !env.TELEGRAM_OWNER_ID ||
+            if (!msg ||
                 msg.chat?.type !== "private" ||
-                String(msg.from?.id) !== env.TELEGRAM_OWNER_ID ||
-                String(msg.chat?.id) !== env.TELEGRAM_OWNER_ID) {
+                !isAuthorizedTelegramUser(env, msg.from?.id, msg.chat?.id)) {
                 return new Response("OK");
             }
 

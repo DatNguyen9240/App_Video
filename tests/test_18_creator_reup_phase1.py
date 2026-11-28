@@ -360,6 +360,7 @@ def test_strict_request_correlation_and_discovery_sample_isolation(tmp_path):
         reference_time="2026-11-28T18:06:00+07:00",
     )
     assert disc_res["source_format"] == "discovery_sample"
+    assert disc_res["acceptance_only"] and not store.query_videos()
     assert disc_res["request_id"] is None
     assert store.get_crawl_request(req_a["request_id"])["status"] == "awaiting_muse"
     assert store.get_crawl_request(req_a["request_id"])["matched_file_count"] == 0
@@ -367,6 +368,96 @@ def test_strict_request_correlation_and_discovery_sample_isolation(tmp_path):
     # 5. Drive ingest of discovery sample is rejected cleanly
     with pytest.raises(CreatorParseError):
         store.ingest_creator_json(raw_payload=raw_disc, file_name="disc_drive.json", source_kind="drive")
+
+
+def _as_muse_v11(payload, *, crawl_id="ccr_20261128_1937_test", stop_reason="target_reached", target_count=1):
+    payload["schema_version"] = "1.1"
+    payload["crawl_id"] = crawl_id
+    payload["crawl"].pop("crawl_id", None)
+    payload["crawl"]["stop_reason"] = stop_reason
+    payload["stats"] = {
+        "listed_count": 8,
+        "enriched_count": len(payload["items"]),
+        "target_count": target_count,
+        "qualified_count": len(payload["items"]),
+        "notes_excluded": 0,
+        "filter_excluded": 0,
+        "filter_exclusion_reasons": {"over_duration": 0},
+        "duplicates_in_registry": None,
+        "stop_reason": stop_reason,
+    }
+    return payload
+
+
+def test_muse_v11_metrics_and_sample_import_only(tmp_path):
+    store = CreatorReupStore(data_dir=str(tmp_path))
+    req = build_creator_crawl_prompt(profile_url=_build_douyin_v1_payload()["creator"]["profile_url"])
+    store.create_crawl_request(req)
+    payload = _as_muse_v11(_build_douyin_v1_payload(request_id="manual_sample_douyin"))
+    payload["items"][0].update({
+        "likes_approx": 77400, "comments": 0, "shares": None, "shares_display": "10.5K",
+        "shares_approx": 10500, "favorites_approx": 12000, "rights_status": "approved_for_reup",
+    })
+    parsed = parse_creator_crawl_payload(payload)
+    item = parsed["items"][0]
+    assert item["likes"] is None and item["likes_approx"] == 77400
+    assert item["views"] is None and item["comments"] == 0
+    assert item["shares"] is None and item["shares_approx"] == 10500
+    assert item["favorites"] is None and item["favorites_approx"] == 12000
+    assert parsed["creators"][0]["followers"] is None
+    for source_kind in ("manual", "drive"):
+        result = store.ingest_creator_json(raw_payload=payload, request_id=req["request_id"], source_kind=source_kind)
+        assert result["acceptance_only"] and result["passed_count"] == 1
+        assert result["stats"]["notes_excluded"] == 0 and result["stats"]["duplicates_in_registry"] is None
+        assert result["videos_inserted"] == 0
+    assert not store.query_videos() and not store.list_raw_files()
+    assert store.get_crawl_request(req["request_id"])["status"] == "awaiting_muse"
+
+
+def test_muse_v11_request_correlation_stop_and_replay(tmp_path):
+    store = CreatorReupStore(data_dir=str(tmp_path))
+    profile = _build_bilibili_simulated_v1()["creator"]["profile_url"]
+    req_a = store.create_crawl_request(build_creator_crawl_prompt(
+        profile_url=profile, requested_count=2, drive_folder_id="creator_root",
+        filter_overrides={"min_views": 55000},
+    ))
+    req_b = store.create_crawl_request(build_creator_crawl_prompt(profile_url=profile, requested_count=2))
+    payload = _as_muse_v11(_build_bilibili_simulated_v1(request_id=req_a["request_id"]), target_count=2)
+    payload["crawl"]["filters"] = {"min_views": 0}
+
+    with pytest.raises(CreatorRequestCorrelationError):
+        store.ingest_creator_json(raw_payload=payload, request_id=req_b["request_id"])
+    with pytest.raises(CreatorRequestCorrelationError):
+        store.ingest_creator_json(raw_payload=payload, source_kind="drive", drive_folder_id="other_root")
+    result = store.ingest_creator_json(raw_payload=payload, filter_overrides={"min_views": 0})
+    assert result["passed_count"] == 0
+    assert result["completion_note"] == "target_not_met_locally"
+    assert store.get_crawl_request(req_a["request_id"])["status"] == "awaiting_muse"
+    assert store.query_videos()[0]["rights_status"] == "pending_review"
+
+    payload["request_id"] = req_b["request_id"]
+    payload["crawl"]["request_id"] = req_b["request_id"]
+    with pytest.raises(CreatorRequestCorrelationError):
+        store.ingest_creator_json(raw_payload=payload)
+    payload = _as_muse_v11(
+        _build_bilibili_simulated_v1(request_id=req_a["request_id"]),
+        crawl_id="bili_blocked", stop_reason="rate_limited", target_count=2,
+    )
+    store.ingest_creator_json(raw_payload=payload)
+    assert store.get_crawl_request(req_a["request_id"])["status"] == "awaiting_muse"
+    assert store.get_crawl_request(req_a["request_id"])["last_result"]["stop_reason"] == "rate_limited"
+    payload = _as_muse_v11(
+        _build_bilibili_simulated_v1(request_id=req_a["request_id"]),
+        crawl_id="bili_final", stop_reason="scan_limit_reached", target_count=2,
+    )
+    store.ingest_creator_json(raw_payload=payload, file_id="bili_drive_result", source_kind="drive", drive_folder_id="creator_root")
+    first = store.get_crawl_request(req_a["request_id"])
+    assert first["status"] == "synced" and first["last_result"]["stop_reason"] == "scan_limit_reached"
+    replay = store.ingest_creator_json(raw_payload=payload, file_id="bili_drive_result", source_kind="drive", drive_folder_id="creator_root")
+    assert replay["idempotent_skip"] and replay["stats"]["qualified_count"] == 1
+    assert store.get_crawl_request(req_a["request_id"])["matched_file_count"] == first["matched_file_count"]
+    assert store.get_crawl_request(req_b["request_id"])["status"] == "awaiting_muse"
+    assert len(store.query_videos()) == 1
 
 
 def test_atomic_dedup_concurrency_production_validation_and_lifecycle(tmp_path):

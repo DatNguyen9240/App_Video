@@ -11,6 +11,8 @@ GOOGLE_DRIVE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g"
 MUSE_POLL_PROFILE = "production_6h"
 # Default Muse web URL for Manual Prompt Trigger ("Mở Muse" button)
 MUSE_WEB_URL = "https://muse.ai/"
+# Optional comma-separated Telegram User IDs allowed to use the bot
+# TELEGRAM_ALLOWED_USERS = "8873018672,8704148998"
 # Optional direct override for 01_Market_Data folder ID
 # MARKET_DATA_FOLDER_ID = ""
 # Optional legacy fallback folder ID

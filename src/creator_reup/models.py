@@ -6,7 +6,13 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 
-CREATOR_SCHEMA_VERSION = "1.0"
+CREATOR_SCHEMA_VERSION = "1.1"
+SUPPORTED_CREATOR_SCHEMA_VERSIONS = ("1.0", CREATOR_SCHEMA_VERSION)
+CREATOR_STOP_REASONS = (
+    "target_reached", "profile_exhausted", "scan_limit_reached",
+    "access_blocked", "captcha_required", "login_required", "rate_limited",
+)
+CREATOR_BLOCKED_STOP_REASONS = frozenset(CREATOR_STOP_REASONS[3:])
 SUPPORTED_PLATFORMS = ("douyin", "bilibili")
 
 RIGHTS_STATUSES = (
@@ -85,12 +91,16 @@ def normalize_platform(value: Any) -> Optional[str]:
 
 def detect_platform_from_url(url: str) -> Optional[str]:
     """Detect Douyin or Bilibili platform from a profile or video URL."""
-    s = str(url or "").strip().lower()
-    if not s:
+    try:
+        parsed = urlparse(str(url or "").strip())
+        host = parsed.hostname or ""
+    except ValueError:
         return None
-    if "douyin.com" in s or "iesdouyin.com" in s:
+    if parsed.scheme not in ("https", "http") or parsed.username is not None:
+        return None
+    if host in ("douyin.com", "iesdouyin.com") or host.endswith((".douyin.com", ".iesdouyin.com")):
         return "douyin"
-    if "bilibili.com" in s or "b23.tv" in s:
+    if host in ("bilibili.com", "b23.tv") or host.endswith(".bilibili.com"):
         return "bilibili"
     return None
 
@@ -295,7 +305,7 @@ def coerce_exact_int(value: Any) -> Optional[int]:
     if isinstance(value, int):
         return value if value >= 0 else None
     if isinstance(value, float):
-        return int(round(value)) if value >= 0 else None
+        return int(value) if value >= 0 and value.is_integer() else None
     s = str(value).strip()
     if re.fullmatch(r"\d+", s):
         return int(s)
