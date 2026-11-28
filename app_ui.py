@@ -2748,7 +2748,7 @@ HTML_TEMPLATE = """
                   </button>
                 </div>
                 <span v-if="crawlRequestForm.platform !== 'threads'" class="text-amber-300/90">
-                  ℹ️ Completion API (/api/crawl/*) chỉ hỗ trợ Threads (V3.2); {{ crawlRequestForm.platform.toUpperCase() }} dùng contract V2 & Drive Sync.
+                  ℹ️ {{ crawlRequestForm.platform.toUpperCase() }} CHƯA hỗ trợ tự động hoàn tất request đầy đủ (Completion API /api/crawl/* chỉ hỗ trợ Threads V3.2); chỉ dùng Drive Sync.
                 </span>
               </div>
             </div>

@@ -5793,7 +5793,7 @@ assert.equal(v3StartBtns.length, 6);
     }
     if (u.startsWith("https://api.telegram.org/")) {
       let body = {};
-      try { body = JSON.parse(init?.body || "{}"); } catch {}
+      try { body = JSON.parse(init?.body || "{}"); } catch { }
       tgCalls.push({ url: u, body });
       return new Response(JSON.stringify({ ok: true, result: { message_id: 2300 + tgCalls.length } }), { status: 200 });
     }
@@ -5846,6 +5846,8 @@ assert.equal(v3StartBtns.length, 6);
     assert.match(reqThreads1.manual_prompt, new RegExp(`Request ID: ${reqThreads1.id}`));
     assert.match(reqThreads1.manual_prompt, /Contract Version: 3\.2/);
     assert.match(reqThreads1.manual_prompt, /POST \/api\/crawl\/claim/);
+    assert.match(reqThreads1.manual_prompt, /max\(10 phút, 20% lease\)/);
+    assert.doesNotMatch(reqThreads1.manual_prompt, /6–10 phút/);
     assert.match(reqThreads1.manual_prompt, /serum vitamin c/);
 
     // Copy lại Prompt endpoint returns exact prompt without creating extra D1 requests
@@ -5862,7 +5864,7 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(promptAgain1.manual_prompt, reqThreads1.manual_prompt);
     assert.equal(promptAgain2.manual_prompt, reqThreads1.manual_prompt);
 
-    // Per-platform prompt differences: TikTok & ALL must NOT advertise /api/crawl/* completion support
+    // Per-platform prompt differences: TikTok, Shopee & ALL must NOT advertise /api/crawl/* completion support
     const createTtResp = await (await worker.fetch(
       new Request("https://worker.example/api/app/crawl-requests", {
         method: "POST",
@@ -5872,8 +5874,21 @@ assert.equal(v3StartBtns.length, 6);
       env23
     )).json();
     assert.equal(createTtResp.request.contract_version, "v2");
+    assert.match(createTtResp.request.manual_prompt, /CHƯA hỗ trợ tự động hoàn tất request đầy đủ cho TikTok/);
     assert.match(createTtResp.request.manual_prompt, /CHỈ hỗ trợ platform="threads"/);
     assert.match(createTtResp.request.manual_prompt, /KHÔNG dùng các endpoint \/api\/crawl\/\*/);
+
+    const createSpResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "shopee", requested_count: 15, keywords: "serum" }),
+      }),
+      env23
+    )).json();
+    assert.equal(createSpResp.request.contract_version, "v2");
+    assert.match(createSpResp.request.manual_prompt, /CHƯA hỗ trợ tự động hoàn tất request đầy đủ cho Shopee/);
+    assert.match(createSpResp.request.manual_prompt, /KHÔNG dùng các endpoint \/api\/crawl\/\*/);
 
     const createAllResp = await (await worker.fetch(
       new Request("https://worker.example/api/app/crawl-requests", {
@@ -5883,7 +5898,7 @@ assert.equal(v3StartBtns.length, 6);
       }),
       env23
     )).json();
-    assert.match(createAllResp.request.manual_prompt, /CHƯA hỗ trợ cho platform="all"/);
+    assert.match(createAllResp.request.manual_prompt, /CHƯA hỗ trợ tự động hoàn tất request đầy đủ cho platform="all"/);
 
     // Telegram Manual Prompt Trigger uses same shared buildMuseManualPrompt & inline Mở Muse button
     const tgReqRes = await worker.fetch(
