@@ -7,8 +7,15 @@ from typing import Any, Dict, List, Optional
 
 from market_intelligence.cloudflare_client import CloudflareBridgeClient
 
-from .models import is_creator_crawler_file_payload, is_market_filename, utc_now_iso
+from .models import CREATOR_SCHEMA_VERSION, is_creator_crawler_file_payload, is_market_filename, utc_now_iso
 from .storage import CreatorReupStore
+
+CREATOR_DRIVE_SYNC_BLOCKER = (
+    "Endpoint Worker hiện tại (/api/app/market/files) chỉ được phép đọc thư mục 01_Market_Data; "
+    "mọi thư mục Creator Crawler riêng nằm ngoài 01_Market_Data sẽ bị Worker từ chối (HTTP 403). "
+    "Phase 1 không mở rộng quyền API Market sang Reup — cần endpoint /api/reup/v1 riêng ở Phase 2. "
+    "Vui lòng dùng Import JSON thủ công nếu file Muse không nằm trong 01_Market_Data."
+)
 
 
 class CreatorDriveSyncService:
@@ -115,7 +122,7 @@ class CreatorDriveSyncService:
         )
 
     def sync_now(self, trigger_source: str = "manual_ui") -> Dict[str, Any]:
-        """List remote Drive files incrementally and ingest only Creator Crawler JSONs."""
+        """List Worker-scoped files incrementally and ingest ONLY strict Muse v1 Creator JSONs."""
         with self._sync_lock:
             with self._state_lock:
                 self._is_syncing = True
@@ -129,6 +136,8 @@ class CreatorDriveSyncService:
             videos_inserted = 0
             videos_deduped = 0
             file_errors: List[str] = []
+            scope_folder_id: Optional[str] = None
+            scoped_mismatch_requests: List[str] = []
 
             try:
                 if not self.client.is_configured():
@@ -139,6 +148,7 @@ class CreatorDriveSyncService:
                         "status": "failed",
                         "unconfigured": True,
                         "error_message": err,
+                        "blocker": CREATOR_DRIVE_SYNC_BLOCKER,
                         "files_checked": 0,
                         "files_ingested": 0,
                         "files_skipped_market": 0,
@@ -153,6 +163,8 @@ class CreatorDriveSyncService:
 
                 for page_idx in range(self.max_list_pages):
                     listing = self.client.list_market_files(cursor=cursor, limit=100, page_token=page_token)
+                    if page_idx == 0 and listing.get("scope_folder_id"):
+                        scope_folder_id = str(listing.get("scope_folder_id") or "").strip() or None
                     if listing.get("status") == "partial_error" or listing.get("partial_error"):
                         pagination_error = f"Pagination partial_error ({listing.get('partial_error') or 'incomplete'})"
                         break
@@ -172,6 +184,13 @@ class CreatorDriveSyncService:
                         break
                     seen_page_tokens.add(next_pt)
                     page_token = next_pt
+
+                if scope_folder_id:
+                    self.store.set_state("drive_scope_folder_id", scope_folder_id)
+                    for req in self.store.list_crawl_requests(limit=50):
+                        req_folder = str(req.get("drive_folder_id") or "").strip()
+                        if req.get("status") == "awaiting_muse" and req_folder and req_folder != scope_folder_id:
+                            scoped_mismatch_requests.append(f"{req['request_id']} ({req_folder})")
 
                 all_files.sort(
                     key=lambda x: (
@@ -213,7 +232,13 @@ class CreatorDriveSyncService:
                             file_errors.append(f"{fname}: JSON lỗi ({json_exc})")
                             continue
 
-                        if not is_creator_crawler_file_payload(parsed_preview, file_name=fname, folder_path=folder_path):
+                        # Drive sync only ingests strict Muse v1 (`schema_version == "1.0"`); discovery samples are manual-only.
+                        is_strict_v1 = (
+                            isinstance(parsed_preview, dict)
+                            and str(parsed_preview.get("schema_version") or "").strip() == CREATOR_SCHEMA_VERSION
+                            and is_creator_crawler_file_payload(parsed_preview, file_name=fname, folder_path=folder_path)
+                        )
+                        if not is_strict_v1:
                             files_skipped_market += 1
                             self.store.mark_ignored_remote_file(
                                 file_id=fid,
@@ -234,7 +259,7 @@ class CreatorDriveSyncService:
                             source_kind="drive",
                             modified_time=mtime or dl_meta.get("modified_time"),
                             md5_checksum=md5 or dl_meta.get("md5_checksum"),
-                            drive_folder_id=folder_path or None,
+                            drive_folder_id=folder_path or scope_folder_id,
                         )
                         if not res.get("idempotent_skip"):
                             files_ingested += 1
@@ -262,6 +287,9 @@ class CreatorDriveSyncService:
                 return {
                     "status": status,
                     "trigger_source": trigger_source,
+                    "scope_folder_id": scope_folder_id,
+                    "scoped_mismatch_requests": scoped_mismatch_requests,
+                    "blocker": CREATOR_DRIVE_SYNC_BLOCKER if (scoped_mismatch_requests or files_ingested == 0) else None,
                     "files_checked": files_checked,
                     "files_downloaded": files_downloaded,
                     "files_ingested": files_ingested,

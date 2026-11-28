@@ -1129,7 +1129,7 @@ def render_reup_video(
     output_mp4: str,
     frame_mode: str = "blur_bg",
     mask_old_sub: bool = True,
-    anti_reup: bool = True,
+    anti_reup: bool = False,
     mirror_video: bool = False,
     duration_sec: float = 0.0,
 ) -> str:
@@ -1278,7 +1278,7 @@ def run_reup_pipeline(
     translation_mode: str = "viral",
     frame_mode: str = "blur_bg",
     mask_old_sub: bool = True,
-    anti_reup: bool = True,
+    anti_reup: bool = False,
     mirror_video: bool = False,
     original_volume: float = 0.0,
     custom_prompt: str = "",

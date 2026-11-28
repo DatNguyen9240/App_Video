@@ -83,6 +83,9 @@ def evaluate_video_filters(
     likes_is_rounded = metrics_precision == "display_rounded" or (
         item.get("likes") is None and item.get("likes_display") is not None
     )
+    views_is_rounded = metrics_precision == "display_rounded" or (
+        item.get("views") is None and item.get("views_display") is not None
+    )
 
     exclusion_reasons: List[str] = []
     verification_reasons: List[str] = []
@@ -95,10 +98,11 @@ def evaluate_video_filters(
         if effective_views is None:
             exclusion_reasons.append("missing_views")
             verification_reasons.append("missing_views")
-        elif effective_views < min_views:
-            exclusion_reasons.append(f"views_below_min:{effective_views}<{min_views}")
-        elif _is_near_threshold(effective_views, min_views) and item.get("views") is None:
-            verification_reasons.append("rounded_views_near_threshold")
+        else:
+            if effective_views < min_views:
+                exclusion_reasons.append(f"views_below_min:{effective_views}<{min_views}")
+            if views_is_rounded and _is_near_threshold(effective_views, min_views):
+                verification_reasons.append("rounded_views_near_threshold")
 
     if effective_likes is None:
         exclusion_reasons.append("missing_likes")
@@ -113,8 +117,11 @@ def evaluate_video_filters(
         if effective_views is None:
             exclusion_reasons.append("missing_views")
             verification_reasons.append("missing_views")
-        elif effective_views < min_views:
-            exclusion_reasons.append(f"views_below_min:{effective_views}<{min_views}")
+        else:
+            if effective_views < min_views:
+                exclusion_reasons.append(f"views_below_min:{effective_views}<{min_views}")
+            if views_is_rounded and _is_near_threshold(effective_views, min_views):
+                verification_reasons.append("rounded_views_near_threshold")
 
     # 2. Duration strictly < max_duration_seconds (default 300s)
     max_dur = int(cfg.get("max_duration_seconds") or 300)
@@ -127,7 +134,8 @@ def evaluate_video_filters(
         if duration_seconds >= max_dur:
             exclusion_reasons.append(f"duration_exceeds_limit:{duration_seconds}>={max_dur}")
 
-    # 3. Recency <= max_age_days (default 365 days) OR platform old-video exception
+    # 3. Recency <= max_age_days (default 365 days), disallow future publish timestamps (> +15m clock skew),
+    # and apply old-video exception ONLY to age check (base engagement + duration remain mandatory).
     max_age_days = int(cfg.get("max_age_days") or 365)
     age_exception_applied = False
     if not published_at:
@@ -139,7 +147,10 @@ def evaluate_video_filters(
             if pub_dt.tzinfo is None:
                 pub_dt = pub_dt.replace(tzinfo=timezone.utc)
             age_delta = ref_dt - pub_dt
-            if age_delta > timedelta(days=max_age_days):
+            if age_delta < -timedelta(minutes=15):
+                exclusion_reasons.append(f"future_published_at:{published_at}")
+                verification_reasons.append("future_published_at")
+            elif age_delta > timedelta(days=max_age_days):
                 exc_likes = cfg.get("old_video_exception_min_likes")
                 exc_views = cfg.get("old_video_exception_min_views")
                 likes_exc_ok = (
@@ -157,8 +168,10 @@ def evaluate_video_filters(
                     age_exception_applied = True
                     if likes_exc_ok and likes_is_rounded and _is_near_threshold(effective_likes, exc_likes):
                         verification_reasons.append("rounded_likes_near_age_exception")
+                    if views_exc_ok and views_is_rounded and _is_near_threshold(effective_views, exc_views):
+                        verification_reasons.append("rounded_views_near_age_exception")
                 else:
-                    exclusion_reasons.append(f"age_exceeds_days:{age_delta.days}>{max_age_days}")
+                    exclusion_reasons.append(f"age_exceeds_days:{max(max_age_days + 1, age_delta.days)}>{max_age_days}")
         except ValueError:
             exclusion_reasons.append("invalid_published_at")
             verification_reasons.append("invalid_published_at")
@@ -170,12 +183,21 @@ def evaluate_video_filters(
     elif needs_verification and passed_filter:
         filter_status = "needs_verification"
     elif needs_verification and not passed_filter:
-        filter_status = "needs_verification" if any(
-            r in verification_reasons
-            for r in ("missing_duration", "missing_published_at", "rounded_likes_near_threshold", "rounded_views_near_threshold")
-        ) and not any(
-            r.startswith(("likes_below_min", "views_below_min", "duration_exceeds_limit", "age_exceeds_days"))
-            for r in exclusion_reasons
+        filter_status = "needs_verification" if (
+            any(
+                r in verification_reasons
+                for r in (
+                    "missing_duration",
+                    "missing_published_at",
+                    "future_published_at",
+                    "rounded_likes_near_threshold",
+                    "rounded_views_near_threshold",
+                )
+            )
+            and not any(
+                r.startswith(("likes_below_min", "views_below_min", "duration_exceeds_limit", "age_exceeds_days"))
+                for r in exclusion_reasons
+            )
         ) else "filtered_out"
     else:
         filter_status = "filtered_out"

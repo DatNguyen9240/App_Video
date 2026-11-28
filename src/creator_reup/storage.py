@@ -3,19 +3,39 @@
 from contextlib import contextmanager
 import hashlib
 import json
-import os
 import sqlite3
 import threading
 import uuid
+import os
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from .filters import evaluate_video_filters, resolve_filter_config, sort_and_filter_videos
-from .models import RIGHTS_STATUSES, SUPPORTED_PLATFORMS, canonicalize_video_url, normalize_platform, utc_now_iso
-from .parser import parse_creator_crawl_payload
+from .filters import evaluate_video_filters, sort_and_filter_videos
+from .models import (
+    RIGHTS_STATUSES,
+    SUPPORTED_PLATFORMS,
+    canonicalize_video_url,
+    normalize_platform,
+    sanitize_job_config,
+    utc_now_iso,
+    verify_local_mp4_output,
+)
+from .parser import CreatorParseError, parse_creator_crawl_payload
+
+
+class CreatorRequestCorrelationError(ValueError):
+    """Raised when imported JSON request_id/crawl_id/platform/creator correlation fails."""
+
+
+def _norm_profile_url(url: Any) -> str:
+    return str(url or "").strip().rstrip("/").lower()
 
 
 class CreatorReupStore:
-    """Thread-safe isolated SQLite repository under `data/creator_reup/`."""
+    """Thread-safe isolated SQLite repository under `data/creator_reup/`.
+
+    NOTE: Multi-laptop dedup is NOT yet active in Phase 1 (requires dedicated Reup D1
+    endpoints on Worker in Phase 2). Current dedup is atomic within this local SQLite DB.
+    """
 
     def __init__(self, data_dir: Optional[str] = None):
         if data_dir is None:
@@ -28,24 +48,36 @@ class CreatorReupStore:
         self._init_schema()
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+    def _connect(self, *, manual_tx: bool = False) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(
+            self.db_path,
+            timeout=30.0,
+            isolation_level=None if manual_tx else "",
+            check_same_thread=False,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
         try:
             yield conn
-            conn.commit()
+            if not manual_tx:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            if not manual_tx:
+                conn.rollback()
             raise
         finally:
             conn.close()
 
     def close(self) -> None:
-        """Close hook matching store lifecycle (connections are short-lived per call)."""
+        """Lifecycle hook; connections are short-lived and closed after each operation."""
         return None
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
+        cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
 
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:
@@ -113,6 +145,7 @@ class CreatorReupStore:
                     source_platform TEXT NOT NULL,
                     source_video_id TEXT NOT NULL,
                     video_id_secondary TEXT,
+                    secondary_video_key TEXT,
                     creator_key TEXT NOT NULL,
                     creator_id TEXT NOT NULL,
                     creator_name TEXT,
@@ -155,16 +188,10 @@ class CreatorReupStore:
                     raw_json TEXT NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_cv_platform_filter
-                    ON creator_videos (source_platform, filter_status, rights_status, dedup_status);
-                CREATE INDEX IF NOT EXISTS idx_cv_creator
-                    ON creator_videos (creator_key, request_id);
-                CREATE INDEX IF NOT EXISTS idx_cv_canonical_url
-                    ON creator_videos (canonical_url);
-
                 CREATE TABLE IF NOT EXISTS creator_reup_jobs (
                     job_id TEXT PRIMARY KEY,
                     video_key TEXT NOT NULL,
+                    secondary_video_key TEXT,
                     source_platform TEXT NOT NULL,
                     source_video_id TEXT NOT NULL,
                     source_url TEXT NOT NULL,
@@ -179,9 +206,32 @@ class CreatorReupStore:
                     updated_at TEXT NOT NULL,
                     completed_at TEXT
                 );
+                """
+            )
+            self._ensure_column(conn, "creator_videos", "secondary_video_key", "TEXT")
+            self._ensure_column(conn, "creator_reup_jobs", "secondary_video_key", "TEXT")
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cv_platform_filter
+                    ON creator_videos (source_platform, filter_status, rights_status, dedup_status);
+                CREATE INDEX IF NOT EXISTS idx_cv_creator
+                    ON creator_videos (creator_key, request_id);
+                CREATE INDEX IF NOT EXISTS idx_cv_canonical_url
+                    ON creator_videos (canonical_url);
+                CREATE INDEX IF NOT EXISTS idx_cv_secondary_key
+                    ON creator_videos (secondary_video_key);
 
                 CREATE INDEX IF NOT EXISTS idx_crj_video_status
                     ON creator_reup_jobs (video_key, status);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_crj_active_video_key
+                    ON creator_reup_jobs (video_key)
+                    WHERE status IN ('queued', 'running', 'completed');
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_crj_active_canonical_url
+                    ON creator_reup_jobs (canonical_url)
+                    WHERE status IN ('queued', 'running', 'completed');
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_crj_active_secondary_key
+                    ON creator_reup_jobs (secondary_video_key)
+                    WHERE secondary_video_key IS NOT NULL AND status IN ('queued', 'running', 'completed');
                 """
             )
 
@@ -215,9 +265,7 @@ class CreatorReupStore:
                 "SELECT modified_time, md5_checksum, sha256_checksum, status FROM creator_raw_files WHERE file_id = ?",
                 (file_id,),
             ).fetchone()
-            if not row:
-                return False
-            if row["status"] == "error":
+            if not row or row["status"] == "error":
                 return False
             if sha256_checksum and row["sha256_checksum"] == sha256_checksum:
                 return True
@@ -315,49 +363,137 @@ class CreatorReupStore:
             d["filters"] = {}
         return d
 
+    def _assert_request_matches_bundle(
+        self,
+        req: Dict[str, Any],
+        *,
+        platform: str,
+        creator_ids: List[str],
+        profile_urls: List[str],
+        explicit_crawl_id: Optional[str],
+    ) -> None:
+        if explicit_crawl_id and req.get("crawl_id") != explicit_crawl_id:
+            raise CreatorRequestCorrelationError(
+                f"crawl_id không khớp với request_id {req['request_id']}: nhận {explicit_crawl_id!r}, cần {req.get('crawl_id')!r}."
+            )
+        if req.get("platform") != platform:
+            raise CreatorRequestCorrelationError(
+                f"platform ({platform}) không khớp request {req['request_id']} ({req.get('platform')})."
+            )
+        req_creator = str(req.get("creator_id") or "").strip()
+        req_prof = _norm_profile_url(req.get("profile_url"))
+        norm_bundle_urls = {_norm_profile_url(u) for u in profile_urls if _norm_profile_url(u)}
+        clean_creator_ids = {str(cid).strip() for cid in creator_ids if str(cid).strip()}
+        if req_creator and clean_creator_ids and req_creator not in clean_creator_ids:
+            raise CreatorRequestCorrelationError(
+                f"creator_id trong JSON ({sorted(clean_creator_ids)}) không khớp request {req['request_id']} ({req_creator})."
+            )
+        if req_prof and norm_bundle_urls and req_prof not in norm_bundle_urls:
+            raise CreatorRequestCorrelationError(
+                f"profile_url trong JSON không khớp request {req['request_id']}."
+            )
+
     def _find_matching_request(
         self,
         conn: sqlite3.Connection,
         *,
+        platform: str,
+        source_format: str,
         explicit_request_id: Optional[str],
         explicit_crawl_id: Optional[str],
         drive_folder_id: Optional[str],
+        creator_ids: List[str],
         creator_profile_urls: List[str],
     ) -> Optional[Dict[str, Any]]:
+        """Resolve matching crawl request strictly without falling back across mismatched IDs."""
         if explicit_request_id:
             row = conn.execute(
                 "SELECT * FROM creator_crawl_requests WHERE request_id = ?",
                 (explicit_request_id,),
             ).fetchone()
-            if row:
-                return self._row_to_request(row)
+            if not row:
+                raise CreatorRequestCorrelationError(f"Không tìm thấy request_id={explicit_request_id!r} (không fallback sang request khác).")
+            req = self._row_to_request(row)
+            self._assert_request_matches_bundle(
+                req,
+                platform=platform,
+                creator_ids=creator_ids,
+                profile_urls=creator_profile_urls,
+                explicit_crawl_id=explicit_crawl_id,
+            )
+            return req
+
         if explicit_crawl_id:
             row = conn.execute(
                 "SELECT * FROM creator_crawl_requests WHERE crawl_id = ?",
                 (explicit_crawl_id,),
             ).fetchone()
-            if row:
-                return self._row_to_request(row)
+            if not row:
+                raise CreatorRequestCorrelationError(f"Không tìm thấy crawl_id={explicit_crawl_id!r} (không fallback sang request khác).")
+            req = self._row_to_request(row)
+            self._assert_request_matches_bundle(
+                req,
+                platform=platform,
+                creator_ids=creator_ids,
+                profile_urls=creator_profile_urls,
+                explicit_crawl_id=explicit_crawl_id,
+            )
+            return req
+
+        # Discovery sample payloads must NEVER auto-pair or close production requests.
+        if source_format != "muse_v1":
+            return None
+
         if drive_folder_id:
-            row = conn.execute(
-                "SELECT * FROM creator_crawl_requests WHERE drive_folder_id = ? ORDER BY created_at DESC LIMIT 1",
-                (drive_folder_id,),
-            ).fetchone()
-            if row:
-                return self._row_to_request(row)
+            rows = conn.execute(
+                """
+                SELECT * FROM creator_crawl_requests
+                WHERE drive_folder_id = ? AND platform = ? AND status = 'awaiting_muse'
+                ORDER BY created_at DESC
+                """,
+                (drive_folder_id, platform),
+            ).fetchall()
+            for r in rows:
+                req = self._row_to_request(r)
+                try:
+                    self._assert_request_matches_bundle(
+                        req,
+                        platform=platform,
+                        creator_ids=creator_ids,
+                        profile_urls=creator_profile_urls,
+                        explicit_crawl_id=None,
+                    )
+                    return req
+                except CreatorRequestCorrelationError:
+                    continue
+
         for url in creator_profile_urls:
             if not url:
                 continue
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT * FROM creator_crawl_requests
-                WHERE profile_url = ? AND status = 'awaiting_muse'
-                ORDER BY created_at DESC LIMIT 1
+                WHERE platform = ? AND status = 'awaiting_muse'
+                ORDER BY created_at DESC
                 """,
-                (url,),
-            ).fetchone()
-            if row:
-                return self._row_to_request(row)
+                (platform,),
+            ).fetchall()
+            norm_u = _norm_profile_url(url)
+            for r in rows:
+                req = self._row_to_request(r)
+                if _norm_profile_url(req.get("profile_url")) != norm_u:
+                    continue
+                try:
+                    self._assert_request_matches_bundle(
+                        req,
+                        platform=platform,
+                        creator_ids=creator_ids,
+                        profile_urls=creator_profile_urls,
+                        explicit_crawl_id=None,
+                    )
+                    return req
+                except CreatorRequestCorrelationError:
+                    continue
         return None
 
     def list_profiles(self, platform: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -368,10 +504,77 @@ class CreatorReupStore:
                     (normalize_platform(platform),),
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    "SELECT * FROM creator_profiles ORDER BY updated_at DESC"
-                ).fetchall()
+                rows = conn.execute("SELECT * FROM creator_profiles ORDER BY updated_at DESC").fetchall()
             return [dict(r) for r in rows]
+
+    def _alias_keys_for_item(
+        self,
+        *,
+        video_key: str,
+        canonical_url: str,
+        secondary_video_key: Optional[str],
+        platform: str,
+    ) -> Tuple[List[str], List[str]]:
+        keys = [video_key]
+        urls = [canonical_url]
+        if secondary_video_key and secondary_video_key not in keys:
+            keys.append(secondary_video_key)
+            sec_id = secondary_video_key.split(":", 1)[1] if ":" in secondary_video_key else secondary_video_key
+            sec_url = canonicalize_video_url("", platform=platform, video_id=sec_id)
+            if sec_url and sec_url not in urls:
+                urls.append(sec_url)
+        return keys, urls
+
+    def _find_existing_video_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        keys: List[str],
+        urls: List[str],
+    ) -> Optional[sqlite3.Row]:
+        key_ph = ",".join("?" for _ in keys)
+        url_ph = ",".join("?" for _ in urls)
+        return conn.execute(
+            f"""
+            SELECT video_key, secondary_video_key, canonical_url, rights_status, rights_note,
+                   rights_updated_at, dedup_status, matched_job_id
+            FROM creator_videos
+            WHERE video_key IN ({key_ph})
+               OR secondary_video_key IN ({key_ph})
+               OR canonical_url IN ({url_ph})
+            LIMIT 1
+            """,
+            (*keys, *keys, *urls),
+        ).fetchone()
+
+    def _find_competing_job_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        keys: List[str],
+        urls: List[str],
+        exclude_job_id: Optional[str] = None,
+    ) -> Optional[sqlite3.Row]:
+        key_ph = ",".join("?" for _ in keys)
+        url_ph = ",".join("?" for _ in urls)
+        excl_sql = "AND job_id != ?" if exclude_job_id else ""
+        params: List[Any] = [*keys, *keys, *urls]
+        if exclude_job_id:
+            params.append(exclude_job_id)
+        return conn.execute(
+            f"""
+            SELECT job_id, status FROM creator_reup_jobs
+            WHERE (video_key IN ({key_ph})
+                   OR secondary_video_key IN ({key_ph})
+                   OR canonical_url IN ({url_ph}))
+              AND status IN ('completed', 'running', 'queued')
+              {excl_sql}
+            ORDER BY CASE status WHEN 'completed' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
+                     created_at DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
 
     def ingest_creator_json(
         self,
@@ -388,7 +591,7 @@ class CreatorReupStore:
         filter_overrides: Optional[Dict[str, Any]] = None,
         reference_time: Any = None,
     ) -> Dict[str, Any]:
-        """Parse, store, pair with crawl requests, evaluate filters, and dedup idempotently."""
+        """Parse, correlate strictly with request, evaluate filters, and dedup idempotently."""
         if isinstance(raw_payload, (bytes, bytearray)):
             raw_bytes = bytes(raw_payload)
         elif isinstance(raw_payload, str):
@@ -397,7 +600,13 @@ class CreatorReupStore:
             raw_bytes = json.dumps(raw_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
         sha256 = hashlib.sha256(raw_bytes).hexdigest()
-        effective_file_id = str(file_id or f"manual:{sha256[:24]}").strip()
+        effective_file_id = str(file_id or f"{source_kind}:{sha256[:24]}").strip()
+
+        bundle = parse_creator_crawl_payload(raw_bytes)
+        if source_kind == "drive" and bundle["source_format"] != "muse_v1":
+            raise CreatorParseError(
+                "JSON discovery sample chỉ dùng để import thủ công, không tự đồng bộ từ Drive."
+            )
 
         with self._lock:
             if self.is_file_unchanged(
@@ -424,7 +633,6 @@ class CreatorReupStore:
                         "videos_deduped": existing_file["videos_deduped"] if existing_file else 0,
                     }
 
-            bundle = parse_creator_crawl_payload(raw_bytes)
             platform = bundle["platform"]
             eff_req_id = request_id or bundle.get("request_id")
             eff_crawl_id = crawl_id or bundle.get("crawl_id")
@@ -432,13 +640,19 @@ class CreatorReupStore:
             ref_time = reference_time or bundle.get("reference_time")
             now = utc_now_iso()
 
+            creator_ids = [c.get("creator_id") or "" for c in bundle["creators"]]
+            creator_urls = [c.get("profile_url") or "" for c in bundle["creators"]]
+
             with self._connect() as conn:
                 matched_req = self._find_matching_request(
                     conn,
+                    platform=platform,
+                    source_format=bundle["source_format"],
                     explicit_request_id=eff_req_id,
                     explicit_crawl_id=eff_crawl_id,
                     drive_folder_id=eff_folder_id,
-                    creator_profile_urls=[c.get("profile_url") or "" for c in bundle["creators"]],
+                    creator_ids=creator_ids,
+                    creator_profile_urls=creator_urls,
                 )
                 if matched_req:
                     eff_req_id = eff_req_id or matched_req["request_id"]
@@ -447,7 +661,6 @@ class CreatorReupStore:
                 else:
                     active_filter_overrides = filter_overrides
 
-                # Upsert creator profiles
                 for c in bundle["creators"]:
                     conn.execute(
                         """
@@ -485,7 +698,6 @@ class CreatorReupStore:
                 videos_deduped = 0
                 passed_count = 0
                 needs_verification_count = 0
-                evaluated_items: List[Dict[str, Any]] = []
 
                 for item in bundle["items"]:
                     evaluated = evaluate_video_filters(
@@ -502,35 +714,22 @@ class CreatorReupStore:
                         needs_verification_count += 1
 
                     vkey = evaluated["video_key"]
+                    sec_key = evaluated.get("secondary_video_key")
                     ckey = f"{platform}:{evaluated['creator_id']}"
                     canonical = canonicalize_video_url(
                         evaluated["video_url"],
                         platform=platform,
                         video_id=evaluated["source_video_id"],
                     )
+                    alias_keys, alias_urls = self._alias_keys_for_item(
+                        video_key=vkey,
+                        canonical_url=canonical,
+                        secondary_video_key=sec_key,
+                        platform=platform,
+                    )
 
-                    existing_video = conn.execute(
-                        """
-                        SELECT video_key, rights_status, rights_note, rights_updated_at,
-                               dedup_status, matched_job_id
-                        FROM creator_videos
-                        WHERE video_key = ? OR canonical_url = ?
-                        LIMIT 1
-                        """,
-                        (vkey, canonical),
-                    ).fetchone()
-
-                    job_row = conn.execute(
-                        """
-                        SELECT job_id, status FROM creator_reup_jobs
-                        WHERE (video_key = ? OR canonical_url = ?)
-                          AND status IN ('completed', 'running', 'queued')
-                        ORDER BY CASE status WHEN 'completed' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
-                                 created_at DESC
-                        LIMIT 1
-                        """,
-                        (vkey, canonical),
-                    ).fetchone()
+                    existing_video = self._find_existing_video_conn(conn, keys=alias_keys, urls=alias_urls)
+                    job_row = self._find_competing_job_conn(conn, keys=alias_keys, urls=alias_urls)
 
                     dedup_status = "new"
                     matched_job_id = None
@@ -548,9 +747,12 @@ class CreatorReupStore:
 
                     if existing_video:
                         videos_deduped += 1
+                        merged_sec_key = sec_key or existing_video["secondary_video_key"]
                         conn.execute(
                             """
                             UPDATE creator_videos SET
+                                secondary_video_key = COALESCE(?, secondary_video_key),
+                                video_id_secondary = COALESCE(?, video_id_secondary),
                                 creator_name = COALESCE(?, creator_name),
                                 request_id = COALESCE(?, request_id),
                                 crawl_id = COALESCE(?, crawl_id),
@@ -585,6 +787,8 @@ class CreatorReupStore:
                             WHERE video_key = ?
                             """,
                             (
+                                merged_sec_key,
+                                evaluated.get("video_id_secondary"),
                                 evaluated.get("creator_name"),
                                 evaluated.get("request_id"),
                                 evaluated.get("crawl_id"),
@@ -624,7 +828,7 @@ class CreatorReupStore:
                         conn.execute(
                             """
                             INSERT INTO creator_videos (
-                                video_key, source_platform, source_video_id, video_id_secondary,
+                                video_key, source_platform, source_video_id, video_id_secondary, secondary_video_key,
                                 creator_key, creator_id, creator_name, request_id, crawl_id, raw_file_id,
                                 video_url, canonical_url, content_type, title, thumbnail,
                                 views, views_display, effective_views, likes, likes_display, effective_likes,
@@ -635,7 +839,7 @@ class CreatorReupStore:
                                 applied_filters_json, rights_status, rights_note, rights_updated_at,
                                 dedup_status, matched_job_id, first_seen_at, last_seen_at, raw_json
                             ) VALUES (
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'video', ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'video', ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, 'pending_review', '', NULL,
                                 ?, ?, ?, ?, ?
@@ -646,6 +850,7 @@ class CreatorReupStore:
                                 platform,
                                 evaluated["source_video_id"],
                                 evaluated.get("video_id_secondary"),
+                                sec_key,
                                 ckey,
                                 evaluated["creator_id"],
                                 evaluated.get("creator_name"),
@@ -684,7 +889,6 @@ class CreatorReupStore:
                                 raw_item_json,
                             ),
                         )
-                    evaluated_items.append(evaluated)
 
                 conn.execute(
                     """
@@ -733,7 +937,8 @@ class CreatorReupStore:
                     ),
                 )
 
-                if matched_req:
+                # Only close production requests from authentic schema v1 files, NEVER discovery fixtures.
+                if matched_req and bundle["source_format"] == "muse_v1":
                     conn.execute(
                         """
                         UPDATE creator_crawl_requests SET
@@ -855,7 +1060,7 @@ class CreatorReupStore:
         sort_by: str = "likes_desc",
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
-        """Query stored creator videos with SQL filters and Python engagement/recency sorting."""
+        """Query stored creator videos with SQL filters and engagement/recency sorting."""
         clauses: List[str] = []
         params: List[Any] = []
         if platform and platform != "all":
@@ -921,103 +1126,258 @@ class CreatorReupStore:
             )
             return {"updated": int(cur.rowcount or 0), "rights_status": status}
 
+    def _validate_single_video_for_production_conn(
+        self,
+        conn: sqlite3.Connection,
+        vk: str,
+        *,
+        exclude_job_id: Optional[str] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Validate filter=passed, not needs_verification, approved rights, and local dedup."""
+        row = conn.execute("SELECT * FROM creator_videos WHERE video_key = ?", (vk,)).fetchone()
+        if not row:
+            return None, {"video_key": vk, "reason": "video_not_found"}
+
+        vid = self._row_to_video(row)
+        alias_keys, alias_urls = self._alias_keys_for_item(
+            video_key=vk,
+            canonical_url=vid["canonical_url"],
+            secondary_video_key=vid.get("secondary_video_key"),
+            platform=vid["source_platform"],
+        )
+        job_row = self._find_competing_job_conn(
+            conn,
+            keys=alias_keys,
+            urls=alias_urls,
+            exclude_job_id=exclude_job_id,
+        )
+        own_queue_only = (
+            exclude_job_id is not None
+            and vid.get("dedup_status") == "duplicate_in_queue"
+            and vid.get("matched_job_id") == exclude_job_id
+        )
+        if job_row or (
+            vid.get("dedup_status") in ("duplicate_processed", "duplicate_in_queue", "duplicate_external")
+            and not own_queue_only
+        ):
+            reason = "already_processed"
+            if (job_row and job_row["status"] in ("running", "queued")) or vid.get("dedup_status") == "duplicate_in_queue":
+                reason = "already_in_queue"
+            return None, {
+                "video_key": vk,
+                "reason": reason,
+                "matched_job_id": job_row["job_id"] if job_row else vid.get("matched_job_id"),
+            }
+
+        if vid.get("needs_verification"):
+            return None, {
+                "video_key": vk,
+                "reason": "needs_verification",
+            }
+
+        if vid.get("filter_status") != "passed" or not vid.get("passed_filter"):
+            return None, {
+                "video_key": vk,
+                "reason": f"filter_not_passed:{vid.get('filter_status')}",
+            }
+
+        if vid.get("rights_status") != "approved_for_reup":
+            return None, {
+                "video_key": vk,
+                "reason": f"rights_not_approved:{vid.get('rights_status')}",
+            }
+
+        return vid, None
+
     def check_videos_ready_for_production(
         self,
         video_keys: List[str],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Validate usage rights AND cross-session dedup before entering Reup pipeline."""
+        """Read-only preflight checking filter=passed, no needs_verification, rights, and dedup."""
         clean_keys = [str(k).strip() for k in (video_keys or []) if str(k).strip()]
         ready: List[Dict[str, Any]] = []
         blocked: List[Dict[str, Any]] = []
-        seen_in_batch = set()
+        seen_aliases = set()
 
         with self._lock, self._connect() as conn:
             for vk in clean_keys:
-                if vk in seen_in_batch:
+                if vk in seen_aliases:
                     blocked.append({"video_key": vk, "reason": "duplicate_in_batch"})
                     continue
-                seen_in_batch.add(vk)
-
-                row = conn.execute(
-                    "SELECT * FROM creator_videos WHERE video_key = ?",
-                    (vk,),
-                ).fetchone()
-                if not row:
-                    blocked.append({"video_key": vk, "reason": "video_not_found"})
+                vid, blk = self._validate_single_video_for_production_conn(conn, vk)
+                if blk is not None:
+                    blocked.append(blk)
                     continue
-
-                vid = self._row_to_video(row)
-                job_row = conn.execute(
-                    """
-                    SELECT job_id, status FROM creator_reup_jobs
-                    WHERE (video_key = ? OR canonical_url = ?)
-                      AND status IN ('completed', 'running', 'queued')
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (vk, vid["canonical_url"]),
-                ).fetchone()
-                if job_row or vid.get("dedup_status") in ("duplicate_processed", "duplicate_in_queue", "duplicate_external"):
-                    reason = "already_processed"
-                    if job_row and job_row["status"] in ("running", "queued"):
-                        reason = "already_in_queue"
-                    elif vid.get("dedup_status") == "duplicate_in_queue":
-                        reason = "already_in_queue"
-                    blocked.append(
-                        {
-                            "video_key": vk,
-                            "reason": reason,
-                            "matched_job_id": job_row["job_id"] if job_row else vid.get("matched_job_id"),
-                        }
-                    )
+                alias_keys, alias_urls = self._alias_keys_for_item(
+                    video_key=vk,
+                    canonical_url=vid["canonical_url"],
+                    secondary_video_key=vid.get("secondary_video_key"),
+                    platform=vid["source_platform"],
+                )
+                if any(a in seen_aliases for a in (*alias_keys, *alias_urls)):
+                    blocked.append({"video_key": vk, "reason": "duplicate_in_batch"})
                     continue
-
-                if vid.get("rights_status") != "approved_for_reup":
-                    blocked.append(
-                        {
-                            "video_key": vk,
-                            "reason": f"rights_not_approved:{vid.get('rights_status')}",
-                        }
-                    )
-                    continue
-
+                seen_aliases.update(alias_keys)
+                seen_aliases.update(alias_urls)
                 ready.append(vid)
 
         return ready, blocked
 
-    def create_reup_job(self, video: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    def claim_and_create_reup_jobs(
+        self,
+        video_keys: List[str],
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Atomically validate ALL rules and insert Reup jobs inside a single BEGIN IMMEDIATE transaction.
+
+        Never persists raw cookies or credentials in SQLite (`sanitize_job_config`).
+        Protected by SQLite partial UNIQUE indexes against concurrent inserts.
+        """
+        clean_keys = [str(k).strip() for k in (video_keys or []) if str(k).strip()]
+        if not clean_keys:
+            return [], [{"video_key": "", "reason": "empty_selection"}]
+
+        safe_cfg_json = json.dumps(sanitize_job_config(config), ensure_ascii=False)
         now = utc_now_iso()
-        job_id = f"crjob_{uuid.uuid4().hex[:12]}"
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO creator_reup_jobs (
-                    job_id, video_key, source_platform, source_video_id, source_url,
-                    canonical_url, status, config_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
-                """,
-                (
-                    job_id,
-                    video["video_key"],
-                    video["source_platform"],
-                    video["source_video_id"],
-                    video["video_url"],
-                    video["canonical_url"],
-                    json.dumps(config or {}, ensure_ascii=False),
-                    now,
-                    now,
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE creator_videos SET
-                    dedup_status = 'duplicate_in_queue',
-                    matched_job_id = ?
-                WHERE video_key = ? AND dedup_status != 'duplicate_processed'
-                """,
-                (job_id, video["video_key"]),
-            )
-            row = conn.execute("SELECT * FROM creator_reup_jobs WHERE job_id = ?", (job_id,)).fetchone()
-            return dict(row)
+
+        with self._lock, self._connect(manual_tx=True) as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                ready_videos: List[Dict[str, Any]] = []
+                blocked: List[Dict[str, Any]] = []
+                seen_aliases = set()
+
+                for vk in clean_keys:
+                    if vk in seen_aliases:
+                        blocked.append({"video_key": vk, "reason": "duplicate_in_batch"})
+                        continue
+                    vid, blk = self._validate_single_video_for_production_conn(conn, vk)
+                    if blk is not None:
+                        blocked.append(blk)
+                        continue
+                    alias_keys, alias_urls = self._alias_keys_for_item(
+                        video_key=vk,
+                        canonical_url=vid["canonical_url"],
+                        secondary_video_key=vid.get("secondary_video_key"),
+                        platform=vid["source_platform"],
+                    )
+                    if any(a in seen_aliases for a in (*alias_keys, *alias_urls)):
+                        blocked.append({"video_key": vk, "reason": "duplicate_in_batch"})
+                        continue
+                    seen_aliases.update(alias_keys)
+                    seen_aliases.update(alias_urls)
+                    ready_videos.append(vid)
+
+                if blocked:
+                    conn.execute("ROLLBACK;")
+                    return [], blocked
+
+                created_jobs: List[Dict[str, Any]] = []
+                for vid in ready_videos:
+                    job_id = f"crjob_{uuid.uuid4().hex[:12]}"
+                    conn.execute(
+                        """
+                        INSERT INTO creator_reup_jobs (
+                            job_id, video_key, secondary_video_key, source_platform,
+                            source_video_id, source_url, canonical_url, status,
+                            config_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                        """,
+                        (
+                            job_id,
+                            vid["video_key"],
+                            vid.get("secondary_video_key"),
+                            vid["source_platform"],
+                            vid["source_video_id"],
+                            vid["video_url"],
+                            vid["canonical_url"],
+                            safe_cfg_json,
+                            now,
+                            now,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE creator_videos SET
+                            dedup_status = 'duplicate_in_queue',
+                            matched_job_id = ?
+                        WHERE video_key = ? AND dedup_status != 'duplicate_processed'
+                        """,
+                        (job_id, vid["video_key"]),
+                    )
+                    row = conn.execute("SELECT * FROM creator_reup_jobs WHERE job_id = ?", (job_id,)).fetchone()
+                    created_jobs.append(self._row_to_job(row))
+
+                conn.execute("COMMIT;")
+                return created_jobs, []
+            except sqlite3.IntegrityError:
+                conn.execute("ROLLBACK;")
+                return [], [{"video_key": clean_keys[0], "reason": "already_in_queue"}]
+            except Exception:
+                conn.execute("ROLLBACK;")
+                raise
+
+    def create_reup_job(self, video: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+        """Backward-compatible wrapper routing single-video job creation through atomic claim."""
+        jobs, blocked = self.claim_and_create_reup_jobs([video["video_key"]], config=config)
+        if blocked or not jobs:
+            reason = blocked[0]["reason"] if blocked else "claim_failed"
+            raise ValueError(f"Không thể tạo Reup job ({reason}).")
+        return jobs[0]
+
+    def reverify_and_start_job(self, job_id: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
+        """Re-check filter/rights/dedup immediately before processing an individual queued job."""
+        now = utc_now_iso()
+        with self._lock, self._connect(manual_tx=True) as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                job_row = conn.execute(
+                    "SELECT * FROM creator_reup_jobs WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                if not job_row:
+                    conn.execute("ROLLBACK;")
+                    return False, None, "job_not_found"
+                if job_row["status"] != "queued":
+                    conn.execute("ROLLBACK;")
+                    return False, None, f"invalid_job_status:{job_row['status']}"
+
+                vk = job_row["video_key"]
+                vid, blk = self._validate_single_video_for_production_conn(conn, vk, exclude_job_id=job_id)
+                if blk is not None:
+                    reason = blk["reason"]
+                    conn.execute(
+                        """
+                        UPDATE creator_reup_jobs SET
+                            status = 'cancelled',
+                            error_message = ?,
+                            updated_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (f"Pre-run re-validation blocked: {reason}", now, job_id),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE creator_videos SET
+                            dedup_status = CASE WHEN matched_job_id = ? AND dedup_status = 'duplicate_in_queue' THEN 'new' ELSE dedup_status END,
+                            matched_job_id = CASE WHEN matched_job_id = ? AND dedup_status = 'duplicate_in_queue' THEN NULL ELSE matched_job_id END
+                        WHERE video_key = ?
+                        """,
+                        (job_id, job_id, vk),
+                    )
+                    conn.execute("COMMIT;")
+                    return False, None, reason
+
+                conn.execute(
+                    "UPDATE creator_reup_jobs SET status = 'running', updated_at = ? WHERE job_id = ?",
+                    (now, job_id),
+                )
+                updated_job = conn.execute("SELECT * FROM creator_reup_jobs WHERE job_id = ?", (job_id,)).fetchone()
+                conn.execute("COMMIT;")
+                return True, self._row_to_job(updated_job), ""
+            except Exception:
+                conn.execute("ROLLBACK;")
+                raise
 
     def update_reup_job_status(
         self,
@@ -1029,8 +1389,18 @@ class CreatorReupStore:
         caption: Optional[str] = None,
         error_message: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        """Transition a Reup job; completion requires a verified local MP4 output file."""
         now = utc_now_iso()
-        completed_at = now if status == "completed" else None
+        target_status = str(status or "").strip().lower()
+        target_error = error_message
+
+        if target_status == "completed":
+            mp4_ok, mp4_err = verify_local_mp4_output(output_path)
+            if not mp4_ok:
+                target_status = "failed"
+                target_error = f"MP4 output verification failed: {mp4_err}"
+
+        completed_at = now if target_status == "completed" else None
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT * FROM creator_reup_jobs WHERE job_id = ?", (job_id,)).fetchone()
             if not row:
@@ -1047,9 +1417,9 @@ class CreatorReupStore:
                     completed_at = COALESCE(?, completed_at)
                 WHERE job_id = ?
                 """,
-                (status, output_filename, output_path, caption, error_message, now, completed_at, job_id),
+                (target_status, output_filename, output_path, caption, target_error, now, completed_at, job_id),
             )
-            if status == "completed":
+            if target_status == "completed":
                 conn.execute(
                     """
                     UPDATE creator_videos SET
@@ -1059,17 +1429,87 @@ class CreatorReupStore:
                     """,
                     (job_id, row["video_key"]),
                 )
-            elif status == "failed":
+            elif target_status in ("failed", "cancelled", "interrupted"):
                 conn.execute(
                     """
                     UPDATE creator_videos SET
-                        dedup_status = CASE WHEN matched_job_id = ? AND dedup_status = 'duplicate_in_queue' THEN 'new' ELSE dedup_status END
+                        dedup_status = CASE WHEN matched_job_id = ? AND dedup_status = 'duplicate_in_queue' THEN 'new' ELSE dedup_status END,
+                        matched_job_id = CASE WHEN matched_job_id = ? AND dedup_status = 'duplicate_in_queue' THEN NULL ELSE matched_job_id END
                     WHERE video_key = ?
                     """,
-                    (job_id, row["video_key"]),
+                    (job_id, job_id, row["video_key"]),
                 )
             updated = conn.execute("SELECT * FROM creator_reup_jobs WHERE job_id = ?", (job_id,)).fetchone()
-            return dict(updated)
+            return self._row_to_job(updated) if updated else None
+
+    def cancel_unfinished_jobs(
+        self,
+        job_ids: List[str],
+        *,
+        status: str = "cancelled",
+        reason: str = "Đã hủy hàng loạt.",
+    ) -> int:
+        """Finalize any queued/running jobs in a batch so none stay wedged in duplicate_in_queue."""
+        clean_ids = [str(j).strip() for j in (job_ids or []) if str(j).strip()]
+        if not clean_ids:
+            return 0
+        now = utc_now_iso()
+        placeholders = ",".join("?" for _ in clean_ids)
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT job_id, video_key FROM creator_reup_jobs
+                WHERE job_id IN ({placeholders}) AND status IN ('queued', 'running')
+                """,
+                tuple(clean_ids),
+            ).fetchall()
+            if not rows:
+                return 0
+            conn.execute(
+                f"""
+                UPDATE creator_reup_jobs SET
+                    status = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE job_id IN ({placeholders}) AND status IN ('queued', 'running')
+                """,
+                (status, reason, now, *clean_ids),
+            )
+            for r in rows:
+                conn.execute(
+                    """
+                    UPDATE creator_videos SET
+                        dedup_status = CASE WHEN matched_job_id = ? AND dedup_status = 'duplicate_in_queue' THEN 'new' ELSE dedup_status END,
+                        matched_job_id = CASE WHEN matched_job_id = ? AND dedup_status = 'duplicate_in_queue' THEN NULL ELSE matched_job_id END
+                    WHERE video_key = ?
+                    """,
+                    (r["job_id"], r["job_id"], r["video_key"]),
+                )
+            return len(rows)
+
+    def recover_interrupted_jobs(
+        self,
+        *,
+        reason: str = "Tiến trình bị gián đoạn khi ứng dụng đóng/khởi động lại.",
+    ) -> int:
+        """Recover orphaned queued/running jobs left behind after crash or unexpected shutdown."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT job_id FROM creator_reup_jobs WHERE status IN ('queued', 'running')"
+            ).fetchall()
+            orphan_ids = [r["job_id"] for r in rows]
+        if not orphan_ids:
+            return 0
+        return self.cancel_unfinished_jobs(orphan_ids, status="interrupted", reason=reason)
+
+    def _row_to_job(self, row: sqlite3.Row) -> Dict[str, Any]:
+        d = dict(row)
+        try:
+            raw_cfg = json.loads(d.pop("config_json") or "{}")
+        except json.JSONDecodeError:
+            raw_cfg = {}
+        d["config"] = sanitize_job_config(raw_cfg)
+        return d
 
     def list_reup_jobs(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock, self._connect() as conn:
@@ -1077,15 +1517,7 @@ class CreatorReupStore:
                 "SELECT * FROM creator_reup_jobs ORDER BY created_at DESC LIMIT ?",
                 (max(1, min(int(limit), 200)),),
             ).fetchall()
-            out = []
-            for r in rows:
-                d = dict(r)
-                try:
-                    d["config"] = json.loads(d.pop("config_json") or "{}")
-                except json.JSONDecodeError:
-                    d["config"] = {}
-                out.append(d)
-            return out
+            return [self._row_to_job(r) for r in rows]
 
     def list_raw_files(self, limit: int = 30) -> List[Dict[str, Any]]:
         with self._lock, self._connect() as conn:
@@ -1131,5 +1563,6 @@ class CreatorReupStore:
             "last_sync_at": self.get_state("last_sync_at"),
             "last_sync_status": self.get_state("last_sync_status", "idle"),
             "last_error": self.get_state("last_error", ""),
+            "drive_scope_folder_id": self.get_state("drive_scope_folder_id", ""),
             "supported_platforms": list(SUPPORTED_PLATFORMS),
         }

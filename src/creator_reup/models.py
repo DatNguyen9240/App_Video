@@ -175,6 +175,58 @@ def canonicalize_video_url(
     return raw
 
 
+def normalize_bilibili_secondary_id(value: Any) -> Optional[str]:
+    """Normalize Bilibili secondary aid/BV alias consistently (e.g. `170001` -> `av170001`)."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d+", s):
+        return f"av{s}"
+    if re.fullmatch(r"av\d+", s, flags=re.IGNORECASE):
+        return s.lower()
+    if re.fullmatch(r"BV[0-9A-Za-z]+", s, flags=re.IGNORECASE):
+        return "BV" + s[2:]
+    return s
+
+
+def sanitize_job_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Strip any raw cookies, tokens, or credentials before persisting/returning job config."""
+    if not isinstance(config, dict):
+        return {}
+    secret_keys = {
+        "browser_cookies",
+        "custom_cookies",
+        "cookies",
+        "cookie",
+        "cookies_text",
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "auth",
+    }
+    clean: Dict[str, Any] = {}
+    has_custom_cookie = bool(str(config.get("custom_cookies") or config.get("cookies_text") or "").strip())
+    browser_mode = str(config.get("browser_cookies") or "").strip()
+
+    for k, v in config.items():
+        kl = str(k).strip().lower()
+        if kl in secret_keys or "cookie" in kl and kl != "cookie_credential_ref":
+            continue
+        clean[k] = v
+
+    if "cookie_credential_ref" not in clean or not clean.get("cookie_credential_ref"):
+        if has_custom_cookie:
+            clean["cookie_credential_ref"] = "ephemeral_memory_only"
+        elif browser_mode == "manual":
+            clean["cookie_credential_ref"] = "manual_cookie_store"
+        elif browser_mode:
+            clean["cookie_credential_ref"] = f"browser_profile:{browser_mode[:24]}"
+        else:
+            clean["cookie_credential_ref"] = "none"
+    return clean
+
+
 def parse_duration_seconds(value: Any) -> Optional[int]:
     """Parse integer duration or `MM:SS` / `HH:MM:SS` strings while keeping `0 != None`."""
     if value is None:
@@ -334,3 +386,64 @@ def is_creator_crawler_file_payload(
         if isinstance(payload.get("items"), list) or isinstance(payload.get("creators"), list):
             return True
     return False
+
+
+def verify_local_mp4_output(video_path: Optional[str]) -> Tuple[bool, str]:
+    """Verify a produced Reup MP4 file actually exists on disk, is non-empty, and has a valid container/stream."""
+    import json as _json
+    import os as _os
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    path_str = str(video_path or "").strip()
+    if not path_str:
+        return False, "missing_output_path"
+    if not _os.path.isfile(path_str):
+        return False, f"output_file_not_found:{path_str}"
+    try:
+        size_bytes = _os.path.getsize(path_str)
+    except OSError as exc:
+        return False, f"output_stat_error:{exc}"
+    if size_bytes < 512:
+        return False, f"output_file_too_small:{size_bytes}"
+
+    try:
+        with open(path_str, "rb") as f:
+            header = f.read(32)
+    except OSError as exc:
+        return False, f"output_read_error:{exc}"
+    if b"ftyp" not in header:
+        return False, "invalid_mp4_header"
+
+    ffprobe_exe = _shutil.which("ffprobe")
+    if not ffprobe_exe:
+        try:
+            import reup_pipeline as _reup_mod
+            cand = _reup_mod.get_ffprobe_exe()
+            if cand and (_shutil.which(cand) or _os.path.exists(cand)):
+                ffprobe_exe = cand
+        except Exception:
+            ffprobe_exe = None
+
+    if ffprobe_exe:
+        try:
+            proc = _subprocess.run(
+                [ffprobe_exe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path_str],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if proc.returncode != 0 or not proc.stdout:
+                return False, f"ffprobe_failed:rc={proc.returncode}"
+            meta = _json.loads(proc.stdout)
+            dur = float((meta.get("format") or {}).get("duration") or 0.0)
+            has_video = any(
+                s.get("codec_type") == "video" and int(s.get("width") or 0) > 0 and int(s.get("height") or 0) > 0
+                for s in (meta.get("streams") or [])
+            )
+            if not has_video or dur <= 0.0:
+                return False, f"invalid_mp4_streams:has_video={has_video},duration={dur}"
+        except Exception as exc:
+            return False, f"ffprobe_exception:{exc}"
+
+    return True, ""

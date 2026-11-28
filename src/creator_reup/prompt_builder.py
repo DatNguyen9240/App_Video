@@ -54,18 +54,20 @@ def build_creator_crawl_prompt(
     if plat == "bilibili":
         threshold_lines = (
             f"- Điều kiện chính: `views >= {cfg['min_views']}` VÀ `likes >= {cfg['min_likes']}`.\n"
-            f"- Thời lượng: `duration_seconds < {cfg['max_duration_seconds']}` giây.\n"
-            f"- Độ mới: đăng trong `{cfg['max_age_days']}` ngày gần nhất.\n"
+            f"- Thời lượng: `duration_seconds < {cfg['max_duration_seconds']}` giây (299s đạt, 300s loại).\n"
+            f"- Độ mới: đăng trong `{cfg['max_age_days']}` ngày gần nhất (không tính ngày tương lai).\n"
             f"- Ngoại lệ video cũ (> {cfg['max_age_days']} ngày vẫn giữ nếu): "
-            f"`views >= {cfg['old_video_exception_min_views']}` HOẶC `likes >= {cfg['old_video_exception_min_likes']}`."
+            f"`views >= {cfg['old_video_exception_min_views']}` HOẶC `likes >= {cfg['old_video_exception_min_likes']}` "
+            f"(CHỈ miễn giới hạn tuổi bài; vẫn BẮT BUỘC đạt ngưỡng cơ bản `views >= {cfg['min_views']} AND likes >= {cfg['min_likes']}` và `duration_seconds < {cfg['max_duration_seconds']}`)."
         )
     else:
         threshold_lines = (
             f"- Điều kiện chính: `likes >= {cfg['min_likes']}` (Douyin Web cho phép `views: null`; nếu chỉ có nhãn làm tròn giữ nguyên `likes: null` + `likes_display`).\n"
-            f"- Thời lượng: `duration_seconds < {cfg['max_duration_seconds']}` giây.\n"
-            f"- Độ mới: đăng trong `{cfg['max_age_days']}` ngày gần nhất.\n"
+            f"- Thời lượng: `duration_seconds < {cfg['max_duration_seconds']}` giây (299s đạt, 300s loại).\n"
+            f"- Độ mới: đăng trong `{cfg['max_age_days']}` ngày gần nhất (không tính ngày tương lai).\n"
             f"- Ngoại lệ video cũ (> {cfg['max_age_days']} ngày vẫn giữ nếu): "
-            f"`likes >= {cfg['old_video_exception_min_likes']}`."
+            f"`likes >= {cfg['old_video_exception_min_likes']}` "
+            f"(CHỈ miễn giới hạn tuổi bài; vẫn BẮT BUỘC `duration_seconds < {cfg['max_duration_seconds']}`)."
         )
 
     plat_title = "Douyin" if plat == "douyin" else "Bilibili"
@@ -76,13 +78,15 @@ def build_creator_crawl_prompt(
         f"crawl_id: {crawl_id}\n"
         f"platform: {plat}\n"
         f"profile_url: {clean_url}\n"
-        f"requested_count: {count_val}\n"
+        f"target_qualified_count: {count_val}\n"
         f"{folder_note}\n"
         f"YÊU CẦU THU THẬP & LỌC VIDEO:\n"
-        f"1. Thu thập tối đa {count_val} video từ trang creator `{clean_url}`.\n"
+        f"1. Mục tiêu là tìm ĐỦ {count_val} video ĐẠT CHUẨN từ trang creator `{clean_url}` (`qualified_count = {count_val}`). "
+        f"`scanned_count` (tổng bài đã quét) và `qualified_count` (số bài đạt chuẩn) là HAI bộ đếm riêng — có thể phải quét nhiều hơn {count_val} bài để lọc ra đủ {count_val} bài đạt chuẩn.\n"
         f"2. Loại bỏ toàn bộ bài ảnh/chữ (`/note/`, `note_image_text`). Chỉ lấy `content_type: \"video\"`.\n"
         f"3. Mở chi tiết video để lấy chính xác `published_at`, `duration_seconds` (hoặc `MM:SS`), `likes`/`likes_display`, `views`, `comments`, `shares`, `thumbnail`, `video_url`.\n"
-        f"{threshold_lines}\n\n"
+        f"{threshold_lines}\n"
+        f"4. KHÔNG TỰ Ý HẠ NGƯỠNG LỌC: Nếu hết nguồn/cuộn hết profile, bị rate limit hoặc CAPTCHA mà chưa đủ {count_val} video ĐẠT CHUẨN, PHẢI dừng lại và ghi rõ `stop_reason` trong `crawl` cùng `stats.scanned_count` và `stats.qualified_count`.\n\n"
         f"QUY TẮC DỮ LIỆU & SCHEMA (BẮT BUỘC):\n"
         f"- Tuân thủ `CREATOR_CRAWL_OUTPUT_SCHEMA_v1` với `schema_version: \"{CREATOR_SCHEMA_VERSION}\"`.\n"
         f"- Gắn đúng `request_id: \"{request_id}\"` và `crawl_id: \"{crawl_id}\"` ở cả root JSON và trong `crawl`.\n"

@@ -69,11 +69,14 @@ from market_intelligence.crawl_strategy import (
     validate_threads_strategy_options,
 )
 from creator_reup import (
+    CREATOR_DRIVE_SYNC_BLOCKER,
     CreatorReupStore,
     CreatorDriveSyncService,
     DEFAULT_CREATOR_FILTERS,
     build_creator_crawl_prompt,
     detect_platform_from_url,
+    sanitize_job_config,
+    verify_local_mp4_output,
 )
 
 _market_runtime_lock = threading.Lock()
@@ -140,6 +143,7 @@ def get_creator_reup_runtime(data_dir=None, client=None):
     with _creator_reup_runtime_lock:
         if _creator_reup_runtime is None:
             store = CreatorReupStore(data_dir=data_dir)
+            store.recover_interrupted_jobs()
             cf_client = client or CloudflareBridgeClient(env_path=ENV_PATH)
             try:
                 poll_interval = int(os.environ.get("CREATOR_REUP_SYNC_INTERVAL_SEC", "30"))
@@ -4484,6 +4488,16 @@ HTML_TEMPLATE = """
           </div>
         </div>
 
+        <div class="px-3.5 py-2 rounded-xl bg-slate-900/70 border border-slate-800 text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2">
+          <span>
+            <i class="fa-solid fa-circle-info text-cyan-400 mr-1.5"></i>
+            {{ creatorCrawler.driveSyncBlocker }}
+          </span>
+          <span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] shrink-0">
+            Chống trùng Phase 1: SQLite cục bộ
+          </span>
+        </div>
+
         <!-- Expandable Filter Thresholds Config -->
         <div v-if="creatorCrawler.showFiltersConfig" class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3 text-xs">
           <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -5041,7 +5055,7 @@ HTML_TEMPLATE = """
             originalVolume: 0.0,
             bgmChoice: 'random',
             maskOldSub: true,
-            antiReup: true,
+            antiReup: false,
             mirrorVideo: false,
             customPrompt: '',
             lastResults: []
@@ -5090,6 +5104,7 @@ HTML_TEMPLATE = """
             requests: [],
             profiles: [],
             videos: [],
+            driveSyncBlocker: 'Endpoint Market (/api/app/market/files) chỉ đọc 01_Market_Data; file Creator ngoài 01_Market_Data vui lòng dùng Import JSON thủ công.',
             jobs: [],
             selectedKeys: [],
             syncPollTimer: null
@@ -7321,6 +7336,7 @@ HTML_TEMPLATE = """
               this.creatorCrawler.profiles = data.profiles || [];
               this.creatorCrawler.jobs = data.jobs || [];
               this.creatorCrawler.isSyncing = Boolean(data.is_syncing);
+              if (data.drive_sync_blocker) this.creatorCrawler.driveSyncBlocker = data.drive_sync_blocker;
               if (data.muse_web_url) this.creatorCrawler.museWebUrl = data.muse_web_url;
             }
           } catch (e) {}
@@ -9257,7 +9273,7 @@ def api_reup_run():
     frame_mode = str(body.get("frame_mode") or "blur_bg")
     original_volume = float(body.get("original_volume") or 0.0)
     mask_old_sub = bool(body.get("mask_old_sub", True))
-    anti_reup = bool(body.get("anti_reup", True))
+    anti_reup = bool(body.get("anti_reup", False))
     mirror_video = bool(body.get("mirror_video", False))
     custom_prompt = str(body.get("custom_prompt") or "")
     browser_cookies = str(body.get("browser_cookies") or "")
@@ -9317,6 +9333,8 @@ def api_creator_reup_state():
         "raw_files": store.list_raw_files(limit=20),
         "jobs": store.list_reup_jobs(limit=30),
         "is_syncing": rt["sync_service"].is_syncing,
+        "drive_sync_blocker": CREATOR_DRIVE_SYNC_BLOCKER,
+        "dedup_scope": "local_sqlite_only",
         "muse_web_url": rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"),
     })
 
@@ -9464,102 +9482,151 @@ def api_creator_reup_video_rights():
         return jsonify({"ok": False, "error": str(exc)}), 400
 
 
+_creator_reup_run_lock = threading.Lock()
+
+
 @app.route("/api/creator_reup/run_selected", methods=["POST"])
 def api_creator_reup_run_selected():
-    """Kiểm tra quyền sử dụng + chống trùng rồi chạy tuần tự qua Reup Pipeline hiện có."""
+    """Kiểm tra bộ lọc + xác minh + quyền sử dụng + chống trùng atomically rồi chạy tuần tự qua Reup Pipeline."""
     body = request.get_json(silent=True) or {}
-    if not body.get("sync_execution") and tracker.get_state().get("is_running"):
-        return jsonify({"ok": False, "error": "Hệ thống đang chạy một tiến trình render khác."}), 409
-
     video_keys = [str(k).strip() for k in (body.get("video_keys") or []) if str(k).strip()]
     if not video_keys:
         return jsonify({"ok": False, "error": "Chưa chọn video nào để sản xuất Reup."}), 400
 
-    rt = get_creator_reup_runtime()
-    store = rt["store"]
-    ready_videos, blocked = store.check_videos_ready_for_production(video_keys)
-    if blocked:
-        has_dup = any(str(b.get("reason") or "").startswith("already_") for b in blocked)
-        status_code = 409 if has_dup and not any(
-            str(b.get("reason") or "").startswith("rights_not_approved") for b in blocked
-        ) else 400
-        reasons_desc = "; ".join(f"{b['video_key']}: {b['reason']}" for b in blocked)
-        return jsonify({
-            "ok": False,
-            "error": f"Video chưa đủ điều kiện quyền sử dụng hoặc bị trùng lặp ({reasons_desc}).",
-            "blocked": blocked,
-            "ready_count": len(ready_videos),
-        }), status_code
-
-    reup_cfg = {
+    # Keep raw cookie credentials strictly in RAM; never write secrets to SQLite, logs, or API responses.
+    runtime_auth = {
+        "browser_cookies": str(body.get("browser_cookies") or ""),
+        "custom_cookies": str(body.get("custom_cookies") or ""),
+    }
+    safe_job_cfg = sanitize_job_config({
         "voice": str(body.get("voice") or "nam_hai"),
         "translation_mode": str(body.get("translation_mode") or "viral"),
         "frame_mode": str(body.get("frame_mode") or "blur_bg"),
         "original_volume": float(body.get("original_volume") or 0.0),
         "mask_old_sub": bool(body.get("mask_old_sub", True)),
-        "anti_reup": bool(body.get("anti_reup", True)),
+        "anti_reup": bool(body.get("anti_reup", False)),
         "mirror_video": bool(body.get("mirror_video", False)),
         "custom_prompt": str(body.get("custom_prompt") or ""),
-        "browser_cookies": str(body.get("browser_cookies") or ""),
-        "custom_cookies": str(body.get("custom_cookies") or ""),
         "bgm_choice": str(body.get("bgm_choice") or "random"),
-    }
+        "browser_cookies": runtime_auth["browser_cookies"],
+        "custom_cookies": runtime_auth["custom_cookies"],
+    })
 
-    jobs = [store.create_reup_job(v, reup_cfg) for v in ready_videos]
+    rt = get_creator_reup_runtime()
+    store = rt["store"]
+
+    with _creator_reup_run_lock:
+        if tracker.get_state().get("is_running"):
+            return jsonify({"ok": False, "error": "Hệ thống đang chạy một tiến trình render khác."}), 409
+
+        jobs, blocked = store.claim_and_create_reup_jobs(video_keys, config=safe_job_cfg)
+        if blocked:
+            has_dup = any(str(b.get("reason") or "").startswith("already_") for b in blocked)
+            has_hard_block = any(
+                not str(b.get("reason") or "").startswith("already_")
+                for b in blocked
+            )
+            status_code = 409 if has_dup and not has_hard_block else 400
+            reasons_desc = "; ".join(f"{b['video_key']}: {b['reason']}" for b in blocked)
+            return jsonify({
+                "ok": False,
+                "error": f"Video chưa đủ điều kiện bộ lọc/quyền sử dụng hoặc bị trùng lặp ({reasons_desc}).",
+                "blocked": blocked,
+                "ready_count": 0,
+            }), status_code
+
+        tracker.reset()
+        tracker.start_step("script", f"Chuẩn bị xử lý {len(jobs)} video Creator Reup...", percent=2)
+
+    all_job_ids = [j["job_id"] for j in jobs]
 
     def _creator_batch_worker():
-        tracker.reset()
-        tracker.log(f"🚀 Bắt đầu xử lý {len(jobs)} video Creator Reup đã duyệt quyền...")
         reup_mod = load_mod("reup_pipeline", "reup_pipeline.py")
         last_ok = None
+        succeeded_count = 0
         failures = []
-        for idx, job in enumerate(jobs, 1):
-            job_id = job["job_id"]
-            try:
-                tracker.check_cancelled()
-                store.update_reup_job_status(job_id, status="running")
-                tracker.log(f"🎬 [{idx}/{len(jobs)}] Reup {job['video_key']}: {job['source_url']}")
-                res = reup_mod.run_reup_pipeline(
-                    source_url=job["source_url"],
-                    voice=reup_cfg["voice"],
-                    translation_mode=reup_cfg["translation_mode"],
-                    frame_mode=reup_cfg["frame_mode"],
-                    mask_old_sub=reup_cfg["mask_old_sub"],
-                    anti_reup=reup_cfg["anti_reup"],
-                    mirror_video=reup_cfg["mirror_video"],
-                    original_volume=reup_cfg["original_volume"],
-                    custom_prompt=reup_cfg["custom_prompt"],
-                    browser_cookies=reup_cfg["browser_cookies"],
-                    bgm_choice=reup_cfg["bgm_choice"],
-                    custom_cookies=reup_cfg["custom_cookies"],
-                )
-                last_ok = res
-                store.update_reup_job_status(
-                    job_id,
-                    status="completed",
-                    output_filename=res.get("video_filename"),
-                    output_path=res.get("video_path"),
-                    caption=res.get("caption", ""),
-                )
-            except Exception as exc:
-                if "PipelineCancelledError" in type(exc).__name__:
-                    store.update_reup_job_status(job_id, status="failed", error_message="Đã hủy bởi người dùng.")
-                    tracker.set_error("Đã ngắt quy trình Creator Reup theo yêu cầu.")
-                    return {"succeeded": 0 if last_ok is None else 1, "failures": failures, "cancelled": True}
-                err_txt = str(exc)
-                failures.append({"job_id": job_id, "video_key": job["video_key"], "error": err_txt})
-                store.update_reup_job_status(job_id, status="failed", error_message=err_txt)
-                tracker.log(f"⚠️ Lỗi ở {job['video_key']}, tiếp tục video kế tiếp: {err_txt}")
+        cancelled = False
+        try:
+            tracker.log(f"🚀 Bắt đầu xử lý {len(jobs)} video Creator Reup đã duyệt quyền...")
+            for idx, job in enumerate(jobs, 1):
+                job_id = job["job_id"]
+                try:
+                    tracker.check_cancelled()
+                    ok_start, _started_job, pre_err = store.reverify_and_start_job(job_id)
+                    if not ok_start:
+                        failures.append({"job_id": job_id, "video_key": job["video_key"], "error": f"pre_run_blocked:{pre_err}"})
+                        tracker.log(f"⛔ Bỏ qua {job['video_key']} do thay đổi trạng thái trước khi chạy: {pre_err}")
+                        continue
 
-        if last_ok:
-            tracker.finish_pipeline(
-                video_filename=last_ok["video_filename"],
-                caption=last_ok.get("caption", ""),
-                total_duration=last_ok.get("duration_sec", 0.0),
+                    tracker.log(f"🎬 [{idx}/{len(jobs)}] Reup {job['video_key']}: {job['source_url']}")
+                    res = reup_mod.run_reup_pipeline(
+                        source_url=job["source_url"],
+                        voice=safe_job_cfg["voice"],
+                        translation_mode=safe_job_cfg["translation_mode"],
+                        frame_mode=safe_job_cfg["frame_mode"],
+                        mask_old_sub=safe_job_cfg["mask_old_sub"],
+                        anti_reup=safe_job_cfg["anti_reup"],
+                        mirror_video=safe_job_cfg["mirror_video"],
+                        original_volume=safe_job_cfg["original_volume"],
+                        custom_prompt=safe_job_cfg["custom_prompt"],
+                        browser_cookies=runtime_auth["browser_cookies"],
+                        bgm_choice=safe_job_cfg["bgm_choice"],
+                        custom_cookies=runtime_auth["custom_cookies"],
+                    )
+                    out_path = str(
+                        res.get("video_path")
+                        or (os.path.join(FINAL_DIR, res["video_filename"]) if res.get("video_filename") else "")
+                    )
+                    updated_job = store.update_reup_job_status(
+                        job_id,
+                        status="completed",
+                        output_filename=res.get("video_filename"),
+                        output_path=out_path,
+                        caption=res.get("caption", ""),
+                    )
+                    if updated_job and updated_job["status"] == "completed":
+                        last_ok = res
+                        succeeded_count += 1
+                    else:
+                        err_msg = (updated_job or {}).get("error_message") or "MP4 output verification failed"
+                        failures.append({"job_id": job_id, "video_key": job["video_key"], "error": err_msg})
+                        tracker.log(f"❌ {job['video_key']} không đạt kiểm tra file MP4 đầu ra: {err_msg}")
+                except Exception as exc:
+                    if "PipelineCancelledError" in type(exc).__name__:
+                        cancelled = True
+                        store.cancel_unfinished_jobs(
+                            all_job_ids[idx - 1:],
+                            status="cancelled",
+                            reason="Đã hủy bởi người dùng.",
+                        )
+                        tracker.set_error("Đã ngắt quy trình Creator Reup theo yêu cầu.")
+                        break
+                    err_txt = str(exc)
+                    failures.append({"job_id": job_id, "video_key": job["video_key"], "error": err_txt})
+                    store.update_reup_job_status(job_id, status="failed", error_message=err_txt)
+                    tracker.log(f"⚠️ Lỗi ở {job['video_key']}, tiếp tục video kế tiếp: {err_txt}")
+        finally:
+            runtime_auth["custom_cookies"] = ""
+            runtime_auth["browser_cookies"] = ""
+            # Safety net: no job in this batch may ever remain stuck in queued/running on unexpected crash.
+            store.cancel_unfinished_jobs(
+                all_job_ids,
+                status="cancelled" if cancelled else "failed",
+                reason="Đã hủy hoặc kết thúc tiến trình bất thường trước khi hoàn tất.",
             )
-        elif failures:
-            tracker.set_error(failures[0]["error"])
-        return {"succeeded": len(jobs) - len(failures), "failures": failures}
+
+        if not cancelled:
+            if last_ok:
+                tracker.finish_pipeline(
+                    video_filename=last_ok["video_filename"],
+                    caption=last_ok.get("caption", ""),
+                    total_duration=last_ok.get("duration_sec", 0.0),
+                )
+            elif failures:
+                tracker.set_error(failures[0]["error"])
+            else:
+                tracker.set_error("Không có video nào được hoàn tất.")
+        return {"succeeded": succeeded_count, "failures": failures, "cancelled": cancelled}
 
     if body.get("sync_execution"):
         exec_summary = _creator_batch_worker()

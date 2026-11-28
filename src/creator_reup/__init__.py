@@ -16,18 +16,22 @@ from .models import (
     detect_platform_from_url,
     extract_video_id_from_url,
     is_creator_crawler_file_payload,
+    normalize_bilibili_secondary_id,
     parse_display_count,
     parse_duration_seconds,
     parse_profile_identifier,
     parse_published_at,
+    sanitize_job_config,
+    verify_local_mp4_output,
 )
-from .parser import parse_creator_crawl_payload
+from .parser import CreatorParseError, parse_creator_crawl_payload
 from .filters import evaluate_video_filters, sort_and_filter_videos
 from .prompt_builder import build_creator_crawl_prompt, generate_crawl_ids
-from .storage import CreatorReupStore
-from .sync_service import CreatorDriveSyncService
+from .storage import CreatorReupStore, CreatorRequestCorrelationError
+from .sync_service import CREATOR_DRIVE_SYNC_BLOCKER, CreatorDriveSyncService
 
 __all__ = [
+    "CREATOR_DRIVE_SYNC_BLOCKER",
     "CREATOR_SCHEMA_VERSION",
     "DEDUP_STATUSES",
     "DEFAULT_CREATOR_FILTERS",
@@ -35,6 +39,8 @@ __all__ = [
     "RIGHTS_STATUSES",
     "SUPPORTED_PLATFORMS",
     "CreatorDriveSyncService",
+    "CreatorParseError",
+    "CreatorRequestCorrelationError",
     "CreatorReupStore",
     "build_creator_crawl_prompt",
     "canonicalize_video_url",
@@ -43,10 +49,13 @@ __all__ = [
     "extract_video_id_from_url",
     "generate_crawl_ids",
     "is_creator_crawler_file_payload",
+    "normalize_bilibili_secondary_id",
     "parse_creator_crawl_payload",
     "parse_display_count",
     "parse_duration_seconds",
     "parse_profile_identifier",
     "parse_published_at",
+    "sanitize_job_config",
     "sort_and_filter_videos",
+    "verify_local_mp4_output",
 ]

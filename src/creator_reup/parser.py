@@ -11,6 +11,7 @@ from .models import (
     coerce_exact_int,
     detect_platform_from_url,
     extract_video_id_from_url,
+    normalize_bilibili_secondary_id,
     normalize_platform,
     parse_display_count,
     parse_duration_seconds,
@@ -104,6 +105,18 @@ def _build_normalized_item(
             "reason": reason,
         }
 
+    raw_secondary = raw_item.get("video_id_secondary")
+    if platform == "bilibili":
+        norm_sec = normalize_bilibili_secondary_id(raw_secondary)
+        # Also retain original raw primary/secondary relationship if URL carried BV and JSON gave aid (or vice versa)
+        raw_vid_str = normalize_bilibili_secondary_id(raw_item.get("video_id"))
+        if not norm_sec and raw_vid_str and raw_vid_str.lower() != final_vid.lower():
+            norm_sec = raw_vid_str
+        secondary_video_key = f"bilibili:{norm_sec}" if (norm_sec and norm_sec.lower() != final_vid.lower()) else None
+    else:
+        norm_sec = str(raw_secondary or "").strip() or None
+        secondary_video_key = None
+
     exact_likes = coerce_exact_int(raw_item.get("likes")) if "likes" in raw_item else None
     likes_display = str(raw_item.get("likes_display")).strip() if raw_item.get("likes_display") not in (None, "") else None
     # Keep exact `likes: None` when only rounded display string is available.
@@ -152,7 +165,8 @@ def _build_normalized_item(
         "video_key": f"{platform}:{final_vid}",
         "source_platform": platform,
         "source_video_id": final_vid,
-        "video_id_secondary": str(raw_item.get("video_id_secondary") or "").strip() or None,
+        "video_id_secondary": norm_sec,
+        "secondary_video_key": secondary_video_key,
         "creator_id": creator_id,
         "creator_handle": creator_meta.get("creator_handle"),
         "creator_name": creator_meta.get("creator_name"),
@@ -270,6 +284,7 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 invalid_excluded += 1
 
+    raw_stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
     return {
         "schema_version": CREATOR_SCHEMA_VERSION,
         "source_format": "muse_v1",
@@ -277,6 +292,7 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "request_id": request_id,
         "crawl_id": crawl_id,
         "drive_folder_id": drive_folder_id,
+        "stop_reason": str(crawl_meta.get("stop_reason") or payload.get("stop_reason") or "").strip() or None,
         "reference_time": crawl_meta.get("crawled_at") or payload.get("measured_at"),
         "filters_hint": crawl_meta.get("filters") if isinstance(crawl_meta.get("filters"), dict) else {},
         "creators": [creator_meta],
@@ -284,10 +300,12 @@ def _parse_v1_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "excluded_items": excluded_items,
         "stats": {
             "total_input_items": len(raw_items),
+            "scanned_count": int(raw_stats.get("scanned_count") or raw_stats.get("grid_items_seen") or len(raw_items)),
+            "qualified_count": int(raw_stats.get("qualified_count") or raw_stats.get("videos_kept") or len(valid_items)),
             "valid_videos_count": len(valid_items),
             "notes_excluded": notes_excluded,
             "invalid_excluded": invalid_excluded,
-            "grid_items_diagnostic": int((payload.get("stats") or {}).get("grid_items_seen") or 0),
+            "grid_items_diagnostic": int(raw_stats.get("grid_items_seen") or 0),
         },
     }
 
