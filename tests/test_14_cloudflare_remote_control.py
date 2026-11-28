@@ -2074,6 +2074,23 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         by_none = flask_client.get("/api/market/runs_catalog?crawl_mode=__none__").get_json()["runs"]
         self.assertEqual([r["run_id"] for r in by_none], ["run_legacy_nometa"])
 
+        # 6. Crawl Center UI result-display improvements (no Contract/formula changes)
+        self.assertNotIn("Mới (tổng):", html)
+        for ui_tok in [
+            "Ứng viên mới phát hiện:",
+            "time_budget: 'Hết ngân sách thời gian'",
+            "Hoàn tất — Đạt mục tiêu",
+            "Hoàn tất — Chưa đạt mục tiêu",
+            "Xem kết quả crawl",
+            "openCrawlResultRun",
+            "marketRunCentricAnchor",
+            "formatStopReasonLabel",
+            "formatActualProcessingDuration",
+            "formatMetricOrMissing",
+            "— (thiếu DL)",
+        ]:
+            self.assertIn(ui_tok, html)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

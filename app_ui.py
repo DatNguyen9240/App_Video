@@ -2538,7 +2538,7 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- Run-Centric Mode & Selector Bar (synchronized across Overview, Threads, TikTok, Shopee, Reports) -->
-        <div class="pt-3 mt-1 border-t border-slate-800/80 space-y-2.5">
+        <div id="marketRunCentricAnchor" class="pt-3 mt-1 border-t border-slate-800/80 space-y-2.5">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap items-center gap-1.5 text-xs">
               <button @click="switchMarketViewMode('by_run')"
@@ -3301,10 +3301,12 @@ HTML_TEMPLATE = """
                     <div class="flex items-center gap-2 flex-wrap">
                       <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
                       <span class="font-mono text-[11px] text-slate-200 font-semibold">Mục tiêu: {{ crw.requested_count || 50 }} bài</span>
-                      <span v-if="crw.platform === 'threads' && (crw.crawl_mode_label || crw.crawl_mode)" class="px-1.5 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30 text-[10px]">🎯 {{ crw.crawl_mode_label || crw.crawl_mode }}</span>
-                      <span v-if="crw.platform === 'threads' && (crw.topic_labels || crw.topics || []).length" :title="(crw.topic_labels || crw.topics).join(', ')" class="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-200 border border-violet-500/30 text-[10px]">🏷️ {{ (crw.topic_labels || crw.topics).slice(0, 2).join(', ') }}{{ (crw.topic_labels || crw.topics).length > 2 ? ` +${(crw.topic_labels || crw.topics).length - 2}` : '' }}</span>
+                      <span v-if="getCrawlProgress(crw).strategyVersion" class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 border border-indigo-500/30 font-mono text-[10px]" :title="'Strategy ' + getCrawlProgress(crw).strategyVersion">Str {{ String(getCrawlProgress(crw).strategyVersion).includes('3.3') ? '3.3' : getCrawlProgress(crw).strategyVersion }}</span>
+                      <span v-if="crw.platform === 'threads' && (getCrawlProgress(crw).crawlModeLabel || crw.crawl_mode_label || crw.crawl_mode)" class="px-1.5 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30 text-[10px]">🎯 {{ getCrawlProgress(crw).crawlModeLabel || crw.crawl_mode_label || crw.crawl_mode }}</span>
+                      <span v-if="crw.platform === 'threads' && (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length" :title="(crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).join(', ')" class="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-200 border border-violet-500/30 text-[10px]">🏷️ {{ (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).slice(0, 2).join(', ') }}{{ (crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length > 2 ? ` +${(crw.topic_labels || crw.topics || getCrawlProgress(crw).topics).length - 2}` : '' }}</span>
                       <span v-if="crw.platform === 'threads' && crw.lookback_hours" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 font-mono text-[10px] border border-slate-700">🕒 {{ crw.lookback_hours === 168 ? '7d' : crw.lookback_hours + 'h' }}</span>
-                      <span v-if="crw.platform === 'threads' && crw.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-sky-300 font-mono text-[10px] border border-slate-700">⏱️ {{ crw.lease_minutes }}p</span>
+                      <span v-if="crw.platform === 'threads' && crw.lease_minutes" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-sky-300 font-mono text-[10px] border border-slate-700" title="Ngân sách lease phiên">⏱️ {{ crw.lease_minutes }}p</span>
+                      <span v-if="getCrawlProgress(crw).actualDurationLabel" class="px-1.5 py-0.5 rounded bg-slate-900 text-cyan-300 font-mono text-[10px] border border-cyan-500/30" :title="getCrawlProgress(crw).actualDurationTitle || 'Thời lượng xử lý thực tế'">⏳ Xử lý: {{ getCrawlProgress(crw).actualDurationLabel }}</span>
                       <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
                         :class="getCrawlDisplayState(crw).badgeClass">
                         {{ getCrawlDisplayState(crw).label }}
@@ -3320,11 +3322,17 @@ HTML_TEMPLATE = """
                           {{ getCrawlProgress(crw).newQualified }}/{{ getCrawlProgress(crw).target }} • {{ getCrawlProgress(crw).reached ? 'Đủ mục tiêu' : 'Chưa đạt mục tiêu' }}
                         </span>
                       </template>
-                      <span v-if="getCrawlProgress(crw).stopReason" class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 text-[10px] font-mono">{{ getCrawlProgress(crw).stopReason }}</span>
+                      <span v-if="getCrawlProgress(crw).stopReason"
+                        :title="'Mã kỹ thuật: ' + getCrawlProgress(crw).stopReason"
+                        class="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-200 border border-slate-700 text-[10px]">
+                        {{ formatStopReasonLabel(getCrawlProgress(crw).stopReason) }}
+                      </span>
                       <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
                     </div>
                     <div class="text-[10px] text-slate-400 truncate mt-0.5">
-                      <span class="font-mono text-slate-500">{{ crw.id }}</span> • {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
+                      <span class="font-mono text-slate-500">{{ crw.id }}</span>
+                      <span v-if="getCrawlProgress(crw).runId" class="text-indigo-300/90 font-mono"> • {{ getCrawlProgress(crw).runId }}</span>
+                      • {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
                     </div>
                     <div v-if="crw.reconcile_message && crw.reconcile_status && crw.reconcile_status !== 'ok'" class="text-[10px] text-amber-300/90 mt-0.5">
                       ↳ {{ crw.reconcile_message }}
@@ -3334,6 +3342,10 @@ HTML_TEMPLATE = """
                     </div>
                   </div>
                   <div class="flex items-center gap-1.5 shrink-0">
+                    <button v-if="canOpenCrawlResultRun(crw)" @click="openCrawlResultRun(crw)"
+                      class="px-2.5 py-1 rounded-lg bg-emerald-600/25 hover:bg-emerald-600/45 text-emerald-200 border border-emerald-500/40 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
+                      🔍 Xem kết quả crawl
+                    </button>
                     <button v-if="crw.status === 'queued'" @click="copyExistingRequestPrompt(crw)"
                       class="px-2 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
                       Copy lại Prompt
@@ -3355,7 +3367,9 @@ HTML_TEMPLATE = """
                   <div class="flex flex-wrap gap-1.5 text-[10px] font-mono">
                     <span v-if="getCrawlProgress(crw).scanned !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200">Quét: {{ getCrawlProgress(crw).scanned }}</span>
                     <span v-if="getCrawlProgress(crw).uniqueCandidates !== null" class="px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700">Ứng viên: {{ getCrawlProgress(crw).uniqueCandidates }}</span>
-                    <span v-if="getCrawlProgress(crw).newCount !== null && getCrawlProgress(crw).newCount !== getCrawlProgress(crw).newQualified" class="px-1.5 py-0.5 rounded bg-teal-950/50 text-teal-300 border border-teal-500/30">Mới (tổng): {{ getCrawlProgress(crw).newCount }}</span>
+                    <span v-if="getCrawlProgress(crw).newCount !== null && getCrawlProgress(crw).newCount !== getCrawlProgress(crw).newQualified"
+                      title="Tổng ứng viên lần đầu xuất hiện trong Registry (gồm bài đạt chuẩn, chưa xác minh và bị loại)"
+                      class="px-1.5 py-0.5 rounded bg-teal-950/50 text-teal-300 border border-teal-500/30">Ứng viên mới phát hiện: {{ getCrawlProgress(crw).newCount }}</span>
                     <span v-if="getCrawlProgress(crw).newQualified !== null" class="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-500/30">Mới đạt chuẩn: {{ getCrawlProgress(crw).newQualified }}</span>
                     <span v-if="getCrawlProgress(crw).duplicate !== null" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">Trùng: {{ getCrawlProgress(crw).duplicate }}</span>
                     <span v-if="getCrawlProgress(crw).updated !== null" class="px-1.5 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-500/30">Cập nhật tương tác: {{ getCrawlProgress(crw).updated }}</span>
@@ -3589,8 +3603,8 @@ HTML_TEMPLATE = """
                       </div>
                     </td>
                     <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
-                      <div>❤️ {{ item.likes_count !== null && item.likes_count !== undefined ? item.likes_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_likes_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_likes_delta) }})</span></div>
-                      <div>💬 {{ item.comments_count !== null && item.comments_count !== undefined ? item.comments_count.toLocaleString('vi-VN') : '—' }} <span v-if="item.last_comments_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_comments_delta) }})</span></div>
+                      <div>❤️ <span :class="(item.likes_count === null || item.likes_count === undefined) ? 'text-slate-500 italic' : 'text-slate-200'" :title="(item.likes_count === null || item.likes_count === undefined) ? 'Thiếu dữ liệu likes (null, không phải 0)' : ''">{{ formatMetricOrMissing(item.likes_count) }}</span> <span v-if="item.last_likes_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_likes_delta) }})</span></div>
+                      <div>💬 <span :class="(item.comments_count === null || item.comments_count === undefined) ? 'text-slate-500 italic' : 'text-slate-200'" :title="(item.comments_count === null || item.comments_count === undefined) ? 'Thiếu dữ liệu bình luận (null, không phải 0)' : ''">{{ formatMetricOrMissing(item.comments_count) }}</span> <span v-if="item.last_comments_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_comments_delta) }})</span></div>
                       <div v-if="item.shares_count !== null && item.shares_count !== undefined">📤 Shares: {{ item.shares_count.toLocaleString('vi-VN') }} <span v-if="item.last_shares_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_shares_delta) }})</span></div>
                       <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ item.reposts_count.toLocaleString('vi-VN') }} <span v-if="item.last_reposts_delta > 0" class="text-[10px] text-emerald-300">(+{{ formatCompactMetric(item.last_reposts_delta) }})</span></div>
                       <div v-if="item.quotes_count !== null && item.quotes_count !== undefined">🗣️ Quotes: {{ item.quotes_count.toLocaleString('vi-VN') }}</div>
@@ -3750,8 +3764,8 @@ HTML_TEMPLATE = """
                 </td>
                 <td class="px-3 py-3 align-top font-mono text-[11px] whitespace-nowrap space-y-0.5">
                   <div :title="formatViewsTooltip(item)">👁️ Views: <strong class="text-cyan-300">{{ formatViewsDisplay(item) }}</strong> <span v-if="item.views_precision === 'display_approx'" class="text-[9px] text-amber-300/90">(≈ hiển thị)</span></div>
-                  <div>❤️ Likes: {{ formatCompactMetric(item.likes_count) }}</div>
-                  <div>💬 Comments: {{ formatCompactMetric(item.comments_count) }}</div>
+                  <div>❤️ Likes: <span :title="(item.likes_count === null || item.likes_count === undefined) ? 'Thiếu dữ liệu likes (null, không phải 0)' : ''">{{ formatMetricOrMissing(item.likes_count) }}</span></div>
+                  <div>💬 Comments: {{ formatMetricOrMissing(item.comments_count) }}</div>
                   <div>📤 Shares: {{ formatCompactMetric(item.shares_count) }}</div>
                   <div v-if="item.reposts_count !== null && item.reposts_count !== undefined">🔁 Reposts: {{ formatCompactMetric(item.reposts_count) }}</div>
                 </td>
@@ -4051,8 +4065,8 @@ HTML_TEMPLATE = """
                   <span v-if="tv.tier" class="ml-1.5 px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[9px] uppercase">{{ tv.tier }}</span>
                 </div>
                 <div class="text-[10px] font-mono text-slate-300">
-                  <span v-if="tv.views_display || tv.views !== undefined">👁️ {{ tv.views_display ?? tv.views ?? '—' }} • </span>
-                  ❤️ {{ tv.likes ?? '—' }} • 💬 {{ tv.comments ?? '—' }} • 🔁 {{ tv.reposts ?? '—' }} • 📤 {{ tv.shares ?? '—' }}
+                  <span v-if="tv.views_display || tv.views !== undefined">👁️ {{ tv.views_display ?? tv.views ?? '— (thiếu DL)' }} • </span>
+                  ❤️ {{ formatMetricOrMissing(tv.likes) }} • 💬 {{ formatMetricOrMissing(tv.comments) }} • 🔁 {{ formatMetricOrMissing(tv.reposts) }} • 📤 {{ formatMetricOrMissing(tv.shares) }}
                 </div>
                 <div v-if="tv.viral_reason" class="text-[10px] text-slate-300">{{ tv.viral_reason }}</div>
                 <div class="text-[10px] text-cyan-300">{{ tv.verification_status }}</div>
@@ -4191,7 +4205,7 @@ HTML_TEMPLATE = """
                 <td class="py-1 pr-2 truncate max-w-[140px]">{{ sn.run_id || sn.source_file_name || '—' }}</td>
                 <td class="py-1 pr-2">{{ formatIsoTime(sn.measured_at || sn.snapshot_at) }}</td>
                 <td class="py-1 pr-2">{{ formatViewsDisplay(sn) }} <span v-if="sn.views_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.views_delta) }})</span></td>
-                <td class="py-1 pr-2">{{ formatCompactMetric(sn.likes_count) }} <span v-if="sn.likes_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.likes_delta) }})</span></td>
+                <td class="py-1 pr-2">{{ formatMetricOrMissing(sn.likes_count) }} <span v-if="sn.likes_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.likes_delta) }})</span></td>
                 <td class="py-1 pr-2">{{ formatCompactMetric(sn.comments_count) }} <span v-if="sn.comments_delta > 0" class="text-emerald-300">(+{{ formatCompactMetric(sn.comments_delta) }})</span></td>
                 <td class="py-1 pr-2">📤 {{ formatCompactMetric(sn.shares_count) }} / 🔁 {{ formatCompactMetric(sn.reposts_count) }}</td>
                 <td class="py-1">{{ sn.change_type }}</td>
@@ -5748,6 +5762,85 @@ HTML_TEMPLATE = """
             eng.with_shares ?? 0,
           ].join('|');
         },
+        formatStopReasonLabel(reason) {
+          const clean = String(reason || '').trim().toLowerCase();
+          if (!clean) return '';
+          const map = {
+            time_budget: 'Hết ngân sách thời gian',
+            target_achieved: 'Đạt mục tiêu',
+            source_exhausted: 'Cạn nguồn phù hợp',
+            exhausted: 'Cạn nguồn phù hợp',
+            no_qualifying_posts: 'Không có bài đạt chuẩn',
+            insufficient_data: 'Thiếu dữ liệu xác minh',
+            rate_limited: 'Giới hạn nền tảng',
+            platform_limit: 'Giới hạn nền tảng',
+            captcha_blocked: 'Gặp CAPTCHA / xác minh',
+            captcha: 'Gặp CAPTCHA / xác minh',
+          };
+          return map[clean] || String(reason);
+        },
+        formatActualProcessingDuration(seconds) {
+          if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds)) || Number(seconds) < 0) return '';
+          const totalSec = Math.round(Number(seconds));
+          const h = Math.floor(totalSec / 3600);
+          const m = Math.floor((totalSec % 3600) / 60);
+          const s = totalSec % 60;
+          if (h > 0) return `${h}g ${m}p`;
+          if (m > 0) return s > 0 ? `${m}p ${s}s` : `${m}p`;
+          return `${s}s`;
+        },
+        findMatchingRunKeyForRequest(crw) {
+          if (!crw || typeof crw !== 'object') return null;
+          const prog = this.getCrawlProgress(crw);
+          const targetRunId = prog.runId || null;
+          const reqId = String(crw.id || '').trim();
+          const repFileId = String(crw.report_file_id || prog.reportFileId || '').trim();
+          const catalog = Array.isArray(this.crawlRunsCatalog) ? this.crawlRunsCatalog : [];
+          for (const r of catalog) {
+            if (targetRunId && r.run_id && String(r.run_id).trim() === targetRunId) return r.run_key;
+          }
+          for (const r of catalog) {
+            if (reqId && r.request_id && String(r.request_id).trim() === reqId) return r.run_key;
+          }
+          if (repFileId) {
+            for (const r of catalog) {
+              const repFiles = Array.isArray(r.report_files) ? r.report_files : [];
+              if (repFiles.some(rf => String(rf.file_id || '').trim() === repFileId)) return r.run_key;
+            }
+          }
+          return null;
+        },
+        canOpenCrawlResultRun(crw) {
+          if (!crw || String(crw.status || '').toLowerCase() !== 'completed') return false;
+          const prog = this.getCrawlProgress(crw);
+          return Boolean(prog.runId || this.findMatchingRunKeyForRequest(crw));
+        },
+        async openCrawlResultRun(crw) {
+          if (!crw) return;
+          let runKey = this.findMatchingRunKeyForRequest(crw);
+          if (!runKey) {
+            await this.loadMarketRunsCatalog({ preserveSelection: true });
+            runKey = this.findMatchingRunKeyForRequest(crw);
+          }
+          if (!runKey) {
+            const prog = this.getCrawlProgress(crw);
+            this.notify(
+              `⏳ Lượt crawl ${prog.runId || crw.id} chưa đồng bộ từ Drive về máy — hãy bấm "Đồng bộ Drive ngay" trước.`,
+              'warning'
+            );
+            return;
+          }
+          this.currentTab = 'market';
+          this.marketViewMode = 'by_run';
+          this.runTab = 'overview';
+          await this.selectCrawlRun(runKey, true);
+          this.$nextTick(() => {
+            const el = document.getElementById('marketRunCentricAnchor');
+            if (el && typeof el.scrollIntoView === 'function') {
+              el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          });
+        },
         getCrawlDisplayState(crw) {
           const pm = (crw?.progress_metrics && typeof crw.progress_metrics === 'object') ? crw.progress_metrics : {};
           const raw = String(crw?.status || 'queued').toLowerCase();
@@ -5762,11 +5855,20 @@ HTML_TEMPLATE = """
             else if (raw === 'completed') code = (regSt === 'pending' || regSt === 'error' ? 'syncing' : 'completed');
             else code = raw;
           }
+          let completedMeta = { label: label || 'Hoàn tất', badgeClass: 'bg-emerald-500/20 text-emerald-300' };
+          if (code === 'completed') {
+            const prog = this.getCrawlProgress(crw);
+            if (prog.reached === true) {
+              completedMeta = { label: 'Hoàn tất — Đạt mục tiêu', badgeClass: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' };
+            } else if (prog.reached === false) {
+              completedMeta = { label: 'Hoàn tất — Chưa đạt mục tiêu', badgeClass: 'bg-amber-500/20 text-amber-300 border border-amber-500/40' };
+            }
+          }
           const map = {
             waiting_prompt: { label: label || 'Chờ gửi prompt', badgeClass: 'bg-amber-500/20 text-amber-300' },
             crawling: { label: label || 'Đang crawl', badgeClass: 'bg-cyan-500/20 text-cyan-300' },
             syncing: { label: label || 'Đang đồng bộ', badgeClass: 'bg-indigo-500/25 text-indigo-300' },
-            completed: { label: label || 'Hoàn tất', badgeClass: 'bg-emerald-500/20 text-emerald-300' },
+            completed: completedMeta,
             failed: { label: label || 'Lỗi', badgeClass: 'bg-rose-500/20 text-rose-300' },
             cancelled: { label: label || 'Đã hủy', badgeClass: 'bg-slate-800 text-slate-400' },
           };
@@ -5840,13 +5942,43 @@ HTML_TEMPLATE = """
           const missingViews = pickInt(pm.missing_views_count, summary.missing_views_count, summary.views_missing_count, s1.missing_views_count);
           const rejected = pickInt(pm.rejected_count, summary.rejected_count, summary.rejected_posts, s1.rejected_count);
           const similarContent = pickInt(pm.similar_content_count, summary.similar_content_count, s1.similar_content_count);
-          const stopReason = pm.stop_reason || summary.stop_reason || null;
+          const stopReason = pm.stop_reason || summary.stop_reason || s1.stop_reason || null;
+          const runId = String(summary.run_id || summary.drive_reconcile?.run_id || s1.run_id || crw?.run_id || '').trim() || null;
+          const reportFileId = String(summary.report_file_id || summary.drive_reconcile?.report_file_id || crw?.report_file_id || '').trim() || null;
+          const strategyVersion = crw?.strategy_version || summary.strategy_version || null;
+          const crawlModeLabel = crw?.crawl_mode_label || summary.crawl_mode_label || summary.crawl_mode || null;
+          const topics = Array.isArray(crw?.topics) && crw.topics.length ? crw.topics : (Array.isArray(summary.topics) ? summary.topics : []);
+
+          let actualDurationSec = pickInt(
+            summary.duration_seconds,
+            summary.execution_duration_sec,
+            summary.elapsed_seconds,
+            pm.duration_seconds
+          );
+          let actualDurationTitle = '';
+          if (actualDurationSec === null) {
+            const startRaw = summary.started_at || crw?.claimed_at || null;
+            const endRaw = summary.ended_at || summary.crawled_at || summary.generated_at || (['completed', 'failed'].includes(String(crw?.status || '').toLowerCase()) ? crw?.updated_at : null);
+            if (startRaw && endRaw) {
+              const sMs = Date.parse(startRaw);
+              const eMs = Date.parse(endRaw);
+              if (Number.isFinite(sMs) && Number.isFinite(eMs) && eMs >= sMs) {
+                actualDurationSec = Math.round((eMs - sMs) / 1000);
+                actualDurationTitle = `${this.formatIsoTime(startRaw)} → ${this.formatIsoTime(endRaw)}`;
+              }
+            }
+          }
+          const actualDurationLabel = this.formatActualProcessingDuration(actualDurationSec);
+
           const hasRealMetrics = [scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified, missingViews, rejected].some(v => v !== null);
           const explicitTargetAchieved = (typeof pm.target_achieved === 'boolean') ? pm.target_achieved : ((typeof summary.target_achieved === 'boolean') ? summary.target_achieved : null);
           const reached = explicitTargetAchieved !== null ? explicitTargetAchieved : (newQualified !== null ? newQualified >= target : null);
           return {
             target, scanned, uniqueCandidates, newCount, newQualified, duplicate, updated, unverified,
-            missingViews, rejected, similarContent, stopReason, hasRealMetrics, reached,
+            missingViews, rejected, similarContent, stopReason, runId, reportFileId,
+            strategyVersion, crawlModeLabel, topics,
+            actualDurationSec, actualDurationLabel, actualDurationTitle,
+            hasRealMetrics, reached,
           };
         },
         async loadMarketStatus() {
@@ -5895,6 +6027,10 @@ HTML_TEMPLATE = """
           if (!Number.isFinite(num)) return String(val);
           if (num >= 1000000) return (num / 1000000).toFixed(1).replace(/\\.0$/, '') + 'M (' + num.toLocaleString('vi-VN') + ')';
           return num.toLocaleString('vi-VN');
+        },
+        formatMetricOrMissing(val) {
+          if (val === null || val === undefined || val === '') return '— (thiếu DL)';
+          return this.formatCompactMetric(val);
         },
         formatRatioMetric(val) {
           if (val === null || val === undefined || val === '') return '—';
