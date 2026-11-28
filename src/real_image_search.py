@@ -149,7 +149,7 @@ def verify_image_with_gemini(image_path: str, query: str, fail_open: bool = True
             "Give score <= 3 if it is: a textbook/book cover, PDF/document page scan, exam sheet, cartoon/anime, AI-generated plastic look, brand logo, blank map/flag when a real scene is needed, or an unrelated generic object/car/building.\n"
             "Reply strictly in format: SCORE: <number> | YES or NO"
         )
-        models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
+        models = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
         for key in keys[:3]:
             client = genai.Client(api_key=key)
             for m in models:
