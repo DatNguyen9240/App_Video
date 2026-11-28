@@ -12,6 +12,7 @@ plus TikTok & Shopee multi-version JSON variants:
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -1260,6 +1261,517 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         reg_align = res_align["registry_items"][0]
         self.assertEqual(reg_align["canonical_url"], "https://threads.net/@align/post/ALIGN_1423")
         self.assertEqual(reg_align["measured_at"], "2026-11-27T14:25:00+07:00")
+
+    def test_run_centric_snapshots_1049_pairing_and_comparison(self):
+        """
+        Run-centric regression tests:
+        - Chronological run catalog with Data+Report pairing (explicit run_id, multi-file E2E, source_files fallback)
+        - Missing run_id groups strictly by source file without fabricating run_id
+        - Point-in-time snapshot isolation (old run retains old likes/views/tier after later run updates metrics or rejects)
+        - Threads V3.2 tier/author_dict/theme normalization + exact counters (32/31/7/3/3/1/17)
+        - Separate per-platform activity counts (fixing 203 vs 218/205 global leakage)
+        - Growth comparison between two crawl runs
+        """
+        from market_intelligence.storage import MarketIntelligenceStore
+
+        sub_dir = os.path.join(self.tmp_dir.name, "run_centric_sub")
+        os.makedirs(sub_dir, exist_ok=True)
+        store = MarketIntelligenceStore(data_dir=sub_dir)
+        try:
+            # 1) Legacy file WITHOUT run_id + paired report via source_files + Shopee product
+            legacy_no_run = {
+                "platform": "threads",
+                "crawled_at": "2026-11-25T10:00:00Z",
+                "records": [
+                    {
+                        "post_id": "LEGACY_P1",
+                        "post_url": "https://threads.net/@leg/post/LEGACY_P1",
+                        "author_handle": "@leg",
+                        "summary_vi": "Bai cu thieu run_id nhung co noi dung day du",
+                        "likes": 85,
+                        "comments": 12,
+                    }
+                ],
+            }
+            legacy_rep = {
+                "platform": "threads",
+                "generated_at": "2026-11-25T10:05:00Z",
+                "source_files": ["threads_legacy_no_runid.json (1 bai)"],
+                "sections": {
+                    "1_executive_summary": {"summary": "Legacy summary without run_id"},
+                    "3_trending_highlights": [{"topic": "Legacy beauty trend", "why_hot": "Test trend"}],
+                },
+            }
+            store.ingest_raw_file("f_leg_data", "threads_legacy_no_runid.json", json.dumps(legacy_no_run).encode("utf-8"), modified_time="2026-11-25T10:00:00Z")
+            store.ingest_raw_file("f_leg_rep", "market_report_legacy_no_runid.json", json.dumps(legacy_rep).encode("utf-8"), modified_time="2026-11-25T10:05:00Z")
+
+            # Helper doc with 0 records and no run_id must be excluded from crawl runs catalog
+            store.ingest_raw_file("f_idx_doc", "post_identity_index.json", json.dumps({"version": "1.0", "records": []}).encode("utf-8"), modified_time="2026-11-25T11:00:00Z")
+
+            # 2) Early Threads + Shopee run (point-in-time baseline for later update & rejection)
+            early_run = {
+                "run_id": "run_early_base",
+                "platform": "threads",
+                "crawled_at": "2026-11-26T09:00:00Z",
+                "records": [
+                    {
+                        "post_id": "POST_GROW",
+                        "post_url": "https://threads.net/@creator/post/POST_GROW",
+                        "author_handle": "@creator",
+                        "summary_vi": "Bai viet tang truong qua 2 luot",
+                        "likes": 100,
+                        "comments": 10,
+                        "views": 5000,
+                        "views_display": "5K",
+                        "views_precision": "rounded_display",
+                        "views_source": "threads_web_browser",
+                        "views_measured_at": "2026-11-26T09:00:00Z",
+                        "views_evidence_url": "https://threads.net/@creator/post/POST_GROW",
+                        "trend_tier": "emerging",
+                        "data_quality": "usable",
+                        "classification": "NEW",
+                    },
+                    {
+                        "post_id": "POST_RICH",
+                        "post_url": "https://threads.net/@rich/post/POST_RICH",
+                        "author_handle": "@rich",
+                        "summary_vi": "Bai da dat chuan truoc do",
+                        "likes": 450,
+                        "views": 22000,
+                        "views_display": "22K",
+                        "views_precision": "rounded_display",
+                        "views_source": "threads_web_browser",
+                        "views_measured_at": "2026-11-26T09:00:00Z",
+                        "views_evidence_url": "https://threads.net/@rich/post/POST_RICH",
+                        "trend_tier": "hot",
+                        "data_quality": "usable",
+                        "classification": "NEW",
+                    },
+                ],
+            }
+            shopee_run = {
+                "run_id": "run_shopee_separate",
+                "platform": "shopee",
+                "crawled_at": "2026-11-26T12:00:00Z",
+                "records": [
+                    {"item_id": "SP_99", "shop_id": "SH_1", "title": "Son kem li", "price": 199000, "sold": 320, "rating": 4.9}
+                ],
+            }
+            store.ingest_raw_file("f_early_t", "threads_crawl_early.json", json.dumps(early_run).encode("utf-8"), modified_time="2026-11-26T09:00:00Z")
+            store.ingest_raw_file("f_sp_1", "shopee_crawl_1.json", json.dumps(shopee_run).encode("utf-8"), modified_time="2026-11-26T12:00:00Z")
+
+            # 3) Multi-file E2E run (original + corrected + report -> 1 grouped run)
+            e2e_th = {"run_id": "e2e-multi-1559", "platform": "threads", "crawled_at": "2026-11-27T08:00:00Z", "records": [{"post_id": "E2E_T1", "post_url": "https://threads.net/@e2e/post/E2E_T1", "likes": 50}]}
+            e2e_tt = {"run_id": "e2e-multi-1559", "platform": "tiktok", "crawled_at": "2026-11-27T08:02:00Z", "records": [{"video_id": "TT_E2E_1", "video_url": "https://www.tiktok.com/@tt/video/TT_E2E_1", "play_count": 15000, "likes": 600}]}
+            e2e_rep = {"run_id": "e2e-multi-1559", "platform": "all", "generated_at": "2026-11-27T08:05:00Z", "sections": {"1_executive_summary": {"summary": "Multi platform summary"}}}
+            store.ingest_raw_file("f_e2e_t", "threads_crawl_e2e.json", json.dumps(e2e_th).encode("utf-8"), modified_time="2026-11-27T08:00:00Z")
+            store.ingest_raw_file("f_e2e_tt", "tiktok_crawl_e2e.json", json.dumps(e2e_tt).encode("utf-8"), modified_time="2026-11-27T08:02:00Z")
+            store.ingest_raw_file("f_e2e_rep", "market_report_e2e.json", json.dumps(e2e_rep).encode("utf-8"), modified_time="2026-11-27T08:05:00Z")
+
+            # 4) Latest 1049-shaped V3.2 run (32 scanned, 31 unique: 7 NEW, 3 UPDATED, 3 DUP, 1 UNV, 17 REJECTED)
+            records_1049 = []
+            # 2 very_hot + 1 hot + 4 emerging = 7 NEW qualified
+            for i in range(7):
+                tier_val = "very_hot" if i < 2 else ("hot" if i == 2 else "emerging")
+                records_1049.append({
+                    "post_id": f"N1049_{i}",
+                    "post_url": f"https://threads.com/@user{i}/post/N1049_{i}",
+                    "author": {"username": f"user{i}", "author_type": "creator"},
+                    "theme": "Black Friday Shopee" if i < 4 else "Review Do Gia Dung",
+                    "content_summary_vi": f"Bai moi dat chuan #{i}",
+                    "likes": 1500 if i < 2 else (400 if i == 2 else 90),
+                    "comments": 40,
+                    "views": 60000 if i < 2 else 12000,
+                    "views_display": "60K" if i < 2 else "12K",
+                    "views_precision": "rounded_display",
+                    "views_source": "threads_web_browser",
+                    "views_measured_at": "2026-11-28T10:50:00+07:00",
+                    "views_evidence_url": f"https://threads.com/@user{i}/post/N1049_{i}",
+                    "tier": tier_val,
+                    "classification": "NEW",
+                    "data_quality": "usable",
+                })
+            # 3 UPDATED_METRICS (first updates POST_GROW's likes 100->850 & views 5000->42000)
+            records_1049.append({
+                "post_id": "POST_GROW",
+                "post_url": "https://threads.net/@creator/post/POST_GROW",
+                "author": {"username": "creator", "author_type": "creator"},
+                "content_summary_vi": "Bai viet tang truong qua 2 luot",
+                "likes": 850,
+                "comments": 65,
+                "views": 42000,
+                "views_display": "42K",
+                "views_precision": "rounded_display",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-28T10:51:00+07:00",
+                "views_evidence_url": "https://threads.net/@creator/post/POST_GROW",
+                "classification": "UPDATED_METRICS",
+                "data_quality": "usable",
+            })
+            for u in range(2):
+                records_1049.append({
+                    "post_id": f"UPD_{u}",
+                    "post_url": f"https://threads.net/@upd{u}/post/UPD_{u}",
+                    "author_handle": f"@upd{u}",
+                    "likes": 120 + u,
+                    "views": None,
+                    "classification": "UPDATED_METRICS",
+                })
+            # 3 DUPLICATE_HISTORY
+            for d in range(3):
+                records_1049.append({
+                    "post_id": f"DUPH_{d}",
+                    "post_url": f"https://threads.net/@dup{d}/post/DUPH_{d}",
+                    "likes": 30,
+                    "views": None,
+                    "classification": "DUPLICATE_HISTORY",
+                })
+            # 1 UNVERIFIED (missing views = 1)
+            records_1049.append({
+                "post_id": "UNV_1",
+                "post_url": "https://threads.net/@unv1/post/UNV_1",
+                "likes": 220,
+                "views": None,
+                "tier": "unverified",
+                "verification_status": "unverified",
+                "data_quality": "needs_verification",
+                "classification": "UNVERIFIED",
+            })
+            # 17 REJECTED (first re-observes POST_RICH as REJECTED due to 48h window without corrupting POST_RICH!)
+            records_1049.append({
+                "post_id": "POST_RICH",
+                "post_url": "https://threads.net/@rich/post/POST_RICH",
+                "likes": 450,
+                "views": None,
+                "classification": "REJECTED",
+                "rejected_reason": "outside_48h_window",
+            })
+            for rj in range(16):
+                records_1049.append({
+                    "post_id": f"REJ_{rj}",
+                    "post_url": f"https://threads.net/@rej{rj}/post/REJ_{rj}",
+                    "likes": 5,
+                    "views": None,
+                    "classification": "REJECTED",
+                    "rejected_reason": "low_engagement",
+                })
+            self.assertEqual(len(records_1049), 31)
+
+            data_1049 = {
+                "contract_version": "3.2",
+                "platform": "threads",
+                "run_id": "run_threads_20261128_1049",
+                "started_at": "2026-11-28T10:49:00+07:00",
+                "ended_at": "2026-11-28T10:56:20+07:00",
+                "run_status": "completed",
+                "counters": {
+                    "requested_count": 10,
+                    "scanned_count": 32,
+                    "unique_candidate_count": 31,
+                    "new_qualified_count": 7,
+                    "duplicate_current_run_count": 1,
+                    "duplicate_history_count": 3,
+                    "updated_metrics_count": 3,
+                    "missing_views_count": 1,
+                    "unverified_count": 1,
+                    "rejected_count": 17,
+                    "target_achieved": False,
+                    "stop_reason": "sources_exhausted",
+                },
+                "tier_counts": {"very_hot": 2, "hot": 1, "emerging": 4, "watchlist": 0, "unverified": 1},
+                "trends_snapshot": {"topics": [{"topic": "Black Friday Shopee", "posts_label": "15 bai"}]},
+                "records": records_1049,
+            }
+            rep_1049 = {
+                "contract_version": "3.2",
+                "platform": "threads",
+                "run_id": "run_threads_20261128_1049",
+                "generated_at": "2026-11-28T10:56:58+07:00",
+                "run_status": "completed",
+                "counters": data_1049["counters"],
+                "telegram_summary": "Run 1049 summary: 7 bai dat chuan moi.",
+                "sections": {
+                    "1_screening": {"counters": data_1049["counters"], "note": "Quet 32 bai, loai 17 bai."},
+                    "2_tier_distribution": {"tier_counts": data_1049["tier_counts"], "group_counts": {"deal_khuyen_mai": 4}},
+                    "3_trends": [{"name": "Black Friday Shopee", "note": "San sale lon", "evidence_post_ids": ["N1049_0", "N1049_1"]}],
+                    "4_top_viral": [{"author": "user0", "post_id": "N1049_0", "likes": 1500, "views_display": "60K", "viral_reason": "Viral manh"}],
+                    "5_emerging_and_signals": {"signals": [{"name": "Tin hieu A", "detail": "Chi tiet A"}]},
+                    "7_affiliate_priorities": [{"product": "Kem chong nang A", "angle": "So sanh gia sale", "viral_level": "very_hot"}],
+                    "8_content_suggestions": [
+                        {"channel": "Threads/Facebook", "idea": "Series so sanh", "basis_post_id": "N1049_0"},
+                        {"channel": "Video ngắn (TikTok)", "idea": "Quay nhanh Black Friday", "basis_post_id": "N1049_1"},
+                    ],
+                },
+            }
+            store.ingest_raw_file("f_1049_data", "threads_trend_20261128_1049.json", json.dumps(data_1049).encode("utf-8"), modified_time="2026-11-28T03:57:50Z")
+            store.ingest_raw_file("f_1049_rep", "trend_report_20261128_1049.json", json.dumps(rep_1049).encode("utf-8"), modified_time="2026-11-28T03:57:30Z")
+
+            # Assert run catalog order, pairing, missing-run_id safety, and exact 1049 counters
+            runs = store.list_crawl_runs(limit=20)
+            self.assertEqual(len(runs), 5)  # 1049, e2e-multi-1559, shopee, early, legacy_no_runid (helper index excluded)
+            self.assertEqual(runs[0]["run_key"], "run_threads_20261128_1049")
+            self.assertEqual(runs[0]["scanned_count"], 32)
+            self.assertEqual(runs[0]["unique_candidate_count"], 31)
+            self.assertEqual(runs[0]["new_qualified_count"], 7)
+            self.assertEqual(runs[0]["updated_metrics_count"], 3)
+            self.assertEqual(runs[0]["duplicate_history_count"], 3)
+            self.assertEqual(runs[0]["unverified_count"], 1)
+            self.assertEqual(runs[0]["rejected_count"], 17)
+            self.assertEqual(runs[0]["missing_views_count"], 1)
+            self.assertEqual(runs[0]["tier_counts"]["very_hot"], 2)
+            self.assertEqual(runs[0]["tier_counts"]["hot"], 1)
+            self.assertEqual(runs[0]["tier_counts"]["emerging"], 4)
+            self.assertIn("drive.google.com/file/d/f_1049_data/view", runs[0]["data_file"]["drive_url"])
+            self.assertIn("drive.google.com/file/d/f_1049_rep/view", runs[0]["report_file"]["drive_url"])
+
+            # Multi-file E2E grouped as ONE run
+            e2e_grp = next(r for r in runs if r["run_key"] == "e2e-multi-1559")
+            self.assertEqual(len(e2e_grp["data_files"]), 2)
+            self.assertEqual(len(e2e_grp["report_files"]), 1)
+            self.assertEqual(set(e2e_grp["platforms"]), {"threads", "tiktok"})
+
+            # Orphan missing run_id keeps run_id=None and pairs report via source_files
+            leg_grp = next(r for r in runs if r["run_key"] == "file:f_leg_data")
+            self.assertIsNone(leg_grp["run_id"])
+            self.assertFalse(leg_grp["has_run_id"])
+            self.assertEqual(leg_grp["grouped_by"], "source_file")
+            self.assertEqual(leg_grp["report_file"]["file_id"], "f_leg_rep")
+
+            # Assert author dict extraction on 1049 items
+            items_1049 = store.query_items(run_key="run_threads_20261128_1049", limit=100)["items"]
+            n0 = next(it for it in items_1049 if it["post_id"] == "N1049_0")
+            self.assertEqual(n0["author_handle"], "@user0")
+            self.assertEqual(n0["trend_tier"], "very_hot")
+            self.assertEqual(n0["extra_meta"].get("author_type"), "creator")
+            self.assertEqual(n0["extra_meta"].get("theme"), "Black Friday Shopee")
+
+            # Point-in-time snapshot isolation: run_early_base MUST still see POST_GROW likes=100, views=5000, emerging!
+            early_items = store.query_items(run_key="run_early_base", limit=50)["items"]
+            early_grow = next(it for it in early_items if it["post_id"] == "POST_GROW")
+            self.assertEqual(early_grow["likes_count"], 100)
+            self.assertEqual(early_grow["views_count"], 5000)
+            self.assertEqual(early_grow["trend_tier"], "emerging")
+            # Meanwhile 1049 sees POST_GROW at 850 / 42000 UPDATED_METRICS
+            grow_1049 = next(it for it in items_1049 if it["post_id"] == "POST_GROW")
+            self.assertEqual(grow_1049["likes_count"], 850)
+            self.assertEqual(grow_1049["views_count"], 42000)
+            self.assertEqual(grow_1049["classification"], "UPDATED_METRICS")
+
+            # REJECTED observation on POST_RICH in 1049 must NOT corrupt market_items POST_RICH!
+            rich_1049 = next(it for it in items_1049 if it["post_id"] == "POST_RICH")
+            self.assertEqual(rich_1049["classification"], "REJECTED")
+            hist_rich = store.query_items(search="POST_RICH", limit=10)["items"][0]
+            self.assertEqual(hist_rich["trend_tier"], "hot")
+            self.assertEqual(hist_rich["views_count"], 22000)
+
+            # Report isolation: run_early_base has NO muse report of its own -> must NOT show 1049 report
+            rep_early = store.build_evidence_report(platform="threads", run_key="run_early_base")
+            self.assertFalse(rep_early["has_muse_report"])
+            rep_full_1049 = store.build_evidence_report(platform="threads", run_key="run_threads_20261128_1049")
+            self.assertTrue(rep_full_1049["has_muse_report"])
+            self.assertEqual(rep_full_1049["trending_highlights"][0]["title"], "Black Friday Shopee")
+            self.assertEqual(rep_full_1049["trending_highlights"][0]["evidence_ids"], ["N1049_0", "N1049_1"])
+            self.assertEqual(rep_full_1049["affiliate_opportunities"][0]["viral_level"], "very_hot")
+            self.assertIn("@user0", rep_full_1049["top_viral"][0]["post"])
+            self.assertEqual(rep_full_1049["emerging_and_signals"]["signals"][0]["signal"], "Tin hieu A")
+            self.assertEqual(rep_full_1049["emerging_and_signals"]["signals"][0]["evidence"], "Chi tiet A")
+            self.assertTrue(rep_full_1049["content_suggestions"]["text_posts"][0].startswith("[Threads/Facebook] Series so sanh"))
+            self.assertTrue(rep_full_1049["content_suggestions"]["short_videos"][0].startswith("[Video ngắn (TikTok)] Quay nhanh"))
+
+            # Per-platform activity isolation: Threads count != Global count (no TikTok/Shopee leak!)
+            g_stats = store.get_stats()
+            self.assertGreater(g_stats["by_platform"]["tiktok"] + g_stats["by_platform"]["shopee"], 0)
+            self.assertEqual(g_stats["by_platform_activity"]["threads"]["total"], g_stats["by_platform"]["threads"])
+            self.assertLess(g_stats["by_platform_activity"]["threads"]["total"], g_stats["total_items"])
+
+            # Compare 2 runs
+            cmp_res = store.compare_crawl_runs("run_early_base", "run_threads_20261128_1049", platform="threads")
+            self.assertTrue(cmp_res["ok"])
+            self.assertEqual(cmp_res["summary"]["overlap_count"], 2)  # POST_GROW + POST_RICH
+            grow_delta = next(c for c in cmp_res["common_items"] if c["post_id"] == "POST_GROW")
+            self.assertEqual(grow_delta["likes_delta"], 750)
+            self.assertEqual(grow_delta["views_delta"], 37000)
+        finally:
+            store.close()
+
+    def test_strategy_v33_fields_special_filter_and_self_healing_backfill(self):
+        tmpdir = tempfile.mkdtemp(prefix="mi_v33_test_")
+        try:
+            store = MarketIntelligenceStore(data_dir=tmpdir)
+            data_1131 = {
+                "contract_version": "3.2",
+                "strategy_version": "3.3 (sua doi 2026-11-28)",
+                "run_id": "run_threads_20261128_1131",
+                "platform": "threads",
+                "crawled_at": "2026-11-28T04:35:00Z",
+                "records": [
+                    {
+                        "post_id": "P1131_A",
+                        "post_url": "https://threads.net/@vf_td.alex/post/P1131_A",
+                        "author": {"username": "@vf_td.alex", "author_type": "creator", "followers": 10},
+                        "likes": 820,
+                        "views": 69800,
+                        "views_display": "69.8K",
+                        "views_precision": "rounded_display",
+                        "views_source": "threads_web_browser",
+                        "views_measured_at": "2026-11-28T04:35:00Z",
+                        "views_evidence_url": "https://threads.net/@vf_td.alex/post/P1131_A",
+                        "classification": "NEW",
+                        "tier": "very_hot",
+                        "natural_viral": True,
+                        "buyer_intent": False,
+                        "v33_observation": {"views_to_followers_ratio": 6980.0},
+                    },
+                    {
+                        "post_id": "P1131_B",
+                        "post_url": "https://threads.net/@zero_brand/post/P1131_B",
+                        "author": {"username": "@zero_brand", "author_type": "brand", "followers": 0},
+                        "likes": 120,
+                        "views": 3500,
+                        "views_display": "3.5K",
+                        "views_precision": "rounded_display",
+                        "views_source": "threads_web_browser",
+                        "views_measured_at": "2026-11-28T04:35:00Z",
+                        "views_evidence_url": "https://threads.net/@zero_brand/post/P1131_B",
+                        "classification": "NEW",
+                        "tier": "emerging",
+                        "natural_viral": False,
+                        "buyer_intent": True,
+                        "v33_observation": {"author_followers": 0, "views_to_followers_ratio": None},
+                    },
+                ],
+            }
+            data_1201 = {
+                "contract_version": "3.2",
+                "strategy_version": "3.3 (sua doi 2026-11-28)",
+                "run_id": "run_threads_20261128_1201",
+                "platform": "threads",
+                "crawled_at": "2026-11-28T05:10:00Z",
+                "summary": {
+                    "scanned_count": 4,
+                    "unique_candidate_count": 4,
+                    "new_qualified_count": 1,
+                    "updated_metrics_count": 1,
+                    "duplicate_history_count": 0,
+                    "unverified_count": 0,
+                    "rejected_count": 2,
+                },
+                "special_counts": {"natural_viral": 1, "buyer_intent": 1, "growth_posts": 1},
+                "records": [
+                    {
+                        "post_id": "P1201_NEW",
+                        "post_url": "https://threads.net/@n1201/post/P1201_NEW",
+                        "author": {"username": "@n1201", "author_type": "creator", "followers": 2500},
+                        "likes": 450,
+                        "views": 25000,
+                        "views_display": "25K",
+                        "views_precision": "rounded_display",
+                        "views_source": "threads_web_browser",
+                        "views_measured_at": "2026-11-28T05:10:00Z",
+                        "views_evidence_url": "https://threads.net/@n1201/post/P1201_NEW",
+                        "classification": "NEW",
+                        "tier": "hot",
+                        "natural_viral": True,
+                        "buyer_intent": True,
+                    },
+                    {
+                        "post_id": "P1131_A",
+                        "post_url": "https://threads.net/@vf_td.alex/post/P1131_A",
+                        "author": {"username": "@vf_td.alex", "author_type": "creator", "followers": 15},
+                        "likes": 1200,
+                        "views": 88000,
+                        "views_display": "88K",
+                        "views_precision": "rounded_display",
+                        "views_source": "threads_web_browser",
+                        "views_measured_at": "2026-11-28T05:10:00Z",
+                        "views_evidence_url": "https://threads.net/@vf_td.alex/post/P1131_A",
+                        "classification": "UPDATED_METRICS",
+                    },
+                    {
+                        "post_id": "P1131_B",
+                        "post_url": "https://threads.net/@zero_brand/post/P1131_B",
+                        "author": {"username": "@zero_brand", "author_type": "brand", "followers": 0},
+                        "likes": 125,
+                        "views": 3500,
+                        "classification": "DUPLICATE_HISTORY",
+                    },
+                    {"post_id": "P1201_REJ1", "classification": "REJECTED", "reject_reason": "low_views", "likes": 1, "views": 10},
+                    {"post_id": "P1201_REJ2", "classification": "REJECTED", "reject_reason": "low_views", "likes": 2, "views": 20},
+                ],
+            }
+            rep_1201 = {
+                "contract_version": "3.2",
+                "strategy_version": "3.3 (sua doi 2026-11-28)",
+                "run_id": "run_threads_20261128_1201",
+                "platform": "threads",
+                "generated_at": "2026-11-28T05:11:00Z",
+                "special_counts": {"natural_viral": 1, "buyer_intent": 1, "growth_posts": 1},
+                "sections": {
+                    "9_growth_tracking": [
+                        {
+                            "post_id": "P1131_A",
+                            "author": "@vf_td.alex",
+                            "theme": "Affiliate Deal",
+                            "likes_before": 820,
+                            "likes_after": 1200,
+                            "comments_before": 10,
+                            "comments_after": 18,
+                            "views_now_display": "88K",
+                            "author_followers": 15,
+                        }
+                    ]
+                },
+            }
+            store.ingest_raw_file("fid_1131", "threads_trend_20261128_1131.json", json.dumps(data_1131).encode("utf-8"), modified_time="2026-11-28T04:36:00Z")
+            store.ingest_raw_file("fid_1201", "threads_trend_20261128_1201.json", json.dumps(data_1201).encode("utf-8"), modified_time="2026-11-28T05:12:00Z")
+            store.ingest_raw_file("fid_1201_rep", "trend_report_20261128_1201.json", json.dumps(rep_1201).encode("utf-8"), modified_time="2026-11-28T05:12:30Z")
+
+            runs = store.list_crawl_runs(limit=10)
+            self.assertEqual(runs[0]["run_key"], "run_threads_20261128_1201")
+            self.assertEqual(runs[0]["strategy_version"], "3.3 (sua doi 2026-11-28)")
+            self.assertEqual(runs[0]["contract_version"], "3.2")
+            self.assertEqual(runs[0]["special_counts"]["natural_viral"], 1)
+            self.assertEqual(runs[0]["special_counts"]["growth_posts"], 1)
+
+            # Followers=0 must remain 0 and views_to_followers_ratio must remain None
+            q_1131 = store.query_items(platform="threads", run_key="run_threads_20261128_1131", limit=20)["items"]
+            item_b = next(x for x in q_1131 if x["post_id"] == "P1131_B")
+            self.assertEqual(item_b["author_followers"], 0)
+            self.assertIsNone(item_b["views_to_followers_ratio"])
+            self.assertIs(item_b["buyer_intent"], True)
+            self.assertIs(item_b["natural_viral"], False)
+            self.assertNotEqual(item_b.get("purchase_intent"), "False")
+
+            # Special filters remain run-isolated
+            nat_1131 = store.query_items(platform="threads", run_key="run_threads_20261128_1131", special_filter="natural_viral", limit=20)["items"]
+            self.assertEqual([x["post_id"] for x in nat_1131], ["P1131_A"])
+            self.assertEqual(nat_1131[0]["views_to_followers_ratio"], 6980.0)
+            self.assertEqual(nat_1131[0]["likes_count"], 820)  # point-in-time, not 1200 from 1201!
+
+            # DUPLICATE_HISTORY with change_type='updated' must NOT leak into activity_filter='growth'
+            growth_1201 = store.query_items(platform="threads", run_key="run_threads_20261128_1201", activity_filter="growth", limit=20)["items"]
+            dup_1201 = store.query_items(platform="threads", run_key="run_threads_20261128_1201", activity_filter="duplicate", limit=20)["items"]
+            self.assertEqual([x["post_id"] for x in growth_1201], ["P1131_A"])
+            self.assertEqual([x["post_id"] for x in dup_1201], ["P1131_B"])
+
+            # Evidence report carries 9_growth_tracking and strategy/contract metadata
+            rep = store.build_evidence_report(platform="threads", run_key="run_threads_20261128_1201")
+            self.assertEqual(rep["strategy_version"], "3.3 (sua doi 2026-11-28)")
+            self.assertEqual(len(rep["growth_tracking"]), 1)
+            self.assertEqual(rep["growth_tracking"][0]["likes_after"], 1200)
+
+            # Simulate stale row missing extra_meta_json & assert self-healing backfill restores it on reopen
+            store._conn.execute("UPDATE market_item_snapshots SET extra_meta_json = NULL, trend_tier = NULL WHERE raw_file_id = 'fid_1201'")
+            store._conn.commit()
+            store.close()
+            reopened = MarketIntelligenceStore(data_dir=tmpdir)
+            healed = reopened.query_items(platform="threads", run_key="run_threads_20261128_1201", activity_filter="new", limit=10)["items"]
+            self.assertEqual(len(healed), 1)
+            self.assertEqual(healed[0]["trend_tier"], "hot")
+            self.assertEqual(healed[0]["author_followers"], 2500)
+            reopened.close()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

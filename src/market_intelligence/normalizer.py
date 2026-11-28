@@ -191,6 +191,7 @@ def detect_platform(
     envelope: Optional[Dict[str, Any]] = None,
     file_name: Optional[str] = None,
     platform_hint: Optional[str] = None,
+    folder_path: Optional[str] = None,
 ) -> str:
     """Detect source platform accurately without misclassifying handles like @shopee_vn on Threads."""
     envelope = envelope or {}
@@ -222,7 +223,7 @@ def detect_platform(
         if found:
             return found
 
-    for candidate in (platform_hint, file_name):
+    for candidate in (platform_hint, file_name, folder_path, envelope.get("_folder_path")):
         found = _normalize_platform_token(_clean_str(candidate))
         if found:
             return found
@@ -431,13 +432,20 @@ def normalize_record(
     schema_version: str = "unknown",
     item_index: int = 0,
     is_corrected: bool = False,
+    folder_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Normalize one raw Market Intelligence item into canonical Data Contract V2 form.
     Missing fields remain None; nothing is fabricated; null never becomes 0.
     """
     envelope = envelope or {}
-    platform = detect_platform(item, envelope=envelope, file_name=file_name, platform_hint=platform_hint)
+    platform = detect_platform(
+        item,
+        envelope=envelope,
+        file_name=file_name,
+        platform_hint=platform_hint,
+        folder_path=folder_path,
+    )
 
     post_id = _clean_str(item.get("post_id"))
     item_id = _clean_str(
@@ -452,15 +460,26 @@ def normalize_record(
     run_id = _clean_str(item.get("run_id") or envelope.get("run_id"))
     external_id = post_id or item_id or numeric_post_id or _clean_str(item.get("id"))
 
-    author_handle = _clean_str(
-        item.get("author_handle")
-        or item.get("author_username")
-        or item.get("username")
-        or item.get("author")
-        or item.get("shop_name")
-        or item.get("seller_name")
+    raw_author = item.get("author")
+    author_dict = raw_author if isinstance(raw_author, dict) else {}
+    raw_handle_str = (
+        _clean_str(item.get("author_handle"))
+        or _clean_str(item.get("author_username"))
+        or _clean_str(item.get("username"))
+        or _clean_str(author_dict.get("username") or author_dict.get("handle"))
+        or (_clean_str(raw_author) if not isinstance(raw_author, dict) else None)
+        or _clean_str(item.get("shop_name"))
+        or _clean_str(item.get("seller_name"))
     )
-    author_name = _clean_str(item.get("author_name") or item.get("shop_title"))
+    if raw_handle_str and platform == "threads" and not raw_handle_str.startswith("@") and " " not in raw_handle_str:
+        raw_handle_str = f"@{raw_handle_str}"
+    author_handle = raw_handle_str
+    author_name = _clean_str(
+        item.get("author_name")
+        or author_dict.get("name")
+        or author_dict.get("display_name")
+        or item.get("shop_title")
+    )
 
     title = _clean_str(item.get("title") or item.get("product_name") or item.get("name"))
     summary_vi = _clean_str(item.get("content_summary_vi"))
@@ -486,10 +505,15 @@ def normalize_record(
         or item.get("contentGroup")
         or item.get("topic_group")
     )
+    raw_buyer_intent = item.get("buyer_intent")
     purchase_intent = _clean_str(
         item.get("purchase_intent")
-        or item.get("purchaseIntent")
-        or item.get("buyer_intent")
+        if item.get("purchase_intent") is not None
+        else (
+            item.get("purchaseIntent")
+            if item.get("purchaseIntent") is not None
+            else (raw_buyer_intent if isinstance(raw_buyer_intent, str) else None)
+        )
     )
 
     published_at = _clean_str(
@@ -559,9 +583,9 @@ def normalize_record(
     engagement_rate_on_views = _clean_float(item.get("engagement_rate_on_views"))
     engagement_rate_approx = bool(item.get("engagement_rate_approx")) if item.get("engagement_rate_approx") is not None else None
 
-    # Data Contract V3.1 first-class fields (kept None on V1/V2 if absent)
+    # Data Contract V3.1/V3.2 first-class fields (kept None on V1/V2 if absent)
     post_pk = _clean_str(item.get("post_pk") or item.get("pk"))
-    trend_tier = _clean_str(item.get("trend_tier"))
+    trend_tier = _clean_str(item.get("trend_tier") or item.get("tier"))
     if trend_tier:
         trend_tier = trend_tier.lower()
     trend_group = _clean_str(item.get("trend_group"))
@@ -607,6 +631,10 @@ def normalize_record(
         "corrects_file",
         "technical_status",
         "data_quality_status",
+        "strategy_version",
+        "contract_version",
+        "attempt",
+        "claimed_by",
         "source_type",
         "upcoming_vouchers",
         "trending_context",
@@ -615,6 +643,10 @@ def normalize_record(
         "request_id",
         "run_id",
         "run_status",
+        "strategy_version",
+        "contract_version",
+        "attempt",
+        "claimed_by",
         "search_groups",
         "entities_mentioned",
         "mentioned_products_brands_topics",
@@ -680,6 +712,10 @@ def normalize_record(
         "first_seen_at",
         "last_seen_at",
         "observation_count",
+        "theme",
+        "rejected_reason",
+        "age_hours_at_crawl",
+        "web_cross_check",
     ):
         if meta_key in item:
             val = item.get(meta_key)
@@ -689,6 +725,61 @@ def normalize_record(
             val = None
         if val is not None and val != "":
             extra_meta[meta_key] = val
+    if author_dict.get("author_type") and not extra_meta.get("author_type"):
+        extra_meta["author_type"] = author_dict.get("author_type")
+    v33_obs = item.get("v33_observation") if isinstance(item.get("v33_observation"), dict) else {}
+    if v33_obs:
+        extra_meta["v33_observation"] = v33_obs
+        if v33_obs.get("verification_session_mode") and "verification_session_mode" not in extra_meta:
+            extra_meta["verification_session_mode"] = _clean_str(v33_obs.get("verification_session_mode"))
+
+    followers_val = None
+    for f_cand in (
+        v33_obs.get("author_followers"),
+        author_dict.get("followers"),
+        item.get("author_followers"),
+        item.get("followers"),
+    ):
+        cleaned_f = _clean_int(f_cand)
+        if cleaned_f is not None:
+            followers_val = cleaned_f
+            break
+    if followers_val is not None:
+        extra_meta["author_followers"] = followers_val
+        extra_meta["followers"] = followers_val
+
+    followers_measured_at = _clean_str(
+        author_dict.get("followers_measured_at")
+        or v33_obs.get("followers_measured_at")
+        or item.get("followers_measured_at")
+    )
+    if followers_measured_at:
+        extra_meta["followers_measured_at"] = followers_measured_at
+
+    if "views_to_followers_ratio" in v33_obs:
+        ratio_val = _clean_float(v33_obs.get("views_to_followers_ratio"))
+        if ratio_val is not None:
+            extra_meta["views_to_followers_ratio"] = ratio_val
+    elif item.get("views_to_followers_ratio") is not None or author_dict.get("views_to_followers_ratio") is not None:
+        ratio_val = _clean_float(
+            item.get("views_to_followers_ratio")
+            if item.get("views_to_followers_ratio") is not None
+            else author_dict.get("views_to_followers_ratio")
+        )
+        if ratio_val is not None:
+            extra_meta["views_to_followers_ratio"] = ratio_val
+    elif followers_val is not None and followers_val > 0 and views_count is not None:
+        extra_meta["views_to_followers_ratio"] = round(float(views_count) / float(followers_val), 2)
+
+    if "natural_viral" in item and item.get("natural_viral") is not None:
+        extra_meta["natural_viral"] = bool(item.get("natural_viral"))
+    if "buyer_intent" in item and item.get("buyer_intent") is not None:
+        raw_bi = item.get("buyer_intent")
+        extra_meta["buyer_intent"] = bool(raw_bi) if isinstance(raw_bi, bool) else raw_bi
+    if extra_meta.get("theme") and not extra_meta.get("theme_tags"):
+        extra_meta["theme_tags"] = [str(extra_meta["theme"]).strip()]
+    if trend_tier and "trend_tier" not in extra_meta:
+        extra_meta["trend_tier"] = trend_tier
     if viral_analysis and viral_analysis.get("affiliate_angle") is not None:
         extra_meta["affiliate_angle"] = viral_analysis.get("affiliate_angle")
     if evidence_url and "evidence_url" not in extra_meta:
@@ -975,6 +1066,7 @@ def normalize_payload(
             schema_version=schema_version,
             item_index=idx,
             is_corrected=is_corrected,
+            folder_path=folder_path,
         )
         for idx, item in enumerate(raw_items)
     ]
