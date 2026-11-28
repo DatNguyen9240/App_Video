@@ -2671,47 +2671,58 @@ HTML_TEMPLATE = """
             <div class="flex items-center justify-between gap-2 flex-wrap">
               <div class="space-y-0.5">
                 <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
-                  <i class="fa-solid fa-spider"></i> Crawl Center — Hàng Đợi D1
+                  <i class="fa-solid fa-spider"></i> Crawl Center — Manual Prompt Trigger (D1)
                 </h3>
                 <div class="text-[10px] text-slate-400 flex items-center gap-2">
                   <span class="inline-flex items-center gap-1 text-emerald-300/90">
                     <span class="w-1.5 h-1.5 rounded-full bg-emerald-400" :class="crawlCenterTimer ? 'animate-pulse' : 'opacity-40'"></span>
-                    {{ crawlCenterTimer ? 'Tự làm mới mỗi 10s' : 'Tạm dừng ngoài tab' }}
+                    {{ crawlCenterTimer ? 'Tự đồng bộ mỗi 10s' : 'Đang tự theo dõi nền' }}
                   </span>
                   <span v-if="crawlLastRefreshedAt" class="font-mono text-slate-500">• Cập nhật: {{ formatIsoTime(crawlLastRefreshedAt) }}</span>
                 </div>
               </div>
               <div class="flex items-center gap-2 flex-wrap">
+                <a :href="museWebUrl" target="_blank" rel="noopener noreferrer"
+                  class="px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-[11px] font-semibold flex items-center gap-1 cursor-pointer">
+                  <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                  <span>Mở Muse</span>
+                </a>
                 <button @click="refreshCrawlCenter(true)" :disabled="isCrawlCenterRefreshing"
                   class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-sky-300 border border-slate-700 text-[11px] font-semibold flex items-center gap-1 cursor-pointer">
                   <i class="fa-solid fa-rotate" :class="isCrawlCenterRefreshing ? 'animate-spin' : ''"></i>
                   <span>{{ isCrawlCenterRefreshing ? 'Đang tải...' : 'Làm mới' }}</span>
                 </button>
-                <select v-model="crawlScheduleProfile" @change="updateCrawlScheduleProfile"
-                  class="glass-input rounded-lg px-2.5 py-1 text-[11px] bg-slate-800 text-amber-300 font-semibold">
-                  <option value="production_6h">Chu kỳ đề xuất Worker: Production (6h)</option>
-                  <option value="test_5m">Chu kỳ đề xuất Worker: Test giới hạn (5p)</option>
-                </select>
               </div>
             </div>
-            <div class="text-[11px] text-slate-300 bg-slate-900/60 px-3 py-2 rounded-xl border border-slate-800 space-y-0.5">
-              <div>
-                Poll thực tế gần nhất từ Muse:
-                <strong class="font-mono text-emerald-300">{{ crawlScheduleInfo?.muse_last_poll_at ? formatIsoTime(crawlScheduleInfo.muse_last_poll_at) : 'Chưa ghi nhận lượt poll từ Muse' }}</strong>
+
+            <details class="text-[10px] text-slate-400 bg-slate-900/50 px-3 py-1.5 rounded-xl border border-slate-800/80">
+              <summary class="cursor-pointer select-none text-slate-300 font-semibold flex items-center justify-between gap-2">
+                <span>⚙️ Hạ tầng polling cũ (Hook đã tắt — chế độ Manual Prompt Trigger)</span>
+                <span class="font-mono text-slate-500">{{ crawlScheduleProfile }}</span>
+              </summary>
+              <div class="mt-2 pt-2 border-t border-slate-800 space-y-1.5">
+                <div class="flex items-center justify-between gap-2 flex-wrap">
+                  <span>Hồ sơ tham chiếu Worker (không tự kích hoạt Muse):</span>
+                  <select v-model="crawlScheduleProfile" @change="updateCrawlScheduleProfile"
+                    class="glass-input rounded-lg px-2 py-1 text-[10px] bg-slate-800 text-amber-300 font-semibold">
+                    <option value="production_6h">Production (6h)</option>
+                    <option value="test_5m">Test giới hạn (5p)</option>
+                  </select>
+                </div>
+                <div>
+                  Poll gần nhất từ Muse:
+                  <strong class="font-mono text-emerald-300">{{ crawlScheduleInfo?.muse_last_poll_at ? formatIsoTime(crawlScheduleInfo.muse_last_poll_at) : 'Chưa ghi nhận (dùng Manual Prompt)' }}</strong>
+                </div>
               </div>
-              <div class="text-[10px] text-slate-400">
-                <span v-if="crawlScheduleInfo?.expected_pickup_at">Dự kiến nhận kế tiếp (theo poll thật): {{ formatIsoTime(crawlScheduleInfo.expected_pickup_at) }}</span>
-                <span v-else>⚠️ Chưa có lịch Muse bật tự động — chỉ đổi cấu hình Worker không tự kích hoạt Muse.</span>
-              </div>
-            </div>
+            </details>
 
             <div class="space-y-2">
               <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
                 <select v-model="crawlRequestForm.platform" class="sm:col-span-3 glass-input rounded-lg px-2.5 py-1.5 text-xs bg-slate-800 text-slate-200">
+                  <option value="threads">Threads (V3.2)</option>
+                  <option value="tiktok">TikTok (V2)</option>
+                  <option value="shopee">Shopee (V2)</option>
                   <option value="all">Tất cả (All)</option>
-                  <option value="threads">Threads</option>
-                  <option value="tiktok">TikTok</option>
-                  <option value="shopee">Shopee</option>
                 </select>
                 <div class="sm:col-span-3 flex items-center gap-1">
                   <input v-model.number="crawlRequestForm.requested_count" type="number" min="1" max="500" step="1"
@@ -2722,19 +2733,47 @@ HTML_TEMPLATE = """
                 <input v-model="crawlRequestForm.keywords" type="text" placeholder="Từ khóa / ngách sản phẩm..."
                   class="sm:col-span-4 glass-input rounded-lg px-3 py-1.5 text-xs text-slate-200">
                 <button @click="submitCrawlRequest"
-                  class="sm:col-span-2 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer">
-                  Gửi Queue
+                  class="sm:col-span-2 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold cursor-pointer whitespace-nowrap">
+                  Tạo & Copy Prompt
                 </button>
               </div>
-              <div class="flex items-center gap-1.5 flex-wrap text-[10px] text-slate-400">
-                <span>Chọn nhanh số lượng:</span>
-                <button v-for="preset in [10, 20, 50, 100, 200]" :key="'crw-preset-' + preset"
-                  type="button" @click="crawlRequestForm.requested_count = preset"
-                  :class="Number(crawlRequestForm.requested_count) === preset ? 'bg-amber-600 text-white border-amber-500 font-bold' : 'bg-slate-800/80 text-slate-300 border-slate-700 hover:bg-slate-700'"
-                  class="px-2 py-0.5 rounded border font-mono cursor-pointer transition">
-                  {{ preset }}
-                </button>
+              <div class="flex items-center justify-between gap-2 flex-wrap text-[10px] text-slate-400">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span>Chọn nhanh số lượng:</span>
+                  <button v-for="preset in [10, 20, 50, 100, 200]" :key="'crw-preset-' + preset"
+                    type="button" @click="crawlRequestForm.requested_count = preset"
+                    :class="Number(crawlRequestForm.requested_count) === preset ? 'bg-amber-600 text-white border-amber-500 font-bold' : 'bg-slate-800/80 text-slate-300 border-slate-700 hover:bg-slate-700'"
+                    class="px-2 py-0.5 rounded border font-mono cursor-pointer transition">
+                    {{ preset }}
+                  </button>
+                </div>
+                <span v-if="crawlRequestForm.platform !== 'threads'" class="text-amber-300/90">
+                  ℹ️ Completion API (/api/crawl/*) chỉ hỗ trợ Threads (V3.2); {{ crawlRequestForm.platform.toUpperCase() }} dùng contract V2 & Drive Sync.
+                </span>
               </div>
+            </div>
+
+            <div v-if="activePromptInfo" class="p-3 rounded-xl bg-indigo-950/40 border border-indigo-500/40 space-y-2 text-xs">
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-bold text-indigo-300">📋 Prompt cho Muse</span>
+                  <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-amber-300">{{ activePromptInfo.request_id }}</span>
+                  <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-emerald-300">Contract: {{ activePromptInfo.contract_version }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <button @click="copyTextToClipboard(activePromptInfo.manual_prompt, '📋 Đã copy Prompt gửi Muse!')"
+                    class="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold cursor-pointer">
+                    Copy Prompt
+                  </button>
+                  <a :href="museWebUrl" target="_blank" rel="noopener noreferrer"
+                    class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer">
+                    Mở Muse
+                  </a>
+                  <button @click="activePromptInfo = null" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 text-[11px] cursor-pointer">✕</button>
+                </div>
+              </div>
+              <textarea readonly rows="6" :value="activePromptInfo.manual_prompt"
+                class="w-full rounded-lg bg-slate-950/90 border border-slate-800 p-2 font-mono text-[11px] text-slate-200 focus:outline-none"></textarea>
             </div>
 
             <div class="space-y-2 max-h-64 overflow-y-auto text-xs pt-1">
@@ -2746,8 +2785,13 @@ HTML_TEMPLATE = """
                       <span class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-bold uppercase text-[10px]">{{ crw.platform }}</span>
                       <span class="font-mono text-[11px] text-slate-200 font-semibold">Mục tiêu: {{ crw.requested_count || 50 }} bài</span>
                       <span class="px-2 py-0.5 rounded-full text-[10px] font-bold"
-                        :class="crw.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' : (crw.status === 'running' ? 'bg-cyan-500/20 text-cyan-300' : (crw.status === 'queued' ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-800 text-slate-400'))">
-                        {{ crw.status === 'queued' ? 'Đang chờ Muse claim' : (crw.status === 'running' ? 'Muse đang crawl' : crw.status) }}
+                        :class="getCrawlDisplayState(crw).badgeClass">
+                        {{ getCrawlDisplayState(crw).label }}
+                      </span>
+                      <span v-if="crw.reconcile_status && crw.reconcile_status !== 'ok'"
+                        :title="crw.reconcile_message || ''"
+                        class="px-1.5 py-0.5 rounded bg-rose-950/60 text-rose-300 border border-rose-500/40 text-[10px]">
+                        ⚠️ {{ crw.reconcile_status === 'waiting_pair' ? 'Chờ đủ Data+Report Drive' : 'Chưa đủ ĐK đối chiếu Drive' }}
                       </span>
                       <template v-if="getCrawlProgress(crw).hasRealMetrics && getCrawlProgress(crw).newQualified !== null">
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border"
@@ -2759,13 +2803,25 @@ HTML_TEMPLATE = """
                       <span class="text-[10px] text-slate-400">[{{ crw.requested_by_source === 'telegram' ? 'Thủ công Telegram' : (crw.requested_by_source === 'app_video' ? 'Thủ công App_Video' : crw.requested_by_source) }}]</span>
                     </div>
                     <div class="text-[10px] text-slate-400 truncate mt-0.5">
-                      {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
+                      <span class="font-mono text-slate-500">{{ crw.id }}</span> • {{ crw.keywords || '(theo cấu hình mặc định)' }} • Tạo lúc: {{ formatIsoTime(crw.created_at) }}
+                    </div>
+                    <div v-if="crw.reconcile_message && crw.reconcile_status && crw.reconcile_status !== 'ok'" class="text-[10px] text-amber-300/90 mt-0.5">
+                      ↳ {{ crw.reconcile_message }}
+                    </div>
+                    <div v-if="crw.error_message && crw.status === 'failed'" class="text-[10px] text-rose-300 mt-0.5">
+                      ❗ {{ crw.error_message }}
                     </div>
                   </div>
-                  <button v-if="crw.status === 'queued'" @click="cancelCrawlRequest(crw.id)"
-                    class="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/30 text-[10px] font-semibold shrink-0 cursor-pointer">
-                    Hủy chờ
-                  </button>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <button v-if="crw.status === 'queued'" @click="copyExistingRequestPrompt(crw)"
+                      class="px-2 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-[10px] font-semibold cursor-pointer whitespace-nowrap">
+                      Copy lại Prompt
+                    </button>
+                    <button v-if="crw.status === 'queued'" @click="cancelCrawlRequest(crw.id)"
+                      class="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/30 text-[10px] font-semibold cursor-pointer">
+                      Hủy chờ
+                    </button>
+                  </div>
                 </div>
 
                 <!-- Tiến độ thực tế từ backend (khi có số liệu) -->
@@ -3668,8 +3724,11 @@ HTML_TEMPLATE = """
           selectedMarketDetail: null,
           isTestingConnection: false,
           marketConnectionNotice: null,
-          crawlRequestForm: { platform: 'all', requested_count: 50, keywords: '' },
+          crawlRequestForm: { platform: 'threads', requested_count: 50, keywords: '' },
           crawlRequests: [],
+          activePromptInfo: null,
+          museWebUrl: 'https://muse.ai/',
+          lastMarketSyncSignature: '',
           crawlScheduleProfile: 'production_6h',
           crawlScheduleInfo: null,
           marketReport: null,
@@ -3756,6 +3815,7 @@ HTML_TEMPLATE = """
       watch: {
         currentTab(newTab) {
           if (newTab === 'market') {
+            this.refreshCrawlCenter(false);
             this.startCrawlCenterPolling();
           } else {
             this.stopCrawlCenterPolling();
@@ -3839,15 +3899,19 @@ HTML_TEMPLATE = """
             } catch(e) {}
 
             marketTick += 1;
-            if (this.marketStatus.is_syncing && !this.isMarketStatusInFlight && marketTick % 5 === 0) {
+            if (!this.isMarketStatusInFlight && marketTick % 6 === 0) {
               this.isMarketStatusInFlight = true;
               try {
-                const prevTotal = this.marketStatus.stats?.total_items || 0;
+                const prevSig = this.lastMarketSyncSignature;
                 const wasSyncing = Boolean(this.marketStatus.is_syncing);
                 await this.loadMarketStatus();
-                const newTotal = this.marketStatus.stats?.total_items || 0;
-                if (newTotal !== prevTotal || (wasSyncing && !this.marketStatus.is_syncing)) {
-                  this.loadMarketItems(this.marketOffset);
+                const nextSig = this.getMarketSyncSignature(this.marketStatus);
+                if ((prevSig && nextSig !== prevSig) || (wasSyncing && !this.marketStatus.is_syncing)) {
+                  await Promise.all([
+                    this.loadMarketItems(this.marketOffset),
+                    this.loadMarketReport(),
+                    this.loadCrawlRequests(),
+                  ]);
                 }
               } finally {
                 this.isMarketStatusInFlight = false;
@@ -4584,12 +4648,81 @@ HTML_TEMPLATE = """
           a.click();
           URL.revokeObjectURL(url);
         },
+        async copyTextToClipboard(text, successMsg = '📋 Đã sao chép vào bộ nhớ tạm!') {
+          const val = String(text || '');
+          if (!val) return false;
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              await navigator.clipboard.writeText(val);
+              this.notify(successMsg, 'success');
+              return true;
+            }
+          } catch (e) {}
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = val;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            this.notify(successMsg, 'success');
+            return true;
+          } catch (err) {
+            this.notify('⚠️ Không tự copy được — hãy copy thủ công từ khung Prompt.', 'warning');
+            return false;
+          }
+        },
+        getMarketSyncSignature(statusData) {
+          const s = statusData?.stats || {};
+          const latestRun = statusData?.recent_runs?.[0] || {};
+          const eng = s.engagement_completeness || {};
+          return [
+            s.last_sync_at || '',
+            s.total_items ?? 0,
+            s.total_raw_files ?? 0,
+            latestRun.run_id || '',
+            latestRun.status || '',
+            s.latest_v3_screening?.run_id || '',
+            eng.with_views ?? 0,
+            eng.with_likes ?? 0,
+            eng.with_comments ?? 0,
+            eng.with_reposts ?? 0,
+            eng.with_shares ?? 0,
+          ].join('|');
+        },
+        getCrawlDisplayState(crw) {
+          const pm = (crw?.progress_metrics && typeof crw.progress_metrics === 'object') ? crw.progress_metrics : {};
+          const raw = String(crw?.status || 'queued').toLowerCase();
+          let code = crw?.display_status || pm.display_status || '';
+          let label = crw?.display_status_label || pm.display_status_label || '';
+          if (!code) {
+            let sum = {};
+            try { sum = typeof crw?.result_summary_json === 'string' ? JSON.parse(crw.result_summary_json || '{}') : (crw?.result_summary || {}); } catch (e) {}
+            const regSt = String(sum?.registry_sync_status || '').toLowerCase();
+            if (raw === 'queued') code = 'waiting_prompt';
+            else if (raw === 'running') code = (sum?.progress?.stage === 'syncing' ? 'syncing' : 'crawling');
+            else if (raw === 'completed') code = (regSt === 'pending' || regSt === 'error' ? 'syncing' : 'completed');
+            else code = raw;
+          }
+          const map = {
+            waiting_prompt: { label: label || 'Chờ gửi prompt', badgeClass: 'bg-amber-500/20 text-amber-300' },
+            crawling: { label: label || 'Đang crawl', badgeClass: 'bg-cyan-500/20 text-cyan-300' },
+            syncing: { label: label || 'Đang đồng bộ', badgeClass: 'bg-indigo-500/25 text-indigo-300' },
+            completed: { label: label || 'Hoàn tất', badgeClass: 'bg-emerald-500/20 text-emerald-300' },
+            failed: { label: label || 'Lỗi', badgeClass: 'bg-rose-500/20 text-rose-300' },
+            cancelled: { label: label || 'Đã hủy', badgeClass: 'bg-slate-800 text-slate-400' },
+          };
+          return { code, ...(map[code] || { label: label || code || raw, badgeClass: 'bg-slate-800 text-slate-300' }) };
+        },
         async loadCrawlRequests() {
           try {
             const res = await fetch('/api/remote/crawl_requests');
             const data = await res.json();
             if (data.ok) {
               this.crawlRequests = data.items || [];
+              if (data.muse_web_url) this.museWebUrl = data.muse_web_url;
               if (data.schedule) {
                 this.crawlScheduleInfo = data.schedule;
                 this.crawlScheduleProfile = data.schedule.poll_profile || 'production_6h';
@@ -4602,14 +4735,17 @@ HTML_TEMPLATE = """
           if (this.isCrawlCenterRefreshing) return;
           this.isCrawlCenterRefreshing = true;
           try {
-            const prevTotal = this.marketStatus.stats?.total_items || 0;
+            const prevSig = this.lastMarketSyncSignature;
             await Promise.all([
               this.loadCrawlRequests(),
               this.loadMarketStatus(),
             ]);
-            const nextTotal = this.marketStatus.stats?.total_items || 0;
-            if (nextTotal !== prevTotal) {
-              await this.loadMarketItems(this.marketOffset);
+            const nextSig = this.getMarketSyncSignature(this.marketStatus);
+            if (!prevSig || nextSig !== prevSig) {
+              await Promise.all([
+                this.loadMarketItems(this.marketOffset),
+                this.loadMarketReport(),
+              ]);
             }
             if (manual) {
               this.notify('🔄 Đã làm mới dữ liệu Crawl Center.', 'success');
@@ -4661,6 +4797,10 @@ HTML_TEMPLATE = """
             const res = await fetch('/api/market/status');
             const data = await res.json();
             this.marketStatus = data;
+            this.lastMarketSyncSignature = this.getMarketSyncSignature(data);
+            if (data.cloudflare?.muse_web_url) {
+              this.museWebUrl = data.cloudflare.muse_web_url;
+            }
             if (data.stats?.sync_interval_seconds) {
               this.marketConfigInterval = data.stats.sync_interval_seconds;
             }
@@ -4833,7 +4973,7 @@ HTML_TEMPLATE = """
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                platform: this.crawlRequestForm.platform || 'all',
+                platform: this.crawlRequestForm.platform || 'threads',
                 requested_count: parsedCount,
                 keywords: this.crawlRequestForm.keywords || '',
                 poll_profile: this.crawlScheduleProfile
@@ -4841,18 +4981,62 @@ HTML_TEMPLATE = """
             });
             const data = await res.json();
             if (data.ok) {
-              this.notify(
-                data.deduplicated
-                  ? 'ℹ️ Đã có yêu cầu crawl tương tự đang chờ trong hàng đợi D1.'
-                  : `📝 Đã gửi yêu cầu ${parsedCount} bài vào Crawl Queue D1 (đang chờ Muse claim).`,
-                'success'
-              );
+              if (data.muse_web_url) this.museWebUrl = data.muse_web_url;
+              const promptText = data.manual_prompt || data.request?.manual_prompt || '';
+              if (promptText) {
+                this.activePromptInfo = {
+                  request_id: data.request?.id || '',
+                  platform: data.request?.platform || this.crawlRequestForm.platform || 'threads',
+                  contract_version: data.request?.contract_version || ((data.request?.platform || 'threads') === 'threads' ? '3.2' : 'v2'),
+                  manual_prompt: promptText,
+                };
+                await this.copyTextToClipboard(
+                  promptText,
+                  data.deduplicated
+                    ? 'ℹ️ Đã dùng lại request đang chờ & copy Prompt!'
+                    : `📋 Đã tạo request ${data.request?.id || ''} (${parsedCount} bài) & copy Prompt!`
+                );
+              } else {
+                this.notify(
+                  data.deduplicated
+                    ? 'ℹ️ Đã có yêu cầu crawl tương tự đang chờ trong hàng đợi D1.'
+                    : `📝 Đã gửi yêu cầu ${parsedCount} bài vào Crawl Queue D1.`,
+                  'success'
+                );
+              }
               await this.loadCrawlRequests();
             } else {
               this.notify(data.error || 'Không thể tạo Crawl Queue (kiểm tra kết nối Cloudflare).', 'error');
             }
           } catch (e) {
             this.notify('Lỗi gửi Crawl Queue: ' + e, 'error');
+          }
+        },
+        async copyExistingRequestPrompt(crw) {
+          if (!crw || !crw.id) return;
+          try {
+            let promptText = crw.manual_prompt || '';
+            let reqObj = crw;
+            if (!promptText) {
+              const res = await fetch('/api/remote/crawl_requests/' + encodeURIComponent(crw.id) + '/prompt');
+              const data = await res.json();
+              if (!data.ok || !data.manual_prompt) {
+                this.notify(data.error || 'Không lấy được Prompt cho request này.', 'error');
+                return;
+              }
+              promptText = data.manual_prompt;
+              reqObj = data.request || crw;
+              if (data.muse_web_url) this.museWebUrl = data.muse_web_url;
+            }
+            this.activePromptInfo = {
+              request_id: reqObj.id,
+              platform: reqObj.platform,
+              contract_version: reqObj.contract_version || (reqObj.platform === 'threads' ? '3.2' : 'v2'),
+              manual_prompt: promptText,
+            };
+            await this.copyTextToClipboard(promptText, `📋 Đã copy lại Prompt của ${reqObj.id} (không tạo request mới).`);
+          } catch (e) {
+            this.notify('Lỗi copy Prompt: ' + e, 'error');
           }
         },
         async cancelCrawlRequest(crawlId) {
@@ -6044,17 +6228,39 @@ def api_remote_crawl_requests():
                 return jsonify({"ok": False, "error": "requested_count phải là số nguyên (1–500)"}), 400
             if req_count < 1 or req_count > 500:
                 return jsonify({"ok": False, "error": "requested_count phải trong khoảng 1–500"}), 400
-            return jsonify(
-                rt["client"].create_crawl_request(
-                    platform=str(body.get("platform", "")).lower().strip(),
-                    keywords=str(body.get("keywords", "")).strip(),
-                    requested_count=req_count,
-                    poll_profile=body.get("poll_profile"),
-                    dedup_token=body.get("dedup_token"),
-                    options=body.get("options") if isinstance(body.get("options"), dict) else {},
-                )
+            res = rt["client"].create_crawl_request(
+                platform=str(body.get("platform", "")).lower().strip(),
+                keywords=str(body.get("keywords", "")).strip(),
+                requested_count=req_count,
+                poll_profile=body.get("poll_profile"),
+                dedup_token=body.get("dedup_token"),
+                options=body.get("options") if isinstance(body.get("options"), dict) else {},
             )
-        return jsonify(rt["client"].list_crawl_requests())
+            if isinstance(res, dict):
+                res.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+            return jsonify(res)
+        listing = rt["client"].list_crawl_requests()
+        if isinstance(listing, dict):
+            listing.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+            try:
+                rt["sync_service"].maybe_trigger_sync_for_crawl_requests(listing.get("items"))
+            except Exception:
+                pass
+        return jsonify(listing)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/api/remote/crawl_requests/<crawl_id>/prompt", methods=["GET"])
+def api_remote_crawl_prompt(crawl_id):
+    rt = get_market_runtime()
+    if not rt["client"].is_configured():
+        return jsonify({"ok": False, "error": "Thiếu CLOUDFLARE_APP_TOKEN"}), 503
+    try:
+        res = rt["client"].get_crawl_request_prompt(crawl_id)
+        if isinstance(res, dict):
+            res.setdefault("muse_web_url", rt["client"].get_public_config_summary().get("muse_web_url", "https://muse.ai/"))
+        return jsonify(res)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
 

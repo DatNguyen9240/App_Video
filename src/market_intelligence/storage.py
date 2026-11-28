@@ -768,6 +768,7 @@ class MarketIntelligenceStore:
                     # Real measurement time ONLY — NEVER fall back to laptop sync timestamp (`now_iso`)
                     measured_at = (
                         item.get("views_measured_at")
+                        or item.get("measured_at")
                         or item.get("crawled_at")
                         or envelope.get("crawled_at")
                         or envelope.get("ended_at")

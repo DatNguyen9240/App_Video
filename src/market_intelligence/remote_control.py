@@ -51,6 +51,7 @@ class RemoteCommandPoller:
         self._thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._last_heartbeat_ts = 0.0
+        self._last_crawl_check_ts = 0.0
         self._last_poll_at: Optional[str] = None
         self._last_poll_error: Optional[str] = None
         self._lock = threading.Lock()
@@ -99,7 +100,22 @@ class RemoteCommandPoller:
             except Exception as exc:
                 with self._lock:
                     self._last_poll_error = str(exc)
+            try:
+                if (time.monotonic() - self._last_crawl_check_ts) >= max(15.0, float(self.poll_interval_sec)):
+                    self.check_crawl_results_once()
+            except Exception:
+                pass
             self._stop_event.wait(timeout=self.poll_interval_sec)
+
+    def check_crawl_results_once(self) -> Dict[str, Any]:
+        """Poll Worker crawl queue and trigger debounced auto-sync when new results exist."""
+        self._last_crawl_check_ts = time.monotonic()
+        self.client.reload_config()
+        if not self.client.is_configured() or not hasattr(self.client, "list_crawl_requests"):
+            return {"triggered": False, "reason": "unconfigured"}
+        data = self.client.list_crawl_requests()
+        items = data.get("items") if isinstance(data, dict) else None
+        return self.sync_service.maybe_trigger_sync_for_crawl_requests(items)
 
     def _heartbeat_loop(self):
         while not self._stop_event.is_set():

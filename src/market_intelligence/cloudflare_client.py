@@ -15,6 +15,7 @@ import requests
 
 DEFAULT_WORKER_URL = "https://app-video-scheduler.doctortphat.workers.dev"
 DEFAULT_CLIENT_ID = "app-video-desktop"
+DEFAULT_MUSE_WEB_URL = "https://muse.ai/"
 
 
 class StaleClaimConflictError(RuntimeError):
@@ -112,6 +113,14 @@ class CloudflareBridgeClient:
                 or env_vars.get("CLOUDFLARE_CLIENT_ID")
                 or DEFAULT_CLIENT_ID
             ).strip()
+            raw_muse_url = (
+                os.environ.get("MUSE_WEB_URL")
+                or env_vars.get("MUSE_WEB_URL")
+                or DEFAULT_MUSE_WEB_URL
+            ).strip()
+            if not raw_muse_url.startswith(("http://", "https://")):
+                raw_muse_url = DEFAULT_MUSE_WEB_URL
+            self.muse_web_url = raw_muse_url
 
     def is_configured(self) -> bool:
         with self._cfg_lock:
@@ -124,6 +133,7 @@ class CloudflareBridgeClient:
                 "client_id": self.client_id,
                 "token_configured": bool(self.api_token),
                 "token_masked": mask_secret(self.api_token),
+                "muse_web_url": getattr(self, "muse_web_url", DEFAULT_MUSE_WEB_URL),
             }
 
     def _headers(self) -> Dict[str, str]:
@@ -361,6 +371,16 @@ class CloudflareBridgeClient:
         )
         if not resp.ok:
             raise RuntimeError(f"cancel_crawl_request failed: HTTP {resp.status_code}")
+        return resp.json()
+
+    def get_crawl_request_prompt(self, crawl_id: str) -> Dict[str, Any]:
+        resp = self._request_with_retry(
+            "GET",
+            f"/api/app/crawl-requests/{crawl_id}/prompt",
+            max_attempts=2,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"get_crawl_request_prompt failed: HTTP {resp.status_code}")
         return resp.json()
 
     def set_crawl_schedule(self, poll_profile: str) -> Dict[str, Any]:

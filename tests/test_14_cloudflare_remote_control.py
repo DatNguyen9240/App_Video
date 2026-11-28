@@ -1431,7 +1431,254 @@ class TestCloudflareSyncAndRemoteControl(unittest.TestCase):
         # Expire lease -> progress update fails
         conn.execute("UPDATE crawl_requests SET lease_expires_at = ? WHERE id = 'crw_th1_p2'", (lease_past,))
         self.assertEqual(conn.execute(prog_sql, ("{\"scanned\":20}", t0, "crw_th1_p2", "muse-ai", 1, t0)).rowcount, 0)
+
+        # Real SQLite check of insertMeasurementSnapshotInD1 (dedup_key, run_id) guard across Completion API vs Desktop Sync
+        conn.execute(
+            """
+            INSERT INTO market_post_snapshots (
+                id, snapshot_idempotency_key, dedup_key, platform, post_id, run_id, measured_at, classification, created_at
+            ) VALUES ('snp_comp_1', 'threads:post:P_SYNC|run_sync_1|2026-11-27T14:25:00+07:00|:1:0::::', 'threads:post:P_SYNC', 'threads', 'P_SYNC', 'run_sync_1', '2026-11-27T14:25:00+07:00', 'NEW', '2026-11-27T14:25:00+07:00')
+            """
+        )
+        dup_hit = conn.execute(
+            """
+            SELECT id FROM market_post_snapshots
+            WHERE (dedup_key = ? OR (? IS NOT NULL AND platform = ? AND post_id = ?))
+              AND run_id = ?
+            LIMIT 1
+            """,
+            ("threads:post:P_SYNC", "P_SYNC", "threads", "P_SYNC", "run_sync_1"),
+        ).fetchone()
+        self.assertIsNotNone(dup_hit)
         conn.close()
+
+
+class _PromptCapableMockClient(MockCloudflareTransportClient):
+    """Extends MockCloudflareTransportClient with Manual Prompt Trigger fields."""
+
+    def get_public_config_summary(self):
+        return {"configured": True, "muse_web_url": "https://muse.ai/"}
+
+    def create_crawl_request(self, platform: str, keywords: str = "", requested_count: int = 50, poll_profile=None, dedup_token=None, options=None):
+        res = super().create_crawl_request(
+            platform=platform,
+            keywords=keywords,
+            requested_count=requested_count,
+            poll_profile=poll_profile,
+            dedup_token=dedup_token,
+            options=options,
+        )
+        req = res["request"]
+        plat = str(req.get("platform") or "threads").lower()
+        cv = "3.2" if plat == "threads" else "v2"
+        req["display_status"] = "waiting_prompt"
+        req["display_status_label"] = "Chờ gửi prompt"
+        req["contract_version"] = cv
+        req["manual_prompt"] = (
+            f"Thực hiện crawl {plat}, mục tiêu {req['requested_count']} bài.\n"
+            f"Request ID: {req['id']}\nPlatform: {plat}\nContract Version: {cv}\nKeywords: {keywords or '(default)'}"
+        )
+        res["manual_prompt"] = req["manual_prompt"]
+        res["muse_web_url"] = "https://muse.ai/"
+        return res
+
+    def get_crawl_request_prompt(self, crawl_id: str):
+        for req in self.mock_crawl_requests:
+            if req.get("id") == crawl_id:
+                return {
+                    "ok": True,
+                    "request": req,
+                    "manual_prompt": req.get("manual_prompt", f"Request ID: {crawl_id}"),
+                    "muse_web_url": "https://muse.ai/",
+                }
+        return {"ok": False, "error": "Not found"}
+
+
+class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.client = _PromptCapableMockClient()
+
+    def tearDown(self):
+        try:
+            rt = app_ui.get_market_runtime()
+            rt["remote_poller"].stop(timeout=1.0)
+            rt["sync_service"].stop(timeout=1.0)
+            rt["store"].close()
+        except Exception:
+            pass
+        app_ui._market_runtime = None
+        self.tmp_dir.cleanup()
+
+    def test_crawl_center_manual_prompt_ui_and_prompt_copy_non_duplication(self):
+        app_ui.reset_market_runtime_for_tests(data_dir=self.tmp_dir.name, client=self.client)
+        app_ui.app.config["TESTING"] = True
+        flask_client = app_ui.app.test_client()
+
+        html = flask_client.get("/").get_data(as_text=True)
+        for token in [
+            "Tạo & Copy Prompt",
+            "Copy lại Prompt",
+            "Mở Muse",
+            "Chờ gửi prompt",
+            "Đang crawl",
+            "Đang đồng bộ",
+            "Hoàn tất",
+            "platform: 'threads'",
+            "getMarketSyncSignature",
+            "getCrawlDisplayState",
+            "Hook đã tắt — chế độ Manual Prompt Trigger",
+        ]:
+            self.assertIn(token, html)
+
+        create_resp = flask_client.post(
+            "/api/remote/crawl_requests",
+            json={"platform": "threads", "requested_count": 10, "keywords": "serum vitamin c"},
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        created = create_resp.get_json()
+        self.assertTrue(created["ok"])
+        self.assertEqual(created["muse_web_url"], "https://muse.ai/")
+        req_id = created["request"]["id"]
+        first_prompt = created["manual_prompt"]
+        self.assertIn(req_id, first_prompt)
+        self.assertEqual(len(self.client.mock_crawl_requests), 1)
+
+        # Copying existing prompt repeatedly MUST NOT create duplicate crawl requests
+        for _ in range(3):
+            p_resp = flask_client.get(f"/api/remote/crawl_requests/{req_id}/prompt")
+            self.assertEqual(p_resp.status_code, 200)
+            p_json = p_resp.get_json()
+            self.assertTrue(p_json["ok"])
+            self.assertEqual(p_json["manual_prompt"], first_prompt)
+            self.assertEqual(len(self.client.mock_crawl_requests), 1)
+
+    def test_desktop_auto_sync_triggers_on_metrics_only_change_and_debounces(self):
+        initial_post = {
+            "run_id": "run_auto_1",
+            "platform": "threads",
+            "crawled_at": "2026-11-28T01:00:00Z",
+            "posts": [{
+                "post_id": "P_AUTO_1",
+                "post_url": "https://www.threads.com/@shop.vn/post/P_AUTO_1",
+                "author_handle": "@shop.vn",
+                "content_summary_vi": "Review kem chống nắng kiềm dầu",
+                "views": None,
+                "likes": 12,
+                "comments": 2,
+            }],
+        }
+        self.client.add_drive_file(
+            "f_auto_1",
+            "threads_trend_20261128_0800.json",
+            json.dumps(initial_post).encode("utf-8"),
+            "2026-11-28T01:00:00Z",
+            "md5_auto_1",
+            folder_path="Threads",
+        )
+        app_ui.reset_market_runtime_for_tests(data_dir=self.tmp_dir.name, client=self.client)
+        app_ui.app.config["TESTING"] = True
+        rt = app_ui.get_market_runtime()
+        flask_client = app_ui.app.test_client()
+
+        # Initial baseline sync: 1 item, 0 views
+        first_res = rt["sync_service"].sync_now(trigger_source="initial_baseline")
+        self.assertEqual(first_res["status"], "completed")
+        base_stats = flask_client.get("/api/market/status").get_json()["stats"]
+        self.assertEqual(base_stats["total_items"], 1)
+        self.assertEqual(base_stats["engagement_completeness"]["with_views"], 0)
+
+        # Simulate Worker completing while desktop was running/offline with SAME total_items (1) but updated metrics + report
+        updated_post = {
+            "run_id": "run_auto_2",
+            "request_id": "crw_auto_metrics",
+            "attempt": 1,
+            "platform": "threads",
+            "crawled_at": "2026-11-28T03:00:00Z",
+            "posts": [{
+                "post_id": "P_AUTO_1",
+                "post_url": "https://www.threads.com/@shop.vn/post/P_AUTO_1",
+                "author_handle": "@shop.vn",
+                "content_summary_vi": "Review kem chống nắng kiềm dầu",
+                "views": 18400,
+                "likes": 195,
+                "comments": 24,
+                "views_display": "18.4K",
+                "views_precision": "exact_badge",
+                "views_source": "threads_web_browser",
+                "views_measured_at": "2026-11-28T03:00:00Z",
+                "views_evidence_url": "https://www.threads.com/@shop.vn/post/P_AUTO_1",
+            }],
+        }
+        updated_report = {
+            "contract_version": "3.2",
+            "request_id": "crw_auto_metrics",
+            "run_id": "run_auto_2",
+            "attempt": 1,
+            "platform": "threads",
+            "generated_at": "2026-11-28T03:01:00Z",
+            "run_status": "completed",
+            "stop_reason": "target_reached",
+            "counters": {"scanned_count": 1, "unique_candidate_count": 1, "new_qualified_count": 0, "updated_metrics_count": 1},
+            "telegram_summary": "Updated metrics P_AUTO_1 with 18.4K views",
+        }
+        self.client.add_drive_file(
+            "f_auto_2",
+            "threads_trend_20261128_1000.json",
+            json.dumps(updated_post).encode("utf-8"),
+            "2026-11-28T03:01:00Z",
+            "md5_auto_2",
+            folder_path="Threads",
+        )
+        self.client.add_drive_file(
+            "f_rpt_2",
+            "trend_report_20261128_1000.json",
+            json.dumps(updated_report).encode("utf-8"),
+            "2026-11-28T03:01:05Z",
+            "md5_rpt_2",
+            folder_path="Reports",
+        )
+        self.client.mock_crawl_requests.append({
+            "id": "crw_auto_metrics",
+            "platform": "threads",
+            "status": "completed",
+            "display_status": "completed",
+            "updated_at": "2099-01-01T00:00:00Z",
+            "report_file_id": "f_rpt_2",
+            "result_summary": updated_report,
+        })
+
+        # Wrap sync_now to count actual executions & confirm debounce + single-flight
+        sync_triggers = []
+        orig_sync_now = rt["sync_service"].sync_now
+        def spy_sync_now(*args, **kwargs):
+            sync_triggers.append(kwargs.get("trigger_source") or (args[0] if args else "sync"))
+            return orig_sync_now(*args, **kwargs)
+        rt["sync_service"].sync_now = spy_sync_now
+
+        # Polling check_crawl_results_once triggers background sync ONCE
+        rt["remote_poller"].check_crawl_results_once()
+        # Immediate repeat via GET /api/remote/crawl_requests & direct helper MUST debounce cleanly
+        flask_client.get("/api/remote/crawl_requests")
+        rt["sync_service"].maybe_trigger_sync_for_crawl_requests(self.client.mock_crawl_requests)
+
+        deadline = time.monotonic() + 5.0
+        new_stats = None
+        while time.monotonic() < deadline:
+            new_stats = flask_client.get("/api/market/status").get_json()["stats"]
+            if new_stats["engagement_completeness"]["with_views"] == 1:
+                break
+            time.sleep(0.05)
+
+        self.assertEqual(len(sync_triggers), 1)
+        self.assertIsNotNone(new_stats)
+        self.assertEqual(new_stats["total_items"], 1)  # unchanged total_items
+        self.assertEqual(new_stats["engagement_completeness"]["with_views"], 1)
+        items_after = flask_client.get("/api/market/items?platform=threads").get_json()["items"]
+        self.assertEqual(items_after[0]["views_count"], 18400)
+        self.assertEqual(items_after[0]["likes_count"], 195)
+        rpt_after = flask_client.get("/api/market/report?platform=threads").get_json()["report"]
+        self.assertEqual(rpt_after["run_id"], "run_auto_2")
 
 
 if __name__ == "__main__":

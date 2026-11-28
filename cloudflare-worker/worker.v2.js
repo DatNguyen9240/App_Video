@@ -8,22 +8,22 @@
  *   3. Crawl Center Queue (`crawl_requests`) for Muse Cloudflare OAuth Connector D1 polling
  *      - Production poll cadence: 6h (`production_6h`); limited test cadence: 5m (`test_5m`)
  *      - Atomic claim, lease timeout, deduplication, queued cancellation, honest waiting state
- *   4. Telegram V2: Reply Keyboard 6-button main menu + Inline Keyboard sub-actions,
- *      `editMessageText` single primary progress message, structured icon-bulleted
- *      Muse Market Analysis Report (short + full views, Drive Explorer/JSON send removed)
+ *   4. Telegram V2: Inline Keyboard hierarchical menus, `editMessageText`, single primary
+ *      progress message, Drive Explorer + open Drive link + direct JSON `sendDocument`,
+ *      standardized Muse Market Analysis Report summary + full report export
  *
  * NOTE: Keep `worker.js` as V1 backup. Review + run `migrations/0001_v2_market_and_commands.sql`
- * & `migrations/0002_notification_retry_state.sql` before deploying.
+ * before deploying.
  */
 
 const DEFAULT_WORKSPACE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g";
 const LEGACY_THREADS_FOLDER_ID = "1jJ0ihxv_LtpZFlkAeBO_BLysLZ9XwcE8";
 const MARKET_DATA_DIR_NAME = "01_Market_Data";
 const MAX_MARKET_JSON_BYTES = 10 * 1024 * 1024;
+const MAX_TELEGRAM_DOC_BYTES = 20 * 1024 * 1024;
 const ONLINE_HEARTBEAT_TTL_MS = 90 * 1000;
-const STUCK_SENDING_THRESHOLD_MS = 5 * 60 * 1000;
-const DEFAULT_MAX_DRIVE_LIST_PAGES = 25;
-const DEFAULT_NOTIFY_BATCH_SIZE = 10;
+const DEFAULT_MUSE_WEB_URL = "https://muse.ai/";
+const ALLOWED_THREADS_HOSTS = new Set(["threads.net", "www.threads.net", "threads.com", "www.threads.com"]);
 
 const ALLOWED_COMMANDS = new Set([
     "app_status",
@@ -36,6 +36,40 @@ const POLL_PROFILE_SECONDS = {
     production_6h: 6 * 3600,
     test_5m: 5 * 60
 };
+
+function getMuseWebUrl(env) {
+    const raw = String(env?.MUSE_WEB_URL || DEFAULT_MUSE_WEB_URL).trim();
+    if (!raw) return DEFAULT_MUSE_WEB_URL;
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+            return parsed.toString();
+        }
+    } catch {}
+    return DEFAULT_MUSE_WEB_URL;
+}
+
+function isAllowedThreadsUrl(rawUrl) {
+    if (typeof rawUrl !== "string") return false;
+    const trimmed = rawUrl.trim();
+    if (!trimmed) return false;
+    try {
+        const parsed = new URL(trimmed);
+        const proto = (parsed.protocol || "").toLowerCase();
+        if (proto !== "http:" && proto !== "https:") return false;
+        const host = (parsed.hostname || "").toLowerCase();
+        return ALLOWED_THREADS_HOSTS.has(host);
+    } catch {
+        return false;
+    }
+}
+
+function escapeTelegramHtml(raw) {
+    return String(raw ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
 
 function jsonResponse(data, status = 200, extraHeaders = {}) {
     return new Response(JSON.stringify(data), {
@@ -74,20 +108,10 @@ function formatVnTime(isoOrDate) {
 
 function inferPlatformHint(pathOrName) {
     const lower = String(pathOrName || "").toLowerCase();
-    if (lower.includes("threads") || lower.startsWith("trend_report") || lower.includes("/trend_report")) return "threads";
+    if (lower.includes("threads")) return "threads";
     if (lower.includes("tiktok")) return "tiktok";
     if (lower.includes("shopee")) return "shopee";
     return null;
-}
-
-function isArchiveFolderName(name) {
-    return String(name || "").trim().toLowerCase() === "archive";
-}
-
-function isArchiveRelPath(relPath) {
-    return String(relPath || "")
-        .split(/[\\/]+/)
-        .some(seg => seg.trim().toLowerCase() === "archive");
 }
 
 function genId(prefix) {
@@ -107,13 +131,195 @@ function formatPollProfileLabel(profile) {
 
 function formatCrawlStatusLabel(status) {
     const map = {
-        queued: "⏳ Đang chờ Muse tiếp nhận (chưa claim)",
-        running: "🕷️ Muse đã claim & đang crawl",
-        completed: "✅ Hoàn thành",
-        failed: "❌ Thất bại",
-        cancelled: "🚫 Đã hủy khi đang chờ"
+        queued: "⏳ Chờ gửi prompt",
+        waiting_prompt: "⏳ Chờ gửi prompt",
+        running: "🕷️ Đang crawl",
+        crawling: "🕷️ Đang crawl",
+        syncing: "🔄 Đang đồng bộ",
+        completed: "✅ Hoàn tất",
+        failed: "❌ Lỗi",
+        cancelled: "🚫 Đã hủy"
     };
     return map[status] || status;
+}
+
+function deriveCrawlRequestDisplayState(reqRow, parsedSummary = null, hasActiveOutbox = false) {
+    const rawStatus = String(reqRow?.status || "queued").trim().toLowerCase();
+    let summary = parsedSummary;
+    if (!summary || typeof summary !== "object") {
+        summary = {};
+        if (typeof reqRow?.result_summary_json === "string" && reqRow.result_summary_json.trim()) {
+            try { summary = JSON.parse(reqRow.result_summary_json); } catch {}
+        } else if (reqRow?.result_summary && typeof reqRow.result_summary === "object") {
+            summary = reqRow.result_summary;
+        }
+    }
+    const reconcile = (summary?.drive_reconcile && typeof summary.drive_reconcile === "object")
+        ? summary.drive_reconcile
+        : null;
+    const reconcileStatus = reconcile?.status ? String(reconcile.status) : null;
+    const reconcileMessage = reconcile?.reason ? String(reconcile.reason) : null;
+    const regStatus = String(summary?.registry_sync_status || "").trim().toLowerCase();
+    const progStage = String(summary?.progress?.stage || "").trim().toLowerCase();
+
+    if (rawStatus === "queued") {
+        return {
+            display_status: "waiting_prompt",
+            display_status_label: "Chờ gửi prompt",
+            reconcile_status: reconcileStatus,
+            reconcile_message: reconcileMessage,
+        };
+    }
+    if (rawStatus === "running") {
+        if (progStage === "syncing") {
+            return {
+                display_status: "syncing",
+                display_status_label: "Đang đồng bộ",
+                reconcile_status: reconcileStatus,
+                reconcile_message: reconcileMessage,
+            };
+        }
+        return {
+            display_status: "crawling",
+            display_status_label: "Đang crawl",
+            reconcile_status: reconcileStatus,
+            reconcile_message: reconcileMessage,
+        };
+    }
+    if (rawStatus === "completed") {
+        if (hasActiveOutbox || regStatus === "pending" || regStatus === "error") {
+            return {
+                display_status: "syncing",
+                display_status_label: "Đang đồng bộ",
+                reconcile_status: reconcileStatus,
+                reconcile_message: reconcileMessage,
+            };
+        }
+        return {
+            display_status: "completed",
+            display_status_label: "Hoàn tất",
+            reconcile_status: reconcileStatus,
+            reconcile_message: reconcileMessage,
+        };
+    }
+    if (rawStatus === "failed") {
+        return {
+            display_status: "failed",
+            display_status_label: "Lỗi",
+            reconcile_status: reconcileStatus,
+            reconcile_message: reconcileMessage,
+        };
+    }
+    if (rawStatus === "cancelled") {
+        return {
+            display_status: "cancelled",
+            display_status_label: "Đã hủy",
+            reconcile_status: reconcileStatus,
+            reconcile_message: reconcileMessage,
+        };
+    }
+    return {
+        display_status: rawStatus,
+        display_status_label: rawStatus,
+        reconcile_status: reconcileStatus,
+        reconcile_message: reconcileMessage,
+    };
+}
+
+function getRequestContractVersion(platform) {
+    const plat = String(platform || "threads").trim().toLowerCase();
+    if (plat === "threads") return "3.2";
+    if (plat === "tiktok" || plat === "shopee") return "v2";
+    return "threads:3.2 | tiktok/shopee:v2";
+}
+
+function buildMuseManualPrompt(reqRow) {
+    const reqId = String(reqRow?.id || "").trim();
+    const plat = String(reqRow?.platform || "threads").trim().toLowerCase() || "threads";
+    const targetCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || 50);
+    const keywords = String(reqRow?.keywords || "").trim();
+    const kwLine = keywords || "(mặc định theo cấu hình ngành hàng / xu hướng hiện hành)";
+    const contractVersion = getRequestContractVersion(plat);
+
+    if (plat === "threads") {
+        return [
+            `Thực hiện crawl Threads, mục tiêu ${targetCount} bài mới đạt chuẩn.`,
+            `Request ID: ${reqId}`,
+            `Platform: threads`,
+            `Requested Count: ${targetCount}`,
+            `Keywords: ${kwLine}`,
+            `Contract Version: ${contractVersion}`,
+            ``,
+            `Hướng dẫn thực thi bắt buộc:`,
+            `1. Claim đúng Request ID qua Custom Connector (custom.app_video): gọi POST /api/crawl/claim với {"request_id": "${reqId}"}. Tuyệt đối KHÔNG claim hoặc fallback sang request khác nếu request này không ở trạng thái queued; lưu lại attempt và chừa tối thiểu 6–10 phút trước lease_expires_at.`,
+            `2. Áp dụng Data Contract V3.2 và dùng Cloud Browser (trình duyệt thật) để xác minh views + đủ 5 trường chứng cứ (views_display, views_precision, views_source="threads_web_browser", views_measured_at, views_evidence_url).`,
+            `3. Chống trùng xuyên lượt với D1 Registry qua POST /api/crawl/registry/check.`,
+            `4. Cập nhật tiến độ thực tế định kỳ qua POST /api/crawl/progress (request_id="${reqId}", claimed_by="muse-ai", attempt, run_id, counters).`,
+            `5. Lưu ĐỦ CẶP 2 file JSON lên Google Drive (AI_WORKSPACE/01_Market_Data/):`,
+            `   - Data JSON: Threads/threads_trend_<YYYYMMDD>_<HHmm>.json (chứa mảng items/records)`,
+            `   - Report JSON: Reports/trend_report_<YYYYMMDD>_<HHmm>.json (kèm .md nếu có)`,
+            `   Cả 2 file phải ghi cùng request_id="${reqId}", run_id, attempt, claimed_by="muse-ai", platform="threads", contract_version="3.2" và counters nhất quán.`,
+            `6. Hoàn tất request qua POST /api/crawl/complete (kèm items/records, result_summary, report_file_id; được phép items: [] nếu no_qualifying_posts hợp lệ V3.2) hoặc POST /api/crawl/fail nếu gặp lỗi.`
+        ].join("\n");
+    }
+
+    if (plat === "tiktok" || plat === "shopee") {
+        const platTitle = plat === "tiktok" ? "TikTok" : "Shopee";
+        const dataFolder = plat === "tiktok" ? "TikTok" : "Shopee";
+        return [
+            `Thực hiện crawl ${platTitle}, mục tiêu ${targetCount} bản ghi.`,
+            `Request ID: ${reqId}`,
+            `Platform: ${plat}`,
+            `Requested Count: ${targetCount}`,
+            `Keywords: ${kwLine}`,
+            `Contract Version: ${contractVersion} (giữ Data Contract hiện hành của ${platTitle}, không áp V3.2 của Threads)`,
+            ``,
+            `Lưu ý & hướng dẫn thực thi:`,
+            `1. Custom Connector completion API (/api/crawl/claim, /progress, /complete, /fail) hiện CHỈ hỗ trợ platform="threads" — KHÔNG dùng các endpoint /api/crawl/* cho ${plat}.`,
+            `2. Thu thập dữ liệu ${platTitle} theo Data Contract hiện hành (${contractVersion}), thiếu dữ liệu thì ghi null và tách rõ data_quality (usable vs needs_verification).`,
+            `3. Lưu đủ cặp file JSON lên Google Drive (AI_WORKSPACE/01_Market_Data/):`,
+            `   - Data JSON: ${dataFolder}/${plat}_crawl_<YYYYMMDD>_<HHmm>.json`,
+            `   - Report JSON: Reports/market_report_<YYYYMMDD>_<HHmm>.json`,
+            `   Gắn rõ request_id="${reqId}", run_id, platform="${plat}", contract_version="${contractVersion}", totals/counters để App_Video Auto Sync đồng bộ.`
+        ].join("\n");
+    }
+
+    return [
+        `Thực hiện crawl tổng hợp (Threads / TikTok / Shopee), mục tiêu ${targetCount} bản ghi.`,
+        `Request ID: ${reqId}`,
+        `Platform: all`,
+        `Requested Count: ${targetCount}`,
+        `Keywords: ${kwLine}`,
+        `Contract Version: ${contractVersion}`,
+        ``,
+        `Lưu ý & hướng dẫn thực thi:`,
+        `1. Custom Connector completion API (/api/crawl/claim, /progress, /complete, /fail) hiện CHỈ hỗ trợ request platform="threads" riêng lẻ, CHƯA hỗ trợ cho platform="all".`,
+        `2. Nếu cần chạy theo luồng Custom Connector + D1 Registry tự động hoàn tất cho Threads V3.2, hãy tạo request platform="threads" riêng.`,
+        `3. Với request "all" này, giữ đúng Data Contract theo từng nền tảng (Threads V3.2 trong Threads/ + trend_report_*.json; TikTok & Shopee V2 hiện hành trong TikTok/, Shopee/ + market_report_*.json), gắn cùng request_id="${reqId}" và run_id để App_Video Auto Sync đồng bộ.`
+    ].join("\n");
+}
+
+function enrichCrawlRequestRow(reqRow, env = null, activeOutboxReqIds = null) {
+    if (!reqRow || typeof reqRow !== "object") return reqRow;
+    const hasOutbox = Boolean(activeOutboxReqIds && activeOutboxReqIds.has(reqRow.id));
+    let parsedSummary = null;
+    if (typeof reqRow.result_summary_json === "string" && reqRow.result_summary_json.trim()) {
+        try { parsedSummary = JSON.parse(reqRow.result_summary_json); } catch {}
+    } else if (reqRow.result_summary && typeof reqRow.result_summary === "object") {
+        parsedSummary = reqRow.result_summary;
+    }
+    const displayState = deriveCrawlRequestDisplayState(reqRow, parsedSummary, hasOutbox);
+    return {
+        ...reqRow,
+        contract_version: getRequestContractVersion(reqRow.platform),
+        display_status: displayState.display_status,
+        display_status_label: displayState.display_status_label,
+        reconcile_status: displayState.reconcile_status,
+        reconcile_message: displayState.reconcile_message,
+        manual_prompt: buildMuseManualPrompt(reqRow),
+        muse_web_url: getMuseWebUrl(env),
+        progress_metrics: computeCrawlRequestProgress(reqRow, activeOutboxReqIds),
+    };
 }
 
 // ─── Worker Runtime State Helpers ────────────────────────────────────────────
@@ -285,9 +491,6 @@ async function isDescendantOfFolder(token, itemId, targetAncestorId, maxDepth = 
         }
         if (!firstMeta) firstMeta = meta;
         if (meta.trashed) return { allowed: false, meta: firstMeta };
-        if (current.id !== targetAncestorId && isArchiveFolderName(meta.name)) {
-            return { allowed: false, meta: firstMeta };
-        }
 
         const parents = Array.isArray(meta.parents) ? meta.parents : [];
         if (parents.includes(targetAncestorId)) return { allowed: true, meta: firstMeta };
@@ -312,7 +515,6 @@ async function isDescendantOfFolder(token, itemId, targetAncestorId, maxDepth = 
                     let pageToken = null;
                     do {
                         const listing = await listFolderChildren(token, n.id, pageToken, 100);
-                                if (isArchiveFolderName(n.name)) break;
                         files.push(...(listing.files || []));
                         pageToken = listing.nextPageToken || null;
                     } while (pageToken);
@@ -320,9 +522,7 @@ async function isDescendantOfFolder(token, itemId, targetAncestorId, maxDepth = 
                 })
             );
             for (const { node, files } of listings) {
-                if (isArchiveFolderName(node.name)) continue;
                 for (const f of files) {
-                    if (isArchiveFolderName(f.name) || isArchiveRelPath(f.name)) continue;
                     if (f.id === itemId) return { allowed: true, meta: firstMeta };
                     if (f.mimeType === "application/vnd.google-apps.folder" && node.depth < maxSubDepth) {
                         nextFrontier.push({ id: f.id, depth: node.depth + 1 });
@@ -348,40 +548,11 @@ async function listFolderChildren(token, folderId, pageToken = null, pageSize = 
     return driveGetJson(token, `files?${params}`);
 }
 
-async function paginateDriveFolderChildren(token, folderId, maxPages = DEFAULT_MAX_DRIVE_LIST_PAGES, pageSize = 100) {
-    const files = [];
-    const seenTokens = new Set();
-    let pageToken = null;
-    const boundedMaxPages = Math.min(Math.max(Number(maxPages) || DEFAULT_MAX_DRIVE_LIST_PAGES, 1), 100);
-    for (let page = 0; page < boundedMaxPages; page++) {
-        const data = await listFolderChildren(token, folderId, pageToken, pageSize);
-        files.push(...(data.files || []));
-        const nextPt = data.nextPageToken ? String(data.nextPageToken) : null;
-        if (data.has_more === true && !nextPt) {
-            return { files, partialError: "missing_page_token", incomplete: true };
-        }
-        if (!nextPt) {
-            return { files, partialError: null, incomplete: false };
-        }
-        if (nextPt === pageToken || seenTokens.has(nextPt)) {
-            return { files, partialError: "repeated_page_token", incomplete: true };
-        }
-        if (page >= boundedMaxPages - 1) {
-            return { files, partialError: "page_limit_exceeded", incomplete: true };
-        }
-        seenTokens.add(nextPt);
-        pageToken = nextPt;
-    }
-    return { files, partialError: "page_limit_exceeded", incomplete: true };
-}
-
-async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso = null, limit = 50, pageToken = null, maxDrivePages = DEFAULT_MAX_DRIVE_LIST_PAGES) {
+async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso = null, limit = 50, pageToken = null) {
     const results = [];
-    const allActiveIds = [];
     let frontier = [{ id: rootMarketFolderId, relPath: "", depth: 0 }];
     const maxDepth = 3;
     const cursorMs = cursorIso ? Date.parse(cursorIso) : null;
-    let partialError = null;
 
     let tokMs = null;
     let tokFileId = "";
@@ -397,31 +568,30 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
         const nextFrontier = [];
         const levelData = await Promise.all(
             frontier.map(async current => {
-                const paged = await paginateDriveFolderChildren(token, current.id, maxDrivePages, 100);
-                return { current, items: paged.files, partialError: paged.partialError };
+                const items = [];
+                let drivePageToken = null;
+                do {
+                    const data = await listFolderChildren(token, current.id, drivePageToken, 100);
+                    items.push(...(data.files || []));
+                    drivePageToken = data.nextPageToken || null;
+                } while (drivePageToken);
+                return { current, items };
             })
         );
-        for (const { current, items, partialError: dirErr } of levelData) {
-            if (dirErr && !partialError) partialError = dirErr;
+        for (const { current, items } of levelData) {
             for (const f of items) {
                 const isFolder = f.mimeType === "application/vnd.google-apps.folder";
                 const childPath = current.relPath ? `${current.relPath}/${f.name}` : f.name;
                 if (isFolder) {
-                    // Strictly exclude Archive/ directories from Auto Sync & manual discovery
-                    if (isArchiveFolderName(f.name) || isArchiveRelPath(childPath)) {
-                        continue;
-                    }
                     if (current.depth < maxDepth) {
                         nextFrontier.push({ id: f.id, relPath: childPath, depth: current.depth + 1 });
                     }
                     continue;
                 }
-                if (isArchiveRelPath(current.relPath)) continue;
                 const isJson =
                     (f.name && f.name.toLowerCase().endsWith(".json")) ||
                     f.mimeType === "application/json";
                 if (!isJson) continue;
-                allActiveIds.push(f.id);
                 const itemMs = f.modifiedTime ? (Date.parse(f.modifiedTime) || 0) : 0;
                 // Inclusive >= on cursorMs ensures multiple files sharing cursor timestamp are never dropped
                 if (cursorMs !== null && Number.isFinite(cursorMs) && itemMs > 0 && itemMs < cursorMs) continue;
@@ -450,39 +620,16 @@ async function listMarketJsonFilesRecursive(token, rootMarketFolderId, cursorIso
     });
     const effLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
     const sliced = results.slice(0, effLimit);
-    let hasMore = results.length > effLimit;
+    const hasMore = results.length > effLimit;
     const last = sliced.length > 0 ? sliced[sliced.length - 1] : null;
-    let nextPageToken = (hasMore && last) ? `${last.modified_time || "1970-01-01T00:00:00Z"}|${last.file_id}` : null;
-    if (hasMore && nextPageToken && nextPageToken === pageToken) {
-        partialError = partialError || "repeated_page_token";
-        hasMore = false;
-        nextPageToken = null;
-    }
-    // Never commit/advance cursor as complete if pagination hit partial_error
-    const nextCursor = (!partialError && last) ? last.modified_time : cursorIso;
-    return {
-        status: partialError ? "partial_error" : "ok",
-        partial_error: partialError,
-        files: sliced,
-        total_matched: results.length,
-        has_more: hasMore,
-        next_page_token: nextPageToken,
-        next_cursor: nextCursor,
-        ...(!partialError && !pageToken ? { active_file_ids: allActiveIds } : {})
-    };
+    const nextCursor = last ? last.modified_time : cursorIso;
+    const nextPageToken = (hasMore && last) ? `${last.modified_time || "1970-01-01T00:00:00Z"}|${last.file_id}` : null;
+    return { files: sliced, total_matched: results.length, has_more: hasMore, next_page_token: nextPageToken, next_cursor: nextCursor };
 }
 
 function isNonReportDocName(fileName) {
     const low = String(fileName || "").toLowerCase();
-    return (
-        low.includes("data_contract") ||
-        low.includes("strategy") ||
-        low.includes("audit") ||
-        low.includes("discovery_sources") ||
-        low.includes("capability_test") ||
-        low.includes("identity_index") ||
-        low.includes("contract_amendment")
-    );
+    return low.includes("data_contract") || low.includes("strategy") || low.includes("audit");
 }
 
 function getReportStem(fileName) {
@@ -745,7 +892,12 @@ function haveRegistryMetricsChanged(incoming, existing) {
     const keys = ["views", "likes", "comments", "shares", "reposts", "quotes", "sold", "price"];
     for (const k of keys) {
         const nv = incoming[k];
-        if (nv !== undefined && nv !== null && nv !== existing[k]) {
+        if (nv === undefined || nv === null) continue;
+        const ev = existing[k];
+        if ((ev === undefined || ev === null) && (k === "shares" || k === "reposts" || k === "quotes") && nv === 0) {
+            continue;
+        }
+        if (nv !== ev) {
             return true;
         }
     }
@@ -795,9 +947,8 @@ function isValidV32ViewsProvenance(meta) {
         const proto = (parsedEv.protocol || "").toLowerCase();
         if (proto !== "http:" && proto !== "https:") return false;
         if (!parsedEv.hostname) return false;
-        if (plat === "threads") {
-            const host = parsedEv.hostname.toLowerCase();
-            if (!host.includes("threads.net") && !host.includes("threads.com")) return false;
+        if (plat === "threads" && !isAllowedThreadsUrl(vEv)) {
+            return false;
         }
     } catch {
         return false;
@@ -907,7 +1058,7 @@ async function checkCrossRunDedupInD1(env, rawItems) {
                 const row = await lookupRegistryRow(env, key, plat, cUrl, postId);
                 if (row) {
                     let latestMetrics = {};
-                    try { latestMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
+                    try { latestMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch { }
                     const resolvedKey = key || row.dedup_key;
                     existing[resolvedKey] = {
                         dedup_key: row.dedup_key,
@@ -962,9 +1113,9 @@ async function migrateSnapshotsOnKeyPromotion(env, oldKey, newKey, postId) {
         const dup = await env.DB.prepare(`
             SELECT id FROM market_post_snapshots
             WHERE snapshot_idempotency_key = ?
-               OR (dedup_key = ? AND ? != '' AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, ''))
+               OR (dedup_key = ? AND ? != '' AND run_id = ?)
             LIMIT 1
-        `).bind(newIdemp, newKey, String(sn.run_id || ""), sn.run_id, sn.measured_at).first();
+        `).bind(newIdemp, newKey, String(sn.run_id || ""), sn.run_id).first();
         if (dup && dup.id !== sn.id) {
             await env.DB.prepare("DELETE FROM market_post_snapshots WHERE id = ?").bind(sn.id).run();
         } else {
@@ -1005,14 +1156,19 @@ async function promoteOrMergeUrlToPostIdInD1(env, row, meta) {
     }
     // Target post_id row already exists separately: merge URL-row snapshots into target without duplication
     await migrateSnapshotsOnKeyPromotion(env, oldKey, targetTaken.dedup_key, meta.postId || targetTaken.post_id);
+    const mergeObsTs = parseObsTimeMs(row.first_seen_at);
+    const takenFirstTs = parseObsTimeMs(targetTaken.first_seen_at);
+    const mergeFirstArg = (mergeObsTs > 0 && (!targetTaken.first_seen_at || takenFirstTs === 0 || mergeObsTs < takenFirstTs))
+        ? row.first_seen_at
+        : null;
     await env.DB.prepare(`
         UPDATE market_post_registry
         SET canonical_url = COALESCE(canonical_url, ?),
             post_pk = COALESCE(post_pk, ?),
-            first_seen_at = CASE WHEN ? IS NOT NULL AND (first_seen_at IS NULL OR ? < first_seen_at) THEN ? ELSE first_seen_at END,
+            first_seen_at = COALESCE(?, first_seen_at),
             snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count)
         WHERE dedup_key = ?
-    `).bind(row.canonical_url, row.post_pk, row.first_seen_at, row.first_seen_at, row.first_seen_at, targetTaken.dedup_key).run();
+    `).bind(row.canonical_url, row.post_pk, mergeFirstArg, targetTaken.dedup_key).run();
     await env.DB.prepare("DELETE FROM market_post_registry WHERE dedup_key = ?").bind(oldKey).run();
     return (await env.DB.prepare("SELECT * FROM market_post_registry WHERE dedup_key = ?").bind(targetTaken.dedup_key).first()) || targetTaken;
 }
@@ -1024,12 +1180,14 @@ async function insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls,
         measuredAt: meta.measuredAt,
         metrics: meta.metrics,
     });
-    if (meta.runId) {
+    const hasCanonicalRunId = Boolean(meta.runId && meta.runId !== "no_run");
+    if (hasCanonicalRunId) {
         const existingRunSnap = await env.DB.prepare(`
             SELECT id FROM market_post_snapshots
-            WHERE dedup_key = ? AND run_id = ? AND COALESCE(measured_at, '') = COALESCE(?, '')
+            WHERE (dedup_key = ? OR (? IS NOT NULL AND platform = ? AND post_id = ?))
+              AND run_id = ?
             LIMIT 1
-        `).bind(targetDedupKey, meta.runId, meta.measuredAt).first();
+        `).bind(targetDedupKey, meta.postId, meta.plat, meta.postId, meta.runId).first();
         if (existingRunSnap) {
             return false;
         }
@@ -1084,7 +1242,12 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
         for (const rawItem of chunk) {
             const meta = extractRegistryItemMeta(rawItem, runId, defaultMeasuredAt);
             if (!meta.key) continue;
-            if (!meta.hasVerifiedViews) {
+            if (
+                !meta.hasVerifiedViews &&
+                !meta.isRejected &&
+                meta.classification !== "UPDATED_METRICS" &&
+                meta.classification !== "DUPLICATE_HISTORY"
+            ) {
                 missingViewsCount += 1;
             }
 
@@ -1192,15 +1355,33 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
 
                 const incomingObsTs = parseObsTimeMs(meta.measuredAt);
                 const existingLastTs = parseObsTimeMs(row.last_seen_at);
+                const existingFirstTs = parseObsTimeMs(row.first_seen_at);
                 const isOlderLateSnapshot = incomingObsTs > 0 && existingLastTs > 0 && incomingObsTs < existingLastTs;
 
+                if (meta.isRejected) {
+                    const rejInserted = await insertMeasurementSnapshotInD1(env, targetDedupKey, meta, "REJECTED", nowIso);
+                    if (rejInserted) snapshotsCreated += 1;
+                    else snapshotsDeduped += 1;
+                    rejectedCount += 1;
+                    await env.DB.prepare(`
+                        UPDATE market_post_registry
+                        SET canonical_url = COALESCE(canonical_url, ?),
+                            post_id = COALESCE(post_id, ?),
+                            post_pk = COALESCE(post_pk, ?),
+                            content_hash = COALESCE(content_hash, ?),
+                            snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count)
+                        WHERE dedup_key = ?
+                    `).bind(meta.cUrl, meta.postId, meta.postPk, meta.contentHash, targetDedupKey).run();
+                    continue;
+                }
+
                 let prevMetrics = {};
-                try { prevMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch {}
+                try { prevMetrics = JSON.parse(row.latest_metrics_json || "{}"); } catch { }
                 const changed = !isOlderLateSnapshot && haveRegistryMetricsChanged(meta.metrics, prevMetrics);
-                const snapCls = meta.isRejected
-                    ? "REJECTED"
-                    : (isOlderLateSnapshot
-                        ? "DUPLICATE_HISTORY"
+                const snapCls = isOlderLateSnapshot
+                    ? "DUPLICATE_HISTORY"
+                    : (meta.classification === "UPDATED_METRICS"
+                        ? (changed ? "UPDATED_METRICS" : "DUPLICATE_HISTORY")
                         : (meta.isUnverified ? "UNVERIFIED" : (changed ? "UPDATED_METRICS" : "DUPLICATE_HISTORY")));
 
                 const snapInserted = await insertMeasurementSnapshotInD1(env, targetDedupKey, meta, snapCls, nowIso);
@@ -1221,6 +1402,10 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                     continue;
                 }
 
+                const nextFirstArg = (incomingObsTs > 0 && (!row.first_seen_at || existingFirstTs === 0 || incomingObsTs < existingFirstTs))
+                    ? meta.measuredAt
+                    : null;
+
                 snapshotsCreated += 1;
                 if (isOlderLateSnapshot) {
                     // Older backfill snapshot arriving out-of-order MUST NEVER clobber newer latest_metrics_json or last_seen_at
@@ -1230,10 +1415,7 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                             post_id = COALESCE(post_id, ?),
                             post_pk = COALESCE(post_pk, ?),
                             content_hash = COALESCE(content_hash, ?),
-                            first_seen_at = CASE
-                                WHEN ? IS NOT NULL AND (first_seen_at IS NULL OR ? < first_seen_at) THEN ?
-                                ELSE first_seen_at
-                            END,
+                            first_seen_at = COALESCE(?, first_seen_at),
                             snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count + 1)
                         WHERE dedup_key = ?
                     `).bind(
@@ -1241,9 +1423,7 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                         meta.postId,
                         meta.postPk,
                         meta.contentHash,
-                        meta.measuredAt,
-                        meta.measuredAt,
-                        meta.measuredAt,
+                        nextFirstArg,
                         targetDedupKey
                     ).run();
                     duplicateCount += 1;
@@ -1252,7 +1432,16 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
 
                 const mergedMetrics = { ...prevMetrics, ...meta.metrics };
                 const effSeenAt = meta.measuredAt || nowIso;
+                const effSeenTs = parseObsTimeMs(effSeenAt);
+                const nextLastArg = (!row.last_seen_at || existingLastTs === 0 || effSeenTs === 0 || effSeenTs >= existingLastTs)
+                    ? effSeenAt
+                    : null;
                 const effViewsMeas = meta.viewsMeasuredAtRaw || (meta.hasVerifiedViews ? meta.measuredAt : null);
+                const existingViewsTs = parseObsTimeMs(row.latest_views_measured_at);
+                const effViewsTs = parseObsTimeMs(effViewsMeas);
+                const nextViewsMeasArg = (effViewsMeas && (!row.latest_views_measured_at || existingViewsTs === 0 || effViewsTs === 0 || effViewsTs >= existingViewsTs))
+                    ? effViewsMeas
+                    : null;
                 await env.DB.prepare(`
                     UPDATE market_post_registry
                     SET canonical_url = COALESCE(?, canonical_url),
@@ -1260,22 +1449,13 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                         post_pk = COALESCE(?, post_pk),
                         content_hash = COALESCE(?, content_hash),
                         last_run_id = COALESCE(?, last_run_id),
-                        first_seen_at = CASE
-                            WHEN ? IS NOT NULL AND (first_seen_at IS NULL OR ? < first_seen_at) THEN ?
-                            ELSE first_seen_at
-                        END,
-                        last_seen_at = CASE
-                            WHEN ? IS NOT NULL AND (last_seen_at IS NULL OR ? >= last_seen_at) THEN ?
-                            ELSE last_seen_at
-                        END,
+                        first_seen_at = COALESCE(?, first_seen_at),
+                        last_seen_at = COALESCE(?, last_seen_at),
                         snapshot_count = COALESCE((SELECT COUNT(*) FROM market_post_snapshots WHERE dedup_key = market_post_registry.dedup_key), snapshot_count + 1),
                         latest_views_display = COALESCE(?, latest_views_display),
                         latest_views_precision = COALESCE(?, latest_views_precision),
                         latest_views_source = COALESCE(?, latest_views_source),
-                        latest_views_measured_at = CASE
-                            WHEN ? IS NOT NULL AND (latest_views_measured_at IS NULL OR ? >= latest_views_measured_at) THEN ?
-                            ELSE latest_views_measured_at
-                        END,
+                        latest_views_measured_at = COALESCE(?, latest_views_measured_at),
                         latest_views_evidence_url = COALESCE(?, latest_views_evidence_url),
                         latest_metrics_json = ?
                     WHERE dedup_key = ?
@@ -1285,18 +1465,12 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                     meta.postPk,
                     meta.contentHash,
                     meta.runId,
-                    meta.measuredAt,
-                    meta.measuredAt,
-                    meta.measuredAt,
-                    effSeenAt,
-                    effSeenAt,
-                    effSeenAt,
+                    nextFirstArg,
+                    nextLastArg,
                     meta.viewsDisplay,
                     meta.viewsPrecision,
                     meta.viewsSource,
-                    effViewsMeas,
-                    effViewsMeas,
-                    effViewsMeas,
+                    nextViewsMeasArg,
                     meta.viewsEvidenceUrl,
                     JSON.stringify(mergedMetrics),
                     targetDedupKey
@@ -1391,7 +1565,7 @@ async function isRequestBlockedByPendingRegistrySync(env, reqRow) {
     if (!reqRow) return false;
     let summary = {};
     if (typeof reqRow.result_summary_json === "string" && reqRow.result_summary_json.trim()) {
-        try { summary = JSON.parse(reqRow.result_summary_json); } catch {}
+        try { summary = JSON.parse(reqRow.result_summary_json); } catch { }
     } else if (reqRow.result_summary && typeof reqRow.result_summary === "object") {
         summary = reqRow.result_summary;
     }
@@ -1407,7 +1581,7 @@ async function isRequestBlockedByPendingRegistrySync(env, reqRow) {
             if (Number(row?.cnt || 0) > 0) {
                 return true;
             }
-        } catch {}
+        } catch { }
     }
     return false;
 }
@@ -1431,6 +1605,7 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes) {
         summaryObj.updated_count = agg.updated_count;
         summaryObj.missing_views_count = agg.missing_views_count;
         summaryObj.unverified_count = agg.unverified_count;
+        summaryObj.rejected_count = agg.rejected_count;
         if (summaryObj.counters && typeof summaryObj.counters === "object") {
             summaryObj.counters.new_count = agg.new_count;
             summaryObj.counters.new_qualified_count = agg.new_qualified_count;
@@ -1440,6 +1615,7 @@ function mergeDedupStatsIntoSummary(summaryObj, dRes) {
             summaryObj.counters.updated_count = agg.updated_count;
             summaryObj.counters.missing_views_count = agg.missing_views_count;
             summaryObj.counters.unverified_count = agg.unverified_count;
+            summaryObj.counters.rejected_count = agg.rejected_count;
         }
     } else {
         summaryObj.new_count = summaryObj.new_count !== undefined ? summaryObj.new_count : agg.new_count;
@@ -1520,7 +1696,7 @@ async function persistRegistryErrorState(env, crawlId, summaryObj, errMsg, nowIs
             }
             baseSummary = parsed;
         }
-    } catch {}
+    } catch { }
     baseSummary.registry_sync_status = "error";
     baseSummary.registry_sync_error = errMsg;
     Object.assign(summaryObj, baseSummary);
@@ -1553,7 +1729,7 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
         }
 
         let chunkItems = [];
-        try { chunkItems = JSON.parse(row.payload_json || "[]"); } catch {}
+        try { chunkItems = JSON.parse(row.payload_json || "[]"); } catch { }
         try {
             const cRes = await recordCrossRunDedupInD1(env, chunkItems, row.run_id || summaryObj.run_id || crawlId, {
                 crawledAt: row.crawled_at || defaultCrawledAt || null,
@@ -1573,7 +1749,7 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
                     SET status = 'error', attempts = attempts + 1, last_error = ?, updated_at = ?
                     WHERE id = ? AND status = 'processing'
                 `).bind(errMsg.slice(0, 400), new Date().toISOString(), row.id).run();
-            } catch {}
+            } catch { }
             await persistRegistryErrorState(env, crawlId, summaryObj, errMsg, new Date().toISOString());
             throw err;
         }
@@ -1620,7 +1796,7 @@ async function drainRegistryOutboxForRequest(env, crawlId, summaryObj, defaultCr
             }
             latestSummary = { ...summaryObj, ...parsedFresh };
         }
-    } catch {}
+    } catch { }
 
     const totalAgg = createEmptyDedupStats();
     for (const dr of doneRows) {
@@ -1669,7 +1845,7 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
         const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(reqId).first();
         if (!reqRow || !["completed", "failed"].includes(reqRow.status)) continue;
         let summaryObj = {};
-        try { summaryObj = JSON.parse(reqRow.result_summary_json || "{}"); } catch {}
+        try { summaryObj = JSON.parse(reqRow.result_summary_json || "{}"); } catch { }
         try {
             const drainRes = await drainRegistryOutboxForRequest(
                 env,
@@ -1679,15 +1855,16 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
             );
             if (!drainRes?.completed || drainRes?.inProgress) continue;
             const freshReq = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(reqId).first();
+            const notifyChatId = freshReq ? (freshReq.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null) : null;
             if (
                 freshReq &&
-                freshReq.requested_by_chat_id &&
+                notifyChatId &&
                 !freshReq.notified_at &&
                 env.TELEGRAM_BOT_TOKEN_VIDEO &&
                 !(await isRequestBlockedByPendingRegistrySync(env, freshReq))
             ) {
                 let latestSum = summaryObj;
-                try { latestSum = JSON.parse(freshReq.result_summary_json || "{}"); } catch {}
+                try { latestSum = JSON.parse(freshReq.result_summary_json || "{}"); } catch { }
                 const notifKey = resolveCanonicalNotificationKey({
                     requestId: reqId,
                     runId: latestSum.run_id || null,
@@ -1703,7 +1880,7 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
                     env,
                     notifKey,
                     recCount,
-                    freshReq.requested_by_chat_id,
+                    notifyChatId,
                     text,
                     { usePrimaryMessage: true, aliasKeys, requestId: reqId, replyMarkup: reportActionsInlineKeyboard(false) }
                 );
@@ -1712,7 +1889,7 @@ async function drainPendingRegistryOutboxInD1(env, limit = 10) {
                         .bind(new Date().toISOString(), reqId).run();
                 }
             }
-        } catch {}
+        } catch { }
     }
 }
 
@@ -1803,13 +1980,13 @@ function extractCrossRunDedupStats(obj) {
     };
 }
 
-function computeCrawlRequestProgress(reqRow) {
+function computeCrawlRequestProgress(reqRow, activeOutboxReqIds = null) {
     let summary = {};
     try {
         summary = typeof reqRow?.result_summary_json === "string"
             ? JSON.parse(reqRow.result_summary_json || "{}")
             : (reqRow?.result_summary || {});
-    } catch {}
+    } catch { }
     const c = (summary.counters && typeof summary.counters === "object") ? summary.counters : {};
     const s1 = summary?.sections?.["1_screening"] || summary?.screening || {};
     const reqCount = Math.max(1, Number.parseInt(reqRow?.requested_count, 10) || Number.parseInt(c.requested_count, 10) || 50);
@@ -1825,6 +2002,8 @@ function computeCrawlRequestProgress(reqRow) {
             ? c.target_achieved
             : (typeof summary.target_achieved === "boolean" ? summary.target_achieved : null);
     const targetReached = explicitAchieved !== null ? explicitAchieved : (qualifiedCount !== null ? qualifiedCount >= reqCount : null);
+    const hasOutbox = Boolean(activeOutboxReqIds && reqRow?.id && activeOutboxReqIds.has(reqRow.id));
+    const displayState = deriveCrawlRequestDisplayState(reqRow, summary, hasOutbox);
     return {
         requested_count: reqCount,
         scanned_count: scannedCount,
@@ -1843,6 +2022,10 @@ function computeCrawlRequestProgress(reqRow) {
         target_achieved: targetReached,
         target_reached: targetReached,
         stop_reason: stopReason,
+        display_status: displayState.display_status,
+        display_status_label: displayState.display_status_label,
+        reconcile_status: displayState.reconcile_status,
+        reconcile_message: displayState.reconcile_message,
     };
 }
 
@@ -2118,7 +2301,7 @@ function formatStructuredReportSummary(d, fileName, isCorr, metaInput = null, op
 
     // 2. 🔥 Trend thị trường
     const marketBullets = [];
-    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
+    if (effStatus === "completed" || effStatus === "partial" || effStatus === "no_qualifying_posts" || !meta.rawRunStatus) {
         if (meta.isV3 && (meta.tiers.very_hot || meta.tiers.hot || meta.tiers.emerging || meta.tiers.watchlist)) {
             pushUniqueBullet(
                 marketBullets,
@@ -2158,7 +2341,7 @@ function formatStructuredReportSummary(d, fileName, isCorr, metaInput = null, op
 
     // 3. 🆕 Trend mới & vòng đời
     const lifecycleBullets = [];
-    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
+    if (effStatus === "completed" || effStatus === "partial" || effStatus === "no_qualifying_posts" || !meta.rawRunStatus) {
         for (const seg of parsedSummary.lifecycle) {
             pushUniqueBullet(lifecycleBullets, seg, seen, 220);
         }
@@ -2180,7 +2363,7 @@ function formatStructuredReportSummary(d, fileName, isCorr, metaInput = null, op
 
     // 4. 💰 Tín hiệu Affiliate
     const affBullets = [];
-    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
+    if (effStatus === "completed" || effStatus === "partial" || effStatus === "no_qualifying_posts" || !meta.rawRunStatus) {
         for (const seg of parsedSummary.affiliate) {
             pushUniqueBullet(affBullets, seg, seen, 220);
         }
@@ -2208,7 +2391,7 @@ function formatStructuredReportSummary(d, fileName, isCorr, metaInput = null, op
 
     // 5. 📈 Biến động so với lượt trước
     const growthBullets = [];
-    if (effStatus === "completed" || effStatus === "partial" || !meta.rawRunStatus) {
+    if (effStatus === "completed" || effStatus === "partial" || effStatus === "no_qualifying_posts" || !meta.rawRunStatus) {
         for (const seg of parsedSummary.growth) {
             pushUniqueBullet(growthBullets, seg, seen, 220);
         }
@@ -2291,80 +2474,60 @@ async function resolveReportsFolderId(token, env) {
         });
         const res = await driveGetJson(token, `files?${params}`);
         if (res.files && res.files.length > 0) return res.files[0].id;
-    } catch {}
+    } catch { }
     return marketFolderId;
 }
 
-function sleepMs(ms) {
-    const delay = Math.max(0, Number(ms) || 0);
-    if (delay <= 0) return Promise.resolve();
-    return new Promise(resolve => setTimeout(resolve, delay));
-}
-
-function normalizeNotifRunId(rawId) {
-    return String(rawId || "report").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 96);
-}
-
-function resolveCanonicalNotificationKey({ requestId = null, runId = null, isCorrected = false, status = null, fileName = null }) {
-    if (runId) {
-        const base = normalizeNotifRunId(runId);
-        if (isCorrected && !base.toLowerCase().endsWith("_corrected")) {
-            return `${base}_corrected`.slice(0, 120);
+async function listValidMuseReportsOnDrive(env) {
+    const token = await getDriveToken(env);
+    const reportsFolderId = await resolveReportsFolderId(token, env);
+    const allReportFiles = [];
+    let pageToken = null;
+    do {
+        const listing = await listFolderChildren(token, reportsFolderId, pageToken, 100);
+        for (const f of (listing.files || [])) {
+            const low = String(f.name || "").toLowerCase();
+            if (!low.endsWith(".json")) continue;
+            if (isNonReportDocName(low)) continue;
+            if (low.startsWith("market_report") || low.includes("report")) {
+                allReportFiles.push(f);
+            }
         }
-        return base;
-    }
-    if (requestId) {
-        const reqNorm = normalizeNotifRunId(requestId);
-        return status ? `crw_${reqNorm}_${status}`.slice(0, 120) : `crw_${reqNorm}`.slice(0, 120);
-    }
-    const fb = normalizeNotifRunId(fileName || "report");
-    return (isCorrected && !fb.toLowerCase().endsWith("_corrected")) ? `${fb}_corrected`.slice(0, 120) : fb;
-}
+        pageToken = listing.nextPageToken || null;
+    } while (pageToken && allReportFiles.length < 200);
 
-function extractReportCrawlMeta(parsed, candidate) {
-    // Strictly order crawl runs by crawl execution timestamp from payload — NEVER MAX with Drive modifiedTime
-    const payloadCandidates = [
-        parsed?.crawled_at,
-        parsed?.crawl_time,
-        parsed?.ended_at,
-        parsed?.source_run?.ended_at,
-        parsed?.collected_at,
-        parsed?.started_at,
-        parsed?.source_run?.started_at,
-        parsed?.generated_at,
-    ];
-    let crawlTs = 0;
-    let hasPayloadCrawlTs = false;
-    for (const rawTs of payloadCandidates) {
-        if (!rawTs) continue;
-        const parsedMs = Date.parse(String(rawTs));
-        if (Number.isFinite(parsedMs) && parsedMs > 0) {
-            crawlTs = parsedMs;
-            hasPayloadCrawlTs = true;
-            break;
-        }
-    }
-    const revisionTs = Date.parse(candidate?.modifiedTime || candidate?.createdTime || "") || 0;
-    if (!hasPayloadCrawlTs) {
-        crawlTs = Date.parse(candidate?.createdTime || candidate?.modifiedTime || "") || 0;
-    }
-    return { crawlTs, hasPayloadCrawlTs, revisionTs };
-}
+    if (!allReportFiles.length) return { reportsFolderId, ranked: [] };
 
-function isInvalidReportPayload(fileName, parsed) {
-    if (!parsed || typeof parsed !== "object") return true;
-    return Boolean(
-        isNonReportDocName(fileName) ||
-        parsed.contract ||
-        parsed.audit ||
-        parsed.strategy ||
-        parsed.engagement_verification_map ||
-        (Array.isArray(parsed.sources) && !parsed.sections && !parsed.platform_results)
-    );
-}
+    allReportFiles.sort((a, b) => (Date.parse(b.modifiedTime || 0) || 0) - (Date.parse(a.modifiedTime || 0) || 0));
 
-function rankParsedReportCandidates(parsedCandidates) {
-    if (!parsedCandidates.length) return [];
+    const parsedCandidates = [];
+    for (const candidate of allReportFiles.slice(0, 20)) {
+        try {
+            const rawRes = await fetch(
+                `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(candidate.id)}?alt=media&supportsAllDrives=true`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (!rawRes.ok) continue;
+            const parsed = await rawRes.json();
+            if (isNonReportDocName(candidate.name) || parsed.contract || parsed.audit || parsed.strategy) continue;
+            const isCorr = String(candidate.name || "").toLowerCase().includes("_corrected") || Boolean(parsed.corrects_report);
+            const effTs = Math.max(
+                Date.parse(parsed.ended_at || "") || 0,
+                Date.parse(parsed.collected_at || "") || 0,
+                Date.parse(candidate.modifiedTime || "") || 0
+            );
+            parsedCandidates.push({
+                reportsFolderId,
+                file: candidate,
+                data: parsed,
+                isCorr,
+                effTs,
+                groupKey: String(parsed.request_id || parsed.run_id || getReportStem(candidate.name))
+            });
+        } catch { }
+    }
+
+    // Link corrects_report target filenames into the same run group
     const fileToGroup = new Map();
     for (const c of parsedCandidates) {
         if (c.file?.name) fileToGroup.set(String(c.file.name).toLowerCase(), c.groupKey);
@@ -2376,100 +2539,19 @@ function rankParsedReportCandidates(parsedCandidates) {
         }
     }
 
-    // Inter-run order uses crawl execution time ONLY; file revision time (modifiedTime) breaks ties WITHIN same run.
-    const groupCrawlTs = new Map();
+    // Newest run ALWAYS beats older runs; _corrected wins only WITHIN the same run
+    const groupLatestTs = new Map();
     for (const c of parsedCandidates) {
-        const cur = groupCrawlTs.get(c.groupKey);
-        if (!cur) {
-            groupCrawlTs.set(c.groupKey, { baseTs: c.crawlTs, fromOriginal: !c.isCorr, fromPayload: c.hasPayloadCrawlTs });
-            continue;
-        }
-        if (c.hasPayloadCrawlTs && !cur.fromPayload) {
-            groupCrawlTs.set(c.groupKey, { baseTs: c.crawlTs, fromOriginal: !c.isCorr, fromPayload: true });
-        } else if (!c.isCorr && (!cur.fromOriginal || (c.crawlTs > 0 && c.crawlTs < cur.baseTs))) {
-            groupCrawlTs.set(c.groupKey, { baseTs: c.crawlTs, fromOriginal: true, fromPayload: c.hasPayloadCrawlTs });
-        } else if (cur.fromOriginal === !c.isCorr && c.crawlTs > 0 && (cur.baseTs === 0 || c.crawlTs < cur.baseTs)) {
-            groupCrawlTs.set(c.groupKey, { baseTs: c.crawlTs, fromOriginal: cur.fromOriginal, fromPayload: cur.fromPayload || c.hasPayloadCrawlTs });
-        }
+        groupLatestTs.set(c.groupKey, Math.max(groupLatestTs.get(c.groupKey) || 0, c.effTs));
     }
-
     parsedCandidates.sort((a, b) => {
-        const aRunTs = groupCrawlTs.get(a.groupKey)?.baseTs || 0;
-        const bRunTs = groupCrawlTs.get(b.groupKey)?.baseTs || 0;
-        const gDiff = bRunTs - aRunTs;
+        const gDiff = (groupLatestTs.get(b.groupKey) || 0) - (groupLatestTs.get(a.groupKey) || 0);
         if (gDiff !== 0) return gDiff;
         if (b.isCorr !== a.isCorr) return (b.isCorr ? 1 : 0) - (a.isCorr ? 1 : 0);
-        const rDiff = (b.revisionTs || 0) - (a.revisionTs || 0);
-        if (rDiff !== 0) return rDiff;
-        return (b.crawlTs || 0) - (a.crawlTs || 0);
+        return b.effTs - a.effTs;
     });
-    return parsedCandidates.map(c => ({ ...c, groupCrawlTs: groupCrawlTs.get(c.groupKey)?.baseTs || c.crawlTs || 0 }));
-}
 
-async function listAllReportFileMetas(env) {
-    const token = await getDriveToken(env);
-    const reportsFolderId = await resolveReportsFolderId(token, env);
-    const maxPages = Math.min(Math.max(Number(env?.MAX_DRIVE_LIST_PAGES) || DEFAULT_MAX_DRIVE_LIST_PAGES, 1), 100);
-    const paged = await paginateDriveFolderChildren(token, reportsFolderId, maxPages, 100);
-    const allReportFiles = [];
-    for (const f of (paged.files || [])) {
-        if (f.mimeType === "application/vnd.google-apps.folder" || isArchiveFolderName(f.name) || isArchiveRelPath(f.name)) continue;
-        const low = String(f.name || "").toLowerCase();
-        if (!low.endsWith(".json")) continue;
-        if (isNonReportDocName(low)) continue;
-        if (low.startsWith("trend_report") || low.startsWith("market_report") || low.includes("report")) {
-            allReportFiles.push(f);
-        }
-    }
-    return { token, reportsFolderId, allReportFiles, partialError: paged.partialError };
-}
-
-async function fetchAndParseDriveReports(token, reportsFolderId, files) {
-    const parsedCandidates = [];
-    let fetchErrorCount = 0;
-    for (const candidate of files) {
-        try {
-            const rawRes = await fetch(
-                `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(candidate.id)}?alt=media&supportsAllDrives=true`,
-                { headers: { Authorization: `Bearer ${token}` } }
-            );
-            if (!rawRes.ok) {
-                fetchErrorCount += 1;
-                continue;
-            }
-            const parsed = await rawRes.json();
-            if (isInvalidReportPayload(candidate.name, parsed)) continue;
-            const isCorr = String(candidate.name || "").toLowerCase().includes("_corrected") || Boolean(parsed.corrects_report);
-            const timing = extractReportCrawlMeta(parsed, candidate);
-            parsedCandidates.push({
-                reportsFolderId,
-                file: candidate,
-                data: parsed,
-                isCorr,
-                crawlTs: timing.crawlTs,
-                hasPayloadCrawlTs: timing.hasPayloadCrawlTs,
-                revisionTs: timing.revisionTs,
-                effTs: timing.crawlTs,
-                groupKey: String(parsed.request_id || parsed.run_id || getReportStem(candidate.name))
-            });
-        } catch {
-            fetchErrorCount += 1;
-        }
-    }
-    return { parsedCandidates, fetchErrorCount };
-}
-
-async function listValidMuseReportsOnDrive(env, maxFetch = 40) {
-    const { token, reportsFolderId, allReportFiles, partialError } = await listAllReportFileMetas(env);
-    if (!allReportFiles.length) return { reportsFolderId, ranked: [], partialError };
-
-    // Sort newest candidates first for UI interactive lookup, keeping >=35 window so older modified reports still compete by crawlTs
-    const sorted = allReportFiles.slice().sort(
-        (a, b) => (Date.parse(b.modifiedTime || b.createdTime || 0) || 0) - (Date.parse(a.modifiedTime || a.createdTime || 0) || 0)
-    );
-    const subset = sorted.slice(0, Math.min(sorted.length, Math.max(20, Number(maxFetch) || 40)));
-    const { parsedCandidates } = await fetchAndParseDriveReports(token, reportsFolderId, subset);
-    return { reportsFolderId, ranked: rankParsedReportCandidates(parsedCandidates), partialError };
+    return { reportsFolderId, ranked: parsedCandidates };
 }
 
 async function getLatestMuseReportFromDrive(env, targetRunOrRequestId = null) {
@@ -2499,7 +2581,7 @@ async function getLatestCrawl(env) {
         q: `'${folderId}' in parents and trashed = false and name contains 'threads_crawl'`,
         fields: "files(id,name,size,createdTime,modifiedTime)",
         orderBy: "createdTime desc",
-        pageSize: "5",
+        pageSize: "1",
         supportsAllDrives: "true",
         includeItemsFromAllDrives: "true"
     });
@@ -2508,7 +2590,7 @@ async function getLatestCrawl(env) {
     if (!res.ok) throw new Error("Drive list failed");
 
     const list = await res.json();
-    const file = (list.files || []).find(f => !isArchiveFolderName(f.name) && !isArchiveRelPath(f.name));
+    const file = list.files?.[0];
     if (!file) return null;
     if (!file.size || Number(file.size) > MAX_MARKET_JSON_BYTES) throw new Error("Invalid file size");
 
@@ -2570,109 +2652,85 @@ async function finalizeNotificationState(env, notifKey, fields) {
         retryPayloadJson = null,
     } = fields;
     try {
-        await env.DB.prepare(`
-            UPDATE crawl_notifications
-            SET status = ?,
-                sent_at = COALESCE(?, sent_at),
-                retry_count = COALESCE(?, retry_count),
-                next_retry_at = ?,
-                retryable = ?,
-                last_error = ?,
-                retry_payload_json = COALESCE(?, retry_payload_json)
-            WHERE run_id = ?
-        `).bind(status, sentAt, retryCount, nextRetryAt, retryable ? 1 : 0, lastError, retryPayloadJson, notifKey).run();
-    } catch {
-        // Graceful compatibility if migration 0002 has not been applied yet
-        if (status === "sent") {
-            await env.DB.prepare("UPDATE crawl_notifications SET status = 'sent', sent_at = ? WHERE run_id = ?")
-                .bind(sentAt || new Date().toISOString(), notifKey).run();
-        } else {
-            await env.DB.prepare("UPDATE crawl_notifications SET status = ? WHERE run_id = ?")
-                .bind(status, notifKey).run();
+        const existing = await env.DB.prepare("SELECT status FROM crawl_notifications WHERE run_id = ?")
+            .bind(notifKey)
+            .first();
+        if (existing) {
+            return { claimed: false, delivered: existing.status === "sent", status: existing.status };
         }
-    }
-}
+    } catch { }
 
-async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, text, options = {}) {
-    const aliasKeys = Array.isArray(options.aliasKeys) ? options.aliasKeys : [];
-    const replyMarkup = options.replyMarkup || homeOnlyInlineKeyboard();
-    const usePrimaryMessage = Boolean(options.usePrimaryMessage);
-    const requestId = options.requestId ? String(options.requestId) : null;
-    const bypassRequestClaim = Boolean(options.bypassRequestClaim);
-    const bypassAliasPrecheck = Boolean(options.bypassAliasPrecheck);
-    const maxRetries = Math.min(Math.max(Number(env?.TELEGRAM_MAX_RETRIES || 5), 1), 10);
-    const immediateMaxWaitMs = Math.max(
-        0,
-        Number(env?.TELEGRAM_IMMEDIATE_RETRY_MAX_MS ?? env?.TELEGRAM_RETRY_MAX_WAIT_MS ?? 2000)
-    );
-    const claimNonce = genId("clm");
-    const retryPayloadJson = JSON.stringify({
-        chatId: String(chatId),
-        text: String(text),
-        usePrimaryMessage,
-        recordCount,
-        requestId,
-        claim_nonce: claimNonce,
-    });
+    async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, text, options = {}) {
+        const aliasKeys = Array.isArray(options.aliasKeys) ? options.aliasKeys : [];
+        const replyMarkup = options.replyMarkup || mainInlineKeyboard();
+        const usePrimaryMessage = Boolean(options.usePrimaryMessage);
+        const requestId = options.requestId ? String(options.requestId) : null;
+        const bypassRequestClaim = Boolean(options.bypassRequestClaim);
+        const bypassAliasPrecheck = Boolean(options.bypassAliasPrecheck);
+        const maxRetries = Math.min(Math.max(Number(env?.TELEGRAM_MAX_RETRIES || 5), 1), 10);
+        const immediateMaxWaitMs = Math.max(
+            0,
+            Number(env?.TELEGRAM_IMMEDIATE_RETRY_MAX_MS ?? env?.TELEGRAM_RETRY_MAX_WAIT_MS ?? 2000)
+        );
+        const claimNonce = genId("clm");
+        const retryPayloadJson = JSON.stringify({
+            chatId: String(chatId),
+            text: String(text),
+            usePrimaryMessage,
+            recordCount,
+            requestId,
+            claim_nonce: claimNonce,
+        });
 
-    const nowIso = new Date().toISOString();
+        if (claim.meta.changes !== 1) {
+            return { claimed: false, delivered: false, status: "duplicate" };
+        }
 
-    // 1. Check aliases first (for distinct keys linking the same run/request) unless already reclaiming exact notifKey
-    if (!bypassAliasPrecheck && aliasKeys.length > 0) {
-        const aliasHit = await checkExistingNotificationKeys(env, aliasKeys);
-        if (aliasHit && aliasHit.key !== notifKey) {
-            const st = aliasHit.row.status;
-            if (st === "sent" || st === "sending" || st === "delivery_uncertain" || st === "delivery_failed") {
+        // 2. Check existing state of exact notifKey
+        const existingExact = await checkExistingNotificationKeys(env, [notifKey]);
+        let isReclaim = false;
+        let currentRetryCount = 0;
+
+        if (existingExact) {
+            const row = existingExact.row;
+            const st = row.status;
+            if (st === "sent" || st === "sending" || st === "delivery_uncertain") {
                 return { claimed: false, delivered: st === "sent", status: st, retries: 0 };
             }
-        }
-    }
-
-    // 2. Check existing state of exact notifKey
-    const existingExact = await checkExistingNotificationKeys(env, [notifKey]);
-    let isReclaim = false;
-    let currentRetryCount = 0;
-
-    if (existingExact) {
-        const row = existingExact.row;
-        const st = row.status;
-        if (st === "sent" || st === "sending" || st === "delivery_uncertain") {
-            return { claimed: false, delivered: st === "sent", status: st, retries: 0 };
-        }
-        if (st === "delivery_failed") {
-            const isRetryable = Number(row.retryable || 0) === 1;
-            const rCount = Number(row.retry_count || 0);
-            const rMax = Number(row.max_retries || maxRetries);
-            if (!isRetryable || rCount >= rMax) {
-                return { claimed: false, delivered: false, status: "delivery_failed", retryable: false, retries: 0 };
-            }
-            if (row.next_retry_at && String(row.next_retry_at) > nowIso) {
-                return { claimed: false, delivered: false, status: "retry_scheduled", next_retry_at: row.next_retry_at, retries: 0 };
+            if (st === "delivery_failed") {
+                const isRetryable = Number(row.retryable || 0) === 1;
+                const rCount = Number(row.retry_count || 0);
+                const rMax = Number(row.max_retries || maxRetries);
+                if (!isRetryable || rCount >= rMax) {
+                    return { claimed: false, delivered: false, status: "delivery_failed", retryable: false, retries: 0 };
+                }
+                if (row.next_retry_at && String(row.next_retry_at) > nowIso) {
+                    return { claimed: false, delivered: false, status: "retry_scheduled", next_retry_at: row.next_retry_at, retries: 0 };
+                }
             }
         }
-    }
 
-    // 3. Atomic durable outbox + request-slot claim inside ONE D1 transaction:
-    //    `notified_at` is NEVER written before or without a durable `crawl_notifications` record.
-    if (!existingExact) {
-        if (requestId && !bypassRequestClaim) {
-            const reqIdStr = String(requestId);
-            const runAtomicClaim = async (useCompat0001 = false) => {
-                const insertStmt = useCompat0001
-                    ? env.DB.prepare(`
+        // 3. Atomic durable outbox + request-slot claim inside ONE D1 transaction:
+        //    `notified_at` is NEVER written before or without a durable `crawl_notifications` record.
+        if (!existingExact) {
+            if (requestId && !bypassRequestClaim) {
+                const reqIdStr = String(requestId);
+                const runAtomicClaim = async (useCompat0001 = false) => {
+                    const insertStmt = useCompat0001
+                        ? env.DB.prepare(`
                         INSERT OR IGNORE INTO crawl_notifications
                         (run_id, record_count, status, created_at)
                         SELECT ?, ?, 'sending', ?
                         WHERE EXISTS (SELECT 1 FROM crawl_requests WHERE id = ? AND notified_at IS NULL)
                     `).bind(notifKey, recordCount, nowIso, reqIdStr)
-                    : env.DB.prepare(`
+                        : env.DB.prepare(`
                         INSERT OR IGNORE INTO crawl_notifications
                         (run_id, record_count, status, created_at, retry_count, max_retries, next_retry_at, retryable, last_error, retry_payload_json)
                         SELECT ?, ?, 'sending', ?, 0, ?, NULL, 0, NULL, ?
                         WHERE EXISTS (SELECT 1 FROM crawl_requests WHERE id = ? AND notified_at IS NULL)
                     `).bind(notifKey, recordCount, nowIso, maxRetries, retryPayloadJson, reqIdStr);
-                const updateReqStmt = useCompat0001
-                    ? env.DB.prepare(`
+                    const updateReqStmt = useCompat0001
+                        ? env.DB.prepare(`
                         UPDATE crawl_requests
                         SET notified_at = ?
                         WHERE id = ?
@@ -2682,7 +2740,7 @@ async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, t
                               WHERE run_id = ? AND status = 'sending' AND created_at = ?
                           )
                     `).bind(nowIso, reqIdStr, notifKey, nowIso)
-                    : env.DB.prepare(`
+                        : env.DB.prepare(`
                         UPDATE crawl_requests
                         SET notified_at = ?
                         WHERE id = ?
@@ -2693,73 +2751,73 @@ async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, t
                           )
                     `).bind(nowIso, reqIdStr, notifKey, retryPayloadJson);
 
-                if (typeof env.DB.batch === "function") {
-                    const batchRes = await env.DB.batch([insertStmt, updateReqStmt]);
-                    return {
-                        inserted: Number(batchRes?.[0]?.meta?.changes || 0),
-                        slotUpdated: Number(batchRes?.[1]?.meta?.changes || 0),
-                    };
-                }
-                // Non-batch fallback: insert durable notification FIRST, only claim slot after insert succeeds
-                const insRes = await insertStmt.run();
-                const insChanges = Number(insRes?.meta?.changes || 0);
-                if (insChanges !== 1) return { inserted: 0, slotUpdated: 0 };
-                try {
-                    const updRes = await updateReqStmt.run();
-                    const updChanges = Number(updRes?.meta?.changes || 0);
-                    if (updChanges !== 1) {
-                        await env.DB.prepare("DELETE FROM crawl_notifications WHERE run_id = ? AND status = 'sending'")
-                            .bind(notifKey).run();
+                    if (typeof env.DB.batch === "function") {
+                        const batchRes = await env.DB.batch([insertStmt, updateReqStmt]);
+                        return {
+                            inserted: Number(batchRes?.[0]?.meta?.changes || 0),
+                            slotUpdated: Number(batchRes?.[1]?.meta?.changes || 0),
+                        };
                     }
-                    return { inserted: updChanges === 1 ? 1 : 0, slotUpdated: updChanges };
-                } catch (slotErr) {
+                    // Non-batch fallback: insert durable notification FIRST, only claim slot after insert succeeds
+                    const insRes = await insertStmt.run();
+                    const insChanges = Number(insRes?.meta?.changes || 0);
+                    if (insChanges !== 1) return { inserted: 0, slotUpdated: 0 };
                     try {
-                        await env.DB.prepare("DELETE FROM crawl_notifications WHERE run_id = ? AND status = 'sending'")
-                            .bind(notifKey).run();
-                    } catch {}
-                    throw slotErr;
-                }
-            };
+                        const updRes = await updateReqStmt.run();
+                        const updChanges = Number(updRes?.meta?.changes || 0);
+                        if (updChanges !== 1) {
+                            await env.DB.prepare("DELETE FROM crawl_notifications WHERE run_id = ? AND status = 'sending'")
+                                .bind(notifKey).run();
+                        }
+                        return { inserted: updChanges === 1 ? 1 : 0, slotUpdated: updChanges };
+                    } catch (slotErr) {
+                        try {
+                            await env.DB.prepare("DELETE FROM crawl_notifications WHERE run_id = ? AND status = 'sending'")
+                                .bind(notifKey).run();
+                        } catch { }
+                        throw slotErr;
+                    }
+                };
 
-            let atomicRes;
-            try {
-                atomicRes = await runAtomicClaim(false);
-            } catch (err) {
-                if (/no such column/i.test(String(err?.message || ""))) {
-                    atomicRes = await runAtomicClaim(true);
-                } else {
-                    throw err;
+                let atomicRes;
+                try {
+                    atomicRes = await runAtomicClaim(false);
+                } catch (err) {
+                    if (/no such column/i.test(String(err?.message || ""))) {
+                        atomicRes = await runAtomicClaim(true);
+                    } else {
+                        throw err;
+                    }
                 }
-            }
-            if (atomicRes.inserted !== 1 || atomicRes.slotUpdated !== 1) {
-                return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
-            }
-        } else {
-            let claim;
-            try {
-                claim = await env.DB.prepare(`
+                if (atomicRes.inserted !== 1 || atomicRes.slotUpdated !== 1) {
+                    return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
+                }
+            } else {
+                let claim;
+                try {
+                    claim = await env.DB.prepare(`
                     INSERT OR IGNORE INTO crawl_notifications
                     (run_id, record_count, status, created_at, retry_count, max_retries, next_retry_at, retryable, last_error, retry_payload_json)
                     VALUES (?, ?, 'sending', ?, 0, ?, NULL, 0, NULL, ?)
                 `).bind(notifKey, recordCount, nowIso, maxRetries, retryPayloadJson).run();
-            } catch (err) {
-                if (!/no such column/i.test(String(err?.message || ""))) throw err;
-                claim = await env.DB.prepare(`
+                } catch (err) {
+                    if (!/no such column/i.test(String(err?.message || ""))) throw err;
+                    claim = await env.DB.prepare(`
                     INSERT OR IGNORE INTO crawl_notifications
                     (run_id, record_count, status, created_at)
                     VALUES (?, ?, 'sending', ?)
                 `).bind(notifKey, recordCount, nowIso).run();
+                }
+                if (claim.meta.changes !== 1) {
+                    return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
+                }
             }
-            if (claim.meta.changes !== 1) {
-                return { claimed: false, delivered: false, status: "duplicate", retries: 0 };
-            }
-        }
-    } else {
-        // Atomic reclaim: ONLY delivery_failed + retryable=1 + retry_count < max_retries + next_retry_at elapsed
-        const reclaimNowIso = new Date().toISOString();
-        let reclaim;
-        try {
-            reclaim = await env.DB.prepare(`
+        } else {
+            // Atomic reclaim: ONLY delivery_failed + retryable=1 + retry_count < max_retries + next_retry_at elapsed
+            const reclaimNowIso = new Date().toISOString();
+            let reclaim;
+            try {
+                reclaim = await env.DB.prepare(`
                 UPDATE crawl_notifications
                 SET status = 'sending',
                     created_at = ?,
@@ -2772,212 +2830,71 @@ async function deliverWithUncertaintyGuard(env, notifKey, recordCount, chatId, t
                   AND retry_count < max_retries
                   AND (next_retry_at IS NULL OR next_retry_at <= ?)
             `).bind(reclaimNowIso, retryPayloadJson, notifKey, reclaimNowIso).run();
-        } catch (err) {
-            if (/no such column/i.test(String(err?.message || ""))) {
-                return { claimed: false, delivered: false, status: "delivery_failed", retries: 0 };
+            } catch (err) {
+                if (/no such column/i.test(String(err?.message || ""))) {
+                    return { claimed: false, delivered: false, status: "delivery_failed", retries: 0 };
+                }
+                throw err;
             }
-            throw err;
+            if (reclaim.meta.changes !== 1) {
+                return { claimed: false, delivered: false, status: "reclaim_rejected", retries: 0 };
+            }
+            isReclaim = true;
+            currentRetryCount = Number(existingExact.row.retry_count || 0) + 1;
         }
-        if (reclaim.meta.changes !== 1) {
-            return { claimed: false, delivered: false, status: "reclaim_rejected", retries: 0 };
+
+        const maxImmediateAttempts = Math.min(Math.max(Number(env?.TELEGRAM_MAX_ATTEMPTS || 3), 1), 5);
+        let retriesInCall = 0;
+
+        for (let attempt = 0; attempt < maxImmediateAttempts; attempt++) {
+            try {
+                const res = usePrimaryMessage
+                    ? await updatePrimaryProgressMessage(env, chatId, text, replyMarkup)
+                    : await sendTelegramMessage(env, chatId, text, replyMarkup);
+
+                if (res.ok) {
+                    await finalizeNotificationState(env, notifKey, {
+                        status: "sent",
+                        sentAt: new Date().toISOString(),
+                        retryCount: currentRetryCount,
+                        nextRetryAt: null,
+                        retryable: 0,
+                        lastError: null,
+                    });
+                    return { claimed: true, delivered: true, status: "sent", retries: retriesInCall, reclaimed: isReclaim };
+                }
+
+                const apiStatus = Number(res.httpStatus || 0);
+                const nextState = apiStatus >= 400 && apiStatus < 500 ? "delivery_failed" : "delivery_uncertain";
+                await env.DB.prepare("UPDATE crawl_notifications SET status = ? WHERE run_id = ?")
+                    .bind(nextState, notifKey).run();
+                return { claimed: true, delivered: false, status: nextState };
+            }
+        await env.DB.prepare("UPDATE crawl_notifications SET status = 'sent', sent_at = ? WHERE run_id = ?")
+                .bind(new Date().toISOString(), notifKey).run();
+            return { claimed: true, delivered: true, status: "sent" };
+        } catch {
+            // Transport threw (timeout/reset after possible server receipt) -> record delivery_uncertain safely
+            await env.DB.prepare("UPDATE crawl_notifications SET status = 'delivery_uncertain' WHERE run_id = ?")
+                .bind(notifKey).run();
+            return { claimed: true, delivered: false, status: "delivery_uncertain" };
         }
-        isReclaim = true;
-        currentRetryCount = Number(existingExact.row.retry_count || 0) + 1;
     }
 
-    const maxImmediateAttempts = Math.min(Math.max(Number(env?.TELEGRAM_MAX_ATTEMPTS || 3), 1), 5);
-    let retriesInCall = 0;
+    async function notifyNewCrawl(env) {
+        if (!env.TELEGRAM_OWNER_ID || !env.TELEGRAM_BOT_TOKEN_VIDEO) return;
+        const cutoffMs = Date.parse("2026-11-26T12:25:00+07:00");
+        const notifiedRequestIds = new Set();
 
-    for (let attempt = 0; attempt < maxImmediateAttempts; attempt++) {
+        // 1. Check ALL unnotified Drive reports (grouped per run so corrected beats original in the same run, processing oldest->newest)
         try {
-            const res = usePrimaryMessage
-                ? await updatePrimaryProgressMessage(env, chatId, text, replyMarkup)
-                : await sendTelegramMessage(env, chatId, text, replyMarkup);
-
-            if (res.ok) {
-                await finalizeNotificationState(env, notifKey, {
-                    status: "sent",
-                    sentAt: new Date().toISOString(),
-                    retryCount: currentRetryCount,
-                    nextRetryAt: null,
-                    retryable: 0,
-                    lastError: null,
-                });
-                return { claimed: true, delivered: true, status: "sent", retries: retriesInCall, reclaimed: isReclaim };
-            }
-
-            const apiStatus = Number(res.httpStatus || 0);
-            if (isDefiniteUnsentTransientTelegram(apiStatus, res.data)) {
-                const retryDelayMs = computeTelegramDeferredDelayMs(currentRetryCount, res.data, env);
-                if (attempt < maxImmediateAttempts - 1 && retryDelayMs <= immediateMaxWaitMs && currentRetryCount < maxRetries) {
-                    retriesInCall += 1;
-                    currentRetryCount += 1;
-                    await sleepMs(retryDelayMs);
-                    continue;
+            const { ranked } = await listValidMuseReportsOnDrive(env);
+            const byGroup = new Map();
+            for (const item of ranked) {
+                if (!byGroup.has(item.groupKey)) {
+                    byGroup.set(item.groupKey, item); // ranked puts winning variant first per group
                 }
-                const canScheduleReclaim = currentRetryCount < maxRetries;
-                const nextRetryIso = canScheduleReclaim ? new Date(Date.now() + retryDelayMs).toISOString() : null;
-                await finalizeNotificationState(env, notifKey, {
-                    status: "delivery_failed",
-                    retryCount: currentRetryCount,
-                    nextRetryAt: nextRetryIso,
-                    retryable: canScheduleReclaim ? 1 : 0,
-                    lastError: `HTTP ${apiStatus}: definite unsent transient error`,
-                    retryPayloadJson,
-                });
-                return {
-                    claimed: true,
-                    delivered: false,
-                    status: "delivery_failed",
-                    retryable: canScheduleReclaim,
-                    next_retry_at: nextRetryIso,
-                    retries: retriesInCall,
-                    retryableExhausted: true,
-                };
-            }
-
-            // Permanent 4xx (except 429/408 handled separately): permanent delivery_failed (not retryable).
-            // 408, 500, 502, 503, 504: uncertain whether Telegram processed -> delivery_uncertain, NEVER retry.
-            const isPermanent4xx = apiStatus >= 400 && apiStatus < 500 && apiStatus !== 408 && apiStatus !== 429;
-            const nextState = isPermanent4xx ? "delivery_failed" : "delivery_uncertain";
-            await finalizeNotificationState(env, notifKey, {
-                status: nextState,
-                retryCount: currentRetryCount,
-                nextRetryAt: null,
-                retryable: 0,
-                lastError: `HTTP ${apiStatus}`,
-            });
-            return { claimed: true, delivered: false, status: nextState, retryable: false, retries: retriesInCall };
-        } catch (err) {
-            if (err && (err.notSent === true || err.code === "ECONNREFUSED")) {
-                const retryDelayMs = computeTelegramDeferredDelayMs(currentRetryCount, null, env);
-                if (attempt < maxImmediateAttempts - 1 && retryDelayMs <= immediateMaxWaitMs && currentRetryCount < maxRetries) {
-                    retriesInCall += 1;
-                    currentRetryCount += 1;
-                    await sleepMs(retryDelayMs);
-                    continue;
-                }
-                const canScheduleReclaim = currentRetryCount < maxRetries;
-                const nextRetryIso = canScheduleReclaim ? new Date(Date.now() + retryDelayMs).toISOString() : null;
-                await finalizeNotificationState(env, notifKey, {
-                    status: "delivery_failed",
-                    retryCount: currentRetryCount,
-                    nextRetryAt: nextRetryIso,
-                    retryable: canScheduleReclaim ? 1 : 0,
-                    lastError: String(err.message || err.code || "Pre-send network failure").slice(0, 200),
-                    retryPayloadJson,
-                });
-                return {
-                    claimed: true,
-                    delivered: false,
-                    status: "delivery_failed",
-                    retryable: canScheduleReclaim,
-                    next_retry_at: nextRetryIso,
-                    retries: retriesInCall,
-                    retryableExhausted: true,
-                };
-            }
-            // Ambiguous transport throw (timeout/reset) -> delivery_uncertain, NEVER retryable
-            await finalizeNotificationState(env, notifKey, {
-                status: "delivery_uncertain",
-                retryCount: currentRetryCount,
-                nextRetryAt: null,
-                retryable: 0,
-                lastError: String(err?.message || "Transport timeout").slice(0, 200),
-            });
-            return { claimed: true, delivered: false, status: "delivery_uncertain", retryable: false, retries: retriesInCall };
-        }
-    }
-    return { claimed: true, delivered: false, status: "delivery_failed", retryable: false, retries: retriesInCall };
-}
-
-async function reclaimDueRetryNotifications(env, limit = 10) {
-    const nowIso = new Date().toISOString();
-    let dueRows = [];
-    try {
-        dueRows = (await env.DB.prepare(`
-            SELECT run_id, record_count, retry_count, max_retries, next_retry_at, retry_payload_json
-            FROM crawl_notifications
-            WHERE status = 'delivery_failed'
-              AND retryable = 1
-              AND retry_count < max_retries
-              AND (next_retry_at IS NULL OR next_retry_at <= ?)
-            ORDER BY COALESCE(next_retry_at, created_at) ASC
-            LIMIT ?
-        `).bind(nowIso, limit).all()).results || [];
-    } catch (err) {
-        const msg = String(err?.message || "").toLowerCase();
-        if (msg.includes("no such column") || msg.includes("no such table")) return;
-        throw err;
-    }
-    for (const row of dueRows) {
-        if (!row.retry_payload_json) continue;
-        let p = null;
-        try { p = JSON.parse(row.retry_payload_json); } catch {}
-        if (!p || !p.chatId || !p.text) continue;
-        const delivery = await deliverWithUncertaintyGuard(
-            env,
-            row.run_id,
-            Number(row.record_count ?? p.recordCount ?? 0),
-            p.chatId,
-            p.text,
-            {
-                usePrimaryMessage: Boolean(p.usePrimaryMessage),
-                requestId: p.requestId || null,
-                bypassRequestClaim: true,
-                bypassAliasPrecheck: true,
-            }
-        );
-        if (delivery.retryableExhausted) break;
-    }
-}
-
-function parseCompositeCursor(rawCursor) {
-    if (!rawCursor || !String(rawCursor).includes("|")) return null;
-    const sep = String(rawCursor).lastIndexOf("|");
-    const rawTs = String(rawCursor).slice(0, sep);
-    const id = String(rawCursor).slice(sep + 1);
-    const tsMs = Date.parse(rawTs);
-    if (!Number.isFinite(tsMs)) return null;
-    return { rawTs, tsMs, id };
-}
-
-function compareCompositeItemToCursor(itemTsMs, itemId, parsedCursor) {
-    if (!parsedCursor) return 1;
-    if (itemTsMs !== parsedCursor.tsMs) return itemTsMs - parsedCursor.tsMs;
-    const sId = String(itemId || "");
-    if (sId === parsedCursor.id) return 0;
-    return sId > parsedCursor.id ? 1 : -1;
-}
-
-function buildDirectD1CrawlNotificationText(req, summary) {
-    const s = (summary && typeof summary === "object") ? summary : {};
-    const platLabel = String(req?.platform || s.platform || "all").toUpperCase();
-    const runStatus = s.run_status ? String(s.run_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
-    const techStatus = s.technical_status ? String(s.technical_status).trim().toLowerCase() : (req?.status === "failed" ? "failed" : "completed");
-    const dqStatus = s.data_quality_status ? String(s.data_quality_status).trim() : null;
-    const c = (s.counters && typeof s.counters === "object") ? s.counters : {};
-    const screening = (s.sections?.["1_screening"] || s.screening || {});
-    const scannedVal = pickFirstFiniteInt(c.scanned_count, s.scanned_count, s.scanned_posts, screening.scanned_count, screening.scanned_posts);
-    const qualifiedVal = pickFirstFiniteInt(c.new_qualified_count, s.new_qualified_count, s.qualified_count, s.qualified_posts, screening.qualified_count, s.record_count);
-    const rejectedVal = pickFirstFiniteInt(c.rejected_count, s.rejected_count, s.rejected_posts, screening.rejected_count);
-    const syntheticReport = {
-        ...s,
-        run_id: s.run_id || req?.id || `crw_${platLabel.toLowerCase()}`,
-        run_status: runStatus,
-        technical_status: techStatus,
-        data_quality_status: dqStatus,
-        error_message: req?.error_message || s.error_message || null,
-        sections: {
-            ...(s.sections || {}),
-            ...((scannedVal !== null || qualifiedVal !== null || rejectedVal !== null) ? {
-                "1_screening": {
-                    ...screening,
-                    ...(scannedVal !== null ? { scanned_count: scannedVal } : {}),
-                    ...(qualifiedVal !== null ? { qualified_count: qualifiedVal } : {}),
-                    ...(rejectedVal !== null ? { rejected_count: rejectedVal } : {}),
-                }
-            } : {}),
+            } : { }),
         },
     };
     const isCorr = Boolean(s.is_corrected || s.corrects_report);
@@ -2992,6 +2909,471 @@ function buildDirectD1CrawlNotificationText(req, summary) {
             sourceLabel: req?.claimed_by ? `Muse (${req.claimed_by})` : "Muse D1",
         }
     );
+}
+
+function isV32CrawlContext(reportData = null, reqRow = null, reqSummary = null) {
+    const cvReport = String(reportData?.contract_version || reportData?.schema_version || "").trim().toLowerCase();
+    const cvSum = String(reqSummary?.contract_version || reqSummary?.schema_version || "").trim().toLowerCase();
+    if (cvReport.startsWith("3.2") || cvReport.includes("v3.2") || cvSum.startsWith("3.2") || cvSum.includes("v3.2")) {
+        return true;
+    }
+    if (String(reportData?.report || "").toLowerCase().includes("v3.2")) {
+        return true;
+    }
+    if (reqSummary && (reqSummary.registry_sync_status !== undefined || reqSummary.dedup_stats !== undefined)) {
+        return true;
+    }
+    if (String(reqRow?.claimed_by || "").trim() === MUSE_DEFAULT_CLAIM_OWNER) {
+        return true;
+    }
+    if (
+        reportData?.counters?.new_qualified_count !== undefined ||
+        reportData?.sections?.["1_screening"]?.new_qualified_count !== undefined
+    ) {
+        return true;
+    }
+    return false;
+}
+
+async function evaluateDriveRequestNotificationGate(env, { requestId, reportData = null, reportEffStatus = "completed", isCorrected = false }) {
+    if (!requestId) {
+        if (await isRequestBlockedByPendingRegistrySync(env, { id: null, result_summary: reportData || {} })) {
+            return { action: "block_cursor", linkedReqRow: null };
+        }
+        return { action: "allow", linkedReqRow: null };
+    }
+
+    const reqIdStr = String(requestId);
+    let linkedReqRow = null;
+    try {
+        linkedReqRow = await env.DB.prepare(
+            "SELECT id, status, claimed_by, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
+        ).bind(reqIdStr).first();
+    } catch {
+        // Fail closed on D1 lookup error so cursor never skips a pending request report
+        return { action: "block_cursor", linkedReqRow: null };
+    }
+
+    if (!linkedReqRow) {
+        if (reportEffStatus === "failed") {
+            return { action: "skip", linkedReqRow: null };
+        }
+        if (isV32CrawlContext(reportData, null, null)) {
+            return { action: "skip", linkedReqRow: null };
+        }
+        if (await isRequestBlockedByPendingRegistrySync(env, { id: reqIdStr, result_summary: reportData || {} })) {
+            return { action: "block_cursor", linkedReqRow: null };
+        }
+        return { action: "allow", linkedReqRow: null };
+    }
+
+    const reqStatus = String(linkedReqRow.status || "").trim().toLowerCase();
+    if (reqStatus === "queued" || reqStatus === "running") {
+        return { action: "block_cursor", linkedReqRow };
+    }
+    if (reqStatus === "cancelled") {
+        return { action: "skip", linkedReqRow };
+    }
+    if (reqStatus === "failed" || reportEffStatus === "failed") {
+        return { action: "skip", linkedReqRow };
+    }
+    if (reqStatus !== "completed") {
+        return { action: "skip", linkedReqRow };
+    }
+
+    if (linkedReqRow.notified_at && !isCorrected) {
+        return { action: "already_notified", linkedReqRow };
+    }
+
+    if (
+        await isRequestBlockedByPendingRegistrySync(env, linkedReqRow) ||
+        await isRequestBlockedByPendingRegistrySync(env, { id: reqIdStr, result_summary: reportData || {} })
+    ) {
+        return { action: "block_cursor", linkedReqRow };
+    }
+
+    let reqSummary = {};
+    if (typeof linkedReqRow.result_summary_json === "string" && linkedReqRow.result_summary_json.trim()) {
+        try { reqSummary = JSON.parse(linkedReqRow.result_summary_json); } catch { }
+    }
+    if (isV32CrawlContext(reportData, linkedReqRow, reqSummary)) {
+        const regStatus = String(reqSummary?.registry_sync_status || "").trim().toLowerCase();
+        if (regStatus !== "ok") {
+            return { action: "block_cursor", linkedReqRow };
+        }
+    }
+
+    return { action: "allow", linkedReqRow };
+}
+
+function validateDriveArtifactPairForRequest(reqRow, dataEntry, reportEntry, existingSummary = null) {
+    const reqPlat = String(reqRow?.platform || "").trim().toLowerCase();
+    const dataObj = dataEntry?.data || {};
+    const repObj = reportEntry?.data || {};
+
+    const dataReqId = dataObj.request_id ? String(dataObj.request_id).trim() : null;
+    const repReqId = repObj.request_id ? String(repObj.request_id).trim() : null;
+    if (!dataReqId || !repReqId || dataReqId !== reqRow.id || repReqId !== reqRow.id) {
+        return { ok: false, status: "validation_failed", reason: "request_id trên Data và Report không khớp request mục tiêu" };
+    }
+
+    const dataRunId = dataObj.run_id ? String(dataObj.run_id).trim() : "";
+    const repRunId = repObj.run_id ? String(repObj.run_id).trim() : "";
+    if (!dataRunId || !repRunId || dataRunId !== repRunId || !/^[a-zA-Z0-9_-]{1,128}$/.test(dataRunId)) {
+        return { ok: false, status: "validation_failed", reason: "run_id giữa Data và Report bị thiếu, không khớp hoặc không hợp lệ" };
+    }
+
+    const rawDataAtt = dataObj.attempt ?? dataObj.attempts ?? dataObj.execution?.attempt;
+    const rawRepAtt = repObj.attempt ?? repObj.attempts ?? repObj.execution?.attempt;
+    const dataAtt = Number(rawDataAtt);
+    const repAtt = Number(rawRepAtt);
+    if (
+        rawDataAtt === undefined || rawDataAtt === null || rawDataAtt === "" ||
+        rawRepAtt === undefined || rawRepAtt === null || rawRepAtt === "" ||
+        !Number.isInteger(dataAtt) || dataAtt < 1 || !Number.isInteger(repAtt) || repAtt < 1 ||
+        dataAtt !== repAtt
+    ) {
+        return { ok: false, status: "validation_failed", reason: "Thiếu hoặc lệch metadata attempt xác định lượt thực thi ở Data/Report" };
+    }
+
+    if (String(reqRow.status || "").toLowerCase() !== "running" || !reqRow.claimed_by || Number(reqRow.attempts || 0) < 1) {
+        return { ok: false, status: "validation_failed", reason: "Request chưa được claim hợp lệ trên D1 (không tự giả lập owner/attempt)" };
+    }
+
+    if (dataAtt !== Number(reqRow.attempts)) {
+        return {
+            ok: false,
+            status: "stale_attempt_rejected",
+            reason: `Artifact thuộc attempt ${dataAtt}, không khớp attempt hiện tại (${reqRow.attempts})`,
+        };
+    }
+
+    if (existingSummary?.run_id && String(existingSummary.run_id).trim() !== dataRunId) {
+        return {
+            ok: false,
+            status: "validation_failed",
+            reason: `run_id (${dataRunId}) lệch với tiến độ đã ghi (${existingSummary.run_id})`,
+        };
+    }
+
+    const dataOwner = String(dataObj.claimed_by || dataObj.worker_id || dataObj.owner || dataObj.execution?.claimed_by || "").trim();
+    const repOwner = String(repObj.claimed_by || repObj.worker_id || repObj.owner || repObj.execution?.claimed_by || "").trim();
+    if (dataOwner && dataOwner !== reqRow.claimed_by) {
+        return { ok: false, status: "validation_failed", reason: `Owner trên Data (${dataOwner}) không khớp claimed_by (${reqRow.claimed_by})` };
+    }
+    if (repOwner && repOwner !== reqRow.claimed_by) {
+        return { ok: false, status: "validation_failed", reason: `Owner trên Report (${repOwner}) không khớp claimed_by (${reqRow.claimed_by})` };
+    }
+
+    const rawItems = Array.isArray(dataObj.items)
+        ? dataObj.items
+        : (Array.isArray(dataObj.records) ? dataObj.records : (Array.isArray(dataObj.posts) ? dataObj.posts : null));
+    if (!Array.isArray(rawItems)) {
+        return { ok: false, status: "validation_failed", reason: "Data JSON thiếu mảng items/records hợp lệ" };
+    }
+
+    const inferredDataPlat = inferPlatformHint(dataEntry?.file?.name) || inferPlatformHint(dataEntry?.file?.folder_path);
+    const dataPlat = String(dataObj.platform || inferredDataPlat || "").trim().toLowerCase();
+    const repPlat = repObj.platform ? String(repObj.platform).trim().toLowerCase() : null;
+    if (reqPlat !== "all") {
+        if (dataPlat && dataPlat !== reqPlat) {
+            return { ok: false, status: "validation_failed", reason: `Platform trên Data (${dataPlat}) không khớp request (${reqPlat})` };
+        }
+        if (repPlat && repPlat !== reqPlat) {
+            return { ok: false, status: "validation_failed", reason: `Platform trên Report (${repPlat}) không khớp request (${reqPlat})` };
+        }
+    }
+
+    if (reqPlat === "threads") {
+        if (reqRow.claimed_by !== MUSE_DEFAULT_CLAIM_OWNER) {
+            return { ok: false, status: "validation_failed", reason: "Owner của request Threads phải là muse-ai" };
+        }
+        const cvData = String(dataObj.contract_version || dataObj.schema_version || "").trim();
+        const cvRep = String(repObj.contract_version || repObj.schema_version || "").trim();
+        if (!cvData.startsWith("3.2") || !cvRep.startsWith("3.2")) {
+            return { ok: false, status: "validation_failed", reason: "Data và Report Threads phải khai báo contract_version 3.2" };
+        }
+        if (!repObj.sections || typeof repObj.sections !== "object" || !String(repObj.telegram_summary || "").trim()) {
+            return { ok: false, status: "validation_failed", reason: "Report V3.2 thiếu sections hoặc telegram_summary" };
+        }
+        const itemsCheck = validateThreadsOnlyCompletionItems(rawItems);
+        if (itemsCheck.errorResponse) {
+            return { ok: false, status: "validation_failed", reason: "Data JSON chứa item hoặc URL không hợp lệ cho Threads" };
+        }
+        const v32Check = validateStrictV32CompletionPayload(repObj, itemsCheck.items);
+        if (v32Check) {
+            return { ok: false, status: "validation_failed", reason: "Payload vi phạm Data Contract V3.2 (thiếu records hoặc run_status/stop_reason không hợp lệ)" };
+        }
+        const rc = (repObj.counters && typeof repObj.counters === "object") ? repObj.counters : {};
+        const dc = (dataObj.counters && typeof dataObj.counters === "object") ? dataObj.counters : null;
+        if (dc) {
+            const dQual = pickFirstFiniteInt(dc.new_qualified_count, dc.qualified_count);
+            const rQual = pickFirstFiniteInt(rc.new_qualified_count, rc.qualified_count);
+            if (dQual !== null && rQual !== null && dQual !== rQual) {
+                return { ok: false, status: "validation_failed", reason: `Counter new_qualified_count giữa Data (${dQual}) và Report (${rQual}) không khớp` };
+            }
+            const dScan = pickFirstFiniteInt(dc.scanned_count, dc.scanned_posts);
+            const rScan = pickFirstFiniteInt(rc.scanned_count, rc.scanned_posts);
+            if (dScan !== null && rScan !== null && dScan !== rScan) {
+                return { ok: false, status: "validation_failed", reason: `Counter scanned_count giữa Data (${dScan}) và Report (${rScan}) không khớp` };
+            }
+        }
+        const repStats = extractMuseReportStats(repObj);
+        if (repStats && repStats.countersReconciled === false) {
+            return { ok: false, status: "validation_failed", reason: "Bộ đếm V3.2 trong Report không đối soát khớp unique_candidate_count" };
+        }
+        return {
+            ok: true,
+            runId: dataRunId,
+            attempt: dataAtt,
+            items: itemsCheck.items,
+            summaryBase: { ...repObj },
+        };
+    }
+
+    if (reqPlat === "tiktok" || reqPlat === "shopee") {
+        if (!repObj.telegram_summary && !repObj.totals && !repObj.platform_results && !repObj.sections) {
+            return { ok: false, status: "validation_failed", reason: "Report V2 thiếu nội dung tổng hợp hợp lệ" };
+        }
+        const normalizedV2 = rawItems.map(it => ({ ...it, platform: String(it?.platform || reqPlat).toLowerCase() }));
+        if (normalizedV2.some(it => it.platform !== reqPlat)) {
+            return { ok: false, status: "validation_failed", reason: `Data JSON chứa bản ghi khác nền tảng ${reqPlat}` };
+        }
+        return {
+            ok: true,
+            runId: dataRunId,
+            attempt: dataAtt,
+            items: normalizedV2,
+            summaryBase: { ...repObj },
+        };
+    }
+
+    return { ok: false, status: "validation_failed", reason: "Không tự động reconcile request platform='all' qua luồng đơn nền tảng" };
+}
+
+async function persistDriveReconcileDiagnostic(env, reqRow, existingSummary, diagState) {
+    try {
+        const nextSum = {
+            ...(existingSummary && typeof existingSummary === "object" ? existingSummary : {}),
+            drive_reconcile: diagState,
+        };
+        await env.DB.prepare(
+            "UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ? AND status = ? AND attempts = ?"
+        ).bind(
+            JSON.stringify(nextSum),
+            new Date().toISOString(),
+            reqRow.id,
+            reqRow.status,
+            Number(reqRow.attempts || 0)
+        ).run();
+    } catch {}
+}
+
+async function reconcileDriveArtifactsForRequests(env) {
+    if (!env?.DB || !env?.GOOGLE_SERVICE_ACCOUNT_JSON) return;
+    let activeReqs = [];
+    try {
+        const res = await env.DB.prepare(
+            "SELECT * FROM crawl_requests WHERE status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 50"
+        ).all();
+        activeReqs = (res?.results || []).filter(r => r && ["queued", "running"].includes(String(r.status || "").toLowerCase()));
+    } catch {
+        return;
+    }
+    if (!activeReqs.length) return;
+
+    const reqById = new Map(activeReqs.map(r => [r.id, r]));
+    const oldestReqMs = activeReqs.reduce((minMs, r) => {
+        const ts = Date.parse(r.created_at || "") || Date.now();
+        return ts < minMs ? ts : minMs;
+    }, Date.now());
+
+    let driveToken = null;
+    let marketFolderId = null;
+    let candidateMetas = [];
+    try {
+        driveToken = await getDriveToken(env);
+        marketFolderId = await resolveMarketDataFolderId(driveToken, env);
+        const maxPages = Math.min(Math.max(Number(env?.MAX_DRIVE_LIST_PAGES) || DEFAULT_MAX_DRIVE_LIST_PAGES, 1), 100);
+        const listed = await listMarketJsonFilesRecursive(driveToken, marketFolderId, null, 100, null, maxPages);
+        candidateMetas = (listed?.files || []).filter(f => {
+            if (!f?.file_id || !f?.name) return false;
+            if (isNonReportDocName(f.name) || isArchiveRelPath(f.folder_path) || isArchiveRelPath(f.name)) return false;
+            const low = String(f.name || "").toLowerCase();
+            if (!low.endsWith(".json")) return false;
+            const mMs = Date.parse(f.modified_time || f.created_time || 0) || 0;
+            if (mMs > 0 && mMs < oldestReqMs - 3600 * 1000) return false;
+            return true;
+        });
+    } catch {
+        return;
+    }
+    if (!candidateMetas.length) return;
+
+    candidateMetas.sort((a, b) => (Date.parse(b.modified_time || 0) || 0) - (Date.parse(a.modified_time || 0) || 0));
+    const boundedMetas = candidateMetas.slice(0, 60);
+
+    const artifactsByReq = new Map();
+    for (const meta of boundedMetas) {
+        try {
+            const rawRes = await fetch(
+                `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(meta.file_id)}?alt=media&supportsAllDrives=true`,
+                { headers: { Authorization: `Bearer ${driveToken}` } }
+            );
+            if (!rawRes.ok) continue;
+            const parsed = await rawRes.json();
+            if (!parsed || typeof parsed !== "object") continue;
+            if (parsed.contract || parsed.audit || parsed.strategy || parsed.engagement_verification_map) continue;
+            const reqId = parsed.request_id ? String(parsed.request_id).trim() : null;
+            if (!reqId || !reqById.has(reqId)) continue;
+
+            const lowName = String(meta.name || "").toLowerCase();
+            const lowFolder = String(meta.folder_path || "").toLowerCase();
+            const isCorr = lowName.includes("_corrected") || Boolean(parsed.corrects_report);
+            const isRepName = lowName.startsWith("trend_report") || lowName.startsWith("market_report") || lowFolder.startsWith("reports");
+            const hasArray = Array.isArray(parsed.items) || Array.isArray(parsed.records) || Array.isArray(parsed.posts);
+            const isReport = isRepName || (!hasArray && Boolean(parsed.run_status || parsed.sections || parsed.platform_results || parsed.telegram_summary));
+            const isData = !isReport && hasArray;
+            if (!isReport && !isData) continue;
+
+            if (!artifactsByReq.has(reqId)) {
+                artifactsByReq.set(reqId, { datas: [], reports: [] });
+            }
+            const bucket = artifactsByReq.get(reqId);
+            const entry = {
+                file: {
+                    id: meta.file_id,
+                    name: meta.name,
+                    folder_path: meta.folder_path || "",
+                    modifiedTime: meta.modified_time || meta.created_time || "",
+                },
+                data: parsed,
+                runId: parsed.run_id ? String(parsed.run_id).trim() : "",
+                attempt: parsed.attempt ?? parsed.attempts ?? parsed.execution?.attempt ?? null,
+                isCorr,
+                revMs: Date.parse(meta.modified_time || meta.created_time || 0) || 0,
+            };
+            if (isData) bucket.datas.push(entry);
+            else bucket.reports.push(entry);
+        } catch {}
+    }
+
+    const sortEntries = (arr) => arr.slice().sort((a, b) => {
+        if (b.isCorr !== a.isCorr) return (b.isCorr ? 1 : 0) - (a.isCorr ? 1 : 0);
+        return (b.revMs || 0) - (a.revMs || 0);
+    });
+
+    for (const reqRow of activeReqs) {
+        const art = artifactsByReq.get(reqRow.id);
+        if (!art || (!art.datas.length && !art.reports.length)) continue;
+
+        let existingSummary = {};
+        try { existingSummary = JSON.parse(reqRow.result_summary_json || "{}"); } catch {}
+
+        const datas = sortEntries(art.datas);
+        const reports = sortEntries(art.reports);
+        if (!datas.length || !reports.length) {
+            await persistDriveReconcileDiagnostic(env, reqRow, existingSummary, {
+                status: "waiting_pair",
+                reason: !datas.length
+                    ? "Mới phát hiện file Report trên Drive, đang chờ file Data JSON khớp request_id/run_id/attempt"
+                    : "Mới phát hiện file Data trên Drive, đang chờ file Report JSON khớp request_id/run_id/attempt",
+                checked_at: new Date().toISOString(),
+            });
+            continue;
+        }
+
+        // Pair matching Data + Report preferring current attempt first
+        const targetAtt = Number(reqRow.attempts || 0);
+        const candidates = [];
+        for (const d of datas) {
+            for (const r of reports) {
+                const sameRun = Boolean(d.runId && r.runId && d.runId === r.runId);
+                const attD = d.attempt !== null && d.attempt !== undefined && d.attempt !== "" ? Number(d.attempt) : null;
+                const attR = r.attempt !== null && r.attempt !== undefined && r.attempt !== "" ? Number(r.attempt) : null;
+                const sameAtt = attD !== null && attR !== null && attD === attR;
+                const score = (sameRun ? 4 : 0) + (sameAtt ? 4 : 0) + (targetAtt > 0 && attD === targetAtt ? 8 : 0) + ((d.isCorr || r.isCorr) ? 1 : 0);
+                candidates.push({ d, r, score });
+            }
+        }
+        candidates.sort((a, b) => b.score - a.score);
+        const bestPair = candidates[0];
+        const validation = validateDriveArtifactPairForRequest(reqRow, bestPair.d, bestPair.r, existingSummary);
+        if (!validation.ok) {
+            await persistDriveReconcileDiagnostic(env, reqRow, existingSummary, {
+                status: validation.status,
+                reason: validation.reason,
+                data_file_id: bestPair.d.file.id,
+                report_file_id: bestPair.r.file.id,
+                checked_at: new Date().toISOString(),
+            });
+            continue;
+        }
+
+        const nowIso = new Date().toISOString();
+        const items = validation.items || [];
+        const crawledAt = validation.summaryBase?.crawled_at || validation.summaryBase?.generated_at || bestPair.d.data?.crawled_at || nowIso;
+        const summaryObj = {
+            ...validation.summaryBase,
+            request_id: reqRow.id,
+            run_id: validation.runId,
+            attempt: validation.attempt,
+            crawled_at: crawledAt,
+            drive_reconciled: true,
+            registry_sync_status: items.length > 0 ? "pending" : "ok",
+            drive_reconcile: {
+                status: "ok",
+                reason: "Đồng bộ an toàn từ cặp Data + Report trên Google Drive",
+                run_id: validation.runId,
+                attempt: validation.attempt,
+                data_file_id: bestPair.d.file.id,
+                report_file_id: bestPair.r.file.id,
+                reconciled_at: nowIso,
+            },
+        };
+
+        const guard = {
+            callerOwner: reqRow.claimed_by,
+            parsedAttempt: Number(reqRow.attempts),
+            nowIso: "",
+        };
+        const outboxStmts = items.length > 0
+            ? await enqueueRegistryOutboxStatements(env, reqRow.id, validation.runId, crawledAt, items, guard, nowIso)
+            : [];
+        const updateReqStmt = env.DB.prepare(`
+            UPDATE crawl_requests
+            SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
+            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+        `).bind(
+            "completed",
+            JSON.stringify(summaryObj),
+            bestPair.r.file.id,
+            null,
+            nowIso,
+            reqRow.id,
+            reqRow.claimed_by,
+            Number(reqRow.attempts),
+            ""
+        );
+
+        let upd = null;
+        if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
+            const batchRes = await env.DB.batch([...outboxStmts, updateReqStmt]);
+            upd = batchRes[batchRes.length - 1];
+        } else {
+            for (const st of outboxStmts) await st.run();
+            upd = await updateReqStmt.run();
+        }
+        if (Number(upd?.meta?.changes || 0) !== 1) {
+            continue;
+        }
+        if (items.length > 0) {
+            try {
+                await drainRegistryOutboxForRequest(env, reqRow.id, summaryObj, crawledAt);
+            } catch {}
+        }
+    }
 }
 
 async function notifyNewCrawl(env) {
@@ -3034,6 +3416,7 @@ async function notifyNewCrawl(env) {
             }
             if (batchEntries.length > 0) {
                 const batchIds = new Set(batchEntries.map(e => e.file.id));
+                const batchIndexById = new Map(batchEntries.map((e, idx) => [e.file.id, idx]));
                 const batchStems = new Set(batchEntries.map(e => getReportStem(e.file.name)));
                 // Pull sibling original/_corrected sharing same stem so corrected beats original even across batch boundary
                 const fetchFiles = batchEntries.map(e => e.file);
@@ -3045,6 +3428,16 @@ async function notifyNewCrawl(env) {
 
                 const { parsedCandidates, fetchErrorCount } = await fetchAndParseDriveReports(token, reportsFolderId, fetchFiles);
                 const ranked = rankParsedReportCandidates(parsedCandidates);
+                const groupMinIdxMap = new Map();
+                for (const cand of ranked) {
+                    const bIdx = batchIndexById.get(cand.file?.id);
+                    if (bIdx === undefined) continue;
+                    const prevIdx = groupMinIdxMap.get(cand.groupKey);
+                    if (prevIdx === undefined || bIdx < prevIdx) {
+                        groupMinIdxMap.set(cand.groupKey, bIdx);
+                    }
+                }
+
                 const byGroup = new Map();
                 for (const item of ranked) {
                     if (!byGroup.has(item.groupKey)) {
@@ -3056,278 +3449,209 @@ async function notifyNewCrawl(env) {
 
                 let transientDeliveryHalted = false;
                 let blockedDriveEncountered = false;
+                let minBlockedBatchIdx = Infinity;
+                const markGroupBlocked = (groupKey) => {
+                    blockedDriveEncountered = true;
+                    const bIdx = groupMinIdxMap.get(groupKey);
+                    if (bIdx !== undefined && bIdx < minBlockedBatchIdx) {
+                        minBlockedBatchIdx = bIdx;
+                    }
+                };
+
                 for (const item of winningReports) {
                     const d = item.data || {};
                     if (item.groupCrawlTs && item.groupCrawlTs < cutoffMs) continue;
                     const effStatus = String(d.run_status || d.technical_status || "completed").toLowerCase();
+                    const reqId = d.request_id ? String(d.request_id) : null;
+
+                    const gate = await evaluateDriveRequestNotificationGate(env, {
+                        requestId: reqId,
+                        reportData: d,
+                        reportEffStatus: effStatus,
+                        isCorrected: item.isCorr,
+                    });
+                    if (gate.action === "block_cursor") {
+                        markGroupBlocked(item.groupKey);
+                        continue;
+                    }
+                    if (gate.action === "already_notified") {
+                        if (reqId) notifiedRequestIds.add(reqId);
+                        continue;
+                    }
+                    if (gate.action === "skip") {
+                        continue;
+                    }
+
                     if (!["completed", "partial", "failed", "source_error", "no_qualifying_posts", "insufficient_data"].includes(effStatus)) continue;
 
                     const rawRunId = d.run_id || item.file?.name || "report";
                     const notifKey = resolveCanonicalNotificationKey({ runId: rawRunId, isCorrected: item.isCorr });
-                    const reqId = d.request_id ? String(d.request_id) : null;
-
-                    // Cross-check if request_id was already notified (e.g. via /complete or direct D1) or blocked by pending/error registry sync
                     const aliasKeys = [];
-                    let linkedReqRow = null;
                     if (reqId) {
                         aliasKeys.push(
                             resolveCanonicalNotificationKey({ requestId: reqId, status: "completed" }),
                             resolveCanonicalNotificationKey({ requestId: reqId, status: "failed" })
                         );
-                        try {
-                            linkedReqRow = await env.DB.prepare(
-                                "SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
-                            ).bind(reqId).first();
-                            if (linkedReqRow && linkedReqRow.notified_at && !item.isCorr) {
-                                notifiedRequestIds.add(reqId);
-                                continue;
+                    }
+
+                    const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText);
+                    if (d.request_id) {
+                        if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+                            notifiedRequestIds.add(String(d.request_id));
+                            try {
+                                await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
+                                    .bind(new Date().toISOString(), String(d.request_id)).run();
+                            } catch { }
+                        }
+                    }
+
+                    // Never advance durable cursor past an item awaiting completion or registry_sync_status=ok
+                    if (!partialError && fetchErrorCount === 0 && !transientDeliveryHalted) {
+                        const cursorEntry = !blockedDriveEncountered
+                            ? batchEntries[batchEntries.length - 1]
+                            : (Number.isFinite(minBlockedBatchIdx) && minBlockedBatchIdx > 0
+                                ? batchEntries[minBlockedBatchIdx - 1]
+                                : null);
+                        if (cursorEntry) {
+                            const lastKey = `${cursorEntry.mtimeStr}|${cursorEntry.file.id}`;
+                            if (!usedRoundRobin) {
+                                await setRuntimeState(env, "notify_drive_cursor", lastKey);
+                            } else {
+                                await setRuntimeState(env, "notify_drive_rr_cursor", lastKey);
+                                if (!rawCursor) await setRuntimeState(env, "notify_drive_cursor", lastKey);
                             }
-                        } catch {}
-                    }
-                    if (await isRequestBlockedByPendingRegistrySync(env, linkedReqRow || { id: reqId, result_summary: d })) {
-                        blockedDriveEncountered = true;
-                        continue;
-                    }
-
-                    const stats = extractMuseReportStats(d) || {};
-                    const recCount = Number(stats.newQualifiedCount ?? stats.qualified ?? stats.scanned ?? d.totals?.records ?? 0);
-                    const summaryText = buildMuseTelegramNotificationText(d, item.file?.name, item.isCorr);
-
-                    const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, env.TELEGRAM_OWNER_ID, summaryText, {
-                        aliasKeys,
-                        requestId: reqId,
-                        bypassRequestClaim: item.isCorr,
-                        bypassAliasPrecheck: item.isCorr,
-                        replyMarkup: reportActionsInlineKeyboard(false),
-                    });
-                    if (delivery.retryableExhausted) {
-                        transientDeliveryHalted = true;
-                        break;
-                    }
-                    if (reqId && (delivery.status === "sent" || delivery.status === "delivery_uncertain")) {
-                        notifiedRequestIds.add(reqId);
-                        try {
-                            await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
-                                .bind(new Date().toISOString(), reqId).run();
-                        } catch {}
+                        }
                     }
                 }
+            } catch { }
 
-                // Never commit durable cursor if Drive pagination hit partialError, blocked item, or fetch/rate-limit failed
-                if (!partialError && fetchErrorCount === 0 && !transientDeliveryHalted && !blockedDriveEncountered) {
-                    const lastEntry = batchEntries[batchEntries.length - 1];
-                    const lastKey = `${lastEntry.mtimeStr}|${lastEntry.file.id}`;
-                    if (!usedRoundRobin) {
-                        await setRuntimeState(env, "notify_drive_cursor", lastKey);
-                    } else {
-                        await setRuntimeState(env, "notify_drive_rr_cursor", lastKey);
-                        if (!rawCursor) await setRuntimeState(env, "notify_drive_cursor", lastKey);
-                    }
-                }
-            }
-        }
-    } catch {}
-
-    // 2. Batch + durable cursor backlog over direct-D1 completed or failed crawl_requests not yet notified
-    try {
-        const rawD1Cursor = await getRuntimeState(env, "notify_d1_cursor", null);
-        const parsedD1Cursor = parseCompositeCursor(rawD1Cursor);
-
-        const rowsRes = await env.DB.prepare(`
+            // 2. Check ALL direct-D1 completed or failed crawl_requests not yet notified
+            try {
+                const rowsRes = await env.DB.prepare(`
             SELECT * FROM crawl_requests
             WHERE status IN ('completed', 'failed') AND notified_at IS NULL
-            ORDER BY updated_at ASC, id ASC LIMIT 200
+            ORDER BY updated_at ASC LIMIT 20
         `).all();
-        const allPendingD1 = (rowsRes.results || []).slice().sort((a, b) => {
-            const uDiff = String(a.updated_at || "").localeCompare(String(b.updated_at || ""));
-            if (uDiff !== 0) return uDiff;
-            return String(a.id || "").localeCompare(String(b.id || ""));
-        });
+                const rows = rowsRes.results || [];
+                for (const req of rows) {
+                    if (notifiedRequestIds.has(req.id)) continue;
+                    let summary = {};
+                    try { summary = JSON.parse(req.result_summary_json || "{}"); } catch { }
+                    const notifKey = `crw_${req.id}_${req.status}`.slice(0, 120);
+                    const recCount = Number(summary.record_count ?? 0);
+                    const chatId = req.requested_by_chat_id || env.TELEGRAM_OWNER_ID;
+                    const platLabel = String(req.platform || "all").toUpperCase();
+                    const text = req.status === "completed"
+                        ? `✅ MUSE CRAWL HOÀN THÀNH (${platLabel})\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `🆔 Mã: ${req.id}\n` +
+                        `👤 Nguồn xử lý: ${req.claimed_by || "Muse"}\n` +
+                        `📊 Số bản ghi: ${summary.record_count ?? "N/A"}\n` +
+                        `🕒 Cập nhật: ${formatVnTime(req.updated_at)}\n\n` +
+                        "🔄 Auto Sync sẽ tự đồng bộ về App_Video."
+                        : `❌ MUSE CRAWL THẤT BẠI (${platLabel})\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `🆔 Mã: ${req.id}\n` +
+                        `👤 Nguồn xử lý: ${req.claimed_by || "Muse"}\n` +
+                        `❗ Lỗi: ${String(req.error_message || "Không rõ nguyên nhân").slice(0, 400)}\n` +
+                        `🕒 Cập nhật: ${formatVnTime(req.updated_at)}`;
 
-        let candidatesD1 = allPendingD1.filter(
-            r => compareCompositeItemToCursor(Date.parse(r.updated_at || 0) || 0, r.id, parsedD1Cursor) > 0
-        );
-        if (candidatesD1.length === 0 && allPendingD1.length > 0 && parsedD1Cursor) {
-            // Wrap around if an out-of-order row had updated_at <= cursor
-            candidatesD1 = allPendingD1;
-        }
-        const batchD1 = candidatesD1.slice(0, batchSize);
-        let lastCleanD1 = null;
-        let blockedD1Encountered = false;
-
-        for (const req of batchD1) {
-            if (notifiedRequestIds.has(req.id)) {
-                if (!blockedD1Encountered) lastCleanD1 = req;
-                continue;
-            }
-            if (await isRequestBlockedByPendingRegistrySync(env, req)) {
-                blockedD1Encountered = true;
-                continue;
-            }
-            let summary = {};
-            try { summary = JSON.parse(req.result_summary_json || "{}"); } catch {}
-            const notifKey = resolveCanonicalNotificationKey({
-                requestId: req.id,
-                runId: summary.run_id || null,
-                status: req.status,
-            });
-            const aliasKeys = [
-                resolveCanonicalNotificationKey({ requestId: req.id, status: req.status }),
-                summary.run_id ? resolveCanonicalNotificationKey({ runId: summary.run_id, isCorrected: true }) : null,
-            ].filter(Boolean);
-
-            const recCount = resolveAuthoritativeSummaryRecCount(summary);
-            const chatId = req.requested_by_chat_id || env.TELEGRAM_OWNER_ID;
-            const text = buildDirectD1CrawlNotificationText(req, summary);
-
-            const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, chatId, text, {
-                aliasKeys,
-                requestId: req.id,
-                replyMarkup: reportActionsInlineKeyboard(false),
-            });
-            if (delivery.retryableExhausted) {
-                break;
-            }
-            if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
-                try {
-                    await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
-                        .bind(new Date().toISOString(), req.id).run();
-                } catch {}
-            }
-            if (!blockedD1Encountered) lastCleanD1 = req;
-        }
-        if (lastCleanD1) {
-            await setRuntimeState(env, "notify_d1_cursor", `${lastCleanD1.updated_at || new Date().toISOString()}|${lastCleanD1.id}`);
-        }
-    } catch {}
-
-    // 3. Batch + durable cursor over V1 fallback on THREADS_FOLDER_ID (excluding Archive/ & unified with Drive/D1 keys)
-    try {
-        const token = await getDriveToken(env);
-        const headers = { Authorization: `Bearer ${token}` };
-        const folderId = env.THREADS_FOLDER_ID || LEGACY_THREADS_FOLDER_ID;
-        const maxPages = Math.min(Math.max(Number(env?.MAX_DRIVE_LIST_PAGES) || DEFAULT_MAX_DRIVE_LIST_PAGES, 1), 100);
-
-        const allV1Files = [];
-        const seenTokens = new Set();
-        let pageToken = null;
-        let v1PartialError = null;
-        for (let page = 0; page < maxPages; page++) {
-            const params = new URLSearchParams({
-                q: `'${folderId}' in parents and trashed = false and name contains 'threads_crawl'`,
-                fields: "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime)",
-                orderBy: "createdTime asc",
-                pageSize: "100",
-                supportsAllDrives: "true",
-                includeItemsFromAllDrives: "true"
-            });
-            if (pageToken) params.set("pageToken", pageToken);
-            const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, { headers });
-            if (!res.ok) {
-                v1PartialError = `drive_http_${res.status}`;
-                break;
-            }
-            const list = await res.json();
-            allV1Files.push(...(list.files || []));
-            const nextPt = list.nextPageToken ? String(list.nextPageToken) : null;
-            if (list.has_more === true && !nextPt) {
-                v1PartialError = "missing_page_token";
-                break;
-            }
-            if (!nextPt) break;
-            if (nextPt === pageToken || seenTokens.has(nextPt)) {
-                v1PartialError = "repeated_page_token";
-                break;
-            }
-            if (page >= maxPages - 1) {
-                v1PartialError = "page_limit_exceeded";
-                break;
-            }
-            seenTokens.add(nextPt);
-            pageToken = nextPt;
-        }
-
-        const rawV1Cursor = await getRuntimeState(env, "notify_v1_fallback_cursor", null);
-        const parsedV1Cursor = parseCompositeCursor(rawV1Cursor);
-
-        const v1Asc = allV1Files
-            .filter(f => f.mimeType !== "application/vnd.google-apps.folder" && !isArchiveFolderName(f.name) && !isArchiveRelPath(f.name))
-            .map(f => ({
-                file: f,
-                tsStr: f.modifiedTime || f.createdTime || "1970-01-01T00:00:00Z",
-                tsMs: Date.parse(f.modifiedTime || f.createdTime || 0) || 0,
-            }))
-            .sort((a, b) => {
-                if (a.tsMs !== b.tsMs) return a.tsMs - b.tsMs;
-                return String(a.file.id) < String(b.file.id) ? -1 : (String(a.file.id) > String(b.file.id) ? 1 : 0);
-            });
-
-        const v1After = v1Asc.filter(entry => compareCompositeItemToCursor(entry.tsMs, entry.file.id, parsedV1Cursor) > 0);
-        let usedV1RoundRobin = false;
-        let v1Batch = v1After.slice(0, batchSize);
-        if (v1Batch.length === 0 && v1Asc.length > 0) {
-            usedV1RoundRobin = true;
-            const rawV1Rr = await getRuntimeState(env, "notify_v1_fallback_rr_cursor", null);
-            const parsedV1Rr = parseCompositeCursor(rawV1Rr);
-            let v1Rr = v1Asc.filter(entry => compareCompositeItemToCursor(entry.tsMs, entry.file.id, parsedV1Rr) > 0);
-            if (v1Rr.length === 0) v1Rr = v1Asc;
-            v1Batch = v1Rr.slice(0, batchSize);
-        }
-        let lastCleanV1 = null;
-        let v1FetchErr = false;
-        let blockedV1Encountered = false;
-
-        for (const entry of v1Batch) {
-            const file = entry.file;
-            if (!file.size || Number(file.size) > MAX_MARKET_JSON_BYTES) {
-                if (!blockedV1Encountered) lastCleanV1 = entry;
-                continue;
-            }
-            const dataRes = await fetch(
-                `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`,
-                { headers }
-            );
-            if (!dataRes.ok) {
-                v1FetchErr = true;
-                break;
-            }
-            const data = await dataRes.json();
-            if (!data || !["completed", "failed"].includes(data.status)) {
-                if (!blockedV1Encountered) lastCleanV1 = entry;
-                continue;
-            }
-            const startedMs = Date.parse(data.started_at);
-            if (!Number.isFinite(startedMs) || startedMs < cutoffMs) {
-                if (!blockedV1Encountered) lastCleanV1 = entry;
-                continue;
-            }
-            if (typeof data.run_id !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.run_id)) {
-                if (!blockedV1Encountered) lastCleanV1 = entry;
-                continue;
-            }
-            const postsLen = Array.isArray(data.posts) ? data.posts.length : 0;
-            const endAt = data.ended_at;
-            if (!Number.isFinite(Date.parse(endAt))) {
-                if (!blockedV1Encountered) lastCleanV1 = entry;
-                continue;
-            }
-
-            if (data.request_id) {
-                try {
-                    const v1ReqRow = await env.DB.prepare(
-                        "SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?"
-                    ).bind(String(data.request_id)).first();
-                    if (await isRequestBlockedByPendingRegistrySync(env, v1ReqRow || { id: String(data.request_id), result_summary: data })) {
-                        blockedV1Encountered = true;
+                    const delivery = await deliverWithUncertaintyGuard(env, notifKey, recCount, chatId, text);
+                    if (delivery.status === "sent" || delivery.status === "delivery_uncertain") {
+                        try {
+                            await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL")
+                                .bind(new Date().toISOString(), req.id).run();
+                        } catch { }
+                    }
+                }
+                if (await isRequestBlockedByPendingRegistrySync(env, req)) {
+                    blockedD1Encountered = true;
+                    continue;
+                }
+                let summary = {};
+                try { summary = JSON.parse(req.result_summary_json || "{}"); } catch { }
+                if (req.status === "completed" && isV32CrawlContext(summary, req, summary)) {
+                    const regStatus = String(summary?.registry_sync_status || "").trim().toLowerCase();
+                    if (regStatus !== "ok") {
+                        blockedD1Encountered = true;
                         continue;
                     }
-                } catch {}
-            } else if (await isRequestBlockedByPendingRegistrySync(env, { result_summary: data })) {
-                blockedV1Encountered = true;
-                continue;
+                }
+                const notifKey = resolveCanonicalNotificationKey({
+                    requestId: req.id,
+                    runId: summary.run_id || null,
+                    status: req.status,
+                });
+                const aliasKeys = [
+                    resolveCanonicalNotificationKey({ requestId: req.id, status: req.status }),
+                    summary.run_id ? resolveCanonicalNotificationKey({ runId: summary.run_id, isCorrected: true }) : null,
+                ].filter(Boolean);
+
+                // 3. Preserved V1 fallback check on THREADS_FOLDER_ID (up to 10 recent files)
+                try {
+                    const token = await getDriveToken(env);
+                    const headers = { Authorization: `Bearer ${token}` };
+                    const folderId = env.THREADS_FOLDER_ID || LEGACY_THREADS_FOLDER_ID;
+                    const params = new URLSearchParams({
+                        q: `'${folderId}' in parents and trashed = false and name contains 'threads_crawl'`,
+                        fields: "files(id,name,size,createdTime,modifiedTime)",
+                        orderBy: "createdTime desc",
+                        pageSize: "10",
+                        supportsAllDrives: "true",
+                        includeItemsFromAllDrives: "true"
+                    });
+                    const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, { headers });
+                    if (!res.ok) return;
+                    const list = await res.json();
+                    const candidates = (list.files || []).slice().reverse();
+                    for (const file of candidates) {
+                        if (!file.size || Number(file.size) > MAX_MARKET_JSON_BYTES) continue;
+                        const dataRes = await fetch(
+                            `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`,
+                            { headers }
+                        );
+                        if (!dataRes.ok) continue;
+                        const data = await dataRes.json();
+                        if (!data || !["completed", "failed"].includes(data.status)) continue;
+                        const startedMs = Date.parse(data.started_at);
+                        if (!Number.isFinite(startedMs) || startedMs < cutoffMs) continue;
+                        if (typeof data.run_id !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(data.run_id)) continue;
+                        const postsLen = Array.isArray(data.posts) ? data.posts.length : 0;
+                        const endAt = data.ended_at;
+                        if (!Number.isFinite(Date.parse(endAt))) continue;
+
+                        const time = formatVnTime(endAt);
+                        const text = data.status === "failed"
+                            ? `❌ MUSE CRAWL THẤT BẠI (Threads)\n━━━━━━━━━━━━━━━━━━━━\n` +
+                            `🆔 Run: ${data.run_id}\n` +
+                            `❗ Lỗi: ${String(data.error_message || "Unknown").slice(0, 300)}\n` +
+                            `🕒 Thời gian: ${time}`
+                            : `🔔 MUSE CRAWL HOÀN THÀNH (Threads)\n━━━━━━━━━━━━━━━━━━━━\n` +
+                            `🆔 Run: ${data.run_id}\n` +
+                            `📊 Số bài: ${postsLen}\n` +
+                            `🧹 Trùng đã loại: ${Number.isSafeInteger(data.duplicates_skipped) ? data.duplicates_skipped : "N/A"}\n` +
+                            `🕒 Hoàn thành: ${time}\n\n` +
+                            "🔄 Auto Sync đang chạy ngầm (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).";
+
+                        await deliverWithUncertaintyGuard(env, data.run_id, postsLen, env.TELEGRAM_OWNER_ID, text);
+                    }
+                } catch { }
             }
 
             const isCorr = String(file.name || "").toLowerCase().includes("_corrected") || Boolean(data.corrects_report);
+            const v1Gate = await evaluateDriveRequestNotificationGate(env, {
+                requestId: data.request_id ? String(data.request_id) : null,
+                reportData: data,
+                reportEffStatus: String(data.status || "completed").toLowerCase(),
+                isCorrected: isCorr,
+            });
+            if (v1Gate.action === "block_cursor") {
+                blockedV1Encountered = true;
+                continue;
+            }
+            if (v1Gate.action === "skip" || v1Gate.action === "already_notified") {
+                if (!blockedV1Encountered) lastCleanV1 = entry;
+                continue;
+            }
+
             const notifKey = resolveCanonicalNotificationKey({ runId: data.run_id, isCorrected: isCorr });
             const corrAlias = resolveCanonicalNotificationKey({ runId: data.run_id, isCorrected: true });
             const reqAlias = data.request_id
@@ -3338,15 +3662,15 @@ async function notifyNewCrawl(env) {
             const time = formatVnTime(endAt);
             const text = data.status === "failed"
                 ? `❌ MUSE CRAWL THẤT BẠI (Threads)\n━━━━━━━━━━━━━━━━━━━━\n` +
-                  `🆔 Run: ${data.run_id}\n` +
-                  `❗ Lỗi: ${String(data.error_message || "Unknown").slice(0, 300)}\n` +
-                  `🕒 Thời gian: ${time}`
+                `🆔 Run: ${data.run_id}\n` +
+                `❗ Lỗi: ${String(data.error_message || "Unknown").slice(0, 300)}\n` +
+                `🕒 Thời gian: ${time}`
                 : `🔔 MUSE CRAWL HOÀN THÀNH (Threads)\n━━━━━━━━━━━━━━━━━━━━\n` +
-                  `🆔 Run: ${data.run_id}\n` +
-                  `📊 Số bài: ${postsLen}\n` +
-                  `🧹 Trùng đã loại: ${Number.isSafeInteger(data.duplicates_skipped) ? data.duplicates_skipped : "N/A"}\n` +
-                  `🕒 Hoàn thành: ${time}\n\n` +
-                  "🔄 Auto Sync đang chạy ngầm (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).";
+                `🆔 Run: ${data.run_id}\n` +
+                `📊 Số bài: ${postsLen}\n` +
+                `🧹 Trùng đã loại: ${Number.isSafeInteger(data.duplicates_skipped) ? data.duplicates_skipped : "N/A"}\n` +
+                `🕒 Hoàn thành: ${time}\n\n` +
+                "🔄 Auto Sync đang chạy ngầm (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).";
 
             const delivery = await deliverWithUncertaintyGuard(env, notifKey, postsLen, env.TELEGRAM_OWNER_ID, text, {
                 aliasKeys,
@@ -3367,7 +3691,7 @@ async function notifyNewCrawl(env) {
                 if (!rawV1Cursor) await setRuntimeState(env, "notify_v1_fallback_cursor", lastV1Key);
             }
         }
-    } catch {}
+    } catch { }
 }
 
 async function expireStaleLeases(env) {
@@ -3393,46 +3717,29 @@ async function expireStaleLeases(env) {
 
 // ─── Telegram API Helpers (Inline, editMessageText, Single Primary Message) ─
 
-function mainReplyKeyboard() {
-    return {
-        keyboard: [
-            [{ text: "🕷️ Crawl dữ liệu" }, { text: "📊 Phân tích thị trường" }],
-            [{ text: "⏰ Lịch tự động" }, { text: "📋 Lịch sử tác vụ" }],
-            [{ text: "📡 Trạng thái hệ thống" }, { text: "⚙️ Cài đặt" }]
-        ],
-        resize_keyboard: true,
-        is_persistent: true
-    };
-}
-
-function homeOnlyInlineKeyboard() {
+function mainInlineKeyboard() {
     return {
         inline_keyboard: [
-            [{ text: "🏠 Trang chủ", callback_data: "menu:home" }]
+            [
+                { text: "🕷️ Crawl dữ liệu", callback_data: "crawl:menu" },
+                { text: "📊 Phân tích thị trường", callback_data: "rpt:summary" }
+            ],
+            [
+                { text: "⏱️ Lịch tự động", callback_data: "sched:view" },
+                { text: "📋 Lịch sử tác vụ", callback_data: "cmd:history" }
+            ],
+            [
+                { text: "📡 Trạng thái hệ thống", callback_data: "sys:status" },
+                { text: "⚙️ Cài đặt", callback_data: "cfg:menu" }
+            ]
         ]
     };
 }
 
-function reportActionsInlineKeyboard(isFullView = false) {
-    return {
-        inline_keyboard: [
-            isFullView
-                ? [
-                    { text: "📌 Xem tóm tắt", callback_data: "rpt:summary" },
-                    { text: "🔄 Làm mới báo cáo", callback_data: "rpt:full" }
-                ]
-                : [
-                    { text: "📄 Xem báo cáo đầy đủ", callback_data: "rpt:full" },
-                    { text: "🔄 Làm mới báo cáo", callback_data: "rpt:summary" }
-                ],
-            [{ text: "🏠 Trang chủ", callback_data: "menu:home" }]
-        ]
-    };
-}
-
-async function sendTelegramMessage(env, chatId, text, replyMarkup = null) {
+async function sendTelegramMessage(env, chatId, text, replyMarkup = null, options = {}) {
     const body = { chat_id: chatId, text: String(text).slice(0, 4096) };
     if (replyMarkup) body.reply_markup = replyMarkup;
+    if (options?.parseMode) body.parse_mode = options.parseMode;
     const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN_VIDEO}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3442,13 +3749,14 @@ async function sendTelegramMessage(env, chatId, text, replyMarkup = null) {
     return { ok: Boolean(resp.ok && data.ok), httpStatus: resp.status, data };
 }
 
-async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = null) {
+async function editTelegramMessage(env, chatId, messageId, text, replyMarkup = null, options = {}) {
     const body = {
         chat_id: chatId,
         message_id: Number(messageId),
         text: String(text).slice(0, 4096)
     };
     if (replyMarkup) body.reply_markup = replyMarkup;
+    if (options?.parseMode) body.parse_mode = options.parseMode;
     const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN_VIDEO}/editMessageText`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3471,21 +3779,24 @@ function isUneditablePrimaryMessageError(httpStatus, data) {
     );
 }
 
-async function sendOrEditTelegram(env, chatId, messageId, text, replyMarkup = null) {
+async function sendOrEditTelegram(env, chatId, messageId, text, replyMarkup = null, options = {}) {
     if (messageId) {
-        const edited = await editTelegramMessage(env, chatId, messageId, text, replyMarkup);
+        const edited = await editTelegramMessage(env, chatId, messageId, text, replyMarkup, options);
         if (edited.ok) return edited;
-        if (!isUneditablePrimaryMessageError(edited.httpStatus, edited.data)) {
+        if (
+            isDefiniteUnsentTransientTelegram(edited.httpStatus, edited.data) ||
+            !isUneditablePrimaryMessageError(edited.httpStatus, edited.data)
+        ) {
             return edited;
         }
     }
-    return sendTelegramMessage(env, chatId, text, replyMarkup);
+    return sendTelegramMessage(env, chatId, text, replyMarkup, options);
 }
 
 async function updatePrimaryProgressMessage(env, chatId, text, replyMarkup = null) {
     const primaryMsgId = await getRuntimeState(env, "tg_primary_status_msg_id", null);
     if (primaryMsgId) {
-        // Any 429, delivery_uncertain (408/5xx/transport throw), or non-missing permanent error MUST NOT
+        // Any 429, delivery_uncertain (408/5xx/network throw), or non-missing permanent error MUST NOT
         // silently fall back to sendMessage — return/throw directly for deliverWithUncertaintyGuard retry taxonomy.
         const edited = await editTelegramMessage(env, chatId, primaryMsgId, text, replyMarkup);
         if (edited.ok) return edited;
@@ -3507,6 +3818,20 @@ async function answerCallbackQuery(env, callbackQueryId, text = "") {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ callback_query_id: callbackQueryId, text: text.slice(0, 180) })
     });
+}
+
+async function sendTelegramDocument(env, chatId, fileName, bytesBuffer, caption = "", mimeType = "application/json") {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) form.append("caption", caption.slice(0, 1000));
+    form.append("document", new Blob([bytesBuffer], { type: mimeType }), fileName);
+
+    const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN_VIDEO}/sendDocument`, {
+        method: "POST",
+        body: form
+    });
+    const data = await resp.json();
+    return { ok: Boolean(resp.ok && data.ok), data };
 }
 
 // ─── D1 Command Queue & Crawl Center Helpers ─────────────────────────────────
@@ -3728,10 +4053,9 @@ async function handleAppApi(request, env, url) {
             const cursor = url.searchParams.get("cursor") || null;
             const pageToken = url.searchParams.get("page_token") || null;
             const limit = Number(url.searchParams.get("limit") || "50");
-            const maxPages = Math.min(Math.max(Number(url.searchParams.get("max_pages") || env.MAX_DRIVE_LIST_PAGES || DEFAULT_MAX_DRIVE_LIST_PAGES), 1), 100);
             const driveToken = await getDriveToken(env);
             const marketFolderId = await resolveMarketDataFolderId(driveToken, env);
-            const listing = await listMarketJsonFilesRecursive(driveToken, marketFolderId, cursor, limit, pageToken, maxPages);
+            const listing = await listMarketJsonFilesRecursive(driveToken, marketFolderId, cursor, limit, pageToken);
             return jsonResponse({ ok: true, scope_folder_id: marketFolderId, ...listing });
         } catch {
             return jsonResponse({ ok: false, error: "Failed to list Market Data files" }, 502);
@@ -3775,7 +4099,7 @@ async function handleAppApi(request, env, url) {
                     JSON.stringify({ size: bodyText.length, modified_time: meta.modifiedTime || null }),
                     new Date().toISOString()
                 ).run();
-            } catch {}
+            } catch { }
 
             return new Response(bodyText, {
                 status: 200,
@@ -3790,59 +4114,6 @@ async function handleAppApi(request, env, url) {
             });
         } catch {
             return jsonResponse({ ok: false, error: "Failed to read Drive file" }, 502);
-        }
-    }
-
-    // 3b. Cross-Run Deduplication & Post Registry endpoints (Fail-closed + Lease/Owner/Attempt Guard)
-    if (request.method === "POST" && path === "/api/app/market/dedup/check") {
-        let body = {};
-        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
-        try {
-            const res = await checkCrossRunDedupInD1(env, body.items || []);
-            return jsonResponse({ ok: true, ...res });
-        } catch (err) {
-            return jsonResponse(
-                { ok: false, registry_unavailable: true, error: String(err?.message || "D1 registry unavailable") },
-                503
-            );
-        }
-    }
-
-    if (request.method === "POST" && path === "/api/app/market/dedup/record") {
-        let body = {};
-        try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
-        const requestId = body.request_id ? String(body.request_id).trim() : null;
-        if (requestId) {
-            const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(requestId).first();
-            if (!reqRow) {
-                return jsonResponse({ ok: false, error: "Crawl request not found", conflict: false }, 404);
-            }
-            const callerOwner = String(body.claimed_by || body.worker_id || clientId || "").trim();
-            if (!callerOwner || (reqRow.claimed_by && callerOwner !== reqRow.claimed_by)) {
-                return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
-            }
-            const rawAttempt = body.attempt ?? body.attempts;
-            if (rawAttempt !== undefined && rawAttempt !== null && Number(rawAttempt) !== Number(reqRow.attempts || 0)) {
-                return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
-            }
-            if (!["running", "completed"].includes(reqRow.status)) {
-                return jsonResponse({ ok: false, error: "Crawl claim is not active or expired", conflict: true }, 409);
-            }
-            if (reqRow.status === "running" && reqRow.lease_expires_at && Date.parse(reqRow.lease_expires_at) < Date.now()) {
-                await expireStaleLeases(env);
-                return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
-            }
-        }
-        try {
-            const res = await recordCrossRunDedupInD1(env, body.items || [], body.run_id || null, {
-                crawledAt: body.crawled_at || body.measured_at || null,
-            });
-            return jsonResponse({ ok: true, ...res });
-        } catch (err) {
-            return jsonResponse(
-                { ok: false, registry_unavailable: true, error: String(err?.message || "D1 registry unavailable") },
-                503
-            );
         }
     }
 
@@ -3920,7 +4191,7 @@ async function handleAppApi(request, env, url) {
 
             if (claimed.meta.changes === 1) {
                 let parsedPayload = {};
-                try { parsedPayload = JSON.parse(candidate.payload_json || "{}"); } catch {}
+                try { parsedPayload = JSON.parse(candidate.payload_json || "{}"); } catch { }
                 return jsonResponse({
                     ok: true,
                     command: {
@@ -3951,25 +4222,13 @@ async function handleAppApi(request, env, url) {
         const resultJson = JSON.stringify(body.result || {});
         const errMsg = body.error_message ? String(body.error_message).slice(0, 1000) : null;
 
-        const rawAttempt = body.attempt ?? body.attempts;
-        const parsedAttempt = Number(rawAttempt);
-        if (rawAttempt === undefined || rawAttempt === null || rawAttempt === "" || !Number.isInteger(parsedAttempt) || parsedAttempt < 1) {
-            return jsonResponse({ ok: false, error: "Missing or invalid required attempt field", conflict: false }, 400);
-        }
-        const callerId = String(body.claimed_by || clientId || "").trim();
-        if (!callerId) {
-            return jsonResponse({ ok: false, error: "Missing claim owner identity", conflict: false }, 400);
-        }
-
         const existing = await env.DB.prepare("SELECT * FROM app_commands WHERE id = ?").bind(commandId).first();
         if (!existing) return jsonResponse({ ok: false, error: "Command not found" }, 404);
 
         if (["completed", "failed", "cancelled"].includes(existing.status)) {
-            if (
-                (existing.claimed_by && callerId !== existing.claimed_by) ||
-                parsedAttempt !== Number(existing.attempts || 0) ||
-                existing.status !== nextStatus
-            ) {
+            const reqAttempt = body.attempt ?? body.attempts;
+            const reqOwner = body.claimed_by || clientId;
+            if ((existing.claimed_by && reqOwner !== existing.claimed_by) || (reqAttempt !== undefined && Number(reqAttempt) !== Number(existing.attempts))) {
                 return jsonResponse({ ok: false, error: "Command already finalized by a newer attempt", conflict: true }, 409);
             }
             return jsonResponse({ ok: true, already_finalized: true, status: existing.status });
@@ -3978,12 +4237,17 @@ async function handleAppApi(request, env, url) {
         if (existing.status !== "running") {
             return jsonResponse({ ok: false, error: "Claim expired or command is not running", conflict: true }, 409);
         }
+
+        const callerId = String(body.claimed_by || clientId);
         if (existing.claimed_by && callerId !== existing.claimed_by) {
             return jsonResponse({ ok: false, error: "Claim ownership mismatch", conflict: true }, 409);
         }
-        if (parsedAttempt !== Number(existing.attempts || 0)) {
-            return jsonResponse({ ok: false, error: "Stale claim attempt", conflict: true }, 409);
+
+        const reqAttempt = body.attempt ?? body.attempts;
+        if (reqAttempt === undefined || Number(reqAttempt) !== Number(existing.attempts || 0)) {
+            return jsonResponse({ ok: false, error: "Stale or missing claim attempt", conflict: true }, 409);
         }
+
         if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
             await expireStaleLeases(env);
             return jsonResponse({ ok: false, error: "Claim lease expired", conflict: true }, 409);
@@ -3993,16 +4257,15 @@ async function handleAppApi(request, env, url) {
             UPDATE app_commands
             SET status = ?, result_json = ?, error_message = ?, updated_at = ?
             WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
-              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
-        `).bind(nextStatus, resultJson, errMsg, nowIso, commandId, callerId, parsedAttempt, nowIso).run();
+        `).bind(nextStatus, resultJson, errMsg, nowIso, commandId, existing.claimed_by, existing.attempts).run();
 
         if (upd.meta.changes !== 1) {
-            return jsonResponse({ ok: false, error: "Completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
+            return jsonResponse({ ok: false, error: "Completion conflict: claim changed concurrently", conflict: true }, 409);
         }
 
         if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
             const text = formatCommandNotificationText(existing, nextStatus, body.result, errMsg);
-            const sent = await updatePrimaryProgressMessage(env, existing.requested_by_chat_id, text, homeOnlyInlineKeyboard());
+            const sent = await updatePrimaryProgressMessage(env, existing.requested_by_chat_id, text, mainInlineKeyboard());
             if (sent.ok) {
                 await env.DB.prepare("UPDATE app_commands SET notified_at = ? WHERE id = ?")
                     .bind(new Date().toISOString(), commandId).run();
@@ -4012,21 +4275,48 @@ async function handleAppApi(request, env, url) {
         return jsonResponse({ ok: true, already_finalized: false, status: nextStatus });
     }
 
-    // 7. Crawl Center APIs (Muse polls D1 via official Cloudflare OAuth Connector)
+    // 7. Crawl Center APIs (Manual Prompt Trigger + Custom Connector D1 Queue)
+    const buildActiveOutboxReqSet = async () => {
+        const outboxSet = new Set();
+        try {
+            const obRes = await env.DB.prepare(
+                "SELECT DISTINCT request_id FROM registry_sync_outbox WHERE status IN ('pending', 'error', 'processing', 'done') LIMIT 100"
+            ).all();
+            for (const row of (obRes?.results || [])) {
+                if (row?.request_id) outboxSet.add(row.request_id);
+            }
+        } catch {}
+        return outboxSet;
+    };
+
     if (request.method === "GET" && path === "/api/app/crawl-requests") {
         await expireStaleLeases(env);
         const rows = await env.DB.prepare(`
             SELECT * FROM crawl_requests ORDER BY created_at DESC LIMIT 40
         `).all();
+        const activeOutboxSet = await buildActiveOutboxReqSet();
         const schedule = await computeExpectedPickup(env);
-        const enriched = (rows.results || []).map(r => ({
-            ...r,
-            progress_metrics: computeCrawlRequestProgress(r),
-        }));
+        const enriched = (rows.results || []).map(r => enrichCrawlRequestRow(r, env, activeOutboxSet));
         return jsonResponse({
             ok: true,
+            muse_web_url: getMuseWebUrl(env),
             schedule,
-            items: enriched
+            items: rows.results || []
+        });
+    }
+
+    if (request.method === "GET" && path.startsWith("/api/app/crawl-requests/") && path.endsWith("/prompt")) {
+        const crawlId = decodeURIComponent(path.slice("/api/app/crawl-requests/".length, -"/prompt".length)).trim();
+        if (!crawlId) return jsonResponse({ ok: false, error: "Missing crawl request ID" }, 400);
+        const row = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+        if (!row) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+        const activeOutboxSet = await buildActiveOutboxReqSet();
+        const enriched = enrichCrawlRequestRow(row, env, activeOutboxSet);
+        return jsonResponse({
+            ok: true,
+            request: enriched,
+            manual_prompt: enriched.manual_prompt,
+            muse_web_url: getMuseWebUrl(env),
         });
     }
 
@@ -4043,7 +4333,16 @@ async function handleAppApi(request, env, url) {
                 source: "app_video",
                 dedupToken: body.dedup_token || null
             });
-            return jsonResponse({ ok: true, ...res }, res.deduplicated ? 200 : 201);
+            const activeOutboxSet = await buildActiveOutboxReqSet();
+            const enrichedReq = enrichCrawlRequestRow(res.request, env, activeOutboxSet);
+            return jsonResponse({
+                ok: true,
+                deduplicated: res.deduplicated,
+                eta: res.eta,
+                request: enrichedReq,
+                manual_prompt: enrichedReq.manual_prompt,
+                muse_web_url: getMuseWebUrl(env),
+            }, res.deduplicated ? 200 : 201);
         } catch (err) {
             return jsonResponse({ ok: false, error: err.message }, 400);
         }
@@ -4058,33 +4357,94 @@ async function handleAppApi(request, env, url) {
         if (upd.meta.changes !== 1) {
             return jsonResponse({ ok: false, error: "Request is not in queued state or not found" }, 409);
         }
-        return jsonResponse({ ok: true, id: crawlId, status: "cancelled" });
+        return jsonResponse({ ok: true, id: crawlId, status: "cancelled", display_status: "cancelled", display_status_label: "Đã hủy" });
     }
 
     if (request.method === "POST" && path === "/api/app/crawl-requests/claim") {
         let body = {};
         try { body = await request.json(); } catch { body = {}; }
+        const requestedId = body.request_id !== undefined && body.request_id !== null
+            ? String(body.request_id).trim()
+            : null;
         const claimRes = await claimNextCrawlRequestInD1(env, {
             workerId: String(body.worker_id || clientId || "muse-ai").slice(0, 64),
             leaseSeconds: body.lease_seconds,
             scheduleConfirmed: body.schedule_confirmed === true,
             threadsOnly: false,
             singleFlight: false,
+            requestId: requestedId,
+            enforceRequestId: body.request_id !== undefined && body.request_id !== null,
         });
-        return jsonResponse(claimRes);
+        return jsonResponse(claimRes, claimRes.statusCode || 200);
     }
 
     if (request.method === "POST" && path.startsWith("/api/app/crawl-requests/") && path.endsWith("/complete")) {
         const crawlId = path.slice("/api/app/crawl-requests/".length, -"/complete".length).trim();
         let body = {};
         try { body = await request.json(); } catch { return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400); }
-        return finalizeCrawlRequestCore(env, {
+        const nextStatus = body.status === "failed" ? "failed" : "completed";
+        const nowIso = new Date().toISOString();
+
+        const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+        if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
+        if (["completed", "failed", "cancelled"].includes(existing.status)) {
+            const reqAttempt = body.attempt ?? body.attempts;
+            const reqOwner = String(body.claimed_by || body.worker_id || clientId);
+            if ((existing.claimed_by && reqOwner !== existing.claimed_by) || (reqAttempt !== undefined && Number(reqAttempt) !== Number(existing.attempts))) {
+                return jsonResponse({ ok: false, error: "Crawl request already finalized by another worker/attempt", conflict: true }, 409);
+            }
+            return jsonResponse({ ok: true, already_finalized: true, status: existing.status });
+        }
+
+        if (existing.status !== "running") {
+            return jsonResponse({ ok: false, error: "Crawl lease expired or request is not running", conflict: true }, 409);
+        }
+
+        const callerOwner = String(body.claimed_by || body.worker_id || clientId);
+        if (existing.claimed_by && callerOwner !== existing.claimed_by) {
+            return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
+        }
+
+        const reqAttempt = body.attempt ?? body.attempts;
+        if (reqAttempt !== undefined && Number(reqAttempt) !== Number(existing.attempts || 0)) {
+            return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
+        }
+
+        if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
+            await expireStaleLeases(env);
+            return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
+        }
+
+        const upd = await env.DB.prepare(`
+            UPDATE crawl_requests
+            SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
+            WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
+        `).bind(
+            nextStatus,
+            JSON.stringify(body.result_summary || {}),
+            body.report_file_id || null,
+            body.error_message || null,
+            nowIso,
             crawlId,
-            body,
-            defaultOwner: clientId,
-            forcedStatus: null,
-            requireThreads: false,
-        });
+            existing.claimed_by,
+            existing.attempts
+        ).run();
+
+        if (upd.meta.changes !== 1) {
+            return jsonResponse({ ok: false, error: "Crawl completion conflict: claim changed concurrently", conflict: true }, 409);
+        }
+
+        if (existing.requested_by_chat_id && !existing.notified_at && env.TELEGRAM_BOT_TOKEN_VIDEO) {
+            const summary = body.result_summary || {};
+            const text = nextStatus === "completed"
+                ? `✅ MUSE CRAWL XONG (${existing.platform.toUpperCase()})\n━━━━━━━━━━━━━━━━━━━━\n🆔 Mã: ${crawlId}\n📊 Số bài: ${summary.record_count ?? "N/A"}`
+                : `❌ MUSE CRAWL THẤT BẠI (${existing.platform.toUpperCase()})\n━━━━━━━━━━━━━━━━━━━━\n🆔 Mã: ${crawlId}\n❗ Lỗi: ${body.error_message || "Unknown"}`;
+            const sent = await updatePrimaryProgressMessage(env, existing.requested_by_chat_id, text, mainInlineKeyboard());
+            if (sent.ok) {
+                await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ?").bind(nowIso, crawlId).run();
+            }
+        }
+        return jsonResponse({ ok: true, already_finalized: false, status: nextStatus });
     }
 
     if (request.method === "POST" && path === "/api/app/crawl-schedule") {
@@ -4104,7 +4464,7 @@ async function handleAppApi(request, env, url) {
     return jsonResponse({ ok: false, error: "Not found" }, 404);
 }
 
-// ─── Telegram V2 Views (Reports, Schedule, Settings, Status, Crawl, History) ─
+// ─── Telegram V2 Views (Reports, Drive Explorer, Crawl Center, Task History) ─
 
 const NON_PRODUCT_TOKENS = new Set([
     "tiktok", "threads", "shopee", "facebook", "instagram", "youtube",
@@ -4118,135 +4478,125 @@ function filterCleanProductItems(list) {
     });
 }
 
-async function buildHomeView(env) {
-    const appState = await getAppOnlineSummary(env);
-    const eta = await computeExpectedPickup(env);
-    const text =
-        "🤖 APP VIDEO MANAGER V2\n━━━━━━━━━━━━━━━━━━━━\n" +
-        "• ☁️ Cloudflare Worker: ✅ Online\n" +
-        `• 🖥️ App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE (Auto Sync chạy khi mở app)"}\n` +
-        `• ⏰ Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
-        `• 🕒 Muse poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n\n` +
-        "👇 Chọn chức năng trên bàn phím bên dưới (tin nhắn thao tác sẽ hiển thị rõ trong cuộc trò chuyện):";
-    return { text, reply_markup: mainReplyKeyboard() };
-}
-
 async function buildAnalysisReportBundle(env) {
     const appState = await getAppOnlineSummary(env);
     let hbReport = null;
     let hbCounts = {};
     if (appState.heartbeat) {
-        try { hbCounts = JSON.parse(appState.heartbeat.market_counts_json || "{}"); } catch {}
-        try { hbReport = JSON.parse(appState.heartbeat.latest_report_json || "null"); } catch {}
+        try { hbCounts = JSON.parse(appState.heartbeat.market_counts_json || "{}"); } catch { }
+        try { hbReport = JSON.parse(appState.heartbeat.latest_report_json || "null"); } catch { }
     }
 
-    // Prioritize latest corrected Muse report directly from Drive (works even when App_Video is OFFLINE)
+    // 1. Prioritize latest corrected Muse report directly from Drive (works even when App_Video is OFFLINE)
     let museDrive = { reportsFolderId: null, file: null, data: null };
     try {
         museDrive = await getLatestMuseReportFromDrive(env);
-    } catch {}
+    } catch { }
 
     const museData = museDrive.data;
+    const reportsFolderUrl = museDrive.reportsFolderId
+        ? `https://drive.google.com/drive/folders/${museDrive.reportsFolderId}`
+        : `https://drive.google.com/drive/folders/${getWorkspaceRootId(env)}`;
+
     let summaryText = "";
     let fullText = "";
+    let sendFileName = `market_report_${Date.now()}.json`;
+    let sendJsonPayload = null;
 
     if (museData && typeof museData === "object") {
         const isCorr = String(museDrive.file?.name || "").toLowerCase().includes("_corrected") || Boolean(museData.corrects_report);
-        const meta = extractMuseReportStats(museData) || {};
-        const pr = meta.platformResults || {};
-        const reportFileName = museDrive.file?.name || (meta.isV3 ? "trend_report_v3.json" : "market_report_muse.json");
-        const appStatusTag = appState.online ? "App_Video: 🟢 ONLINE" : "App_Video: 🔴 OFFLINE (đọc trực tiếp Drive)";
+        const totals = museData.totals || {};
+        const pr = museData.platform_results || {};
+        const headerBadge = isCorr ? "BẢN CORRECTED V2" : "MUSE DRIVE REPORT";
+        sendFileName = museDrive.file?.name || "market_report_muse.json";
+        sendJsonPayload = museData;
 
-        summaryText = formatStructuredReportSummary(museData, reportFileName, isCorr, meta, { appStatusTag });
-
-        if (meta.isV3) {
-            const detailParts = [
-                `📄 BÁO CÁO CHI TIẾT ${meta.isV32 ? "V3.2" : "V3.1"}: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`,
-                `📊 Chất lượng crawl\n• File: ${reportFileName}\n• run_status: ${meta.rawRunStatus || "—"} | technical_status: ${meta.rawTechStatus || "—"} | data_quality_status: ${meta.rawDqStatus || "—"}${meta.stopReason ? `\n• stop_reason: ${meta.stopReason} | target_achieved: ${meta.targetAchieved}` : ""}`,
-                `📊 Sàng lọc & Phân tầng\n• Quét ${meta.scanned ?? "N/A"} | Duy nhất ${meta.uniqueCandidates ?? "N/A"} | Mới đạt chuẩn ${meta.newQualifiedCount ?? meta.qualified ?? "N/A"} | Loại ${meta.rejected ?? "N/A"}${meta.crossVerified !== null ? ` | Web: ${meta.crossVerified}` : ""}\n• Very Hot ${meta.tiers.very_hot} • Hot ${meta.tiers.hot} • Emerging ${meta.tiers.emerging} • Watchlist ${meta.tiers.watchlist} • Unverified ${meta.unverified}`
-            ];
-            if (meta.trends.length) {
-                detailParts.push(
-                    "🔥 XU HƯỚNG NỔI BẬT\n" +
-                    meta.trends.slice(0, 4).map(t => `• ${t.theme || t.title || t}${t.lifecycle_state ? ` ${formatTrendLifecycleTag(t.lifecycle_state)}` : ""}\n  Bằng chứng: ${t.evidence || t.basis || "—"}`).join("\n")
-                );
-            }
-            if (meta.topViral.length) {
-                detailParts.push(
-                    "🚀 TOP BÀI VIRAL\n" +
-                    meta.topViral.slice(0, 4).map(v => `• ${v.post} (${formatViewsLabel(v)}, ${v.likes ?? "—"} likes, ${v.comments ?? "—"} cmt)${v.url ? `\n  ${v.url}` : ""}`).join("\n")
-                );
-            }
-            if (meta.signals.length || meta.emerging.length) {
-                const sigLines = meta.signals.slice(0, 3).map(s => `• [Tín hiệu] ${s.signal || s.topic}: ${s.evidence || ""}`);
-                const emLines = meta.emerging.slice(0, 2).map(e => `• [Mới nổi] ${e.topic}: ${e.evidence || ""}`);
-                detailParts.push("🆕 MỚI NỔI & TÍN HIỆU ĐƠN LẺ\n" + [...emLines, ...sigLines].join("\n"));
-            }
-            if (meta.growthTracking.length) {
-                detailParts.push(
-                    "📈 BIẾN ĐỘNG SO VỚI LƯỢT TRƯỚC\n" +
-                    meta.growthTracking.slice(0, 4).map(g => `• ${typeof g === "string" ? g : `${g.post || g.author_handle || g.post_id || "Bài cũ"}: ${g.change_summary || g.delta_summary || g.note || ""}`}`).join("\n")
-                );
-            }
-            if (meta.aff.length) {
-                detailParts.push(
-                    "💰 CƠ HỘI AFFILIATE ƯU TIÊN\n" +
-                    meta.aff.slice(0, 4).map(a => `• ${a.product} [${a.priority || "—"}]: ${a.evidence || a.evidence_summary || ""}`).join("\n")
-                );
-            }
-            if (meta.actions.length) {
-                detailParts.push("🎯 HÀNH ĐỘNG ƯU TIÊN\n" + meta.actions.slice(0, 3).map(a => `• ${trimBullet(a?.action || a?.title || a, 180)}`).join("\n"));
-            }
-            if (meta.verifDetail) {
-                detailParts.push(`⚠️ XÁC MINH & GIỚI HẠN\n• ${meta.verifDetail}`);
-            }
-            fullText = detailParts.join("\n\n").slice(0, 4000);
-        } else {
-            const detailSections = [`📄 BÁO CÁO ĐẦY ĐỦ: ${museData.report || reportFileName}\n━━━━━━━━━━━━━━━━━━━━`];
-            for (const pKey of ["threads", "tiktok", "shopee"]) {
-                const p = pr[pKey];
-                if (!p) continue;
-                const corrs = Array.isArray(p.corrections) ? p.corrections.slice(0, 3).map(c => `  + ${c}`).join("\n") : "";
-                const issues = Array.isArray(p.remaining_issues) ? p.remaining_issues.slice(0, 3).map(i => `  - ${i}`).join("\n") : "";
-                detailSections.push(
-                    `[${pKey.toUpperCase()}] ${p.business_usable_records ?? 0}/${p.records ?? 0} usable (KT: ${p.technical_status || p.status}, CL: ${p.data_quality_status || "—"})` +
-                    (corrs ? `\n• Đã chuẩn hóa:\n${corrs}` : "") +
-                    (issues ? `\n• Hạn chế còn lại:\n${issues}` : "")
-                );
-            }
-            const lims = Array.isArray(museData.data_quality_and_limitations)
-                ? museData.data_quality_and_limitations.slice(0, 4).map(l => `• ${l}`).join("\n")
-                : "";
-            if (lims) detailSections.push(`⚠️ Giới hạn dữ liệu:\n${lims}`);
-            fullText = detailSections.join("\n\n").slice(0, 4000);
+        const platLines = [];
+        for (const pKey of ["threads", "tiktok", "shopee"]) {
+            const p = pr[pKey];
+            if (!p) continue;
+            platLines.push(
+                `• ${pKey.toUpperCase()}: ${p.business_usable_records ?? 0}/${p.records ?? 0} dùng được` +
+                ` | KT: ${p.technical_status || p.status || "—"} | CL: ${p.data_quality_status || "—"}`
+            );
         }
+
+        const headerLines = [
+            `📊 PHÂN TÍCH THỊ TRƯỜNG (${headerBadge})`,
+            `📄 File: ${sendFileName}` + (appState.online ? " | 🖥️ App_Video: 🟢 ONLINE" : " | 🖥️ App_Video: 🔴 OFFLINE (đọc trực tiếp Drive)"),
+            `Tổng crawl: ${totals.records ?? "N/A"} | Dùng được (usable): ${totals.business_usable_records ?? "N/A"} | Cần xác minh: ${totals.needs_verification_records ?? "N/A"}`,
+            `Kỹ thuật: ${museData.technical_status || "—"} | Chất lượng: ${museData.data_quality_status || "—"}`
+        ];
+        if (platLines.length) headerLines.push(platLines.join("\n"));
+
+        if (museData.telegram_summary) {
+            summaryText = `${headerLines.join("\n")}\n\n${museData.telegram_summary}`;
+        } else {
+            summaryText = headerLines.join("\n\n");
+        }
+
+        // Detailed breakdown for "Xem báo cáo đầy đủ"
+        const detailSections = [`📖 BÁO CÁO ĐẦY ĐỦ: ${museData.report || sendFileName}`];
+        for (const pKey of ["threads", "tiktok", "shopee"]) {
+            const p = pr[pKey];
+            if (!p) continue;
+            const corrs = Array.isArray(p.corrections) ? p.corrections.slice(0, 3).map(c => `  + ${c}`).join("\n") : "";
+            const issues = Array.isArray(p.remaining_issues) ? p.remaining_issues.slice(0, 3).map(i => `  - ${i}`).join("\n") : "";
+            detailSections.push(
+                `[${pKey.toUpperCase()}] ${p.business_usable_records ?? 0}/${p.records ?? 0} usable (KT: ${p.technical_status || p.status}, CL: ${p.data_quality_status || "—"})` +
+                (corrs ? `\nĐã chuẩn hóa:\n${corrs}` : "") +
+                (issues ? `\nHạn chế còn lại:\n${issues}` : "")
+            );
+        }
+        const lims = Array.isArray(museData.data_quality_and_limitations)
+            ? museData.data_quality_and_limitations.slice(0, 4).map(l => `• ${l}`).join("\n")
+            : "";
+        if (lims) detailSections.push(`⚠️ Giới hạn dữ liệu:\n${lims}`);
+        fullText = detailSections.join("\n\n");
     } else if (hbReport && typeof hbReport === "object") {
         // Fallback strictly when NO Muse report JSON exists in 01_Market_Data/Reports/
-        summaryText = formatStructuredReportSummary(
-            hbReport,
-            "App_Video Local Heartbeat",
-            false,
-            null,
-            { appStatusTag: "App_Video: 🟢 ONLINE", hbCounts }
-        );
+        const cleanAff = filterCleanProductItems(hbReport.affiliate_opportunities).slice(0, 3);
+        const trends = Array.isArray(hbReport.trending_highlights)
+            ? hbReport.trending_highlights.slice(0, 3).map(t => t?.title || t?.topic || t).filter(Boolean)
+            : [];
+        const needs = Array.isArray(hbReport.consumer_needs_problems)
+            ? hbReport.consumer_needs_problems.slice(0, 2).map(n => n?.title || n).filter(Boolean)
+            : [];
+        const dq = hbReport.data_quality || {};
+        summaryText = [
+            "📊 PHÂN TÍCH THỊ TRƯỜNG (Dữ liệu App_Video)",
+            `Tổng: ${hbCounts.total_items ?? dq.total_items ?? 0} bản ghi | Usable: ${dq.usable_items ?? "N/A"} | Cần xác minh: ${dq.needs_verification_items ?? "N/A"}`,
+            trends.length ? `🔥 Xu hướng: ${trends.join("; ")}` : "",
+            needs.length ? `💡 Nhu cầu: ${needs.join("; ")}` : "",
+            `🛒 Cơ hội đủ điều kiện: ${cleanAff.length ? cleanAff.map(a => a.product).join("; ") : "Chưa có sản phẩm đủ điều kiện"}`
+        ].filter(Boolean).join("\n\n");
         fullText = summaryText;
+        sendJsonPayload = hbReport;
     } else {
-        summaryText =
-            "📊 BÁO CÁO PHÂN TÍCH THỊ TRƯỜNG\n━━━━━━━━━━━━━━━━━━━━\n\n" +
-            "📊 Chất lượng crawl\n• Chưa tìm thấy báo cáo nào trong 01_Market_Data/Reports/.\n\n" +
-            "🔥 Trend thị trường\n• Chưa có dữ liệu.\n\n" +
-            "🆕 Trend mới & vòng đời\n• Chưa có dữ liệu.\n\n" +
-            "💰 Tín hiệu Affiliate\n• Chưa có dữ liệu.\n\n" +
-            "📈 Biến động so với lượt trước\n• Chưa có dữ liệu.\n\n" +
-            "🎯 Hành động đề xuất\n• Vào 🕷️ Crawl dữ liệu để tạo lượt thu thập mới.";
+        summaryText = "📊 PHÂN TÍCH THỊ TRƯỜNG\n\nChưa tìm thấy báo cáo nào trong AI_WORKSPACE/01_Market_Data/Reports/.";
         fullText = summaryText;
+        sendJsonPayload = { status: "empty", generated_at: new Date().toISOString() };
     }
 
+    const kb = {
+        inline_keyboard: [
+            [
+                { text: "📖 Xem báo cáo đầy đủ", callback_data: "rpt:full" },
+                { text: "🔄 Làm mới báo cáo", callback_data: "rpt:summary" }
+            ],
+            [
+                { text: "🏠 Trang chủ", callback_data: "menu:home" }
+            ]
+        ]
+    };
     return {
         text: summaryText,
         fullText,
-        reply_markup: reportActionsInlineKeyboard(false),
-        full_reply_markup: reportActionsInlineKeyboard(true)
+        reply_markup: kb,
+        fullPayload: sendJsonPayload,
+        fileName: sendFileName,
+        reportsFolderId: museDrive.reportsFolderId,
+        driveFileId: museDrive.file?.id || null
     };
 }
 
@@ -4265,17 +4615,21 @@ async function buildAutoScheduleView(env) {
         : "Chưa xác định (chỉ tính sau khi có lượt poll thật từ Muse)";
 
     const text =
-        "⏰ LỊCH TỰ ĐỘNG (TRẠNG THÁI THỰC TẾ)\n━━━━━━━━━━━━━━━━━━━━\n" +
+        "⏱️ LỊCH TỰ ĐỘNG (TRẠNG THÁI THỰC TẾ)\n\n" +
         `• Lịch tự động Muse: ${museStatusText}\n` +
         `• Poll Muse thực tế gần nhất: ${lastPollText}\n` +
         `• Dự kiến nhận việc kế tiếp: ${nextEtaText}\n` +
-        `• Chu kỳ đề xuất trên D1: ${eta.profile_label} (chỉ tham chiếu)\n` +
-        `• Auto Sync App_Video: Chạy ngầm tự động mỗi ${syncIntervalSec}s khi online`;
+        `• Hồ sơ D1 đề xuất: ${eta.profile_label} (không tự bật lịch bên Muse)\n` +
+        `• Auto Sync App_Video: Chạy ngầm tự động mỗi ${syncIntervalSec}s khi App_Video online`;
 
     const kb = {
         inline_keyboard: [
             [
-                { text: "🔄 Kiểm tra lại lịch", callback_data: "sched:view" },
+                { text: "🔄 Kiểm tra lại", callback_data: "sched:view" },
+                { text: "🕷️ Crawl dữ liệu", callback_data: "crawl:menu" }
+            ],
+            [
+                { text: "⚙️ Cài đặt", callback_data: "cfg:menu" },
                 { text: "🏠 Trang chủ", callback_data: "menu:home" }
             ]
         ]
@@ -4292,17 +4646,26 @@ async function buildSettingsMenu(env) {
         : "Chưa ghi nhận";
 
     const text =
-        "⚙️ CÀI ĐẶT HỆ THỐNG & ĐỒNG BỘ\n━━━━━━━━━━━━━━━━━━━━\n" +
-        `• Auto Sync App_Video: Chạy ngầm tự động (${syncIntervalSec}s/lần)\n` +
+        "⚙️ CÀI ĐẶT HỆ THỐNG & ĐỒNG BỘ\n\n" +
+        `• Auto Sync App_Video: Tự động chạy ngầm (${syncIntervalSec}s/lần)\n` +
+        `• App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
         `• Đồng bộ gần nhất: ${lastSyncText}\n` +
-        `• Chu kỳ đề xuất trên D1: ${eta.profile_label}\n` +
-        `• Xác nhận lịch phía Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa xác nhận"}`;
+        `• Hồ sơ chu kỳ đề xuất (D1): ${eta.profile_label}\n` +
+        `• Xác nhận lịch phía Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa xác nhận (chỉ tham chiếu)"}`;
 
     const kb = {
         inline_keyboard: [
-            [{ text: "🔄 Đồng bộ thủ công", callback_data: "cmd:sync_now" }],
-            [{ text: "🔀 Đổi chu kỳ đề xuất (5p / 6h)", callback_data: "crawl:toggle_profile" }],
-            [{ text: "🏠 Trang chủ", callback_data: "menu:home" }]
+            [
+                { text: "🔄 Đồng bộ thủ công ngay", callback_data: "cmd:sync_now" },
+                { text: "📡 Ping App_Video Live", callback_data: "cmd:app_status" }
+            ],
+            [
+                { text: "🔀 Đổi hồ sơ đề xuất (5p / 6h)", callback_data: "crawl:toggle_profile" }
+            ],
+            [
+                { text: "⏱️ Lịch tự động", callback_data: "sched:view" },
+                { text: "🏠 Trang chủ", callback_data: "menu:home" }
+            ]
         ]
     };
     return { text, reply_markup: kb };
@@ -4323,117 +4686,64 @@ async function buildSystemStatusView(env) {
         const rootId = getWorkspaceRootId(env);
         await driveGetJson(token, `files/${encodeURIComponent(rootId)}?fields=id,name`);
         driveBackendStatus = "✅ Connected (Auto Sync Backend)";
-    } catch {}
+    } catch { }
 
     const appState = await getAppOnlineSummary(env);
     const eta = await computeExpectedPickup(env);
     const hb = appState.heartbeat;
     let hbCounts = {};
     if (hb?.market_counts_json) {
-        try { hbCounts = JSON.parse(hb.market_counts_json); } catch {}
+        try { hbCounts = JSON.parse(hb.market_counts_json); } catch { }
     }
     let uncertainNotifs = 0;
-    let stuckSendingNotifs = 0;
-    const stuckCutoffIso = new Date(Date.now() - STUCK_SENDING_THRESHOLD_MS).toISOString();
     try {
-        const issueRows = (await env.DB.prepare(
-            "SELECT run_id, status, created_at FROM crawl_notifications WHERE status IN ('delivery_uncertain', 'sending') ORDER BY created_at DESC LIMIT 50"
-        ).all()).results || [];
-        for (const nr of issueRows) {
-            if (nr.status === "delivery_uncertain") uncertainNotifs += 1;
-            else if (nr.status === "sending" && nr.created_at && nr.created_at <= stuckCutoffIso) stuckSendingNotifs += 1;
-        }
-    } catch {
-        try {
-            const uRow = await env.DB.prepare("SELECT COUNT(*) AS cnt FROM crawl_notifications WHERE status = 'delivery_uncertain'").first();
-            uncertainNotifs = Number(uRow?.cnt || 0);
-        } catch {}
-    }
-
-    const notifWarnings = [];
-    if (uncertainNotifs > 0) {
-        notifWarnings.push(`⚠️ Cảnh báo gửi tin không chắc chắn (delivery_uncertain): ${uncertainNotifs} mục — Không tự gửi lại để tránh trùng; kiểm tra Telegram trước khi xử lý thủ công.`);
-    }
-    if (stuckSendingNotifs > 0) {
-        notifWarnings.push(`⚠️ Cảnh báo trạng thái sending bị treo: ${stuckSendingNotifs} thông báo (>5 phút chưa hoàn tất). Phương án xử lý: kiểm tra lịch sử chat Telegram; chuyển sang không chắc chắn hoặc chỉ mở khóa gửi lại khi chắc chắn chưa từng nhận.`);
-    }
+        const uRow = await env.DB.prepare("SELECT COUNT(*) AS cnt FROM crawl_notifications WHERE status = 'delivery_uncertain'").first();
+        uncertainNotifs = Number(uRow?.cnt || 0);
+    } catch { }
 
     const text =
         "📡 TRẠNG THÁI HỆ THỐNG\n━━━━━━━━━━━━━━━━━━━━\n" +
-        "• ☁️ Cloudflare Worker: ✅ Online\n" +
-        "• 🤖 Telegram Bot: ✅ Connected\n" +
-        `• 🗄️ D1 Database: ${dbStatus}\n` +
-        `• 🔗 Drive Connector Backend: ${driveBackendStatus}\n` +
-        `• 🖥️ App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
-        `• 🔄 Đồng bộ ngầm gần nhất: ${hb?.last_sync_at ? formatVnTime(hb.last_sync_at) : "Chưa ghi nhận"} (${hb?.sync_status || "unknown"})\n` +
-        `• 📦 Kho local App_Video: ${hbCounts.total_items ?? "N/A"} bản ghi\n` +
-        `• ⏰ Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
-        `• 🕒 Muse Poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n` +
-        (notifWarnings.length ? `${notifWarnings.join("\n")}\n` : "") +
-        "• 🚫 Auto Publisher: Chưa triển khai";
+        "☁️ Cloudflare Worker: ✅ Online\n" +
+        "🤖 Telegram Bot: ✅ Connected\n" +
+        `🗄️ D1 Database: ${dbStatus}\n` +
+        `🔗 Drive Connector Backend: ${driveBackendStatus}\n` +
+        `🖥️ App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE"}\n` +
+        `🔄 Đồng bộ ngầm gần nhất: ${hb?.last_sync_at ? formatVnTime(hb.last_sync_at) : "Chưa ghi nhận"} (${hb?.sync_status || "unknown"})\n` +
+        `📦 Kho local App_Video: ${hbCounts.total_items ?? "N/A"} bản ghi\n` +
+        `⏱️ Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
+        `🕒 Muse Poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n` +
+        (uncertainNotifs > 0 ? `⚠️ Cảnh báo gửi tin không chắc chắn: ${uncertainNotifs} (không tự gửi lại tránh trùng)\n` : "") +
+        "🚫 Auto Publisher: Chưa triển khai";
 
-    const inlineRows = [];
-    if (uncertainNotifs > 0 || stuckSendingNotifs > 0) {
-        inlineRows.push([{ text: "🔍 Xem chi tiết thông báo cần kiểm tra", callback_data: "notif:issues" }]);
-    }
-    if (stuckSendingNotifs > 0) {
-        inlineRows.push([
-            { text: "🛠️ Chuyển sending treo -> uncertain", callback_data: "notif:stuck:uncertain" },
-            { text: "🧹 Mở khóa gửi lại", callback_data: "notif:stuck:reset" }
-        ]);
-    }
-    inlineRows.push([
-        { text: "🔄 Làm mới trạng thái", callback_data: "sys:status" },
-        { text: "🏠 Trang chủ", callback_data: "menu:home" }
-    ]);
-
-    return { text, reply_markup: { inline_keyboard: inlineRows } };
-}
-
-async function buildNotificationIssuesView(env) {
-    const stuckCutoffIso = new Date(Date.now() - STUCK_SENDING_THRESHOLD_MS).toISOString();
-    let rows = [];
-    try {
-        rows = (await env.DB.prepare(
-            "SELECT run_id, status, created_at FROM crawl_notifications WHERE status IN ('delivery_uncertain', 'sending') ORDER BY created_at DESC LIMIT 20"
-        ).all()).results || [];
-    } catch {}
-    const stuck = rows.filter(r => r.status === "sending" && r.created_at && r.created_at <= stuckCutoffIso);
-    const uncertain = rows.filter(r => r.status === "delivery_uncertain");
-    const lines = [
-        "🔍 CHI TIẾT THÔNG BÁO CẦN KIỂM TRA\n━━━━━━━━━━━━━━━━━━━━",
-        `• Treo sending (>5p): ${stuck.length}`,
-        ...stuck.slice(0, 5).map(r => `  ⏳ ${r.run_id} (lúc ${formatVnTime(r.created_at)})`),
-        `• Không chắc chắn (delivery_uncertain): ${uncertain.length}`,
-        ...uncertain.slice(0, 5).map(r => `  ⚠️ ${r.run_id} (lúc ${formatVnTime(r.created_at)})`),
-        "\n📌 Nguyên tắc an toàn: không tự gửi lại delivery_uncertain. Chỉ xử lý sending treo ngay tại màn Trạng thái hệ thống sau khi đã kiểm tra chat Telegram."
-    ];
-    return {
-        text: lines.join("\n"),
-        reply_markup: {
-            inline_keyboard: [[
-                { text: "⬅️ Quay lại Trạng thái", callback_data: "sys:status" },
+    const kb = {
+        inline_keyboard: [
+            [
+                { text: "🔄 Làm mới", callback_data: "sys:status" },
+                { text: "⚙️ Cài đặt", callback_data: "cfg:menu" }
+            ],
+            [
                 { text: "🏠 Trang chủ", callback_data: "menu:home" }
-            ]]
-        }
+            ]
+        ]
     };
+    return { text, reply_markup: kb };
 }
 
 async function buildCrawlCenterMenu(env) {
     await expireStaleLeases(env);
-    const eta = await computeExpectedPickup(env);
     const rowsRes = await env.DB.prepare(
-        "SELECT id, platform, requested_count, status, requested_by_source, expected_pickup_at FROM crawl_requests ORDER BY created_at DESC LIMIT 6"
+        "SELECT id, platform, keywords, requested_count, status, requested_by_source, result_summary_json FROM crawl_requests ORDER BY created_at DESC LIMIT 6"
     ).all();
     const rows = rowsRes.results || [];
     const summaryLines = rows.map(r => {
-        const srcLabel = r.requested_by_source === "telegram" ? "Thủ công TG" : (r.requested_by_source === "app_video" ? "Thủ công App" : (r.requested_by_source || "N/A"));
-        return `• [${r.platform}/${r.requested_count}|${srcLabel}] ${formatCrawlStatusLabel(r.status)} (${r.id.slice(-8)})`;
+        const srcLabel = r.requested_by_source === "telegram" ? "Telegram" : (r.requested_by_source === "app_video" ? "App_Video" : (r.requested_by_source || "N/A"));
+        const ds = deriveCrawlRequestDisplayState(r);
+        return `• [${r.platform}/${r.requested_count}|${srcLabel}] ${formatCrawlStatusLabel(ds.display_status)} (${r.id.slice(-8)})`;
     });
 
     const inlineRows = [
         [
-            { text: "🧵 Threads", callback_data: "crawl:plat:threads" },
+            { text: "🧵 Threads (V3.2)", callback_data: "crawl:plat:threads" },
             { text: "🎵 TikTok", callback_data: "crawl:plat:tiktok" }
         ],
         [
@@ -4443,23 +4753,56 @@ async function buildCrawlCenterMenu(env) {
     ];
     for (const r of rows) {
         if (r.status === "queued") {
-            inlineRows.push([{ text: `✖️ Hủy chờ ${r.platform}/${r.requested_count} (${r.id.slice(-8)})`, callback_data: `crawl:cancel:${r.id}` }]);
+            inlineRows.push([
+                { text: `📋 Prompt (${r.id.slice(-8)})`, callback_data: `crawl:prompt:${r.id}` },
+                { text: `✖️ Hủy (${r.id.slice(-8)})`, callback_data: `crawl:cancel:${r.id}` }
+            ]);
         }
     }
-    inlineRows.push([{ text: "🏠 Trang chủ", callback_data: "menu:home" }]);
+    inlineRows.push([
+        { text: "⏱️ Lịch tự động", callback_data: "sched:view" },
+        { text: "🏠 Trang chủ", callback_data: "menu:home" }
+    ]);
 
-    const pollRealText = eta.muse_last_poll_at
-        ? `${formatVnTime(eta.muse_last_poll_at)} (dự kiến kế tiếp: ${eta.expected_pickup_at ? formatVnTime(eta.expected_pickup_at) : "Chưa có"})`
-        : "Chưa ghi nhận lượt poll nào từ Muse (lịch Muse chưa bật)";
+    const confirmText = eta.muse_schedule_confirmed
+        ? "✅ Đã xác nhận từ lượt poll thực tế của Muse"
+        : "⚠️ Lịch phía Muse CHƯA xác nhận thay đổi (đây chỉ là mức cấu hình trên Worker/D1)";
 
     const text =
-        "🕷️ CRAWL DỮ LIỆU — HÀNG ĐỢI D1\n━━━━━━━━━━━━━━━━━━━━\n" +
-        `• Chu kỳ tham chiếu Worker: ${eta.profile_label} (${eta.muse_schedule_confirmed ? "Muse đã xác nhận" : "Muse chưa bật/xác nhận"})\n` +
-        `• Poll thực tế gần nhất: ${pollRealText}\n` +
-        "• Lưu ý: Yêu cầu mới giữ trạng thái CHỜ (queued) cho đến khi Muse claim.\n\n" +
+        "🕷️ CRAWL DỮ LIỆU — MANUAL PROMPT TRIGGER\n━━━━━━━━━━━━━━━━━━━━\n" +
+        "• Chọn nền tảng để tạo request D1 và nhận Prompt copy gửi sang Muse (desktop không cần bật).\n" +
+        "• Yêu cầu giữ trạng thái CHỜ GỬI PROMPT cho đến khi Muse claim đúng Request ID.\n\n" +
         (summaryLines.length ? `Gần đây:\n${summaryLines.join("\n")}` : "Chưa có yêu cầu nào.");
 
     return { text, reply_markup: { inline_keyboard: inlineRows } };
+}
+
+function buildTelegramPromptResponse(env, reqRow, { deduplicated = false } = {}) {
+    const promptText = buildMuseManualPrompt(reqRow);
+    const ds = deriveCrawlRequestDisplayState(reqRow);
+    const header =
+        `📝 <b>${deduplicated ? "ĐÃ CÓ YÊU CẦU TƯƠNG TỰ ĐANG CHỜ (DÙNG LẠI)" : "ĐÃ TẠO REQUEST CRAWL VÀO D1"}</b>\n` +
+        `• Mã Request ID: <code>${escapeTelegramHtml(reqRow.id)}</code>\n` +
+        `• Nền tảng: <b>${escapeTelegramHtml(String(reqRow.platform || "").toUpperCase())}</b> | Mục tiêu: <b>${Number(reqRow.requested_count || 50)}</b>\n` +
+        `• Trạng thái: ${escapeTelegramHtml(ds.display_status_label)} | Contract: <code>${escapeTelegramHtml(getRequestContractVersion(reqRow.platform))}</code>\n` +
+        `<i>Chạm để copy đoạn Prompt bên dưới và dán gửi Muse:</i>\n` +
+        `<pre>${escapeTelegramHtml(promptText)}</pre>`;
+    const kb = {
+        inline_keyboard: [
+            [
+                { text: "📋 Lấy lại Prompt", callback_data: `crawl:prompt:${reqRow.id}` },
+                { text: "🌐 Mở Muse", url: getMuseWebUrl(env) },
+            ],
+            reqRow.status === "queued"
+                ? [{ text: "✖️ Hủy yêu cầu này", callback_data: `crawl:cancel:${reqRow.id}` }]
+                : [],
+            [
+                { text: "⬅️ Quay lại Crawl dữ liệu", callback_data: "crawl:menu" },
+                { text: "🏠 Trang chủ", callback_data: "menu:home" }
+            ]
+        ].filter(r => r.length > 0)
+    };
+    return { htmlText: header, replyMarkup: kb };
 }
 
 async function buildTaskHistoryView(env) {
@@ -4481,12 +4824,13 @@ async function buildTaskHistoryView(env) {
     const crwLines = crawls.map(r => `• Crawl ${r.platform}(${r.requested_count}) [${r.status}|${r.requested_by_source || "manual"}] — ${formatVnTime(r.created_at)}`);
 
     inlineRows.push([
-        { text: "🔄 Làm mới lịch sử", callback_data: "cmd:history" },
-        { text: "🏠 Trang chủ", callback_data: "menu:home" }
+        { text: "🕷️ Crawl dữ liệu", callback_data: "crawl:menu" },
+        { text: "⚙️ Cài đặt", callback_data: "cfg:menu" }
     ]);
+    inlineRows.push([{ text: "🏠 Trang chủ", callback_data: "menu:home" }]);
 
     const text =
-        "📋 LỊCH SỬ TÁC VỤ & HÀNG ĐỢI D1\n━━━━━━━━━━━━━━━━━━━━\n" +
+        "📋 LỊCH SỬ TÁC VỤ & HÀNG ĐỢI D1\n\n" +
         `Lệnh App_Video:\n${cmdLines.length ? cmdLines.join("\n") : "• Trống"}\n\n` +
         `Yêu cầu Crawl Muse:\n${crwLines.length ? crwLines.join("\n") : "• Trống"}`;
 
@@ -4514,29 +4858,17 @@ async function handleTelegramUpdate(request, env) {
             return new Response("OK");
         }
         const data = String(cq.data || "");
-        const getCallbackAckText = (cbData) => {
-            if (cbData === "menu:home") return "🏠 Đang mở Trang chủ";
-            if (cbData === "rpt:summary") return "📊 Đang tải báo cáo tóm tắt";
-            if (cbData === "rpt:full") return "📄 Đang mở báo cáo đầy đủ";
-            if (cbData === "cmd:sync_now") return "🔄 Đã xếp lệnh đồng bộ thủ công";
-            if (cbData === "cmd:history" || cbData === "cmd:queue") return "📋 Đang tải lịch sử tác vụ";
-            if (cbData.startsWith("cmd:cancel:")) return "✅ Đã tiếp nhận yêu cầu hủy lệnh";
-            if (cbData === "sched:view") return "⏰ Đang kiểm tra lịch tự động";
-            if (cbData === "cfg:menu") return "⚙️ Đang mở Cài đặt";
-            if (cbData === "sys:status") return "📡 Đang làm mới trạng thái hệ thống";
-            if (cbData === "crawl:menu") return "🕷️ Đang mở Crawl dữ liệu";
-            if (cbData === "crawl:toggle_profile") return "🔀 Đã đổi hồ sơ tham chiếu D1";
-            if (cbData.startsWith("crawl:plat:")) return `✅ Đã chọn ${cbData.slice("crawl:plat:".length).toUpperCase()}`;
-            if (cbData.startsWith("crawl:go:") || cbData.startsWith("crawl:queue:")) return "📝 Đã gửi yêu cầu crawl vào hàng đợi";
-            if (cbData.startsWith("crawl:cancel:")) return "✅ Đã xử lý hủy yêu cầu crawl";
-            if (cbData.startsWith("notif:")) return "🔍 Đang xử lý thông báo";
-            return "✅ Đã tiếp nhận thao tác";
-        };
-        await answerCallbackQuery(env, cq.id, getCallbackAckText(data));
+        await answerCallbackQuery(env, cq.id);
 
         if (data === "menu:home") {
-            const home = await buildHomeView(env);
-            await sendTelegramMessage(env, chatId, home.text, home.reply_markup);
+            const appState = await getAppOnlineSummary(env);
+            await sendOrEditTelegram(
+                env,
+                chatId,
+                msgId,
+                `🤖 APP VIDEO MANAGER V2\nApp_Video: ${appState.online ? "🟢 ONLINE" : "🔴 OFFLINE"}\nChọn thao tác:`,
+                mainInlineKeyboard()
+            );
             return new Response("OK");
         }
 
@@ -4549,7 +4881,7 @@ async function handleTelegramUpdate(request, env) {
                 (appState.online
                     ? "🟢 App_Video đang ONLINE — đang chờ nhận và thực thi..."
                     : "⏳ App_Video đang OFFLINE — lệnh đã lưu hàng đợi D1, sẽ tự chạy khi online.");
-            const edited = await sendOrEditTelegram(env, chatId, msgId, statusText, homeOnlyInlineKeyboard());
+            const edited = await sendOrEditTelegram(env, chatId, msgId, statusText, mainInlineKeyboard());
             if (edited.ok && (msgId || edited.data?.result?.message_id)) {
                 await setRuntimeState(env, "tg_primary_status_msg_id", String(msgId || edited.data.result.message_id));
             }
@@ -4575,7 +4907,7 @@ async function handleTelegramUpdate(request, env) {
             return new Response("OK");
         }
 
-        if (data === "rpt:summary") {
+        if (data === "rpt:summary" || data === "mkt:report") {
             const bundle = await buildAnalysisReportBundle(env);
             await sendOrEditTelegram(env, chatId, msgId, bundle.text, bundle.reply_markup);
             return new Response("OK");
@@ -4583,7 +4915,7 @@ async function handleTelegramUpdate(request, env) {
 
         if (data === "rpt:full") {
             const bundle = await buildAnalysisReportBundle(env);
-            await sendOrEditTelegram(env, chatId, msgId, bundle.fullText || bundle.text, bundle.full_reply_markup || bundle.reply_markup);
+            await sendOrEditTelegram(env, chatId, msgId, bundle.fullText || bundle.text, bundle.reply_markup);
             return new Response("OK");
         }
 
@@ -4605,41 +4937,13 @@ async function handleTelegramUpdate(request, env) {
             return new Response("OK");
         }
 
-        if (data === "notif:issues") {
-            const view = await buildNotificationIssuesView(env);
-            await sendOrEditTelegram(env, chatId, msgId, view.text, view.reply_markup);
-            return new Response("OK");
-        }
-
-        if (data === "notif:stuck:uncertain") {
-            const stuckCutoffIso = new Date(Date.now() - STUCK_SENDING_THRESHOLD_MS).toISOString();
-            const upd = await env.DB.prepare(
-                "UPDATE crawl_notifications SET status = 'delivery_uncertain' WHERE status = 'sending' AND created_at <= ?"
-            ).bind(stuckCutoffIso).run();
-            const prefix = `🛠️ Đã chuyển ${upd.meta?.changes || 0} thông báo sending bị treo sang delivery_uncertain (an toàn chống trùng).\n\n`;
-            const view = await buildSystemStatusView(env);
-            await sendOrEditTelegram(env, chatId, msgId, prefix + view.text, view.reply_markup);
-            return new Response("OK");
-        }
-
-        if (data === "notif:stuck:reset") {
-            const stuckCutoffIso = new Date(Date.now() - STUCK_SENDING_THRESHOLD_MS).toISOString();
-            const del = await env.DB.prepare(
-                "DELETE FROM crawl_notifications WHERE status = 'sending' AND created_at <= ?"
-            ).bind(stuckCutoffIso).run();
-            const prefix = `🧹 Đã mở khóa ${del.meta?.changes || 0} thông báo sending bị treo; Cron kế tiếp sẽ gửi lại nếu báo cáo vẫn hợp lệ.\n\n`;
-            const view = await buildSystemStatusView(env);
-            await sendOrEditTelegram(env, chatId, msgId, prefix + view.text, view.reply_markup);
-            return new Response("OK");
-        }
-
         if (data === "rpt:send" || data === "rpt:gdoc" || data === "drv:root" || data.startsWith("drv:")) {
             await sendOrEditTelegram(
                 env,
                 chatId,
                 msgId,
-                "ℹ️ Drive Explorer và gửi file JSON đã được gỡ bỏ hoàn toàn khỏi Telegram UX. Dữ liệu đồng bộ tự động qua Auto Sync hoặc nút 🔄 Đồng bộ thủ công trong ⚙️ Cài đặt.",
-                homeOnlyInlineKeyboard()
+                "ℹ️ Drive Explorer và gửi file JSON đã được bỏ khỏi menu Telegram. Auto Sync tự động đồng bộ ngầm về App_Video (hoặc vào ⚙️ Cài đặt → Đồng bộ thủ công).",
+                mainInlineKeyboard()
             );
             return new Response("OK");
         }
@@ -4671,17 +4975,14 @@ async function handleTelegramUpdate(request, env) {
                         { text: "50 bài", callback_data: `crawl:go:${plat}:50` },
                         { text: "100 bài", callback_data: `crawl:go:${plat}:100` }
                     ],
-                    [
-                        { text: "⬅️ Quay lại Crawl dữ liệu", callback_data: "crawl:menu" },
-                        { text: "🏠 Trang chủ", callback_data: "menu:home" }
-                    ]
+                    [{ text: "⬅️ Chọn lại nền tảng", callback_data: "crawl:menu" }]
                 ]
             };
             await sendOrEditTelegram(
                 env,
                 chatId,
                 msgId,
-                `✓ Đã chọn nền tảng: ${plat.toUpperCase()}\n━━━━━━━━━━━━━━━━━━━━\nChọn số lượng mục tiêu để đưa vào hàng đợi D1 cho Muse polling:`,
+                `✓ Đã chọn nền tảng: ${plat.toUpperCase()}\n━━━━━━━━━━━━━━━━━━━━\nChọn số lượng mục tiêu để tạo Request D1 & nhận Prompt gửi Muse:`,
                 kb
             );
             return new Response("OK");
@@ -4707,30 +5008,38 @@ async function handleTelegramUpdate(request, env) {
                     dedupToken: `tg_crw_${update.update_id}`
                 });
                 const reqRow = res.request;
-                const etaInfo = reqRow.expected_pickup_at
-                    ? `Dự kiến Muse nhận: ${formatVnTime(reqRow.expected_pickup_at)}`
-                    : "Dự kiến Muse nhận: Chưa xác định (chưa ghi nhận lượt poll từ Muse)";
-                const msg =
-                    `📝 ${res.deduplicated ? "ĐÃ CÓ YÊU CẦU TƯƠNG TỰ ĐANG CHỜ" : "ĐÃ XẾP YÊU CẦU CRAWL VÀO D1"}\n\n` +
-                    `Mã: ${reqRow.id}\n` +
-                    `Nền tảng: ${reqRow.platform.toUpperCase()} | Số lượng: ${reqRow.requested_count}\n` +
-                    `Trạng thái: ${formatCrawlStatusLabel(reqRow.status)}\n` +
-                    `Nguồn kích hoạt: Thủ công từ Telegram\n` +
-                    `Cấu hình Worker: ${formatPollProfileLabel(reqRow.poll_profile)}\n` +
-                    etaInfo;
-                const kb = {
-                    inline_keyboard: [
-                        reqRow.status === "queued"
-                            ? [{ text: "✖️ Hủy yêu cầu này", callback_data: `crawl:cancel:${reqRow.id}` }]
-                            : [],
-                        [{ text: "⬅️ Quay lại Crawl dữ liệu", callback_data: "crawl:menu" }, { text: "🏠 Trang chủ", callback_data: "menu:home" }]
-                    ].filter(r => r.length > 0)
-                };
-                const edited = await sendOrEditTelegram(env, chatId, msgId, msg, kb);
+                const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: res.deduplicated });
+                const edited = await sendOrEditTelegram(
+                    env,
+                    chatId,
+                    msgId,
+                    promptView.htmlText,
+                    promptView.replyMarkup,
+                    { parseMode: "HTML" }
+                );
                 if (edited.ok && (msgId || edited.data?.result?.message_id)) {
                     await setRuntimeState(env, "tg_primary_status_msg_id", String(msgId || edited.data.result.message_id));
                 }
             }
+            return new Response("OK");
+        }
+
+        if (data.startsWith("crawl:prompt:")) {
+            const crawlId = data.slice("crawl:prompt:".length).trim();
+            const reqRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(crawlId).first();
+            if (!reqRow) {
+                await sendOrEditTelegram(env, chatId, msgId, `⚠️ Không tìm thấy request ${crawlId}.`, homeOnlyInlineKeyboard());
+                return new Response("OK");
+            }
+            const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: true });
+            await sendOrEditTelegram(
+                env,
+                chatId,
+                msgId,
+                promptView.htmlText,
+                promptView.replyMarkup,
+                { parseMode: "HTML" }
+            );
             return new Response("OK");
         }
 
@@ -4765,21 +5074,30 @@ async function handleTelegramUpdate(request, env) {
     const chatId = msg.chat.id;
     const rawInput = (msg.text || "").trim();
     const mapped = {
-        "🕷️ Crawl dữ liệu": "/crawlcenter",
-        "📊 Phân tích thị trường": "/market",
-        "⏰ Lịch tự động": "/schedule",
-        "📋 Lịch sử tác vụ": "/queue",
-        "📡 Trạng thái hệ thống": "/status",
+        "🏠 Trang chủ": "/start",
+        "📊 Trạng thái": "/status",
+        "⏱️ Lịch tự động": "/schedule",
         "⚙️ Cài đặt": "/settings",
-        "🏠 Trang chủ": "/start"
+        "🔍 Dữ liệu thị trường": "/market",
+        "🕷️ Crawl Center": "/crawlcenter",
+        "📋 Hàng đợi lệnh": "/queue",
+        "📋 Lịch sử tác vụ": "/queue"
     }[rawInput] || rawInput;
 
-    let reply = "Sử dụng bàn phím bên dưới hoặc gõ /start để mở menu chính.";
-    let markup = mainReplyKeyboard();
+    let reply = "Sử dụng /start hoặc /status.";
+    let markup = mainInlineKeyboard();
 
     if (mapped === "/start") {
-        const home = await buildHomeView(env);
-        const sent = await sendTelegramMessage(env, chatId, home.text, home.reply_markup);
+        const appState = await getAppOnlineSummary(env);
+        const eta = await computeExpectedPickup(env);
+        reply =
+            "🤖 APP VIDEO MANAGER V2\n\n" +
+            `• Cloudflare Worker: ✅ Online\n` +
+            `• App_Video Desktop: ${appState.online ? `🟢 ONLINE (${appState.age_sec}s)` : "🔴 OFFLINE (Auto Sync chạy khi mở app)"}\n` +
+            `• Lịch tự động Muse: ${eta.muse_schedule_confirmed ? "✅ Đã xác nhận" : "⚪ Chưa kích hoạt / Chưa xác nhận"}\n` +
+            `• Muse poll gần nhất: ${eta.muse_last_poll_at ? formatVnTime(eta.muse_last_poll_at) : "Chưa ghi nhận"}\n\n` +
+            "Chọn chức năng trong bảng điều khiển bên dưới:";
+        const sent = await updatePrimaryProgressMessage(env, chatId, reply, mainInlineKeyboard());
         return new Response(sent.ok ? "OK" : "Delivery failed", { status: sent.ok ? 200 : 502 });
     } else if (mapped === "/schedule") {
         const view = await buildAutoScheduleView(env);
@@ -4797,7 +5115,7 @@ async function handleTelegramUpdate(request, env) {
             (appState.online
                 ? "🟢 App_Video đang ONLINE — đang chờ nhận và thực thi."
                 : "⏳ App_Video hiện đang OFFLINE — lệnh sẽ chạy tự động khi mở App_Video.");
-        const sent = await updatePrimaryProgressMessage(env, chatId, reply, homeOnlyInlineKeyboard());
+        const sent = await updatePrimaryProgressMessage(env, chatId, reply, mainInlineKeyboard());
         return new Response(sent.ok ? "OK" : "Delivery failed", { status: sent.ok ? 200 : 502 });
     } else if (mapped === "/market") {
         const bundle = await buildAnalysisReportBundle(env);
@@ -4819,7 +5137,6 @@ async function handleTelegramUpdate(request, env) {
         const keywords = (Number.isFinite(maybeCount) ? parts.slice(3) : parts.slice(2)).join(" ").trim();
         if (!ALLOWED_CRAWL_PLATFORMS.has(plat)) {
             reply = "Cú pháp: /request_crawl <threads|tiktok|shopee|all> [số_lượng] [từ_khóa]";
-            markup = homeOnlyInlineKeyboard();
         } else {
             const res = await createCrawlRequestInD1(env, {
                 platform: plat,
@@ -4830,14 +5147,9 @@ async function handleTelegramUpdate(request, env) {
                 dedupToken: `tg_crw_msg_${msg.message_id}`
             });
             const reqRow = res.request;
-            const etaText = reqRow.expected_pickup_at
-                ? formatVnTime(reqRow.expected_pickup_at)
-                : "Chưa xác định (chưa ghi nhận lượt poll từ Muse)";
-            reply =
-                `📝 Đã xếp yêu cầu crawl (${reqRow.platform}/${reqRow.requested_count}) vào D1: ${reqRow.id}\n` +
-                `Trạng thái: ${formatCrawlStatusLabel(reqRow.status)}\n` +
-                `Dự kiến Muse nhận: ${etaText}`;
-            markup = homeOnlyInlineKeyboard();
+            const promptView = buildTelegramPromptResponse(env, reqRow, { deduplicated: res.deduplicated });
+            const sentPrompt = await sendTelegramMessage(env, chatId, promptView.htmlText, promptView.replyMarkup, { parseMode: "HTML" });
+            return new Response(sentPrompt.ok ? "OK" : "Delivery failed", { status: sentPrompt.ok ? 200 : 502 });
         }
     } else if (mapped === "/notifytest") {
         try {
@@ -4851,7 +5163,27 @@ async function handleTelegramUpdate(request, env) {
         } catch {
             reply = "❌ Notification check failed.";
         }
-        markup = homeOnlyInlineKeyboard();
+    } else if (mapped === "/crawl") {
+        try {
+            const data = await getLatestCrawl(env);
+            if (!data) {
+                reply = "Chưa có kết quả crawl.";
+            } else {
+                const completed = data.status === "completed";
+                reply =
+                    "📊 MARKET INTELLIGENCE\n\n" +
+                    "Nền tảng: Threads\n" +
+                    "Nguồn dữ liệu: Muse\n" +
+                    `Trạng thái: ${completed ? "✅ Hoàn thành" : "⚠️ Chưa xác nhận"}\n` +
+                    `Số bài: ${data.posts.length}\n` +
+                    `Trùng đã loại: ${Number.isSafeInteger(data.duplicates_skipped) ? data.duplicates_skipped : "N/A"}\n` +
+                    `Cập nhật: ${formatVnTime(data.ended_at)}`;
+            }
+        } catch {
+            reply = "❌ Không đọc được kết quả crawl.";
+        }
+    } else if (mapped === "/drive") {
+        reply = "ℹ️ Drive Explorer và chức năng gửi file JSON đã được bỏ khỏi menu Telegram. Auto Sync tự động đồng bộ ngầm về App_Video.";
     } else if (mapped === "/status") {
         const view = await buildSystemStatusView(env);
         reply = view.text;
@@ -4864,27 +5196,19 @@ async function handleTelegramUpdate(request, env) {
 
 // ─── Worker Entrypoint ───────────────────────────────────────────────────────
 
-
-// ─── Muse Custom Connector Scoped API (`/api/crawl/*`, Phase 1 Read-Only POC) ─
-
-const MUSE_REGISTRY_CHECK_MAX_ITEMS = 100;
-
-function normalizeCrawlRegistryCheckItems(body) {
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return { error: "Request body must be a JSON object" };
-    }
-    const defaultPlat = String(body.platform || "threads").toLowerCase().trim() || "threads";
-    if (Array.isArray(body.items)) {
-        if (body.items.length > MUSE_REGISTRY_CHECK_MAX_ITEMS) {
-            return { error: `Maximum ${MUSE_REGISTRY_CHECK_MAX_ITEMS} items allowed per request` };
+export default {
+    async scheduled(controller, env, ctx) {
+        try {
+            await notifyNewCrawl(env);
+            await expireStaleLeases(env);
+        } catch {
+            console.error("Scheduled check failed");
+            throw new Error("Scheduled check failed");
         }
-        return { items: body.items };
-    }
+    },
 
-    const items = [];
-    const dedupKeys = Array.isArray(body.dedup_keys) ? body.dedup_keys : [];
-    const canonicalUrls = Array.isArray(body.canonical_urls) ? body.canonical_urls : [];
-    const postIds = Array.isArray(body.post_ids) ? body.post_ids : [];
+    async fetch(request, env) {
+        const url = new URL(request.url);
 
     for (const k of dedupKeys) {
         const s = String(k || "").trim();
@@ -4914,6 +5238,12 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
     const scheduleConfirmed = options.scheduleConfirmed === true;
     const threadsOnly = Boolean(options.threadsOnly);
     const singleFlight = Boolean(options.singleFlight);
+    const enforceRequestId = Boolean(options.enforceRequestId);
+    const explicitReqId = enforceRequestId ? String(options.requestId || "").trim() : null;
+
+    if (enforceRequestId && !explicitReqId) {
+        return { ok: false, statusCode: 400, error: "Invalid empty request_id", request: null, conflict: false };
+    }
 
     const now = new Date();
     const nowIso = now.toISOString();
@@ -4922,6 +5252,37 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
         await setRuntimeState(env, "muse_schedule_confirmed", "1");
     }
     await expireStaleLeases(env);
+
+    if (enforceRequestId) {
+        const targetRow = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(explicitReqId).first();
+        if (!targetRow) {
+            return { ok: false, statusCode: 404, error: "Crawl request not found", request: null, conflict: false };
+        }
+        if (threadsOnly && String(targetRow.platform || "").trim().toLowerCase() !== "threads") {
+            return { ok: false, statusCode: 403, error: "Forbidden: scope restricted to threads requests", request: null, conflict: false };
+        }
+        if (targetRow.status !== "queued") {
+            return {
+                ok: false,
+                statusCode: 409,
+                conflict: true,
+                reason: "request_not_queued",
+                current_status: targetRow.status,
+                error: `Crawl request ${explicitReqId} is in '${targetRow.status}' state and cannot be claimed`,
+                request: null,
+            };
+        }
+        if (Number(targetRow.attempts || 0) >= Number(targetRow.max_attempts || 3)) {
+            return {
+                ok: false,
+                statusCode: 409,
+                conflict: true,
+                reason: "max_attempts_exhausted",
+                error: `Crawl request ${explicitReqId} exhausted max attempts`,
+                request: null,
+            };
+        }
+    }
 
     if (singleFlight) {
         const activeRun = await env.DB.prepare(`
@@ -4933,44 +5294,34 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
         if (activeRun) {
             return { ok: true, request: null, single_flight_blocked: true, reason: "active_crawl_in_progress" };
         }
-        const pendingOutbox = await env.DB.prepare(`
-            SELECT id FROM registry_sync_outbox
-            WHERE status IN ('pending', 'error', 'processing', 'done')
-            LIMIT 1
-        `).first();
-        if (pendingOutbox) {
-            return { ok: true, request: null, single_flight_blocked: true, reason: "registry_sync_pending" };
-        }
-        const blockedCompleted = await env.DB.prepare(`
-            SELECT 1 AS blocked FROM (
-                SELECT result_summary_json FROM crawl_requests
-                WHERE status IN ('completed', 'failed')
-                ORDER BY created_at DESC LIMIT 50
-            ) r
-            WHERE r.result_summary_json IS NOT NULL
-              AND json_valid(r.result_summary_json) = 1
-              AND lower(COALESCE(json_extract(r.result_summary_json, '$.registry_sync_status'), '')) IN ('pending', 'error')
-            LIMIT 1
-        `).first();
-        if (blockedCompleted) {
-            return { ok: true, request: null, single_flight_blocked: true, reason: "registry_sync_pending" };
-        }
-    }
 
-    for (let retry = 0; retry < 2; retry++) {
-        const candidate = threadsOnly
-            ? await env.DB.prepare(`
-                SELECT * FROM crawl_requests
-                WHERE status = 'queued'
-                  AND lower(trim(platform)) = 'threads'
-                  AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
-                ORDER BY created_at ASC LIMIT 1
-            `).first()
-            : await env.DB.prepare(`
-                SELECT * FROM crawl_requests WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1
-            `).first();
+    const attemptsLoopMax = enforceRequestId ? 1 : 2;
+    for (let retry = 0; retry < attemptsLoopMax; retry++) {
+        const candidate = enforceRequestId
+            ? await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(explicitReqId).first()
+            : (threadsOnly
+                ? await env.DB.prepare(`
+                    SELECT * FROM crawl_requests
+                    WHERE status = 'queued'
+                      AND lower(trim(platform)) = 'threads'
+                      AND COALESCE(attempts, 0) < COALESCE(max_attempts, 3)
+                    ORDER BY created_at ASC LIMIT 1
+                `).first()
+                : await env.DB.prepare(`
+                    SELECT * FROM crawl_requests WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1
+                `).first());
 
-        if (!candidate) {
+        if (!candidate || candidate.status !== "queued") {
+            if (enforceRequestId) {
+                return {
+                    ok: false,
+                    statusCode: 409,
+                    conflict: true,
+                    reason: "request_not_queued",
+                    error: `Crawl request ${explicitReqId} is no longer queued`,
+                    request: null,
+                };
+            }
             return { ok: true, request: null };
         }
 
@@ -5004,10 +5355,11 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
             if (updatedRow) {
                 let parsedOpts = {};
                 try { parsedOpts = JSON.parse(updatedRow.options_json || "{}"); } catch {}
+                const enriched = enrichCrawlRequestRow(updatedRow, env);
                 return {
                     ok: true,
                     request: {
-                        ...updatedRow,
+                        ...enriched,
                         attempt: Number(updatedRow.attempts || 1),
                         options: parsedOpts,
                     },
@@ -5026,6 +5378,16 @@ async function claimNextCrawlRequestInD1(env, options = {}) {
             if (lostToActive) {
                 return { ok: true, request: null, single_flight_blocked: true, reason: "active_crawl_in_progress" };
             }
+        }
+        if (enforceRequestId) {
+            return {
+                ok: false,
+                statusCode: 409,
+                conflict: true,
+                reason: "claim_race_conflict",
+                error: `Crawl request ${explicitReqId} could not be claimed (status or single-flight conflict)`,
+                request: null,
+            };
         }
     }
     return { ok: true, request: null };
@@ -5081,9 +5443,8 @@ function validateThreadsOnlyCompletionItems(rawItems) {
         }
         const urlFields = [it.canonical_url, it.post_url, it.video_url, it.product_url, it.url, it.views_evidence_url];
         for (const u of urlFields) {
-            if (typeof u === "string" && u.trim()) {
-                const lowerU = u.trim().toLowerCase();
-                if (lowerU.includes("tiktok.com") || lowerU.includes("shopee.") || lowerU.includes("shope.ee")) {
+            if (u !== undefined && u !== null && typeof u === "string" && u.trim()) {
+                if (!isAllowedThreadsUrl(u)) {
                     return { errorResponse: jsonResponse({ ok: false, error: `Non-Threads URL '${u.trim()}' at index ${i} is rejected` }, 400) };
                 }
             }
@@ -5116,292 +5477,48 @@ function validateStrictV32CompletionPayload(summaryObj, rawItems) {
             { ok: false, error: "Report declares new/qualified posts (>0) but items/records array is missing or empty" },
             400
         );
-    }
-    if (declaredCount > 0 && itemsLen < declaredCount) {
-        return jsonResponse(
-            { ok: false, error: `Report declares ${declaredCount} new/qualified posts but only supplied ${itemsLen} records` },
-            400
-        );
-    }
-    if (!hasItemsArray) {
-        return jsonResponse(
-            { ok: false, error: "Completion payload must include items/records array (use [] for valid 0-post V3.2 run)" },
-            400
-        );
-    }
 
-    if (itemsLen === 0) {
-        const cv = String(summaryObj?.contract_version || "").trim();
-        if (!cv.startsWith("3.")) {
-            return jsonResponse(
-                { ok: false, error: "Zero-post completion requires Data Contract V3.2 (contract_version: '3.2')" },
-                400
-            );
-        }
-        const runId = String(summaryObj?.run_id || "").trim();
-        if (!runId) {
-            return jsonResponse(
-                { ok: false, error: "Zero-post Data Contract V3.2 completion requires non-empty run_id" },
-                400
-            );
-        }
-        const rawStatus = String(summaryObj?.run_status || "").trim().toLowerCase();
-        const stopReason = String(c.stop_reason || summaryObj.stop_reason || s1.stop_reason || "").trim();
-        const validZeroStatuses = new Set(["no_qualifying_posts", "insufficient_data", "partial", "completed"]);
-        if (!validZeroStatuses.has(rawStatus)) {
-            return jsonResponse(
-                { ok: false, error: "Zero-post completion requires V3.2 run_status ('no_qualifying_posts', 'insufficient_data', 'partial', or 'completed' with stop_reason)" },
-                400
-            );
-        }
-        if ((rawStatus === "completed" || rawStatus === "partial") && !stopReason) {
-            return jsonResponse(
-                { ok: false, error: "Zero-post completion with run_status='completed'/'partial' requires explicit stop_reason" },
-                400
-            );
-        }
-    }
-    return null;
-}
-
-function normalizeProgressMetricsPatch(existingSummary, body, reqRow, nowIso) {
-    const summaryObj = (existingSummary && typeof existingSummary === "object" && !Array.isArray(existingSummary))
-        ? { ...existingSummary }
-        : {};
-    const prevCounters = (summaryObj.counters && typeof summaryObj.counters === "object") ? { ...summaryObj.counters } : {};
-    const bodyCounters = (body.counters && typeof body.counters === "object") ? body.counters : {};
-
-    const intFields = [
-        "requested_count",
-        "scanned_count",
-        "unique_candidate_count",
-        "qualified_count",
-        "new_qualified_count",
-        "new_count",
-        "duplicate_history_count",
-        "duplicate_count",
-        "updated_metrics_count",
-        "updated_count",
-        "missing_views_count",
-        "unverified_count",
-        "similar_content_count",
-        "rejected_count",
-    ];
-    for (const k of intFields) {
-        const raw = bodyCounters[k] !== undefined ? bodyCounters[k] : body[k];
-        if (raw !== undefined && raw !== null && raw !== "") {
-            const n = Number(raw);
-            if (Number.isFinite(n) && n >= 0) {
-                prevCounters[k] = Math.trunc(n);
+        let upd = null;
+        if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
+            const batchResults = await env.DB.batch([...outboxStmts, updateReqStmt]);
+            upd = batchResults[batchResults.length - 1];
+        } else {
+            for (const st of outboxStmts) {
+                await st.run();
             }
+            upd = await updateReqStmt.run();
         }
-    }
-    if (prevCounters.requested_count === undefined && reqRow?.requested_count) {
-        prevCounters.requested_count = Number(reqRow.requested_count);
-    }
-    const rawTarget = bodyCounters.target_achieved !== undefined ? bodyCounters.target_achieved : body.target_achieved;
-    if (typeof rawTarget === "boolean") {
-        prevCounters.target_achieved = rawTarget;
-    }
-    const rawStop = bodyCounters.stop_reason !== undefined ? bodyCounters.stop_reason : body.stop_reason;
-    if (typeof rawStop === "string" && rawStop.trim()) {
-        prevCounters.stop_reason = rawStop.trim().slice(0, 120);
-    }
-    summaryObj.counters = prevCounters;
 
-    if (typeof body.run_id === "string" && body.run_id.trim()) {
-        summaryObj.run_id = body.run_id.trim().slice(0, 128);
-    }
-    summaryObj.progress = {
-        stage: typeof body.stage === "string" ? body.stage.trim().slice(0, 80) : (summaryObj.progress?.stage || "running"),
-        message: typeof body.message === "string" ? body.message.trim().slice(0, 400) : (summaryObj.progress?.message || null),
-        updated_at: nowIso,
-    };
-    return summaryObj;
-}
-
-async function updateCrawlProgressInD1(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, requireThreads = false }) {
-    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
-    if (parsed.errorResponse) return parsed.errorResponse;
-    const { parsedAttempt, callerOwner } = parsed;
-    const cleanId = parsed.crawlId;
-
-    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
-    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
-    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
-        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
-    }
-    if (existing.status !== "running") {
-        return jsonResponse({ ok: false, error: "Crawl request is not running", conflict: true }, 409);
-    }
-    if (existing.claimed_by && callerOwner !== existing.claimed_by) {
-        return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
-    }
-    if (parsedAttempt !== Number(existing.attempts || 0)) {
-        return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
-    }
-    if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
-        await expireStaleLeases(env);
-        return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
-    }
-
-    let existingSummary = {};
-    try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
-    const nowIso = new Date().toISOString();
-    const updatedSummary = normalizeProgressMetricsPatch(existingSummary, body, existing, nowIso);
-    const updatedSummaryJson = JSON.stringify(updatedSummary);
-
-    const upd = await env.DB.prepare(`
-        UPDATE crawl_requests
-        SET result_summary_json = ?, updated_at = ?
-        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
-          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
-    `).bind(updatedSummaryJson, nowIso, cleanId, callerOwner, parsedAttempt, nowIso).run();
-
-    if (Number(upd?.meta?.changes || 0) !== 1) {
-        return jsonResponse({ ok: false, error: "Crawl progress conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
-    }
-
-    return jsonResponse({
-        ok: true,
-        request_id: cleanId,
-        status: "running",
-        claimed_by: callerOwner,
-        attempt: parsedAttempt,
-        progress: updatedSummary.progress,
-        progress_metrics: computeCrawlRequestProgress({ ...existing, result_summary_json: updatedSummaryJson }),
-    });
-}
-
-async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "", enforceFixedOwner = null, forcedStatus = null, requireThreads = false, strictV32Completion = false }) {
-    const parsed = parseCrawlClaimInputs(crawlId, body, defaultOwner, enforceFixedOwner);
-    if (parsed.errorResponse) return parsed.errorResponse;
-    const { parsedAttempt, callerOwner } = parsed;
-    const cleanId = parsed.crawlId;
-
-    const nextStatus = forcedStatus || (body.status === "failed" ? "failed" : "completed");
-    const nowIso = new Date().toISOString();
-
-    const bodySummaryObj = (body.result_summary && typeof body.result_summary === "object")
-        ? { ...body.result_summary }
-        : {};
-    if (requireThreads && bodySummaryObj.platform !== undefined && bodySummaryObj.platform !== null && String(bodySummaryObj.platform).trim().toLowerCase() !== "threads") {
-        return jsonResponse({ ok: false, error: "Only platform='threads' summary payloads are allowed" }, 400);
-    }
-
-    let bodyDedupItems = Array.isArray(bodySummaryObj.items)
-        ? bodySummaryObj.items
-        : (Array.isArray(bodySummaryObj.records)
-            ? bodySummaryObj.records
-            : (Array.isArray(body.items)
-                ? body.items
-                : (Array.isArray(body.records) ? body.records : null)));
-
-    if (requireThreads && bodyDedupItems !== null) {
-        const itemsCheck = validateThreadsOnlyCompletionItems(bodyDedupItems);
-        if (itemsCheck.errorResponse) return itemsCheck.errorResponse;
-        bodyDedupItems = itemsCheck.items;
-    }
-
-    if (strictV32Completion && nextStatus === "completed") {
-        const v32Err = validateStrictV32CompletionPayload(bodySummaryObj, bodyDedupItems);
-        if (v32Err) return v32Err;
-    }
-
-    const existing = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
-    if (!existing) return jsonResponse({ ok: false, error: "Crawl request not found" }, 404);
-    if (requireThreads && String(existing.platform || "").trim().toLowerCase() !== "threads") {
-        return jsonResponse({ ok: false, error: "Forbidden: scope restricted to threads requests" }, 403);
-    }
-
-    if (["completed", "failed", "cancelled"].includes(existing.status)) {
-        if (
-            (enforceFixedOwner && existing.claimed_by !== enforceFixedOwner) ||
-            (existing.claimed_by && callerOwner !== existing.claimed_by) ||
-            parsedAttempt !== Number(existing.attempts || 0) ||
-            existing.status !== nextStatus
-        ) {
-            return jsonResponse({ ok: false, error: "Crawl request already finalized by another worker/attempt", conflict: true }, 409);
+        if (Number(upd?.meta?.changes || 0) !== 1) {
+            return jsonResponse({ ok: false, error: "Crawl completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
         }
-        let existingSummary = {};
-        try { existingSummary = JSON.parse(existing.result_summary_json || "{}"); } catch {}
-        let totalOutboxCount = 0;
-        try {
-            const cntRow = await env.DB.prepare(`
-                SELECT COUNT(*) AS cnt FROM registry_sync_outbox
-                WHERE request_id = ?
-            `).bind(cleanId).first();
-            totalOutboxCount = Number(cntRow?.cnt || 0);
-        } catch {}
 
-        const needsRecovery =
-            existingSummary.registry_sync_status === "error" ||
-            existingSummary.registry_sync_status === "pending" ||
-            totalOutboxCount > 0;
-
-        if (needsRecovery) {
-            if (totalOutboxCount === 0) {
-                const freshReq = await env.DB.prepare("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
-                    .bind(cleanId).first();
-                let freshSum = existingSummary;
-                try { freshSum = JSON.parse(freshReq?.result_summary_json || "{}"); } catch {}
-                const freshCntRow = await env.DB.prepare(
-                    "SELECT COUNT(*) AS cnt FROM registry_sync_outbox WHERE request_id = ?"
-                ).bind(cleanId).first();
-                const freshOutboxCount = Number(freshCntRow?.cnt || 0);
-                if (
-                    freshOutboxCount === 0 &&
-                    freshSum.registry_sync_status !== "error" &&
-                    freshSum.registry_sync_status !== "pending"
-                ) {
-                    return jsonResponse({
-                        ok: true,
-                        already_finalized: true,
-                        status: freshReq?.status || existing.status,
-                        registry_sync_status: freshSum.registry_sync_status || "ok",
-                        dedup_stats: freshSum.dedup_stats || undefined,
-                    });
-                }
-                if (freshOutboxCount === 0) {
-                    const fallbackItems = bodyDedupItems && bodyDedupItems.length > 0
-                        ? bodyDedupItems
-                        : (Array.isArray(freshSum.items) ? freshSum.items : []);
-                    if (fallbackItems.length > 0) {
-                        await enqueueRecoveryOutboxForFinalizedRequest(
-                            env,
-                            cleanId,
-                            freshSum.run_id || bodySummaryObj.run_id || cleanId,
-                            freshSum.crawled_at || bodySummaryObj.crawled_at || freshSum.generated_at || null,
-                            fallbackItems,
-                            nowIso
-                        );
-                    }
-                }
-            }
+        if (dedupSourceItems && dedupSourceItems.length > 0) {
             try {
                 const drainRes = await drainRegistryOutboxForRequest(
                     env,
                     cleanId,
-                    existingSummary,
-                    existingSummary.crawled_at || existingSummary.generated_at || null
+                    summaryObj,
+                    summaryObj.crawled_at || summaryObj.generated_at || null
                 );
                 if (drainRes?.inProgress || !drainRes?.completed) {
                     return jsonResponse(
                         {
                             ok: false,
                             registry_sync_in_progress: true,
-                            completed_status: existing.status,
+                            completed_status: nextStatus,
                             recovery_pending: true,
-                            error: "Registry sync recovery is currently in progress by another worker",
+                            error: "Registry sync is currently in progress by another worker",
                         },
                         503
                     );
                 }
                 const recoveredStats = drainRes.dedup_stats || existingSummary.dedup_stats;
                 const freshAfter = await env.DB.prepare("SELECT * FROM crawl_requests WHERE id = ?").bind(cleanId).first();
+                const recNotifyChatId = freshAfter ? (freshAfter.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null) : null;
                 if (
                     freshAfter &&
-                    freshAfter.requested_by_chat_id &&
+                    recNotifyChatId &&
                     !freshAfter.notified_at &&
                     env.TELEGRAM_BOT_TOKEN_VIDEO &&
                     !(await isRequestBlockedByPendingRegistrySync(env, freshAfter))
@@ -5424,7 +5541,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
                         env,
                         notifKey,
                         recCount,
-                        freshAfter.requested_by_chat_id,
+                        recNotifyChatId,
                         text,
                         { usePrimaryMessage: true, aliasKeys, requestId: cleanId, replyMarkup: reportActionsInlineKeyboard(false) }
                     );
@@ -5433,136 +5550,15 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
                             .bind(nowIso, cleanId).run();
                     }
                 }
-                return jsonResponse({
-                    ok: true,
-                    already_finalized: false,
-                    recovered_registry_sync: true,
-                    status: existing.status,
-                    registry_sync_status: existingSummary.registry_sync_status || "ok",
-                    dedup_stats: recoveredStats,
-                });
-            } catch (err) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        registry_unavailable: true,
-                        completed_status: existing.status,
-                        recovery_pending: true,
-                        error: String(err?.message || "D1 registry unavailable"),
-                    },
-                    503
-                );
+
+                return new Response("Not found", { status: 404 });
             }
-        }
-        return jsonResponse({
-            ok: true,
-            already_finalized: true,
-            status: existing.status,
-            registry_sync_status: existingSummary.registry_sync_status || "ok",
-            dedup_stats: existingSummary.dedup_stats || undefined,
-        });
-    }
-
-    if (existing.status !== "running") {
-        return jsonResponse({ ok: false, error: "Crawl lease expired or request is not running", conflict: true }, 409);
-    }
-    if (existing.claimed_by && callerOwner !== existing.claimed_by) {
-        return jsonResponse({ ok: false, error: "Crawl claim ownership mismatch", conflict: true }, 409);
-    }
-    if (parsedAttempt !== Number(existing.attempts || 0)) {
-        return jsonResponse({ ok: false, error: "Stale crawl claim attempt", conflict: true }, 409);
-    }
-    if (existing.lease_expires_at && Date.parse(existing.lease_expires_at) < Date.now()) {
-        await expireStaleLeases(env);
-        return jsonResponse({ ok: false, error: "Crawl claim lease expired", conflict: true }, 409);
-    }
-
-    const summaryObj = { ...bodySummaryObj };
-    const dedupSourceItems = bodyDedupItems;
-    if (dedupSourceItems && dedupSourceItems.length > 0) {
-        summaryObj.registry_sync_status = "pending";
-    }
-
-    const outboxStmts = (dedupSourceItems && dedupSourceItems.length > 0)
-        ? await enqueueRegistryOutboxStatements(
-            env,
-            cleanId,
-            summaryObj.run_id || cleanId,
-            summaryObj.crawled_at || summaryObj.generated_at || null,
-            dedupSourceItems,
-            { callerOwner, parsedAttempt, nowIso },
-            nowIso
-        )
-        : [];
-    const updateReqStmt = env.DB.prepare(`
-        UPDATE crawl_requests
-        SET status = ?, result_summary_json = ?, report_file_id = ?, error_message = ?, updated_at = ?
-        WHERE id = ? AND status = 'running' AND claimed_by = ? AND attempts = ?
-          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
-    `).bind(
-        nextStatus,
-        JSON.stringify(summaryObj),
-        body.report_file_id || null,
-        body.error_message || null,
-        nowIso,
-        cleanId,
-        callerOwner,
-        parsedAttempt,
-        nowIso
-    );
-
-    let upd = null;
-    if (outboxStmts.length > 0 && typeof env.DB.batch === "function") {
-        const batchResults = await env.DB.batch([...outboxStmts, updateReqStmt]);
-        upd = batchResults[batchResults.length - 1];
-    } else {
-        for (const st of outboxStmts) {
-            await st.run();
-        }
-        upd = await updateReqStmt.run();
-    }
-
-    if (Number(upd?.meta?.changes || 0) !== 1) {
-        return jsonResponse({ ok: false, error: "Crawl completion conflict: owner, attempt, status, or lease failed atomic guard", conflict: true }, 409);
-    }
-
-    if (dedupSourceItems && dedupSourceItems.length > 0) {
-        try {
-            const drainRes = await drainRegistryOutboxForRequest(
-                env,
-                cleanId,
-                summaryObj,
-                summaryObj.crawled_at || summaryObj.generated_at || null
-            );
-            if (drainRes?.inProgress || !drainRes?.completed) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        registry_sync_in_progress: true,
-                        completed_status: nextStatus,
-                        recovery_pending: true,
-                        error: "Registry sync is currently in progress by another worker",
-                    },
-                    503
-                );
-            }
-        } catch (err) {
-            return jsonResponse(
-                {
-                    ok: false,
-                    registry_unavailable: true,
-                    completed_status: nextStatus,
-                    recovery_pending: true,
-                    error: String(err?.message || "D1 registry unavailable"),
-                },
-                503
-            );
-        }
-    }
+    };
 
     let telegramNotified = false;
+    const notifyChatId = existing.requested_by_chat_id || env.TELEGRAM_OWNER_ID || null;
     if (
-        existing.requested_by_chat_id &&
+        notifyChatId &&
         !existing.notified_at &&
         env.TELEGRAM_BOT_TOKEN_VIDEO &&
         !(await isRequestBlockedByPendingRegistrySync(env, { id: cleanId, result_summary_json: JSON.stringify(summaryObj) }))
@@ -5589,7 +5585,7 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
             env,
             notifKey,
             recCount,
-            existing.requested_by_chat_id,
+            notifyChatId,
             text,
             { usePrimaryMessage: true, aliasKeys, requestId: cleanId, replyMarkup: reportActionsInlineKeyboard(false) }
         );
@@ -5598,10 +5594,13 @@ async function finalizeCrawlRequestCore(env, { crawlId, body, defaultOwner = "",
             await env.DB.prepare("UPDATE crawl_requests SET notified_at = ? WHERE id = ? AND notified_at IS NULL").bind(nowIso, cleanId).run();
         }
     }
+    const finalDisplay = deriveCrawlRequestDisplayState({ ...existing, status: nextStatus, result_summary_json: JSON.stringify(summaryObj) }, summaryObj, false);
     return jsonResponse({
         ok: true,
         already_finalized: false,
         status: nextStatus,
+        display_status: finalDisplay.display_status,
+        display_status_label: finalDisplay.display_status_label,
         registry_sync_status: summaryObj.registry_sync_status || "ok",
         dedup_stats: summaryObj.dedup_stats || undefined,
         telegram_notified: telegramNotified,
@@ -5770,7 +5769,7 @@ async function handleMuseCrawlApi(request, env, url) {
         }
     }
 
-    // 3. POST /api/crawl/claim (Threads only, single-flight, atomic claim, fixed server owner muse-ai, 30-min lease)
+    // 3. POST /api/crawl/claim (Threads only, single-flight, atomic claim, fixed server owner muse-ai, 30-min lease, optional strict request_id)
     if (path === "/api/crawl/claim") {
         if (request.method !== "POST") {
             return jsonResponse({ ok: false, error: "Method not allowed" }, 405, { Allow: "POST" });
@@ -5792,6 +5791,7 @@ async function handleMuseCrawlApi(request, env, url) {
                 );
             }
         }
+        const hasExplicitReqId = body.request_id !== undefined && body.request_id !== null;
         try {
             const res = await claimNextCrawlRequestInD1(env, {
                 workerId: MUSE_DEFAULT_CLAIM_OWNER,
@@ -5799,8 +5799,13 @@ async function handleMuseCrawlApi(request, env, url) {
                 scheduleConfirmed: body.schedule_confirmed === true,
                 threadsOnly: true,
                 singleFlight: true,
+                requestId: hasExplicitReqId ? String(body.request_id).trim() : null,
+                enforceRequestId: hasExplicitReqId,
             });
-            return jsonResponse(res);
+            const statusCode = res.statusCode || 200;
+            const outBody = { ...res };
+            delete outBody.statusCode;
+            return jsonResponse(outBody, statusCode);
         } catch (err) {
             return jsonResponse({ ok: false, error: String(err?.message || "D1 claim failed") }, 503);
         }
@@ -5986,6 +5991,11 @@ export default {
             await drainPendingRegistryOutboxInD1(env);
         } catch (err) {
             console.error("Scheduled drainPendingRegistryOutboxInD1 failed:", err?.message || err);
+        }
+        try {
+            await reconcileDriveArtifactsForRequests(env);
+        } catch (err) {
+            console.error("Scheduled reconcileDriveArtifactsForRequests failed:", err?.message || err);
         }
         try {
             await notifyNewCrawl(env);

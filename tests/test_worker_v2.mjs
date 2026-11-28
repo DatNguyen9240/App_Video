@@ -152,16 +152,18 @@ class MockD1Database {
         if (
           norm.startsWith("SELECT status, notified_at FROM crawl_requests WHERE id = ?") ||
           norm.startsWith("SELECT id, status, notified_at, result_summary_json FROM crawl_requests WHERE id = ?") ||
+          norm.startsWith("SELECT id, status, claimed_by, notified_at, result_summary_json FROM crawl_requests WHERE id = ?") ||
           norm.startsWith("SELECT status, result_summary_json FROM crawl_requests WHERE id = ?")
         ) {
           const row = db.crawlRequests.find((c) => c.id === this.args[0]);
           return row
             ? {
-                id: row.id,
-                status: row.status,
-                notified_at: row.notified_at,
-                result_summary_json: row.result_summary_json,
-              }
+              id: row.id,
+              status: row.status,
+              claimed_by: row.claimed_by,
+              notified_at: row.notified_at,
+              result_summary_json: row.result_summary_json,
+            }
             : null;
         }
         if (norm.startsWith("SELECT value FROM worker_runtime_state WHERE key = ?")) {
@@ -274,15 +276,25 @@ class MockD1Database {
           if (db.failRegistry) throw new Error("Simulated D1 registry outage");
         }
         if (norm.startsWith("SELECT id FROM market_post_snapshots WHERE snapshot_idempotency_key = ?")) {
-          const [idempKey, newKey, runFlag, runId, measAt] = this.args;
+          const [idempKey, newKey, runFlag, runId] = this.args;
           if (db.postSnapshots.has(idempKey)) {
             return { id: db.postSnapshots.get(idempKey).id };
           }
           if (runFlag) {
             for (const s of db.postSnapshots.values()) {
-              if (s.dedup_key === newKey && s.run_id === runId && String(s.measured_at || "") === String(measAt || "")) {
+              if (s.dedup_key === newKey && s.run_id === runId) {
                 return { id: s.id };
               }
+            }
+          }
+          return null;
+        }
+        if (norm.startsWith("SELECT id FROM market_post_snapshots WHERE (dedup_key = ?")) {
+          const [dedupKey, postIdFilter, plat, postIdVal, runId] = this.args;
+          for (const s of db.postSnapshots.values()) {
+            const matchKey = s.dedup_key === dedupKey || (postIdFilter && s.platform === plat && s.post_id === postIdVal);
+            if (matchKey && s.run_id === runId) {
+              return { id: s.id };
             }
           }
           return null;
@@ -399,6 +411,14 @@ class MockD1Database {
         if (norm.includes("FROM crawl_notifications WHERE status = 'delivery_uncertain'")) {
           return {
             results: db.notifications.filter((n) => n.status === "delivery_uncertain"),
+          };
+        }
+        if (norm.includes("FROM crawl_requests WHERE status IN ('queued', 'running')")) {
+          return {
+            results: db.crawlRequests
+              .filter((c) => c.status === "queued" || c.status === "running")
+              .map((c) => ({ ...c }))
+              .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))),
           };
         }
         if (norm.includes("FROM crawl_requests")) {
@@ -566,34 +586,31 @@ class MockD1Database {
           return { meta: { changes: 1 } };
         }
         if (norm.startsWith("UPDATE market_post_registry SET canonical_url = COALESCE(canonical_url, ?)")) {
-          if (norm.includes("last_seen_at")) {
-            // Unexpected shape guard
-          }
-          if (norm.includes("first_seen_at = CASE")) {
-            if (this.args.length === 8) {
+          if (norm.includes("first_seen_at = COALESCE(?, first_seen_at)")) {
+            if (this.args.length === 6) {
               // Older late snapshot backfill update
-              const [cUrl, postId, postPk, contentHash, fs1, fs2, fs3, dedupKey] = this.args;
+              const [cUrl, postId, postPk, contentHash, fsArg, dedupKey] = this.args;
               const row = db.postRegistry.get(dedupKey);
               if (!row) return { meta: { changes: 0 } };
               if (!row.canonical_url && cUrl) row.canonical_url = cUrl;
               if (!row.post_id && postId) row.post_id = postId;
               if (!row.post_pk && postPk) row.post_pk = postPk;
               if (!row.content_hash && contentHash) row.content_hash = contentHash;
-              if (fs1 && (!row.first_seen_at || fs1 < row.first_seen_at)) row.first_seen_at = fs1;
+              if (fsArg && (!row.first_seen_at || db._parseObsTs(fsArg) < db._parseObsTs(row.first_seen_at))) row.first_seen_at = fsArg;
               row.snapshot_count = Math.max(1, db._countSnaps(dedupKey));
               return { meta: { changes: 1 } };
             }
-            // Merge URL -> post_id case (6 args)
-            const [cUrl, postPk, fs1, fs2, fs3, dedupKey] = this.args;
+            // Merge URL -> post_id case (4 args)
+            const [cUrl, postPk, fsArg, dedupKey] = this.args;
             const row = db.postRegistry.get(dedupKey);
             if (!row) return { meta: { changes: 0 } };
             if (!row.canonical_url && cUrl) row.canonical_url = cUrl;
             if (!row.post_pk && postPk) row.post_pk = postPk;
-            if (fs1 && (!row.first_seen_at || fs1 < row.first_seen_at)) row.first_seen_at = fs1;
+            if (fsArg && (!row.first_seen_at || db._parseObsTs(fsArg) < db._parseObsTs(row.first_seen_at))) row.first_seen_at = fsArg;
             row.snapshot_count = Math.max(1, db._countSnaps(dedupKey));
             return { meta: { changes: 1 } };
           }
-          // Existing duplicate snapshot metadata backfill (5 args)
+          // Existing duplicate or rejected snapshot metadata backfill (5 args)
           const [cUrl, postId, postPk, contentHash, dedupKey] = this.args;
           const row = db.postRegistry.get(dedupKey);
           if (!row) return { meta: { changes: 0 } };
@@ -607,10 +624,9 @@ class MockD1Database {
         if (norm.startsWith("UPDATE market_post_registry SET")) {
           const [
             cUrl, postId, postPk, contentHash, runId,
-            fs1, fs2, fs3,
-            ls1, ls2, ls3,
+            fsArg, lsArg,
             vDisp, vPrec, vSrc,
-            vm1, vm2, vm3,
+            vmArg,
             vEv, latestMetricsJson, dedupKey
           ] = this.args;
           const row = db.postRegistry.get(dedupKey);
@@ -620,13 +636,13 @@ class MockD1Database {
           if (postPk) row.post_pk = postPk;
           if (contentHash) row.content_hash = contentHash;
           if (runId) row.last_run_id = runId;
-          if (fs1 && (!row.first_seen_at || fs1 < row.first_seen_at)) row.first_seen_at = fs1;
-          if (ls1 && (!row.last_seen_at || ls1 >= row.last_seen_at)) row.last_seen_at = ls1;
+          if (fsArg && (!row.first_seen_at || db._parseObsTs(fsArg) < db._parseObsTs(row.first_seen_at))) row.first_seen_at = fsArg;
+          if (lsArg && (!row.last_seen_at || db._parseObsTs(lsArg) >= db._parseObsTs(row.last_seen_at))) row.last_seen_at = lsArg;
           row.snapshot_count = Math.max(1, db._countSnaps(dedupKey));
           if (vDisp) row.latest_views_display = vDisp;
           if (vPrec) row.latest_views_precision = vPrec;
           if (vSrc) row.latest_views_source = vSrc;
-          if (vm1 && (!row.latest_views_measured_at || vm1 >= row.latest_views_measured_at)) row.latest_views_measured_at = vm1;
+          if (vmArg && (!row.latest_views_measured_at || db._parseObsTs(vmArg) >= db._parseObsTs(row.latest_views_measured_at))) row.latest_views_measured_at = vmArg;
           if (vEv) row.latest_views_evidence_url = vEv;
           row.latest_metrics_json = latestMetricsJson;
           return { meta: { changes: 1 } };
@@ -763,6 +779,16 @@ class MockD1Database {
           row.status = "error";
           row.attempts = Number(row.attempts || 0) + 1;
           row.last_error = last_error;
+          row.updated_at = updated_at;
+          return { meta: { changes: 1 } };
+        }
+        if (norm.startsWith("UPDATE crawl_requests SET result_summary_json = ?, updated_at = ? WHERE id = ? AND status = ? AND attempts = ?")) {
+          const [result_summary_json, updated_at, id, status, attempts] = this.args;
+          const row = db.crawlRequests.find(
+            (c) => c.id === id && c.status === status && Number(c.attempts || 0) === Number(attempts)
+          );
+          if (!row) return { meta: { changes: 0 } };
+          row.result_summary_json = result_summary_json;
           row.updated_at = updated_at;
           return { meta: { changes: 1 } };
         }
@@ -4491,7 +4517,7 @@ assert.equal(v3StartBtns.length, 6);
     );
     const text = await res.text();
     let json = null;
-    try { json = JSON.parse(text); } catch {}
+    try { json = JSON.parse(text); } catch { }
     return {
       status: res.status,
       headers: res.headers,
@@ -5334,6 +5360,1098 @@ assert.equal(v3StartBtns.length, 6);
     assert.equal(zeroJson.registry_sync_status, "ok");
   } finally {
     globalThis.fetch = prevFetch21;
+  }
+}
+
+// 22. Telegram Cron Completion Gate, Failed Stream Separation, Cursor Preservation, Independent Reports & Desktop-vs-Complete Snapshot Dedup
+{
+  const tgCalls22 = [];
+  let driveReports22 = [];
+  const env22 = {
+    APP_VIDEO_API_TOKEN: "app-secret-22",
+    MUSE_APP_VIDEO_TOKEN: "muse-secret-22",
+    TELEGRAM_OWNER_ID: "999022",
+    TELEGRAM_BOT_TOKEN_VIDEO: "bot22-token",
+    TELEGRAM_WEBHOOK_SECRET: "whsec22",
+    GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: "sa@test.iam.gserviceaccount.com", private_key: privateKey }),
+    GOOGLE_DRIVE_FOLDER_ID: "drive-root-22",
+    NOTIFY_BATCH_SIZE: "25",
+    DB: new MockD1Database(),
+  };
+
+  const prevFetch22 = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.startsWith("https://oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "mock-token-22" }), { status: 200 });
+    }
+    if (sUrl.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+      const q = new URL(sUrl).searchParams.get("q") || "";
+      if (q.includes("'drive-root-22' in parents") && q.includes("'01_Market_Data'")) {
+        return new Response(JSON.stringify({ files: [{ id: "mdata-22", name: "01_Market_Data" }] }), { status: 200 });
+      }
+      if (q.includes("'mdata-22' in parents") && q.includes("'Reports'")) {
+        return new Response(JSON.stringify({ files: [{ id: "reports-22", name: "Reports" }] }), { status: 200 });
+      }
+      if (q.includes("'reports-22' in parents")) {
+        return new Response(JSON.stringify({ files: driveReports22.map((r) => r.file) }), { status: 200 });
+      }
+      if (q.includes(`'${THREADS_ID}' in parents`)) {
+        return new Response(JSON.stringify({ files: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ files: [] }), { status: 200 });
+    }
+    const matched = driveReports22.find((r) =>
+      sUrl.startsWith(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(r.file.id)}?alt=media`)
+    );
+    if (matched) {
+      return new Response(JSON.stringify(matched.data), { status: 200 });
+    }
+    if (sUrl.startsWith("https://api.telegram.org/bot")) {
+      tgCalls22.push({ url: sUrl, body: JSON.parse(init.body || "{}") });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 2200 + tgCalls22.length } }), { status: 200 });
+    }
+    throw new Error("Unexpected fetch22: " + sUrl);
+  };
+
+  try {
+    // 22a: Request states (queued, running, cancelled, missing registry_sync_status=ok) MUST NOT send completion report,
+    // cursor MUST NOT skip waiting requests, independent reports MUST send, and duplicates MUST remain suppressed.
+    env22.DB.crawlRequests.push(
+      {
+        id: "crw_22_queued",
+        platform: "threads",
+        keywords: "kw_q",
+        requested_count: 20,
+        status: "queued",
+        claimed_by: null,
+        attempts: 1,
+        max_attempts: 3,
+        requested_by_chat_id: "999022",
+        notified_at: null,
+        created_at: "2026-11-27T10:00:00.000Z",
+        updated_at: "2026-11-27T10:00:00.000Z",
+        result_summary_json: null,
+      },
+      {
+        id: "crw_22_running",
+        platform: "threads",
+        keywords: "kw_r",
+        requested_count: 20,
+        status: "running",
+        claimed_by: "muse-ai",
+        lease_expires_at: "2026-11-28T10:30:00.000Z",
+        attempts: 1,
+        max_attempts: 3,
+        requested_by_chat_id: "999022",
+        notified_at: null,
+        created_at: "2026-11-27T10:01:00.000Z",
+        updated_at: "2026-11-27T10:01:00.000Z",
+        result_summary_json: null,
+      },
+      {
+        id: "crw_22_cancelled",
+        platform: "threads",
+        keywords: "kw_c",
+        requested_count: 20,
+        status: "cancelled",
+        claimed_by: null,
+        attempts: 2,
+        max_attempts: 3,
+        requested_by_chat_id: "999022",
+        notified_at: null,
+        created_at: "2026-11-27T10:02:00.000Z",
+        updated_at: "2026-11-27T10:02:00.000Z",
+        result_summary_json: null,
+      }
+    );
+
+    driveReports22 = [
+      {
+        file: { id: "drv_22_cancelled", name: "trend_report_22_cancelled.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:05:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          request_id: "crw_22_cancelled",
+          run_id: "run_22_cancelled",
+          crawled_at: "2026-11-27T10:05:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 20, new_qualified_count: 0 },
+          telegram_summary: "CANCELLED MUST NEVER NOTIFY",
+        },
+      },
+      {
+        file: { id: "drv_22_queued", name: "trend_report_22_queued.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:06:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          request_id: "crw_22_queued",
+          run_id: "run_22_queued",
+          crawled_at: "2026-11-27T10:06:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 20, new_qualified_count: 4 },
+          telegram_summary: "QUEUED REPORT WAITING COMPLETION",
+        },
+      },
+      {
+        file: { id: "drv_22_running", name: "trend_report_22_running.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:07:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          request_id: "crw_22_running",
+          run_id: "run_22_running",
+          crawled_at: "2026-11-27T10:07:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 20, new_qualified_count: 6 },
+          telegram_summary: "RUNNING REPORT WAITING COMPLETION",
+        },
+      },
+      {
+        file: { id: "drv_22_indep", name: "trend_report_22_independent.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:08:00.000Z" },
+        data: {
+          contract_version: "3.2",
+          run_id: "run_22_independent",
+          crawled_at: "2026-11-27T10:08:00.000Z",
+          run_status: "completed",
+          counters: { requested_count: 10, new_qualified_count: 3 },
+          telegram_summary: "INDEPENDENT REPORT OK",
+        },
+      },
+    ];
+
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 1, "Only independent report without request_id may notify on first tick");
+    assert.ok(tgCalls22[0].body.text.includes("INDEPENDENT REPORT OK"));
+    assert.equal(env22.DB.crawlRequests.find((c) => c.id === "crw_22_queued").notified_at, null);
+    assert.equal(env22.DB.crawlRequests.find((c) => c.id === "crw_22_running").notified_at, null);
+    assert.equal(env22.DB.crawlRequests.find((c) => c.id === "crw_22_cancelled").notified_at, null);
+    // Cursor MUST advance only to drv_22_cancelled (strictly BEFORE earliest blocked drv_22_queued!)
+    assert.equal(env22.DB.runtimeState.get("notify_drive_cursor"), "2026-11-27T10:05:00.000Z|drv_22_cancelled");
+
+    // Repeated Cron while queued/running stay uncompleted -> 0 new messages
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 1);
+
+    // Transition crw_22_queued to completed V3.2 WITHOUT registry_sync_status='ok' -> MUST STILL stay blocked!
+    const qRow22 = env22.DB.crawlRequests.find((c) => c.id === "crw_22_queued");
+    qRow22.status = "completed";
+    qRow22.result_summary_json = JSON.stringify({ contract_version: "3.2", run_id: "run_22_queued", new_qualified_count: 4 });
+    qRow22.updated_at = "2026-11-27T10:09:00.000Z";
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 1, "Completed V3.2 request without registry_sync_status=ok MUST NOT notify");
+    assert.equal(qRow22.notified_at, null);
+
+    // Now set registry_sync_status='ok' on crw_22_queued AND complete crw_22_running with registry_sync_status='ok'
+    qRow22.result_summary_json = JSON.stringify({
+      contract_version: "3.2",
+      run_id: "run_22_queued",
+      registry_sync_status: "ok",
+      new_qualified_count: 4,
+    });
+    const rRow22 = env22.DB.crawlRequests.find((c) => c.id === "crw_22_running");
+    rRow22.status = "completed";
+    rRow22.result_summary_json = JSON.stringify({
+      contract_version: "3.2",
+      run_id: "run_22_running",
+      registry_sync_status: "ok",
+      new_qualified_count: 6,
+    });
+    rRow22.updated_at = "2026-11-27T10:10:00.000Z";
+
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 3, "Both unblocked Drive reports notify ONCE without duplicating independent report");
+    assert.ok(tgCalls22.slice(1).some((c) => c.body.text.includes("QUEUED REPORT WAITING COMPLETION")));
+    assert.ok(tgCalls22.slice(1).some((c) => c.body.text.includes("RUNNING REPORT WAITING COMPLETION")));
+    assert.ok(qRow22.notified_at);
+    assert.ok(rRow22.notified_at);
+    assert.equal(env22.DB.runtimeState.get("notify_drive_cursor"), "2026-11-27T10:08:00.000Z|drv_22_indep");
+
+    // Re-running scheduled() must NOT duplicate notifications
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 3);
+
+    // _corrected Drive report for an already notified completed V3.2 request MUST still deliver cleanly
+    driveReports22.push({
+      file: { id: "drv_22_running_corr", name: "trend_report_22_running_corrected.json", mimeType: "application/json", size: "950", modifiedTime: "2026-11-27T10:11:00.000Z" },
+      data: {
+        contract_version: "3.2",
+        request_id: "crw_22_running",
+        run_id: "run_22_running",
+        corrects_report: "trend_report_22_running.json",
+        crawled_at: "2026-11-27T10:07:00.000Z",
+        run_status: "completed",
+        counters: { requested_count: 20, new_qualified_count: 7 },
+        telegram_summary: "RUNNING REPORT CORRECTED DELIVERED",
+      },
+    });
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 4);
+    assert.ok(tgCalls22[3].body.text.includes("RUNNING REPORT CORRECTED DELIVERED"));
+
+    // 22b: Failed request with Drive report -> dedicated failure path only, never completion stream
+    env22.DB.crawlRequests.push({
+      id: "crw_22_failed",
+      platform: "threads",
+      keywords: "kw_fail",
+      requested_count: 20,
+      status: "failed",
+      claimed_by: "muse-ai",
+      attempts: 3,
+      max_attempts: 3,
+      error_message: "Threads login wall",
+      requested_by_chat_id: "999022",
+      notified_at: null,
+      created_at: "2026-11-27T10:12:00.000Z",
+      updated_at: "2026-11-27T10:12:00.000Z",
+      result_summary_json: JSON.stringify({ contract_version: "3.2", run_id: "run_22_failed", run_status: "failed" }),
+    });
+    driveReports22.push({
+      file: { id: "drv_22_failed", name: "trend_report_22_failed.json", mimeType: "application/json", size: "900", modifiedTime: "2026-11-27T10:13:00.000Z" },
+      data: {
+        contract_version: "3.2",
+        request_id: "crw_22_failed",
+        run_id: "run_22_failed",
+        crawled_at: "2026-11-27T10:13:00.000Z",
+        run_status: "failed",
+        error_message: "Threads login wall",
+        telegram_summary: "SHOULD NOT COME FROM DRIVE COMPLETION STREAM",
+      },
+    });
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 5, "Failed request notifies ONCE via dedicated D1 failed flow, skipped in Drive completion");
+    assert.ok(!tgCalls22[4].body.text.includes("SHOULD NOT COME FROM DRIVE COMPLETION STREAM"));
+    assert.ok(tgCalls22[4].body.text.includes("Threads login wall"));
+    await worker.scheduled({}, env22, {});
+    assert.equal(tgCalls22.length, 5);
+
+    // 22c: Desktop Sync vs Completion API snapshot idempotency (BOTH orders, even when ended_at vs item.measured_at differ)
+    const hMuse22 = { Authorization: "Bearer muse-secret-22", "Content-Type": "application/json" };
+    const hApp22 = { Authorization: "Bearer app-secret-22", "Content-Type": "application/json" };
+    env22.DB.crawlRequests.push({
+      id: "crw_22_snap_a",
+      platform: "threads",
+      keywords: "snap_a",
+      requested_count: 1,
+      status: "queued",
+      attempts: 0,
+      max_attempts: 3,
+      created_at: "2026-11-27T11:00:00.000Z",
+      updated_at: "2026-11-27T11:00:00.000Z",
+    });
+    const claimSnapA = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", {
+      method: "POST", headers: hMuse22, body: "{}",
+    }), env22)).json();
+    assert.equal(claimSnapA.request.id, "crw_22_snap_a");
+
+    const compSnapARes = await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST",
+      headers: hMuse22,
+      body: JSON.stringify({
+        request_id: "crw_22_snap_a",
+        attempt: 1,
+        result_summary: { contract_version: "3.2", run_id: "run_22_sync_a", crawled_at: "2026-11-27T14:35:00+07:00", run_status: "completed" },
+        items: [{
+          platform: "threads",
+          post_id: "P22_A",
+          canonical_url: "https://threads.net/@u22/post/P22_A",
+          measured_at: "2026-11-27T14:25:00+07:00",
+          views: 15000,
+          views_display: "15K",
+          views_precision: "rounded_display",
+          views_source: "threads_web_browser",
+          views_measured_at: "2026-11-27T14:25:00+07:00",
+          views_evidence_url: "https://threads.net/@u22/post/P22_A",
+          likes: 200,
+        }],
+      }),
+    }), env22);
+    assert.equal(compSnapARes.status, 200);
+    const snapCountBeforeDesktopA = env22.DB.postSnapshots.size;
+
+    // Desktop sync arrives with same run_id='run_22_sync_a' and fallback ended_at timestamp ('14:35:00+07:00')
+    const desktopResA = await (await worker.fetch(new Request("https://example.workers.dev/api/app/market/dedup/record", {
+      method: "POST",
+      headers: hApp22,
+      body: JSON.stringify({
+        run_id: "run_22_sync_a",
+        crawled_at: "2026-11-27T14:35:00+07:00",
+        items: [{
+          platform: "threads",
+          post_id: "P22_A",
+          canonical_url: "https://threads.net/@u22/post/P22_A",
+          measured_at: "2026-11-27T14:35:00+07:00",
+          views: 15000,
+          likes: 200,
+        }],
+      }),
+    }), env22)).json();
+    assert.equal(desktopResA.snapshots_created, 0, "Desktop sync MUST NOT create duplicate snapshot after /complete");
+    assert.equal(desktopResA.snapshots_deduped, 1);
+    assert.equal(env22.DB.postSnapshots.size, snapCountBeforeDesktopA);
+    assert.equal(env22.DB.postRegistry.get("threads:post:P22_A").snapshot_count, 1);
+
+    // Reverse order: Desktop sync first, then /complete second on run_22_sync_b
+    const desktopResB = await (await worker.fetch(new Request("https://example.workers.dev/api/app/market/dedup/record", {
+      method: "POST",
+      headers: hApp22,
+      body: JSON.stringify({
+        run_id: "run_22_sync_b",
+        crawled_at: "2026-11-27T14:55:00+07:00",
+        items: [{ platform: "threads", post_id: "P22_B", canonical_url: "https://threads.net/@u22/post/P22_B", likes: 80 }],
+      }),
+    }), env22)).json();
+    assert.equal(desktopResB.snapshots_created, 1);
+
+    env22.DB.crawlRequests.push({
+      id: "crw_22_snap_b",
+      platform: "threads",
+      keywords: "snap_b",
+      requested_count: 1,
+      status: "queued",
+      attempts: 0,
+      max_attempts: 3,
+      created_at: "2026-11-27T11:10:00.000Z",
+      updated_at: "2026-11-27T11:10:00.000Z",
+    });
+    const claimSnapB = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/claim", {
+      method: "POST", headers: hMuse22, body: "{}",
+    }), env22)).json();
+    assert.equal(claimSnapB.request.id, "crw_22_snap_b");
+    const compSnapBRes = await (await worker.fetch(new Request("https://example.workers.dev/api/crawl/complete", {
+      method: "POST",
+      headers: hMuse22,
+      body: JSON.stringify({
+        request_id: "crw_22_snap_b",
+        attempt: 1,
+        result_summary: { contract_version: "3.2", run_id: "run_22_sync_b", crawled_at: "2026-11-27T14:50:00+07:00", run_status: "completed" },
+        items: [{
+          platform: "threads",
+          post_id: "P22_B",
+          canonical_url: "https://threads.net/@u22/post/P22_B",
+          measured_at: "2026-11-27T14:50:00+07:00",
+          likes: 80,
+        }],
+      }),
+    }), env22)).json();
+    assert.equal(compSnapBRes.dedup_stats.snapshots_created, 0);
+    assert.equal(compSnapBRes.dedup_stats.snapshots_deduped, 1);
+    assert.equal(env22.DB.postRegistry.get("threads:post:P22_B").snapshot_count, 1);
+  } finally {
+    globalThis.fetch = prevFetch22;
+  }
+}
+
+// 23. Manual Prompt Trigger + Strict Claim by request_id + Drive Listener Reconciliation + E2E 1622 fixes
+{
+  const tgCalls = [];
+  let driveFilesByFolder = {
+    threads: [],
+    reports: [],
+  };
+  let drivePayloadById = {};
+  const prevFetch23 = globalThis.fetch;
+
+  const svcKeyPem = (() => {
+    const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+    return privateKey.export({ type: "pkcs8", format: "pem" });
+  })();
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.startsWith("https://oauth2.googleapis.com/token")) {
+      return new Response(JSON.stringify({ access_token: "drv_tok_23", expires_in: 3600 }), { status: 200 });
+    }
+    if (u.startsWith("https://www.googleapis.com/drive/v3/files/")) {
+      const m = u.match(/\/files\/([^/?]+)/);
+      const fid = m ? decodeURIComponent(m[1]) : "";
+      if (drivePayloadById[fid] !== undefined) {
+        return new Response(JSON.stringify(drivePayloadById[fid]), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+    }
+    if (u.startsWith("https://www.googleapis.com/drive/v3/files")) {
+      const parsedUrl = new URL(u);
+      const q = parsedUrl.searchParams.get("q") || "";
+      if (q.includes("01_Market_Data")) {
+        return new Response(JSON.stringify({ files: [{ id: "mdata_root", name: "01_Market_Data", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200 });
+      }
+      if (q.includes("'mdata_root' in parents")) {
+        return new Response(JSON.stringify({
+          files: [
+            { id: "threads_dir", name: "Threads", mimeType: "application/vnd.google-apps.folder" },
+            { id: "reports_dir", name: "Reports", mimeType: "application/vnd.google-apps.folder" },
+          ],
+        }), { status: 200 });
+      }
+      if (q.includes("name = 'Reports'") || q.includes("name='Reports'")) {
+        return new Response(JSON.stringify({ files: [{ id: "reports_dir", name: "Reports", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200 });
+      }
+      if (q.includes("'threads_dir' in parents")) {
+        return new Response(JSON.stringify({ files: driveFilesByFolder.threads }), { status: 200 });
+      }
+      if (q.includes("'reports_dir' in parents")) {
+        return new Response(JSON.stringify({ files: driveFilesByFolder.reports }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ files: [] }), { status: 200 });
+    }
+    if (u.startsWith("https://api.telegram.org/")) {
+      let body = {};
+      try { body = JSON.parse(init?.body || "{}"); } catch {}
+      tgCalls.push({ url: u, body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 2300 + tgCalls.length } }), { status: 200 });
+    }
+    return prevFetch23(url, init);
+  };
+
+  try {
+    const env23 = {
+      DB: new MockD1Database(),
+      APP_VIDEO_API_TOKEN: "app-token-23",
+      MUSE_APP_VIDEO_TOKEN: "muse-token-23",
+      TELEGRAM_BOT_TOKEN_VIDEO: "bot-tok-23",
+      TELEGRAM_WEBHOOK_SECRET: "tg-sec-23",
+      TELEGRAM_OWNER_ID: "99887766",
+      MUSE_WEB_URL: "https://muse.ai/",
+      THREADS_FOLDER_ID: "legacy_threads_dir",
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: "svc@test-project.iam.gserviceaccount.com",
+        private_key: svcKeyPem,
+      }),
+    };
+
+    const findReq = (id) => Array.from(env23.DB.crawlRequests.values()).find(r => r.id === id);
+    const countReqs = () => Array.from(env23.DB.crawlRequests.values()).length;
+
+    const appHeaders = {
+      "Content-Type": "application/json",
+      Authorization: "Bearer app-token-23",
+    };
+    const museHeaders = {
+      "Content-Type": "application/json",
+      Authorization: "Bearer muse-token-23",
+    };
+
+    // 23A: Shared Manual Prompt Trigger + Display States + Non-duplication + Platform contracts
+    const createThreadsResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "serum vitamin c" }),
+      }),
+      env23
+    )).json();
+    assert.equal(createThreadsResp.ok, true);
+    const reqThreads1 = createThreadsResp.request;
+    assert.equal(reqThreads1.display_status, "waiting_prompt");
+    assert.equal(reqThreads1.display_status_label, "Chờ gửi prompt");
+    assert.equal(reqThreads1.contract_version, "3.2");
+    assert.equal(reqThreads1.muse_web_url, "https://muse.ai/");
+    assert.match(reqThreads1.manual_prompt, new RegExp(`Request ID: ${reqThreads1.id}`));
+    assert.match(reqThreads1.manual_prompt, /Contract Version: 3\.2/);
+    assert.match(reqThreads1.manual_prompt, /POST \/api\/crawl\/claim/);
+    assert.match(reqThreads1.manual_prompt, /serum vitamin c/);
+
+    // Copy lại Prompt endpoint returns exact prompt without creating extra D1 requests
+    const countBeforeCopy = countReqs();
+    const promptAgain1 = await (await worker.fetch(
+      new Request(`https://worker.example/api/app/crawl-requests/${reqThreads1.id}/prompt`, { headers: appHeaders }),
+      env23
+    )).json();
+    const promptAgain2 = await (await worker.fetch(
+      new Request(`https://worker.example/api/app/crawl-requests/${reqThreads1.id}/prompt`, { headers: appHeaders }),
+      env23
+    )).json();
+    assert.equal(countReqs(), countBeforeCopy);
+    assert.equal(promptAgain1.manual_prompt, reqThreads1.manual_prompt);
+    assert.equal(promptAgain2.manual_prompt, reqThreads1.manual_prompt);
+
+    // Per-platform prompt differences: TikTok & ALL must NOT advertise /api/crawl/* completion support
+    const createTtResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "tiktok", requested_count: 15, keywords: "skincare" }),
+      }),
+      env23
+    )).json();
+    assert.equal(createTtResp.request.contract_version, "v2");
+    assert.match(createTtResp.request.manual_prompt, /CHỈ hỗ trợ platform="threads"/);
+    assert.match(createTtResp.request.manual_prompt, /KHÔNG dùng các endpoint \/api\/crawl\/\*/);
+
+    const createAllResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "all", requested_count: 20, keywords: "review" }),
+      }),
+      env23
+    )).json();
+    assert.match(createAllResp.request.manual_prompt, /CHƯA hỗ trợ cho platform="all"/);
+
+    // Telegram Manual Prompt Trigger uses same shared buildMuseManualPrompt & inline Mở Muse button
+    const tgReqRes = await worker.fetch(
+      new Request("https://worker.example/telegram", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": "tg-sec-23",
+        },
+        body: JSON.stringify({
+          update_id: 2301,
+          message: {
+            message_id: 11,
+            from: { id: 99887766 },
+            chat: { id: 99887766, type: "private" },
+            text: "/request_crawl threads 12 retinol",
+          },
+        }),
+      }),
+      env23
+    );
+    assert.equal(tgReqRes.status, 200);
+    const tgPromptMsg = tgCalls.find(c => String(c.body?.text || "").includes("Request ID:"));
+    assert.ok(tgPromptMsg, "Telegram /request_crawl should output Manual Prompt");
+    assert.match(tgPromptMsg.body.text, /<pre>[\s\S]*Contract Version: 3\.2[\s\S]*<\/pre>/);
+    const museBtn = tgPromptMsg.body.reply_markup.inline_keyboard.flat().find(b => b.url === "https://muse.ai/");
+    assert.ok(museBtn, "Telegram response must include Mở Muse button");
+    const reqThreads2 = Array.from(env23.DB.crawlRequests.values()).find(r => r.keywords === "retinol");
+    assert.ok(reqThreads2, "Telegram should create second threads request");
+
+    // Re-fetching prompt via Telegram callback does NOT create new request
+    const countBeforeTgPrompt = countReqs();
+    await worker.fetch(
+      new Request("https://worker.example/telegram", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": "tg-sec-23",
+        },
+        body: JSON.stringify({
+          update_id: 2302,
+          callback_query: {
+            id: "cb_prompt_23",
+            from: { id: 99887766 },
+            message: { message_id: 12, chat: { id: 99887766, type: "private" } },
+            data: `crawl:prompt:${reqThreads2.id}`,
+          },
+        }),
+      }),
+      env23
+    );
+    assert.equal(countReqs(), countBeforeTgPrompt);
+
+    // 23B: Strict POST /api/crawl/claim by request_id (no fallback across queued items)
+    // Order: reqThreads1 (older queued), reqThreads2 (newer queued), createTtResp.request (tiktok)
+    const missingClaim = await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: "crw_missing_999" }),
+      }),
+      env23
+    );
+    assert.equal(missingClaim.status, 404);
+    assert.equal(findReq(reqThreads1.id).status, "queued");
+    assert.equal(findReq(reqThreads2.id).status, "queued");
+
+    const wrongPlatClaim = await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: createTtResp.request.id }),
+      }),
+      env23
+    );
+    assert.equal(wrongPlatClaim.status, 403);
+    assert.equal(findReq(reqThreads1.id).status, "queued");
+
+    // Target claim explicitly selects newer reqThreads2 instead of older reqThreads1
+    const claimNewRes = await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqThreads2.id }),
+      }),
+      env23
+    );
+    assert.equal(claimNewRes.status, 200);
+    const claimNewJson = await claimNewRes.json();
+    assert.equal(claimNewJson.request.id, reqThreads2.id);
+    assert.equal(claimNewJson.request.attempt, 1);
+    assert.equal(findReq(reqThreads1.id).status, "queued");
+
+    // Single-flight blocks claiming reqThreads1 while reqThreads2 is running
+    const claimOtherWhileRunning = await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqThreads1.id }),
+      }),
+      env23
+    );
+    assert.equal(claimOtherWhileRunning.status, 200);
+    const claimOtherJson = await claimOtherWhileRunning.json();
+    assert.equal(claimOtherJson.request, null);
+    assert.equal(claimOtherJson.single_flight_blocked, true);
+    assert.equal(claimOtherJson.reason, "active_crawl_in_progress");
+    assert.equal(findReq(reqThreads1.id).status, "queued");
+
+    // 23C: Drive Listener Reconciliation (Cron) — waiting_pair, validation_failed, stale attempt, valid pair, concurrency race
+    const tgCountBeforeReconcile = tgCalls.length;
+    const validDrivePost = {
+      platform: "threads",
+      post_id: "P_DRV_23_1",
+      url: "https://www.threads.com/@brand.vn/post/P_DRV_23_1",
+      author_handle: "@brand.vn",
+      text: "Review serum vitamin C da nhạy cảm",
+      views: 15200,
+      likes: 420,
+      comments: 31,
+      reposts: 12,
+      shares: 9,
+      views_display: "15.2K",
+      views_precision: "exact_badge",
+      views_source: "threads_web_browser",
+      views_measured_at: "2026-11-28T03:00:00Z",
+      views_evidence_url: "https://www.threads.com/@brand.vn/post/P_DRV_23_1",
+      posted_at: "2026-11-28T01:00:00Z",
+      classification: "NEW",
+    };
+    const buildV32Report = (reqId, runId, attempt, qualifiedCount = 1) => ({
+      contract_version: "3.2",
+      request_id: reqId,
+      run_id: runId,
+      attempt,
+      claimed_by: "muse-ai",
+      platform: "threads",
+      crawled_at: "2026-11-28T03:05:00Z",
+      generated_at: "2026-11-28T03:05:00Z",
+      run_status: qualifiedCount > 0 ? "completed" : "no_qualifying_posts",
+      stop_reason: qualifiedCount > 0 ? "target_reached" : "no_qualifying_posts",
+      counters: {
+        scanned_count: qualifiedCount,
+        unique_candidate_count: qualifiedCount,
+        new_qualified_count: qualifiedCount,
+        updated_metrics_count: 0,
+        duplicate_history_count: 0,
+        rejected_count: 0,
+        unverified_count: 0,
+        missing_views_count: 0,
+        counters_reconciled: true,
+      },
+      sections: {
+        "1_screening": { scanned: qualifiedCount, new_qualified: qualifiedCount, updated_metrics: 0, rejected: 0, missing_views: 0 },
+        "2_market": "Serum vitamin C tăng trưởng ổn định",
+        "4_growth": "Tương tác tốt ở phân khúc skincare",
+      },
+      telegram_summary: `Drive Reconcile Test (${qualifiedCount} bài mới)`,
+    });
+
+    // Subcase 1: Data JSON alone (no Report JSON) -> waiting_pair, NOT completed, 0 registry writes, 0 Telegram
+    driveFilesByFolder.threads = [
+      { id: "drv_data_only", name: "threads_trend_20261128_1000.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:05:00Z" },
+    ];
+    driveFilesByFolder.reports = [];
+    drivePayloadById = {
+      drv_data_only: {
+        contract_version: "3.2",
+        request_id: reqThreads2.id,
+        run_id: "run_drv_23",
+        attempt: 1,
+        claimed_by: "muse-ai",
+        platform: "threads",
+        counters: { scanned_count: 1, new_qualified_count: 1 },
+        items: [validDrivePost],
+      },
+    };
+    await worker.scheduled({}, env23, {});
+    const afterSingleFile = findReq(reqThreads2.id);
+    assert.equal(afterSingleFile.status, "running");
+    assert.equal(JSON.parse(afterSingleFile.result_summary_json).drive_reconcile.status, "waiting_pair");
+    assert.equal(env23.DB.postRegistry.size, 0);
+    assert.equal(tgCalls.length, tgCountBeforeReconcile);
+
+    // Subcase 2: Pair pointing to UNCLAIMED queued request (reqThreads1) + CANCELLED request -> NEVER completed
+    const reqCancelledResp = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 5, keywords: "cancel check" }),
+      }),
+      env23
+    )).json();
+    await worker.fetch(
+      new Request(`https://worker.example/api/app/crawl-requests/${reqCancelledResp.request.id}/cancel`, {
+        method: "POST",
+        headers: appHeaders,
+      }),
+      env23
+    );
+    driveFilesByFolder.threads = [
+      { id: "drv_d_queued", name: "threads_trend_20261128_1001.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
+      { id: "drv_d_cancel", name: "threads_trend_20261128_1002.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
+    ];
+    driveFilesByFolder.reports = [
+      { id: "drv_r_queued", name: "trend_report_20261128_1001.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
+      { id: "drv_r_cancel", name: "trend_report_20261128_1002.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:06:00Z" },
+    ];
+    drivePayloadById = {
+      drv_d_queued: { contract_version: "3.2", request_id: reqThreads1.id, run_id: "run_unclaimed", attempt: 1, claimed_by: "muse-ai", platform: "threads", items: [validDrivePost] },
+      drv_r_queued: buildV32Report(reqThreads1.id, "run_unclaimed", 1, 1),
+      drv_d_cancel: { contract_version: "3.2", request_id: reqCancelledResp.request.id, run_id: "run_cancelled", attempt: 1, claimed_by: "muse-ai", platform: "threads", items: [validDrivePost] },
+      drv_r_cancel: buildV32Report(reqCancelledResp.request.id, "run_cancelled", 1, 1),
+    };
+    await worker.scheduled({}, env23, {});
+    assert.equal(findReq(reqThreads1.id).status, "queued");
+    assert.equal(JSON.parse(findReq(reqThreads1.id).result_summary_json).drive_reconcile.status, "validation_failed");
+    assert.equal(findReq(reqCancelledResp.request.id).status, "cancelled");
+    assert.equal(env23.DB.postRegistry.size, 0);
+
+    // Subcase 3: Stale attempt=1 artifact when reqThreads2 is on attempt=2 -> stale_attempt_rejected
+    findReq(reqThreads2.id).attempts = 2;
+    driveFilesByFolder.threads = [
+      { id: "drv_d_stale", name: "threads_trend_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
+    ];
+    driveFilesByFolder.reports = [
+      { id: "drv_r_stale", name: "trend_report_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
+    ];
+    drivePayloadById = {
+      drv_d_stale: { contract_version: "3.2", request_id: reqThreads2.id, run_id: "run_drv_23", attempt: 1, claimed_by: "muse-ai", platform: "threads", counters: { scanned_count: 1, new_qualified_count: 1 }, items: [validDrivePost] },
+      drv_r_stale: buildV32Report(reqThreads2.id, "run_drv_23", 1, 1),
+    };
+    await worker.scheduled({}, env23, {});
+    const afterStale = findReq(reqThreads2.id);
+    assert.equal(afterStale.status, "running");
+    assert.equal(JSON.parse(afterStale.result_summary_json).drive_reconcile.status, "stale_attempt_rejected");
+    assert.equal(env23.DB.postRegistry.size, 0);
+
+    // Subcase 4: Valid attempt=2 Data+Report pair -> reconciles to completed + syncs Registry + sends Telegram ONCE
+    driveFilesByFolder.threads = [
+      { id: "drv_d_stale", name: "threads_trend_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
+      { id: "drv_d_ok", name: "threads_trend_20261128_1008.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:08:00Z" },
+    ];
+    driveFilesByFolder.reports = [
+      { id: "drv_r_stale", name: "trend_report_20261128_1003.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:07:00Z" },
+      { id: "drv_r_ok", name: "trend_report_20261128_1008.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:08:00Z" },
+    ];
+    drivePayloadById.drv_d_ok = {
+      contract_version: "3.2",
+      request_id: reqThreads2.id,
+      run_id: "run_drv_23_att2",
+      attempt: 2,
+      claimed_by: "muse-ai",
+      platform: "threads",
+      counters: { scanned_count: 1, new_qualified_count: 1 },
+      items: [validDrivePost],
+    };
+    drivePayloadById.drv_r_ok = buildV32Report(reqThreads2.id, "run_drv_23_att2", 2, 1);
+
+    await worker.scheduled({}, env23, {});
+    const completedReq2 = findReq(reqThreads2.id);
+    assert.equal(completedReq2.status, "completed");
+    assert.equal(JSON.parse(completedReq2.result_summary_json).registry_sync_status, "ok");
+    assert.equal(JSON.parse(completedReq2.result_summary_json).drive_reconcile.status, "ok");
+    assert.equal(env23.DB.postRegistry.get("threads:post:P_DRV_23_1").snapshot_count, 1);
+    const tgSentAfterReconcile = tgCalls.slice(tgCountBeforeReconcile).filter(c => c.url.includes("sendMessage"));
+    assert.equal(tgSentAfterReconcile.length, 1);
+    assert.ok(completedReq2.notified_at);
+
+    // Second Cron tick produces ZERO extra snapshots or Telegram messages
+    const tgTotalAfterTick1 = tgCalls.length;
+    await worker.scheduled({}, env23, {});
+    assert.equal(env23.DB.postRegistry.get("threads:post:P_DRV_23_1").snapshot_count, 1);
+    assert.equal(tgCalls.length, tgTotalAfterTick1);
+
+    // Subcase 5: Concurrent race between POST /api/crawl/complete & worker.scheduled()
+    const claimRace = await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqThreads1.id }),
+      }),
+      env23
+    );
+    assert.equal(claimRace.status, 200);
+    const racePost = {
+      ...validDrivePost,
+      post_id: "P_RACE_23",
+      url: "https://www.threads.com/@race.vn/post/P_RACE_23",
+      views_evidence_url: "https://www.threads.com/@race.vn/post/P_RACE_23",
+    };
+    driveFilesByFolder.threads = [
+      { id: "drv_d_race", name: "threads_trend_20261128_1015.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:15:00Z" },
+    ];
+    driveFilesByFolder.reports = [
+      { id: "drv_r_race", name: "trend_report_20261128_1015.json", mimeType: "application/json", modifiedTime: "2026-11-28T03:15:00Z" },
+    ];
+    drivePayloadById = {
+      drv_d_race: {
+        contract_version: "3.2",
+        request_id: reqThreads1.id,
+        run_id: "run_race_23",
+        attempt: 1,
+        claimed_by: "muse-ai",
+        platform: "threads",
+        counters: { scanned_count: 1, new_qualified_count: 1 },
+        items: [racePost],
+      },
+      drv_r_race: buildV32Report(reqThreads1.id, "run_race_23", 1, 1),
+    };
+    const tgBeforeRace = tgCalls.filter(c => c.url.includes("sendMessage")).length;
+    const [apiRaceRes] = await Promise.all([
+      worker.fetch(
+        new Request("https://worker.example/api/crawl/complete", {
+          method: "POST",
+          headers: museHeaders,
+          body: JSON.stringify({
+            request_id: reqThreads1.id,
+            attempt: 1,
+            run_id: "run_race_23",
+            report_file_id: "drv_r_race",
+            items: [racePost],
+            result_summary: buildV32Report(reqThreads1.id, "run_race_23", 1, 1),
+          }),
+        }),
+        env23
+      ),
+      worker.scheduled({}, env23, {}),
+    ]);
+    assert.ok([200, 409].includes(apiRaceRes.status));
+    assert.equal(findReq(reqThreads1.id).status, "completed");
+    assert.equal(env23.DB.postRegistry.get("threads:post:P_RACE_23").snapshot_count, 1);
+    const tgAfterRace = tgCalls.filter(c => c.url.includes("sendMessage")).length;
+    assert.equal(tgAfterRace - tgBeforeRace, 1);
+
+    // 23D: E2E 1622 fixes — @shopee.vn hostname allowlist, REJECTED vs UPDATED_METRICS, missing_views_count, +07:00 vs Z, 0-qualified notification
+    driveFilesByFolder = { threads: [], reports: [] };
+    drivePayloadById = {};
+    env23.DB.postRegistry.set("threads:post:P1622_REJ", {
+      dedup_key: "threads:post:P1622_REJ",
+      platform: "threads",
+      post_id: "P1622_REJ",
+      canonical_url: "https://www.threads.com/@shopee.vn/post/P1622_REJ",
+      first_seen_at: "2026-11-27T08:00:00Z",
+      last_seen_at: "2026-11-27T15:00:00+07:00",
+      latest_metrics_json: JSON.stringify({ views: null, likes: 5, comments: 1, shares: 0 }),
+      snapshot_count: 1,
+    });
+    env23.DB.postRegistry.set("threads:post:P1622_UPD", {
+      dedup_key: "threads:post:P1622_UPD",
+      platform: "threads",
+      post_id: "P1622_UPD",
+      canonical_url: "https://www.threads.com/@creator.vn/post/P1622_UPD",
+      first_seen_at: "2026-11-27T08:00:00Z",
+      last_seen_at: "2026-11-27T15:00:00+07:00", // = 08:00Z
+      latest_metrics_json: JSON.stringify({ views: null, likes: 10, comments: 2, shares: 1 }),
+      snapshot_count: 1,
+    });
+
+    const req1622Create = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "e2e1622" }),
+      }),
+      env23
+    )).json();
+    const req1622Id = req1622Create.request.id;
+    assert.equal(req1622Create.request.requested_by_chat_id || null, null);
+    await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: req1622Id }),
+      }),
+      env23
+    );
+
+    // Non-Threads hostname (shopee.vn) MUST still be rejected with 400
+    const badHostRes = await worker.fetch(
+      new Request("https://worker.example/api/crawl/complete", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: req1622Id,
+          attempt: 1,
+          run_id: "run_bad_host_23",
+          items: [{ platform: "threads", post_id: "BAD_H", url: "https://shopee.vn/product/123", text: "bad" }],
+          result_summary: buildV32Report(req1622Id, "run_bad_host_23", 1, 1),
+        }),
+      }),
+      env23
+    );
+    assert.equal(badHostRes.status, 400);
+
+    // Valid @shopee.vn URL + REJECTED reposts:null->0 + UPDATED_METRICS without views + 1 unverified missing views + mixed-TZ older late snapshot
+    const tgBefore1622 = tgCalls.length;
+    const comp1622 = await worker.fetch(
+      new Request("https://worker.example/api/crawl/complete", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: req1622Id,
+          attempt: 1,
+          run_id: "run_1622_fix",
+          items: [
+            {
+              platform: "threads",
+              post_id: "P1622_REJ",
+              url: "https://www.threads.com/@shopee.vn/post/P1622_REJ",
+              author_handle: "@shopee.vn",
+              likes: 5,
+              comments: 1,
+              shares: 0,
+              reposts: 0,
+              views: null,
+              classification: "REJECTED",
+              crawled_at: "2026-11-28T03:30:00Z",
+            },
+            {
+              platform: "threads",
+              post_id: "P1622_UPD",
+              url: "https://www.threads.com/@creator.vn/post/P1622_UPD",
+              author_handle: "@creator.vn",
+              likes: 25,
+              comments: 2,
+              shares: 1,
+              views: null,
+              classification: "UPDATED_METRICS",
+              crawled_at: "2026-11-28T03:30:00Z",
+            },
+            {
+              platform: "threads",
+              post_id: "P1622_UPD",
+              url: "https://www.threads.com/@creator.vn/post/P1622_UPD",
+              author_handle: "@creator.vn",
+              likes: 7,
+              comments: 1,
+              shares: 0,
+              views: null,
+              classification: "DUPLICATE_HISTORY",
+              crawled_at: "2026-11-27T09:00:00+07:00", // = 02:00Z, older than existing 08:00Z!
+            },
+            {
+              platform: "threads",
+              post_id: "P1622_MISS",
+              url: "https://www.threads.com/@newshop.vn/post/P1622_MISS",
+              author_handle: "@newshop.vn",
+              likes: 30,
+              comments: 5,
+              shares: 2,
+              views: null,
+              classification: "NEW_UNVERIFIED",
+              crawled_at: "2026-11-28T03:30:00Z",
+            },
+          ],
+          result_summary: {
+            contract_version: "3.2",
+            request_id: req1622Id,
+            run_id: "run_1622_fix",
+            platform: "threads",
+            crawled_at: "2026-11-28T03:30:00Z",
+            run_status: "no_qualifying_posts",
+            stop_reason: "no_qualifying_posts",
+            counters: {
+              scanned_count: 4,
+              unique_candidate_count: 3,
+              new_qualified_count: 0,
+              updated_metrics_count: 1,
+              duplicate_history_count: 0,
+              rejected_count: 1,
+              unverified_count: 1,
+              missing_views_count: 1,
+              counters_reconciled: true,
+            },
+            sections: {
+              "1_screening": { scanned: 4, new_qualified: 0, updated_metrics: 1, rejected: 1, missing_views: 1 },
+              "3_trends": [{ topic: "Skincare routine tối giản", count: 2 }],
+              "9_growth_tracking": ["Tệp follower tăng nhanh ở nhóm beauty"],
+            },
+            telegram_summary: "Đã quét 4 bài: 0 bài đạt chuẩn mới, 1 cập nhật metric, 1 thiếu views.",
+          },
+        }),
+      }),
+      env23
+    );
+    assert.equal(comp1622.status, 200);
+    const comp1622Json = await comp1622.json();
+    assert.equal(comp1622Json.dedup_stats.rejected_count, 1);
+    assert.equal(comp1622Json.dedup_stats.updated_metrics_count, 1);
+    assert.equal(comp1622Json.dedup_stats.new_qualified_count, 0);
+    assert.equal(comp1622Json.dedup_stats.missing_views_count, 1);
+    assert.equal(comp1622Json.display_status, "completed");
+    assert.equal(comp1622Json.telegram_notified, true);
+    assert.equal(JSON.parse(findReq(req1622Id).result_summary_json).missing_views_count, 1);
+    const regUpd = env23.DB.postRegistry.get("threads:post:P1622_UPD");
+    assert.equal(JSON.parse(regUpd.latest_metrics_json).likes, 25);
+    assert.equal(Date.parse(regUpd.last_seen_at) >= Date.parse("2026-11-28T03:30:00Z"), true);
+    const rejSnaps = Array.from(env23.DB.postSnapshots.values()).filter(s => s.dedup_key === "threads:post:P1622_REJ");
+    assert.ok(rejSnaps.some(s => s.classification === "REJECTED"));
+    const tgSent1622 = tgCalls.slice(tgBefore1622).filter(c => c.url.includes("sendMessage") || c.url.includes("editMessageText"));
+    assert.equal(tgSent1622.length, 1);
+    assert.equal(String(tgSent1622[0].body.chat_id), "99887766");
+    assert.match(tgSent1622[0].body.text, /🔥 Trend thị trường/);
+    assert.match(tgSent1622[0].body.text, /📈 Biến động so với lượt trước/);
+
+    // Pure 0-item no_qualifying_posts V3.2 completion succeeds and delivers structured summary
+    const reqZeroCreate = await (await worker.fetch(
+      new Request("https://worker.example/api/app/crawl-requests", {
+        method: "POST",
+        headers: appHeaders,
+        body: JSON.stringify({ platform: "threads", requested_count: 10, keywords: "zero_valid" }),
+      }),
+      env23
+    )).json();
+    await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: reqZeroCreate.request.id }),
+      }),
+      env23
+    );
+    const compZero = await worker.fetch(
+      new Request("https://worker.example/api/crawl/complete", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: reqZeroCreate.request.id,
+          attempt: 1,
+          run_id: "run_zero_v32_23",
+          items: [],
+          result_summary: {
+            contract_version: "3.2",
+            request_id: reqZeroCreate.request.id,
+            run_id: "run_zero_v32_23",
+            platform: "threads",
+            crawled_at: "2026-11-28T03:45:00Z",
+            run_status: "no_qualifying_posts",
+            stop_reason: "no_qualifying_posts",
+            counters: {
+              scanned_count: 15,
+              unique_candidate_count: 0,
+              new_qualified_count: 0,
+              updated_metrics_count: 0,
+              duplicate_history_count: 0,
+              rejected_count: 0,
+              unverified_count: 0,
+              missing_views_count: 0,
+              counters_reconciled: true,
+            },
+            sections: {
+              "1_screening": { scanned: 15, new_qualified: 0 },
+              "3_trends": [{ topic: "Chưa đủ mẫu đạt chuẩn", count: 0 }],
+            },
+            telegram_summary: "Đã quét 15 bài nhưng không có bài đạt chuẩn mới.",
+          },
+        }),
+      }),
+      env23
+    );
+    assert.equal(compZero.status, 200);
+    const compZeroJson = await compZero.json();
+    assert.equal(compZeroJson.status, "completed");
+    assert.equal(compZeroJson.registry_sync_status, "ok");
+    assert.equal(compZeroJson.telegram_notified, true);
+  } finally {
+    globalThis.fetch = prevFetch23;
   }
 }
 

@@ -1237,6 +1237,30 @@ class TestMarketNormalizerAndStorage(unittest.TestCase):
         self.assertEqual(merged_after["snapshot_count"], 2)
         self.assertEqual(len(self.store.get_item_detail(merged_after["id"])["snapshots"]), 2)
 
+        # 10) Desktop sync preserves canonical_url and item-level measured_at even when views_measured_at is null
+        canon_meas_payload = {
+            "run_id": "run-v32-desktop-align",
+            "platform": "threads",
+            "started_at": "2026-11-27T14:23:00+07:00",
+            "ended_at": "2026-11-27T14:35:00+07:00",
+            "records": [
+                {
+                    "platform": "threads",
+                    "post_id": "ALIGN_1423",
+                    "canonical_url": "https://www.threads.net/@align/post/ALIGN_1423?ref=1",
+                    "measured_at": "2026-11-27T14:25:00+07:00",
+                    "views_measured_at": None,
+                    "likes_count": 42,
+                }
+            ],
+        }
+        res_align = self.store.ingest_raw_file(
+            "f_align_1423", "threads_trend_align_1423.json", json.dumps(canon_meas_payload).encode("utf-8")
+        )
+        reg_align = res_align["registry_items"][0]
+        self.assertEqual(reg_align["canonical_url"], "https://threads.net/@align/post/ALIGN_1423")
+        self.assertEqual(reg_align["measured_at"], "2026-11-27T14:25:00+07:00")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

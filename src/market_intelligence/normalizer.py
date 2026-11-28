@@ -511,6 +511,12 @@ def normalize_record(
         or envelope.get("started_at")
         or item.get("views_measured_at")
     )
+    measured_at = _clean_str(
+        item.get("views_measured_at")
+        or item.get("measured_at")
+        or item.get("crawled_at")
+        or crawled_at
+    )
     language = _clean_str(item.get("language"))
 
     likes_count = _clean_int(item.get("likes") if "likes" in item else item.get("likes_count"))
@@ -696,13 +702,14 @@ def normalize_record(
     if is_corrected:
         extra_meta["is_corrected"] = True
 
+    canon_url_raw = _clean_str(item.get("canonical_url")) or url
     dedup_key = build_dedup_key(
         platform=platform,
         post_id=post_id,
         item_id=item_id,
         shop_id=shop_id,
         external_id=external_id,
-        url=url,
+        url=canon_url_raw,
         author_handle=author_handle,
         published_at=published_at,
         title=title,
@@ -726,13 +733,14 @@ def normalize_record(
         "text_content": text_content,
         "summary_vi": summary_vi or text_content,
         "url": url,
-        "canonical_url": _canonical_url(url),
+        "canonical_url": _canonical_url(canon_url_raw),
         "evidence_url": evidence_url,
         "content_group": content_group,
         "purchase_intent": purchase_intent,
         "language": language,
         "published_at": published_at,
         "crawled_at": crawled_at,
+        "measured_at": measured_at,
         "likes_count": likes_count,
         "comments_count": comments_count,
         "shares_count": shares_count,

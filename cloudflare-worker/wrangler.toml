@@ -4,7 +4,8 @@ compatibility_date = "2026-11-26"
 
 [vars]
 GOOGLE_DRIVE_FOLDER_ID = "1F5m2t3uPxSlicE8PQW70xjf7FSC6345g"
-MUSE_POLL_PROFILE = "test_5m"
+MUSE_POLL_PROFILE = "production_6h"
+MUSE_WEB_URL = "https://muse.ai/"
 
 [[d1_databases]]
 binding = "DB"
