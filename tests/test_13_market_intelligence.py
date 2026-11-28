@@ -1983,8 +1983,8 @@ class TestDataContractV33AndSafeMetricRepair(unittest.TestCase):
 
         s1_payload = {
             "contract_version": "3.3",
-            "quality_policy_version": "3.3-a-20261128",
-            "skill_version": "1.0",
+            "quality_policy_version": "3.3-hot-only-r2-20261128",
+            "skill_version": "1.2",
             "request_id": "crw_bundle_100",
             "run_id": "crw_bundle_100_s1",
             "session_seq": 1,
@@ -2000,8 +2000,8 @@ class TestDataContractV33AndSafeMetricRepair(unittest.TestCase):
         }
         s2_payload = {
             "contract_version": "3.3",
-            "quality_policy_version": "3.3-a-20261128",
-            "skill_version": "1.0",
+            "quality_policy_version": "3.3-hot-only-r2-20261128",
+            "skill_version": "1.2",
             "request_id": "crw_bundle_100",
             "run_id": "crw_bundle_100_s2",
             "session_seq": 2,
@@ -2081,7 +2081,7 @@ class TestDataContractV33AndSafeMetricRepair(unittest.TestCase):
         }
         v33_low = {
             "contract_version": "3.3",
-            "quality_policy_version": "3.3-hot-only-20261128",
+            "quality_policy_version": "3.3-hot-only-r2-20261128",
             "run_id": "run_v33_23views",
             "platform": "threads",
             "crawled_at": "2026-11-28T09:00:00Z",
@@ -2105,6 +2105,123 @@ class TestDataContractV33AndSafeMetricRepair(unittest.TestCase):
         self.assertEqual([x["post_id"] for x in self.store.query_items(run_key="run_legacy_v32_keep")["items"]], ["LEG_EM_V32"])
         self.assertEqual(self.store.query_items(run_key="run_v33_23views")["items"], [])
         self.assertEqual(self.store.get_run_audit_diagnostics("run_v33_23views")["below_hot_count"], 1)
+
+    def test_r2_threshold_boundaries_and_historical_dynamic_display(self):
+        from src.market_intelligence.normalizer import assess_v33_quality, classify_display_tier_r2
+
+        def _norm_candidate(pid, views, likes, *, tier="emerging", cls="NEW", with_views_prov=True):
+            rec = {
+                "platform": "threads",
+                "post_id": pid,
+                "url": f"https://www.threads.com/@u/post/{pid}",
+                "summary_vi": f"Summary {pid}",
+                "classification": cls,
+                "trend_tier": tier,
+                "verification_status": "cross_verified_web",
+                "views_count": views,
+                "likes_count": likes,
+                "views_source": "threads_web_browser" if with_views_prov else None,
+                "views_display": str(views) if views is not None else None,
+                "views_precision": "exact" if with_views_prov else None,
+                "views_measured_at": "2026-11-28T10:00:00Z" if with_views_prov else None,
+                "views_evidence_url": f"https://www.threads.com/@u/post/{pid}" if with_views_prov else None,
+                "views_missing": 1 if views is None else 0,
+            }
+            return rec
+
+        # Exact Policy 3.3-hot-only-r2-20261128 boundaries:
+        cases = [
+            ("B_5000_199", 5000, 199, False, "below_hot"),
+            ("B_5001_0", 5001, 0, True, "hot"),
+            ("B_0_200", 0, 200, True, "hot"),
+            ("B_49999_999", 49999, 999, True, "hot"),
+            ("B_50000_0", 50000, 0, True, "very_hot"),
+            ("B_0_1000", 0, 1000, True, "very_hot"),
+        ]
+        for pid, v, l, exp_q, exp_tier in cases:
+            cand = _norm_candidate(pid, v, l)
+            q = assess_v33_quality(cand)
+            d = classify_display_tier_r2(cand)
+            self.assertEqual(q["quality_qualified"], exp_q, f"{pid} quality_qualified mismatch")
+            self.assertEqual(q["quality_tier_basis"], exp_tier, f"{pid} quality_tier_basis mismatch")
+            self.assertEqual(d["display_qualified"], exp_q, f"{pid} display_qualified mismatch")
+            self.assertEqual(d["effective_tier"], exp_tier, f"{pid} effective_tier mismatch")
+
+        # Missing views or likes MUST NOT qualify even if the other metric is high
+        for pid, v, l in [("M_NO_V", None, 1500), ("M_NO_L", 60000, None)]:
+            cand = _norm_candidate(pid, v, l, with_views_prov=(v is not None))
+            self.assertFalse(assess_v33_quality(cand)["quality_qualified"])
+            self.assertFalse(classify_display_tier_r2(cand)["display_qualified"])
+
+        # Historical V3.2 items ingested intact (immutable snapshots, reports, counters);
+        # hot_only=True promotes verified >=Hot historical posts & hides below-threshold while keeping them in SQLite
+        def _raw_v32(pid, views, likes, tier):
+            return {
+                "post_id": pid,
+                "post_url": f"https://www.threads.com/@h/post/{pid}",
+                "author_handle": f"@h_{pid}",
+                "content_summary_vi": f"Historical item {pid}",
+                "classification": "NEW",
+                "trend_tier": tier,
+                "verification_status": "cross_verified_web",
+                "views": views,
+                "likes": likes,
+                "views_display": f"{views}" if views is not None else None,
+                "views_precision": "exact" if views is not None else None,
+                "views_source": "threads_web_browser" if views is not None else None,
+                "views_measured_at": "2026-11-27T08:00:00Z" if views is not None else None,
+                "views_evidence_url": f"https://www.threads.com/@h/post/{pid}" if views is not None else None,
+            }
+
+        hist_data = {
+            "contract_version": "3.2",
+            "run_id": "run_hist_r2_keep",
+            "platform": "threads",
+            "crawled_at": "2026-11-27T08:00:00Z",
+            "counters": {"requested_count": 5, "scanned_count": 5, "new_qualified_count": 5},
+            "records": [
+                _raw_v32("HIST_BELOW_5000", 5000, 199, "emerging"),
+                _raw_v32("HIST_PROMOTED_VIEWS", 5001, 10, "emerging"),
+                _raw_v32("HIST_PROMOTED_LIKES", 1200, 200, "watchlist"),
+                _raw_v32("HIST_PROMOTED_VHOT", 49999, 1000, "hot"),
+                _raw_v32("HIST_MISSING_VIEWS", None, 450, "hot"),
+            ],
+        }
+        hist_rep = {
+            "contract_version": "3.2",
+            "run_id": "run_hist_r2_keep",
+            "platform": "threads",
+            "generated_at": "2026-11-27T08:01:00Z",
+            "sections": {"1_screening": {"scanned_count": 5, "new_qualified_count": 5}},
+            "telegram_summary": "Immutable historical report",
+        }
+        self.store.ingest_raw_file("fid_hr2_d", "threads_hist_r2.json", json.dumps(hist_data).encode("utf-8"), modified_time="2026-11-27T08:00:00Z")
+        self.store.ingest_raw_file("fid_hr2_r", "trend_report_hist_r2.json", json.dumps(hist_rep).encode("utf-8"), modified_time="2026-11-27T08:01:00Z")
+
+        hot_q = self.store.query_items(platform="threads", run_key="run_hist_r2_keep", hot_only=True, limit=20)
+        self.assertEqual({it["post_id"] for it in hot_q["items"]}, {"HIST_PROMOTED_VIEWS", "HIST_PROMOTED_LIKES", "HIST_PROMOTED_VHOT"})
+        vh_only = self.store.query_items(platform="threads", run_key="run_hist_r2_keep", trend_tier="very_hot", hot_only=True, limit=20)
+        self.assertEqual([it["post_id"] for it in vh_only["items"]], ["HIST_PROMOTED_VHOT"])
+        hot_tier = self.store.query_items(platform="threads", run_key="run_hist_r2_keep", trend_tier="hot", hot_only=True, limit=20)
+        self.assertEqual({it["post_id"] for it in hot_tier["items"]}, {"HIST_PROMOTED_VIEWS", "HIST_PROMOTED_LIKES"})
+
+        # Global SQL path with hot_only=True also promotes historical qualified rows & excludes below-threshold rows
+        global_hot = self.store.query_items(platform="threads", hot_only=True, trend_tier="hot", limit=50)
+        global_hot_ids = {it["post_id"] for it in global_hot["items"]}
+        self.assertTrue({"HIST_PROMOTED_VIEWS", "HIST_PROMOTED_LIKES"}.issubset(global_hot_ids))
+        self.assertNotIn("HIST_BELOW_5000", global_hot_ids)
+
+        # Historical DB rows, snapshots, reports, and counters stay untouched in SQLite!
+        db_row = self.store._conn.execute("SELECT trend_tier FROM market_items WHERE post_id = 'HIST_PROMOTED_VIEWS'").fetchone()
+        self.assertEqual(db_row["trend_tier"], "emerging")
+        below_row = self.store._conn.execute("SELECT post_id FROM market_items WHERE post_id = 'HIST_BELOW_5000'").fetchone()
+        self.assertIsNotNone(below_row)
+        st = self.store.get_stats(run_key="run_hist_r2_keep", platform="threads")
+        self.assertEqual(st["run_summary"]["scanned_count"], 5)
+        self.assertEqual(st["run_summary"]["new_qualified_count"], 4)
+        self.assertEqual(st["effective_threads_by_trend_tier"], {"very_hot": 1, "hot": 2})
+        ev_rep = self.store.build_evidence_report(platform="threads", run_key="run_hist_r2_keep")
+        self.assertEqual(ev_rep["telegram_summary"], "Immutable historical report")
 
 
 if __name__ == "__main__":

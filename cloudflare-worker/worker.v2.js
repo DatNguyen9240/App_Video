@@ -299,8 +299,8 @@ const THREADS_STRATEGY_VERSION = "3.3 (sửa đổi 28/11/2026)";
 const THREADS_CONTRACT_V32 = "3.2";
 const THREADS_CONTRACT_V33 = "3.3";
 const THREADS_SKILL_NAME = "threads_crawl";
-const THREADS_SKILL_VERSION = "1.1";
-const THREADS_QUALITY_POLICY_VERSION = "3.3-hot-only-20261128";
+const THREADS_SKILL_VERSION = "1.2";
+const THREADS_QUALITY_POLICY_VERSION = "3.3-hot-only-r2-20261128";
 const THREADS_QUALITY_POLICY_SPEC = Object.freeze({
     version: THREADS_QUALITY_POLICY_VERSION,
     policy_mode: "hot_and_very_hot_only",
@@ -312,7 +312,7 @@ const THREADS_QUALITY_POLICY_SPEC = Object.freeze({
     qualified_tiers: ["very_hot", "hot"],
     thresholds: {
         very_hot: { views_gte: 50000, likes_gte: 1000, logic: "OR" },
-        hot: { views_gte: 10000, likes_gte: 300, logic: "OR" },
+        hot: { views_gt: 5000, likes_gte: 200, logic: "OR" },
     },
     required_classification: "NEW",
     required_metrics: ["views", "likes"],
@@ -769,7 +769,7 @@ function buildMuseManualPrompt(reqRow) {
         if (contractInfo.isV33) {
             return [
                 `${isResume ? "TIẾP TỤC " : ""}Crawl Threads • Request ID: ${reqId}`,
-                `Skill: Nạp ${THREADS_SKILL_NAME} v${cfg.skill_version} (Policy ${cfg.quality_policy_version} • Hot & Very Hot only)`,
+                `Skill: Nạp ${THREADS_SKILL_NAME} v${cfg.skill_version} (Policy ${cfg.quality_policy_version} • Hot: views > 5K hoặc likes >= 200 | Very Hot: views >= 50K hoặc likes >= 1K)`,
                 `Crawl Mode: ${modeObj.id} (${modeObj.label})`,
                 `Topics: ${topicPrompt.topicHeader} (${topicsCompact})`,
                 `Keywords: ${kwLine}`,
@@ -780,13 +780,13 @@ function buildMuseManualPrompt(reqRow) {
                 `Contract & API Spec (${contractVersion}):`,
                 `- Claim: POST /api/crawl/claim {"request_id":"${reqId}","claimed_by":"muse-ai"} (lease nội bộ; gia hạn qua POST /api/crawl/lease/renew khi còn tiến độ thật).`,
                 `- Thực thi: POST /api/crawl/registry/check | POST /api/crawl/progress | Checkpoint (is_checkpoint=true, chưa đủ hoặc gặp CAPTCHA/rate_limit): POST /api/crawl/checkpoint | Hoàn tất cuối (is_checkpoint=false): POST /api/crawl/complete.`,
-                `- Không bật Hook, Scheduled Task hoặc AI polling; không lưu bài dưới Hot vào kho nghiên cứu.`,
+                `- Chỉ dùng Custom Connector HTTP /api/crawl/* (không SQL trực tiếp); không bật Hook/Scheduled Task/AI polling; không lưu bài dưới Hot vào kho nghiên cứu.`,
             ].join("\n");
         }
 
         return [
             `${isResume ? "TIẾP TỤC " : ""}Crawl Threads • Request ID: ${reqId}`,
-            `Skill: Nạp ${THREADS_SKILL_NAME} v${THREADS_SKILL_VERSION} (chỉ thu thập Hot >= 10K views/300 likes & Very Hot >= 50K views/1K likes)`,
+            `Skill: Nạp ${THREADS_SKILL_NAME} v${THREADS_SKILL_VERSION} (chỉ thu thập Hot: views > 5K hoặc likes >= 200 & Very Hot: views >= 50K hoặc likes >= 1K)`,
             `Crawl Mode: ${modeObj.id} (${modeObj.label})`,
             `Topics: ${topicPrompt.topicHeader} (${topicsCompact})`,
             `Keywords: ${kwLine}`,
@@ -1012,12 +1012,33 @@ function evaluateMuseHelperCompatibilityPayload(raw) {
     );
     const hasRequiredSkillVersion = Boolean(declaredSkillVersion && compareDottedSemver(declaredSkillVersion, THREADS_SKILL_VERSION) >= 0);
     const hasOutdatedDeclaredSkill = Boolean(declaredSkillVersion && !hasRequiredSkillVersion);
+
+    let declaredPolicyVersion = obj.quality_policy_version
+        ? String(obj.quality_policy_version).trim()
+        : (obj.policy_version ? String(obj.policy_version).trim() : null);
+    if (!declaredPolicyVersion && Array.isArray(obj.supported_quality_policies)) {
+        const hit = obj.supported_quality_policies.map(v => String(v || "").trim()).find(v => v === THREADS_QUALITY_POLICY_VERSION);
+        declaredPolicyVersion = hit || (obj.supported_quality_policies[0] ? String(obj.supported_quality_policies[0]).trim() : null);
+    }
+    if (!declaredPolicyVersion && Array.isArray(obj.supported_policies)) {
+        const hit = obj.supported_policies.map(v => String(v || "").trim()).find(v => v === THREADS_QUALITY_POLICY_VERSION);
+        declaredPolicyVersion = hit || (obj.supported_policies[0] ? String(obj.supported_policies[0]).trim() : null);
+    }
+    const hasRequiredPolicyVersion = declaredPolicyVersion === THREADS_QUALITY_POLICY_VERSION;
     const missingCaps = MUSE_REQUIRED_V33_CAPABILITIES.filter(c => !caps.includes(c));
     const hasAllCaps = missingCaps.length === 0 && caps.length > 0;
-    const explicitVerified = !explicitRevoked && !hasOutdatedDeclaredSkill && (
+    const explicitVerified = !explicitRevoked && hasRequiredSkillVersion && hasRequiredPolicyVersion && (
         obj.verified === true || obj.v33_compatible === true || obj.v33_ready === true || obj.explicit_verified === true
     );
-    const v33Ready = !explicitRevoked && (explicitVerified || (hasV33Contract && hasRequiredSkillVersion && hasAllCaps));
+    const v33Ready = !explicitRevoked && hasRequiredSkillVersion && hasRequiredPolicyVersion && (explicitVerified || (hasV33Contract && hasAllCaps));
+    let incompatibilityReason = null;
+    if (!v33Ready) {
+        if (explicitRevoked) incompatibilityReason = "explicit_revoked";
+        else if (!hasRequiredSkillVersion) incompatibilityReason = hasOutdatedDeclaredSkill ? `outdated_skill_${declaredSkillVersion}` : "missing_skill_v1_2";
+        else if (!hasRequiredPolicyVersion) incompatibilityReason = declaredPolicyVersion ? `outdated_policy_${declaredPolicyVersion}` : "missing_quality_policy_r2";
+        else if (!hasV33Contract) incompatibilityReason = "missing_contract_3_3";
+        else if (!hasAllCaps) incompatibilityReason = "missing_required_capabilities";
+    }
     return {
         v33_ready: v33Ready,
         v33_compatible: v33Ready,
@@ -1028,6 +1049,8 @@ function evaluateMuseHelperCompatibilityPayload(raw) {
         supported_contracts: contracts,
         skill_name: obj.skill_name ? String(obj.skill_name).trim() : (hasSkill ? THREADS_SKILL_NAME : null),
         skill_version: declaredSkillVersion,
+        quality_policy_version: declaredPolicyVersion,
+        incompatibility_reason: incompatibilityReason,
         capabilities: caps,
         missing_capabilities: missingCaps,
         verified_by: obj.verified_by ? String(obj.verified_by).trim() : null,
@@ -1062,6 +1085,7 @@ async function setMuseHelperCompatibility(env, payload) {
         supported_contracts: current.supported_contracts,
         skill_name: current.skill_name,
         skill_version: current.skill_version,
+        quality_policy_version: current.quality_policy_version,
         capabilities: current.capabilities,
         explicit_verified: current.explicit_verified,
         verified_by: current.verified_by,
@@ -1802,7 +1826,7 @@ function isValidV32ViewsProvenance(meta) {
 function isValidV33LikesVerified(rawItem, meta) {
     if (!meta || !meta.metrics) return false;
     const likes = meta.metrics.likes;
-    if (likes === undefined || likes === null || !Number.isFinite(Number(likes)) || Number(likes) < 0) {
+    if (likes === undefined || likes === null || typeof likes === "boolean" || !Number.isFinite(Number(likes)) || Number(likes) < 0) {
         return false;
     }
     if (rawItem?.likes_verified === false || rawItem?.metrics?.likes_verified === false) {
@@ -1820,15 +1844,15 @@ function isTrafficContentItem(rawItem) {
 
 function classifyQuantitativeV33Tier(metrics) {
     const m = metrics || {};
-    const views = (m.views === null || m.views === undefined || m.views === "") ? NaN : Number(m.views);
-    const likes = (m.likes === null || m.likes === undefined || m.likes === "") ? NaN : Number(m.likes);
+    const views = (m.views === null || m.views === undefined || m.views === "" || typeof m.views === "boolean") ? NaN : Number(m.views);
+    const likes = (m.likes === null || m.likes === undefined || m.likes === "" || typeof m.likes === "boolean") ? NaN : Number(m.likes);
     if (!Number.isFinite(views) || views < 0 || !Number.isFinite(likes) || likes < 0) {
         return { tier: "unverified", qualified: false, reason: "unverified_views_or_likes" };
     }
     if (views >= 50000 || likes >= 1000) {
         return { tier: "very_hot", qualified: true, reason: null };
     }
-    if (views >= 10000 || likes >= 300) {
+    if (views > 5000 || likes >= 200) {
         return { tier: "hot", qualified: true, reason: null };
     }
     return { tier: "below_hot", qualified: false, reason: "below_hot_threshold" };
@@ -2412,7 +2436,7 @@ async function recordCrossRunDedupInD1(env, rawItems, runId = null, opts = {}) {
                 let row = await lookupRegistryRow(env, meta.key, meta.plat, meta.cUrl, meta.postId);
 
                 if (!row) {
-                    // Policy 3.3-hot-only-20261128: V3.3 below-Hot / unverified / unqualified new candidates store ONLY minimal audit metadata
+                    // Policy 3.3-hot-only-r2-20261128: V3.3 below-Hot / unverified / unqualified new candidates store ONLY minimal audit metadata
                     // in crawl_request_quality_items and MUST NEVER enter market_post_registry or market_post_snapshots.
                     if (reqContext?.isV33 === true && !meta.isQualityQualified) {
                         if (reqId) {
@@ -6550,6 +6574,9 @@ async function handleAppApi(request, env, url) {
             if (!patch.skill_version) {
                 patch.skill_version = THREADS_SKILL_VERSION;
             }
+            if (!patch.quality_policy_version && !patch.policy_version) {
+                patch.quality_policy_version = THREADS_QUALITY_POLICY_VERSION;
+            }
             if (!Array.isArray(patch.capabilities)) {
                 patch.capabilities = [...MUSE_REQUIRED_V33_CAPABILITIES];
             }
@@ -9684,6 +9711,8 @@ async function handleMuseCrawlApi(request, env, url) {
             supported_skills: body.supported_skills || [],
             skill_name: body.skill_name || THREADS_SKILL_NAME,
             skill_version: body.skill_version || null,
+            quality_policy_version: body.quality_policy_version || body.policy_version || null,
+            supported_quality_policies: body.supported_quality_policies || body.supported_policies || [],
             capabilities: body.capabilities || [],
             verified: body.verified,
             v33_compatible: body.v33_compatible,

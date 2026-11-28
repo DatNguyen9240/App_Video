@@ -1497,13 +1497,24 @@ class _PromptCapableMockClient(MockCloudflareTransportClient):
 
     def set_helper_compatibility(self, payload=None):
         p = payload if isinstance(payload, dict) else {}
-        ready = bool(p.get("v33_compatible") or p.get("verify_v33"))
+        skill_ver = str(p.get("skill_version") or "").strip()
+        policy_ver = str(p.get("quality_policy_version") or "").strip()
+        if p.get("verify_v33") is True and not skill_ver:
+            skill_ver = "1.2"
+        if p.get("verify_v33") is True and not policy_ver:
+            policy_ver = "3.3-hot-only-r2-20261128"
+        skill_ok = bool(skill_ver) and tuple(int(x) for x in skill_ver.split(".")) >= (1, 2)
+        policy_ok = policy_ver == "3.3-hot-only-r2-20261128"
+        ready = bool((p.get("v33_compatible") or p.get("verified") or p.get("verify_v33")) and skill_ok and policy_ok)
         self.helper_compatibility = {
             "v33_compatible": ready,
             "v33_ready": ready,
             "default_contract_version": "3.3",
-            "helper_version": p.get("helper_version") or "muse-helper/3.3.0",
-            "skill_version": p.get("skill_version") or "1.1",
+            "helper_version": p.get("helper_version") or "muse-helper/3.3.2",
+            "skill_version": skill_ver or None,
+            "quality_policy_version": policy_ver or None,
+            "required_skill_version": "1.2",
+            "required_quality_policy_version": "3.3-hot-only-r2-20261128",
             "note": p.get("note"),
         }
         return {"ok": True, "helper_compatibility": dict(self.helper_compatibility)}
@@ -1696,10 +1707,23 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
             self.assertEqual(r409.status_code, 409)
             self.assertEqual(r409.get_json()["code"], "muse_helper_incompatible")
 
-        # Confirm helper compatibility -> creates 3.3 request, pauses & resumes with resume_prompt
+        # Outdated Helper v1.1 / old policy MUST remain incompatible even if v33_compatible=True
+        h_old_skill = flask_client.post(
+            "/api/remote/helper_compatibility",
+            json={"v33_compatible": True, "skill_version": "1.1", "quality_policy_version": "3.3-hot-only-r2-20261128"},
+        ).get_json()
+        self.assertFalse(h_old_skill["helper_compatibility"]["v33_compatible"])
+
+        h_old_policy = flask_client.post(
+            "/api/remote/helper_compatibility",
+            json={"v33_compatible": True, "skill_version": "1.2", "quality_policy_version": "3.3-hot-only-20261128"},
+        ).get_json()
+        self.assertFalse(h_old_policy["helper_compatibility"]["v33_compatible"])
+
+        # Confirm helper compatibility (v1.2 + 3.3-hot-only-r2-20261128) -> creates 3.3 request, pauses & resumes with resume_prompt
         h_after = flask_client.post(
             "/api/remote/helper_compatibility",
-            json={"verify_v33": True, "helper_version": "muse-helper/3.3.0"},
+            json={"verify_v33": True, "helper_version": "muse-helper/3.3.2"},
         ).get_json()
         self.assertTrue(h_after["helper_compatibility"]["v33_compatible"])
 
@@ -1719,13 +1743,62 @@ class TestManualPromptTriggerAndAutoSync(unittest.TestCase):
         self.assertEqual(res_res.status_code, 200)
         self.assertIn(req_id, res_res.get_json()["resume_prompt"])
 
-        # HTML includes new V3.3 Hot & Very Hot UI hooks & quality filter pills (and wraps Crawl Center controls without overflow)
+        # HTML includes new V3.3 Hot & Very Hot r2 UI hooks (no legacy history table, hidden empty Affiliate box, Skill v1.2)
         html = flask_client.get("/").get_data(as_text=True)
-        for token in ["Xác nhận Helper V3.3", "quality_only", "traffic_content", "Chẩn đoán kỹ thuật", "technical_diagnostics", "🔥 Very Hot", "⚡ Hot"]:
+        for token in [
+            "Xác nhận Helper V3.3",
+            "quality_only",
+            "traffic_content",
+            "Chẩn đoán kỹ thuật",
+            "technical_diagnostics",
+            "🔥 Very Hot",
+            "⚡ Hot",
+            "views > 5.000 hoặc likes >= 200",
+            "meaningfulAffiliateOpportunities",
+            "skill_version: '1.2'",
+            "quality_policy_version: '3.3-hot-only-r2-20261128'",
+            "hot_only:",
+        ]:
             self.assertIn(token, html)
-        for absent_tok in ["watchlist_only", "🌱 Emerging (", "👀 Watchlist ("]:
+        for absent_tok in [
+            "watchlist_only",
+            "🌱 Emerging (",
+            "👀 Watchlist (",
+            "DỮ LIỆU LỊCH SỬ CŨ",
+            "📜 Dữ liệu cũ",
+            "Unverified (Cũ)",
+            "Chưa có sản phẩm Affiliate đủ điều kiện.",
+            "Chưa có cơ hội đủ điều kiện từ dữ liệu hiện tại.",
+        ]:
             self.assertNotIn(absent_tok, html)
         self.assertNotIn("flex flex-wrap xl:flex-nowrap items-center gap-2", html)
+
+        # API hot_only=1 enforces r2 boundary and promotes qualified historical items dynamically
+        rt = app_ui.get_market_runtime()
+        store = rt["store"]
+        store.ingest_raw_file(
+            "fid_ui_r2_hist",
+            "threads_ui_r2_hist.json",
+            json.dumps({
+                "contract_version": "3.2",
+                "run_id": "run_ui_r2_hist",
+                "platform": "threads",
+                "crawled_at": "2026-11-27T09:00:00Z",
+                "records": [
+                    {"post_id": "UI_R2_BELOW", "post_url": "https://www.threads.com/@r/post/UI_R2_BELOW", "views": 5000, "likes": 199, "views_source": "threads_web_browser", "views_display": "5K", "views_precision": "exact", "views_measured_at": "2026-11-27T09:00:00Z", "views_evidence_url": "https://www.threads.com/@r/post/UI_R2_BELOW", "tier": "emerging"},
+                    {"post_id": "UI_R2_HOT_V", "post_url": "https://www.threads.com/@r/post/UI_R2_HOT_V", "views": 5001, "likes": 0, "views_source": "threads_web_browser", "views_display": "5K", "views_precision": "exact", "views_measured_at": "2026-11-27T09:00:00Z", "views_evidence_url": "https://www.threads.com/@r/post/UI_R2_HOT_V", "tier": "emerging"},
+                    {"post_id": "UI_R2_HOT_L", "post_url": "https://www.threads.com/@r/post/UI_R2_HOT_L", "views": 0, "likes": 200, "views_source": "threads_web_browser", "views_display": "0", "views_precision": "exact", "views_measured_at": "2026-11-27T09:00:00Z", "views_evidence_url": "https://www.threads.com/@r/post/UI_R2_HOT_L", "tier": "watchlist"},
+                    {"post_id": "UI_R2_VHOT", "post_url": "https://www.threads.com/@r/post/UI_R2_VHOT", "views": 49999, "likes": 1000, "views_source": "threads_web_browser", "views_display": "49.9K", "views_precision": "exact", "views_measured_at": "2026-11-27T09:00:00Z", "views_evidence_url": "https://www.threads.com/@r/post/UI_R2_VHOT", "tier": "hot"},
+                ],
+            }).encode("utf-8"),
+            modified_time="2026-11-27T09:00:00Z",
+        )
+        api_hot_only = flask_client.get("/api/market/items?platform=threads&run_key=run_ui_r2_hist&hot_only=1").get_json()
+        self.assertEqual({it["post_id"]: it["effective_trend_tier"] for it in api_hot_only["items"]}, {
+            "UI_R2_HOT_V": "hot",
+            "UI_R2_HOT_L": "hot",
+            "UI_R2_VHOT": "very_hot",
+        })
 
         # runs_catalog exposes bundles alongside individual runs
         cat = flask_client.get("/api/market/runs_catalog").get_json()

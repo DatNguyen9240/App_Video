@@ -1,22 +1,24 @@
 # THREADS_CRAWL_SKILL — Tiêu chuẩn thu thập và nghiên cứu nội dung Threads Việt Nam
 
-- Phiên bản Skill được duyệt: **1.1** (`V3.3 Hot & Very Hot Only` — 28/11/2026).
+- Phiên bản Skill được duyệt: **1.2** (`V3.3 Hot & Very Hot Only r2` — 28/11/2026).
 - Chiến lược: Strategy 3.3, gồm **Hot & Very Hot Only**, `natural_viral`, `traffic_content`, `affiliate`, `buyer_intent`, `market_trend`, và Checkpoint/Resume đa phiên không giới hạn tổng thời gian.
 - Hợp đồng dữ liệu mục tiêu: Data Contract V3.3 (bảo toàn 100% tương thích ngược dữ liệu V3.2 lịch sử).
-- Chính sách ngưỡng chất lượng: `quality_policy_version = "3.3-hot-only-20261128"`.
-- Mục đích: tài liệu nghiệp vụ duy nhất để Muse nạp khi thực hiện crawl Threads. Muse đóng gói theo custom skill `threads_crawl` tại `~/workspace/custom-skills/threads_crawl/SKILL.md` và xác nhận tương thích qua Worker trước khi chạy request V3.3.
+- Chính sách ngưỡng chất lượng: `quality_policy_version = "3.3-hot-only-r2-20261128"`.
+- Phạm vi công cụ: Muse chỉ thao tác qua **Custom Connector HTTP `/api/crawl/*`**, **không sử dụng quyền SQL trực tiếp vào D1**.
+- Mục đích: tài liệu nghiệp vụ duy nhất để Muse nạp khi thực hiện crawl Threads. Muse đóng gói theo custom skill `threads_crawl` tại `~/workspace/custom-skills/threads_crawl/SKILL.md` và xác nhận tương thích (`skill_version: "1.2"`, `quality_policy_version: "3.3-hot-only-r2-20261128"`) qua Worker trước khi chạy request V3.3.
 
-## 1. Chính sách chất lượng bắt buộc (Hot & Very Hot Only)
+## 1. Chính sách chất lượng bắt buộc (Hot & Very Hot Only — Policy r2)
 
 Thu thập N bài **mới đạt chuẩn `Hot` hoặc `Very Hot` (`quality_qualified_count`)**, không phải N bản ghi thô. Ngưỡng định lượng bắt buộc từ **số liệu thật tại nguồn** (Worker tự kiểm chứng lại, không tin nhãn do agent tự gán):
 
 - **Very Hot:** `views >= 50.000` **hoặc** `likes >= 1.000`.
-- **Hot:** `views >= 10.000` **hoặc** `likes >= 300`.
+- **Hot:** `views > 5.000` **hoặc** `likes >= 200` (lưu ý `views` nghiêm ngặt `> 5.000`; bài đúng `5.000 views` & `199 likes` là `below_hot`).
 
 **Quy tắc loại trừ dứt khoát:**
 - **KHÔNG có ngoại lệ Emerging hoặc Watchlist.**
-- **KHÔNG thu thập, KHÔNG phân tích sâu và KHÔNG lưu bài dưới ngưỡng Hot** (kể cả Emerging hoặc bài ít tương tác như `23 views / 0 likes`) vào kho nội dung nghiên cứu mới.
-- Chỉ giữ metadata audit tối thiểu nếu cần cho Registry, chống trùng xuyên phiên và đối soát Contract.
+- **KHÔNG thu thập, KHÔNG phân tích sâu và KHÔNG lưu bài dưới ngưỡng Hot** (ví dụ `5.000 views / 199 likes` hoặc `23 views / 0 likes`) vào kho nội dung nghiên cứu mới.
+- Chỉ giữ metadata audit tối thiểu qua API Worker để phục vụ Registry, chống trùng xuyên phiên và đối soát Contract.
+- Bắt buộc xác minh cả `views` và `likes` (`0` hợp lệ khác hoàn toàn `null`); không bỏ qua bước đo `views` chỉ vì `likes` thấp ở bước candidate.
 - Nghiên cứu đầy đủ cả nội dung kéo traffic (`traffic_content`), viral tự nhiên (`natural_viral`), xây dựng follower, và nội dung Affiliate / nhu cầu mua hàng (`buyer_intent`). Traffic Content không bắt buộc phải có sản phẩm, Affiliate hoặc Buyer Intent.
 - Ưu tiên người dùng bình thường và creator nhỏ có lượt xem vượt quy mô tài khoản; hạn chế người nổi tiếng, ca sĩ, thương hiệu lớn và quảng cáo đơn thuần (trừ khi người thường nhắc tới hoặc đúng nhu cầu thương mại).
 
@@ -48,7 +50,7 @@ Thu thập N bài **mới đạt chuẩn `Hot` hoặc `Very Hot` (`quality_quali
 
 ## 4. Kiểm tra công cụ, handshake tương thích và nhận request
 
-1. Xác minh Custom Connector (`GET /api/crawl/health`) và gửi khai báo Helper (`POST /api/crawl/helper/handshake` với `skill_name: "threads_crawl"`, `skill_version: "1.1"`, `capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"]`).
+1. Xác minh Custom Connector (`GET /api/crawl/health`) và gửi khai báo Helper bắt buộc cả Skill lẫn Quality Policy (`POST /api/crawl/helper/handshake` với `skill_name: "threads_crawl"`, `skill_version: "1.2"`, `quality_policy_version: "3.3-hot-only-r2-20261128"`, `supported_contracts: ["3.2", "3.3"]`, `capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"]`). Worker **từ chối Helper `v1.1` hoặc policy cũ `3.3-hot-only-20261128`**.
 2. Kiểm tra `threads-cli`, Cloud Browser và phiên Threads Web đã đăng nhập `@toilaai267`. Nếu phiên hết hạn hoặc gặp CAPTCHA -> dừng và yêu cầu người dùng xử lý qua Browser Takeover trước khi tiếp tục; không hỏi mật khẩu/OTP trong chat.
 3. Gọi `POST /api/crawl/claim` với chính xác `request_id` trong prompt (`{"request_id": "..."}`). Nếu là Resume sau checkpoint, đọc `session_seq`, `accumulated_quality_count`, `remaining_target` và `checkpoint`.
 4. Tạo `session_run_id` duy nhất cho phiên hiện tại (ví dụ `<request_id>_s<session_seq>`), gắn nhất quán trong Data JSON, Report JSON và API `/progress`, `/checkpoint`, `/complete`.
@@ -56,12 +58,12 @@ Thu thập N bài **mới đạt chuẩn `Hot` hoặc `Very Hot` (`quality_quali
 ## 5. Pipeline thực thi bắt buộc
 
 1. **Discovery:** Tìm ứng viên theo `crawl_mode` và `topics`, tránh quét lặp lại các truy vấn trong `checkpoint.tried_queries`.
-2. **Lọc sơ bộ & Sàng lọc ngưỡng Hot:** Bỏ qua bài ngoài thị trường/`lookback_hours`, spam, vi phạm `exclusions`, hoặc tín hiệu quá thấp không có khả năng chạm ngưỡng Hot sau khi xác minh Web. Không bỏ qua bước đo `views` chỉ vì `likes` thấp ở bước candidate.
+2. **Lọc sơ bộ & Sàng lọc ngưỡng Hot r2:** Bỏ qua bài ngoài thị trường/`lookback_hours`, spam, vi phạm `exclusions`, hoặc tín hiệu quá thấp không có khả năng chạm ngưỡng Hot sau khi xác minh Web. Không bỏ qua bước đo `views` chỉ vì `likes` thấp ở bước candidate.
 3. **Registry-check:** Gọi `POST /api/crawl/registry/check` (<= 100 items/lượt). Fail-closed nếu HTTP 503. Phân biệt `NEW`, `DUPLICATE_HISTORY`, `UPDATED_METRICS`.
 4. **Xác minh (Cloud Browser `@toilaai267` + `threads-cli`):** Bắt buộc xác minh cả `views` và `likes` (`0` hợp lệ khác hoàn toàn với `null`), `comments`, `reposts`, `quotes`, `shares` riêng biệt (không cộng shares vào reposts), `author_followers`, và đầy đủ 5 trường provenance views Web V3.2 (`views_display`, `views_precision`, `views_source="threads_web_browser"`, `views_measured_at`, `views_evidence_url`).
-5. **Kiểm tra đạt chuẩn Hot & Very Hot:**
-   - Nếu `NEW` + đủ provenance Web (`views >= 0`, `likes >= 0`) + đạt **`Very Hot`** (`views >= 50.000` OR `likes >= 1.000`) hoặc **`Hot`** (`views >= 10.000` OR `likes >= 300`) + phân tích đầy đủ -> đánh dấu `quality_qualified = true` và đưa vào Data JSON nghiên cứu.
-   - Nếu dưới ngưỡng Hot hoặc thiếu xác minh -> **KHÔNG phân tích sâu, KHÔNG đưa vào kho nội dung nghiên cứu mới**. Chỉ ghi nhận tối thiểu vào bộ đếm `below_hot_count` / `rejected_count` / `unverified_count` hoặc payload audit gọn để phục vụ đối soát.
+5. **Kiểm tra đạt chuẩn Hot & Very Hot (`3.3-hot-only-r2-20261128`):**
+   - Nếu `NEW` + đủ provenance Web (`views >= 0`, `likes >= 0`) + đạt **`Very Hot`** (`views >= 50.000` OR `likes >= 1.000`) hoặc **`Hot`** (`views > 5.000` OR `likes >= 200`) + phân tích đầy đủ -> đánh dấu `quality_qualified = true` và đưa vào Data JSON nghiên cứu.
+   - Nếu dưới ngưỡng Hot hoặc thiếu xác minh -> **KHÔNG phân tích sâu, KHÔNG đưa vào kho nội dung nghiên cứu mới**. Chỉ ghi nhận tối thiểu vào bộ đếm `below_hot_count` / `rejected_count` / `unverified_count` hoặc payload audit gọn qua API Worker để phục vụ đối soát.
 6. **Cập nhật & Gia hạn an toàn:** Định kỳ gọi `POST /api/crawl/progress`. Khi chạm dự trữ phiên hoặc gặp `rate_limited` / `captcha_blocked`:
    - Nếu đang có tiến độ thực sự và còn lượt gia hạn (`lease_renew_count < 2`): gọi `POST /api/crawl/lease/renew` (+30 phút/lần).
    - Nếu chuẩn bị hết phiên hoặc bị chặn: **dừng thu thập ngay**, lưu artifact phiên lên Drive với `is_checkpoint: true`, gọi `POST /api/crawl/checkpoint` để đồng bộ D1 Registry và nhả phiên về `paused` (hoặc `blocked`).
@@ -69,6 +71,6 @@ Thu thập N bài **mới đạt chuẩn `Hot` hoặc `Very Hot` (`quality_quali
 
 ## 6. Đầu ra & Bảo toàn lịch sử
 
-- Data JSON & Report JSON của từng phiên lưu vào `AI_WORKSPACE/01_Market_Data/Threads/` và `Reports/` gắn `request_id`, `session_seq`, `session_run_id`, `is_checkpoint` (`true` với phiên tạm dừng, `false` với kết thúc cuối), `contract_version: "3.3"`, `strategy_version`, `quality_policy_version: "3.3-hot-only-20261128"`, `skill_version: "1.1"`.
+- Data JSON & Report JSON của từng phiên lưu vào `AI_WORKSPACE/01_Market_Data/Threads/` và `Reports/` gắn `request_id`, `session_seq`, `session_run_id`, `is_checkpoint` (`true` với phiên tạm dừng, `false` với kết thúc cuối), `contract_version: "3.3"`, `strategy_version`, `quality_policy_version: "3.3-hot-only-r2-20261128"`, `skill_version: "1.2"`.
 - `counters` bắt buộc khai báo đủ: `requested_count`, `scanned_count`, `unique_candidate_count`, `new_count`, `new_qualified_count`, `quality_qualified_count`, `below_hot_count`, `duplicate_history_count`, `updated_metrics_count`, `unverified_count`, `rejected_count`, `missing_views_count`, `target_metric: "quality_qualified_count"`, `target_achieved`, `stop_reason`.
 - Mọi dữ liệu lịch sử V3.2 / V1 / V2 được bảo toàn nguyên vẹn; không ghi đè snapshot cũ.

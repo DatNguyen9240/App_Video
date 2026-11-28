@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .normalizer import (
     NON_CRAWL_ROLES,
     assess_v33_quality,
+    classify_display_tier_r2,
     extract_canonical_metrics,
     extract_v32_counters,
     is_archive_path,
@@ -2187,6 +2188,7 @@ class MarketIntelligenceStore:
         activity_filter: Optional[str] = None,
         special_filter: Optional[str] = None,
         quality_filter: Optional[str] = None,
+        hot_only: bool = False,
         run_key: Optional[str] = None,
         search: Optional[str] = None,
         sort_by: str = "recent",
@@ -2241,14 +2243,17 @@ class MarketIntelligenceStore:
                     elif it.get("data_quality") != data_quality:
                         continue
 
+                if hot_only and not it.get("display_hot_qualified"):
+                    continue
+
                 if tier_norm:
-                    it_tier = str(it.get("trend_tier") or "").lower()
+                    it_tier = str((it.get("effective_trend_tier") if hot_only else None) or it.get("trend_tier") or "").lower()
                     it_ver = str(it.get("verification_status") or "").lower()
                     if tier_norm == "legacy":
-                        if it.get("trend_tier") is not None:
+                        if hot_only or it.get("trend_tier") is not None:
                             continue
                     elif tier_norm == "unverified":
-                        if not (it_tier == "unverified" or it_ver == "unverified" or str(it.get("classification") or "").upper() == "UNVERIFIED"):
+                        if hot_only or not (it_tier == "unverified" or it_ver == "unverified" or str(it.get("classification") or "").upper() == "UNVERIFIED"):
                             continue
                     else:
                         if it_tier != tier_norm or it_ver == "unverified":
@@ -2376,7 +2381,11 @@ class MarketIntelligenceStore:
             elif sb == "tier":
                 filtered.sort(
                     key=lambda x: (
-                        tier_rank_map.get(str(x.get("trend_tier") or "").lower(), 0),
+                        tier_rank_map.get(
+                            str((x.get("effective_trend_tier") if hot_only else None) or x.get("trend_tier") or "").lower(),
+                            0,
+                        ),
+                        int(x.get("views_count") or 0) if hot_only else (int(x.get("likes_count") or 0) + int(x.get("comments_count") or 0)),
                         int(x.get("likes_count") or 0) + int(x.get("comments_count") or 0),
                     ),
                     reverse=True,
@@ -2436,8 +2445,18 @@ class MarketIntelligenceStore:
                 clauses.append("m.data_quality = ?")
                 params.append(data_quality)
 
-        if trend_tier and trend_tier != "all":
-            tier_norm = trend_tier.lower().strip()
+        tier_norm = trend_tier.lower().strip() if (trend_tier and trend_tier != "all") else None
+        if hot_only:
+            clauses.append("(m.views_count > 5000 OR m.likes_count >= 200)")
+            clauses.append("COALESCE(m.classification, '') NOT IN ('REJECTED', 'UNVERIFIED')")
+            clauses.append("COALESCE(m.verification_status, '') != 'unverified'")
+            clauses.append("COALESCE(m.data_quality, '') != 'needs_verification'")
+            clauses.append("COALESCE(m.trend_tier, '') != 'unverified'")
+            if tier_norm == "very_hot":
+                clauses.append("(m.views_count >= 50000 OR m.likes_count >= 1000)")
+            elif tier_norm in ("legacy", "unverified", "emerging", "watchlist"):
+                clauses.append("1 = 0")
+        elif tier_norm:
             if tier_norm == "legacy":
                 clauses.append("m.trend_tier IS NULL")
             elif tier_norm == "unverified":
@@ -2559,7 +2578,8 @@ class MarketIntelligenceStore:
                 {where_sql}
                 ORDER BY {order_sql}
             """
-            if qf_norm == "quality_only":
+            need_python_postfilter = bool(hot_only or qf_norm == "quality_only")
+            if need_python_postfilter:
                 rows = self._conn.execute(base_select, params).fetchall()
                 total = None
             else:
@@ -2592,9 +2612,24 @@ class MarketIntelligenceStore:
             enriched = self._attach_v33_fields(d)
             if qf_norm == "quality_only" and not enriched.get("quality_qualified"):
                 continue
+            if hot_only:
+                if not enriched.get("display_hot_qualified"):
+                    continue
+                if tier_norm in ("very_hot", "hot") and enriched.get("effective_trend_tier") != tier_norm:
+                    continue
             items.append(enriched)
 
-        if qf_norm == "quality_only":
+        if need_python_postfilter:
+            if hot_only and sort_by == "tier":
+                tier_rank_map = {"very_hot": 5, "hot": 4}
+                items.sort(
+                    key=lambda x: (
+                        tier_rank_map.get(str(x.get("effective_trend_tier") or "").lower(), 0),
+                        int(x.get("views_count") or 0),
+                        int(x.get("likes_count") or 0) + int(x.get("comments_count") or 0),
+                    ),
+                    reverse=True,
+                )
             total = len(items)
             items = items[off : off + lim]
 
@@ -2719,6 +2754,7 @@ class MarketIntelligenceStore:
             by_platform_activity: Dict[str, Dict[str, int]] = {"all": _init_act(), "threads": _init_act(), "tiktok": _init_act(), "shopee": _init_act()}
             by_platform_quality: Dict[str, Dict[str, int]] = {p: {"total": 0, "usable": 0, "needs_verification": 0, "unlabeled": 0} for p in ("threads", "tiktok", "shopee")}
             by_platform_trend_tier: Dict[str, Dict[str, int]] = {"all": _init_tiers(), "threads": _init_tiers(), "tiktok": _init_tiers(), "shopee": _init_tiers()}
+            effective_threads_by_trend_tier = {"very_hot": 0, "hot": 0}
 
             for it in all_snaps:
                 ip = str(it.get("platform") or "unknown").lower()
@@ -2766,6 +2802,10 @@ class MarketIntelligenceStore:
                             tier_b[it_tier] += 1
                         elif not cls:
                             tier_b["legacy"] += 1
+                if ip == "threads" and cls not in ("REJECTED", "UPDATED_METRICS", "DUPLICATE_HISTORY"):
+                    eff_t = str(it.get("effective_trend_tier") or "")
+                    if eff_t in ("very_hot", "hot") and it.get("display_hot_qualified"):
+                        effective_threads_by_trend_tier[eff_t] += 1
 
             total_items = len(scoped_snaps)
             by_quality = {"usable": 0, "needs_verification": 0, "unlabeled": 0}
@@ -2881,6 +2921,7 @@ class MarketIntelligenceStore:
                 "by_platform_quality": by_platform_quality,
                 "by_trend_tier": by_platform_trend_tier.get(plat_scope) or _init_tiers(),
                 "threads_by_trend_tier": by_platform_trend_tier["threads"],
+                "effective_threads_by_trend_tier": effective_threads_by_trend_tier,
                 "by_platform_trend_tier": by_platform_trend_tier,
                 "by_trend_group": by_trend_group,
                 "by_verification_status": by_verification_status,
@@ -2995,6 +3036,22 @@ class MarketIntelligenceStore:
                 by_platform_trend_tier[p_low][tkey] += r["c"]
                 if p_low == "threads":
                     threads_by_trend_tier[tkey] += r["c"]
+
+            effective_threads_by_trend_tier = {"very_hot": 0, "hot": 0}
+            for r in self._conn.execute(
+                f"""
+                SELECT m.views_count, m.likes_count, m.views_missing, m.trend_tier,
+                       m.verification_status, m.data_quality, m.classification
+                FROM market_items m
+                {active_item_join}
+                  AND LOWER(COALESCE(m.platform, '')) = 'threads'
+                  AND COALESCE(m.classification, '') != 'REJECTED'
+                  AND (m.views_count > 5000 OR m.likes_count >= 200)
+                """
+            ).fetchall():
+                eff_r2 = classify_display_tier_r2(dict(r))
+                if eff_r2["display_qualified"] and eff_r2["effective_tier"] in ("very_hot", "hot"):
+                    effective_threads_by_trend_tier[eff_r2["effective_tier"]] += 1
 
             by_trend_group = {"trend_toan_thi_truong": 0, "trend_affiliate": 0, "trend_moi_noi": 0}
             for r in self._conn.execute(
@@ -3177,6 +3234,7 @@ class MarketIntelligenceStore:
             "by_platform_quality": by_platform_quality,
             "by_trend_tier": by_trend_tier,
             "threads_by_trend_tier": threads_by_trend_tier,
+            "effective_threads_by_trend_tier": effective_threads_by_trend_tier,
             "by_platform_trend_tier": by_platform_trend_tier,
             "by_trend_group": by_trend_group,
             "by_verification_status": by_verification_status,
@@ -3518,6 +3576,7 @@ class MarketIntelligenceStore:
         d["v33_observation"] = v33_obs
 
         q_eval = assess_v33_quality(d)
+        r2_disp = classify_display_tier_r2(d)
         d["quality_qualified"] = bool(q_eval["quality_qualified"])
         d["quality_tier_basis"] = q_eval.get("quality_tier_basis")
         d["quality_exclusion_reason"] = q_eval.get("quality_exclusion_reason")
@@ -3525,6 +3584,8 @@ class MarketIntelligenceStore:
         d["traffic_content"] = bool(q_eval.get("traffic_content"))
         d["quality_policy_version"] = q_eval.get("quality_policy_version") or em.get("quality_policy_version")
         d["skill_version"] = em.get("skill_version")
+        d["effective_trend_tier"] = r2_disp["effective_tier"]
+        d["display_hot_qualified"] = bool(r2_disp["display_qualified"])
         return d
 
     @staticmethod
@@ -4255,6 +4316,7 @@ class MarketIntelligenceStore:
 
         # Tier & classification counts directly from point-in-time effective snapshots
         tier_counts: Dict[str, int] = {"very_hot": 0, "hot": 0, "emerging": 0, "watchlist": 0, "unverified": 0}
+        effective_tier_counts: Dict[str, int] = {"very_hot": 0, "hot": 0}
         new_qualified_snap = 0
         quality_qualified_snap = 0
         watchlist_snap = 0
@@ -4299,6 +4361,10 @@ class MarketIntelligenceStore:
                     traffic_content_snap += 1
                 if tier in ("very_hot", "hot", "emerging", "watchlist"):
                     tier_counts[tier] += 1
+                if str(item.get("platform") or "").lower() == "threads" and item.get("display_hot_qualified"):
+                    eff_t = str(item.get("effective_trend_tier") or "")
+                    if eff_t in ("very_hot", "hot"):
+                        effective_tier_counts[eff_t] += 1
 
         # Extract authoritative envelope/report counters when scope aligns
         grp_plats = sorted(grp["platforms"])
@@ -4640,6 +4706,7 @@ class MarketIntelligenceStore:
             "rejected_count": rejected_count,
             "missing_views_count": missing_views_count,
             "tier_counts": tier_counts,
+            "effective_tier_counts": effective_tier_counts,
             "total_all_platforms": len(all_platform_snaps),
             "data_file": primary_data_file,
             "report_file": primary_report_file,

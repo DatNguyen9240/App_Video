@@ -1,23 +1,36 @@
 {
-  "contract": "Data Contract V3.3 — Hot & Very Hot Only & Multi-session Target-based Crawl",
+  "contract": "Data Contract V3.3 — Hot & Very Hot Only (Policy r2) & Multi-session Target-based Crawl",
   "version": "3.3",
   "supersedes_for_v33_requests": "3.2",
+  "muse_access_boundary": {
+    "http_connector_only": true,
+    "allowed_endpoints": ["/api/crawl/*"],
+    "direct_sql_access": false
+  },
   "backward_compatibility": {
     "legacy_v32_preserved": true,
     "rules": [
       "Request cũ (V3.1 / V3.2 hoặc contract_version IS NULL trên D1) giữ nguyên target_metric='new_qualified_count' và kết quả lịch sử.",
       "Không đặt DEFAULT migration ép các request V3.2 cũ chuyển nghĩa sang V3.3.",
-      "Kho dữ liệu lịch sử V1/V2/V3.2 trong SQLite/D1 được bảo toàn nguyên vẹn.",
-      "quality_qualified_count là con số mục tiêu chính thức của các request V3.3 (chỉ đếm bài Hot & Very Hot mới đạt chuẩn)."
+      "Kho dữ liệu lịch sử V1/V2/V3.2 trong SQLite/D1 được bảo toàn nguyên vẹn; bài lịch sử đủ số liệu (views + likes) đạt ngưỡng r2 được hiển thị linh hoạt trong Hot/Very Hot.",
+      "quality_qualified_count là con số mục tiêu chính thức của các request V3.3 (chỉ đếm bài Hot & Very Hot mới đạt chuẩn r2)."
     ]
   },
   "skill_binding": {
     "skill_name": "threads_crawl",
-    "skill_version": "1.1",
+    "skill_version": "1.2",
     "recommended_path": "~/workspace/custom-skills/threads_crawl/SKILL.md"
   },
+  "compatibility_gate": {
+    "requires_contract": "3.3",
+    "requires_min_skill_version": "1.2",
+    "requires_quality_policy_version": "3.3-hot-only-r2-20261128",
+    "requires_capabilities": ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
+    "rejects_legacy_helper_v1_1_and_old_policy": true,
+    "silent_fallback_to_v32": false
+  },
   "quality_policy": {
-    "quality_policy_version": "3.3-hot-only-20261128",
+    "quality_policy_version": "3.3-hot-only-r2-20261128",
     "hot_only": true,
     "qualified_tiers": ["very_hot", "hot"],
     "emerging_counted_toward_target": false,
@@ -31,7 +44,7 @@
       "zero_distinct_from_null": true,
       "tiers": {
         "very_hot": "views >= 50000 OR likes >= 1000",
-        "hot": "views >= 10000 OR likes >= 300",
+        "hot": "views > 5000 OR likes >= 200",
         "below_hot": "Rejected from new research corpus & target (audit-only metadata if needed)"
       },
       "content_analysis_required": true,

@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 THREADS_CONTRACT_V32 = "3.2"
 THREADS_CONTRACT_V33 = "3.3"
 THREADS_SKILL_NAME = "threads_crawl"
-THREADS_SKILL_VERSION = "1.1"
-THREADS_QUALITY_POLICY_VERSION = "3.3-hot-only-20261128"
+THREADS_SKILL_VERSION = "1.2"
+THREADS_QUALITY_POLICY_VERSION = "3.3-hot-only-r2-20261128"
 THREADS_DEFAULT_LEASE_MINUTES_V33 = 60
 THREADS_MAX_LEASE_RENEWALS_PER_SESSION = 2
 THREADS_LEASE_RENEW_INCREMENT_MINUTES = 30
@@ -27,7 +27,7 @@ THREADS_QUALITY_POLICY_SPEC: Dict[str, Any] = {
     "requires_verified_likes": True,
     "tiers": {
         "very_hot": "views >= 50000 OR likes >= 1000",
-        "hot": "views >= 10000 OR likes >= 300",
+        "hot": "views > 5000 OR likes >= 200",
     },
 }
 

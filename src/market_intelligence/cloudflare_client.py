@@ -392,8 +392,10 @@ class CloudflareBridgeClient:
                     "supported_contracts": ["3.2"],
                     "capabilities": [],
                     "default_contract_version": "3.3",
+                    "required_skill_version": "1.2",
+                    "required_quality_policy_version": "3.3-hot-only-r2-20261128",
                     "worker_endpoint_missing": True,
-                    "note": f"Worker chưa deploy endpoint V3.3 (/api/app/muse-helper/compatibility -> HTTP {resp.status_code}); cần nâng cấp Worker/Muse Helper v1.1 (chỉ hỗ trợ Rollback có chủ đích V3.2, không tự fallback V3.2).",
+                    "note": f"Worker chưa deploy endpoint V3.3 (/api/app/muse-helper/compatibility -> HTTP {resp.status_code}); cần nâng cấp Worker/Muse Helper v1.2 (3.3-hot-only-r2-20261128; chỉ hỗ trợ Rollback có chủ đích V3.2, không tự fallback V3.2).",
                 },
             }
         if not resp.ok:

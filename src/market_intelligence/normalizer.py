@@ -1067,7 +1067,7 @@ def assess_v33_quality(
     likes_i = int(likes)
     if views >= 50000 or likes_i >= 1000:
         tier_basis = "very_hot"
-    elif views >= 10000 or likes_i >= 300:
+    elif views > 5000 or likes_i >= 200:
         tier_basis = "hot"
     else:
         return {
@@ -1085,6 +1085,50 @@ def assess_v33_quality(
         "is_watchlist": False,
         "traffic_content": is_traffic,
     }
+
+
+def classify_display_tier_r2(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Pure read-time classification under Policy 3.3-hot-only-r2-20261128 for Market Intelligence UI.
+    Evaluates verified numeric views & likes dynamically (including historical posts with sufficient metrics)
+    without mutating historical snapshots, reports, or counters.
+    """
+    if not isinstance(item, dict):
+        return {"effective_tier": "below_hot", "display_qualified": False}
+    cls = str(item.get("classification") or "").strip().upper()
+    dq = str(item.get("data_quality") or "").strip().lower()
+    vs = str(item.get("verification_status") or "").strip().lower()
+    tt = str(item.get("trend_tier") or "").strip().lower()
+    if cls == "REJECTED" or dq == "rejected":
+        return {"effective_tier": "rejected", "display_qualified": False}
+    if cls == "UNVERIFIED" or vs == "unverified" or dq == "needs_verification" or tt == "unverified":
+        return {"effective_tier": "unverified", "display_qualified": False}
+
+    views = item.get("views_count")
+    likes = item.get("likes_count")
+    views_ok = (
+        views is not None
+        and not isinstance(views, bool)
+        and isinstance(views, (int, float))
+        and int(views) >= 0
+        and not bool(item.get("views_missing"))
+    )
+    likes_ok = (
+        likes is not None
+        and not isinstance(likes, bool)
+        and isinstance(likes, (int, float))
+        and int(likes) >= 0
+    )
+    if not (views_ok and likes_ok):
+        return {"effective_tier": "insufficient_metrics", "display_qualified": False}
+
+    views_i = int(views)
+    likes_i = int(likes)
+    if views_i >= 50000 or likes_i >= 1000:
+        return {"effective_tier": "very_hot", "display_qualified": True}
+    if views_i > 5000 or likes_i >= 200:
+        return {"effective_tier": "hot", "display_qualified": True}
+    return {"effective_tier": "below_hot", "display_qualified": False}
 
 
 def extract_v32_counters(raw_obj: Any, legacy_fallback_qualified: bool = False) -> Dict[str, Any]:

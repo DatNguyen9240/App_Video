@@ -3697,10 +3697,10 @@ assert.equal(v3StartBtns.length, 6);
     assert.match(blockedInlineMsg.text, /Muse Helper chưa nâng cấp|Skill threads_crawl/);
     assert.equal(env14.DB.crawlRequests.length, 0);
 
-    // Once Helper V3.3 is verified, inline shortcut creates Threads V3.3 request in D1
+    // Once Helper V3.3 (Skill v1.2 + Policy r2) is verified, inline shortcut creates Threads V3.3 request in D1
     env14.DB.runtimeState.set(
       "muse_helper_compatibility_json",
-      JSON.stringify({ v33_compatible: true, verified: true, skill_version: "1.1", supported_contracts: ["3.2", "3.3"], capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"] })
+      JSON.stringify({ v33_compatible: true, verified: true, skill_version: "1.2", quality_policy_version: "3.3-hot-only-r2-20261128", supported_contracts: ["3.2", "3.3"], capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"] })
     );
     const queuedMsg = await sendCallback(80060, "crawl:go:threads:50");
     assertNoMainMenuDuplicateInInline(queuedMsg, "Sau khi tạo Crawl");
@@ -6356,7 +6356,7 @@ assert.equal(v3StartBtns.length, 6);
       const requiredPatterns = [
         /Crawl Threads/,
         new RegExp(`Request ID: ${expectedReqId}`),
-        /Skill: Nạp threads_crawl v1\.1 \(chỉ thu thập Hot >= 10K views\/300 likes & Very Hot >= 50K views\/1K likes\)/,
+        /Skill: Nạp threads_crawl v1\.2 \(chỉ thu thập Hot: views > 5K hoặc likes >= 200 & Very Hot: views >= 50K hoặc likes >= 1K\)/,
         /Crawl Mode: /,
         /Topics: /,
         /Lookback: /,
@@ -6468,7 +6468,7 @@ assert.equal(v3StartBtns.length, 6);
     assert.ok(tgPromptMsg, "Telegram /request_crawl should output Manual Prompt");
     assert.ok(tgPromptMsg.body.text.length <= 4096, `Telegram message exceeded 4096 chars: ${tgPromptMsg.body.text.length}`);
     assert.ok(tgPromptMsg.body.text.trim().endsWith("</pre>"), "Telegram HTML must cleanly close </pre>");
-    assert.match(tgPromptMsg.body.text, /<pre>[\s\S]*threads_crawl v1\.1[\s\S]*Contract &amp; API Spec \(3\.2\):[\s\S]*strategy_version="3\.3 \(sửa đổi 28\/11\/2026\)"[\s\S]*<\/pre>/);
+    assert.match(tgPromptMsg.body.text, /<pre>[\s\S]*threads_crawl v1\.2[\s\S]*Contract &amp; API Spec \(3\.2\):[\s\S]*strategy_version="3\.3 \(sửa đổi 28\/11\/2026\)"[\s\S]*<\/pre>/);
     const museBtn = tgPromptMsg.body.reply_markup.inline_keyboard.flat().find(b => b.url === "https://muse.ai/");
     assert.ok(museBtn, "Telegram response must include Mở Muse button");
     const reqThreads2 = Array.from(env23.DB.crawlRequests.values()).find(r => r.keywords === "retinol");
@@ -7220,7 +7220,7 @@ assert.equal(v3StartBtns.length, 6);
       assert.equal(mkJson.request.lookback_hours, mc.lookback_hours);
       if (mc.exclusions?.exclude_celebrity === false) {
         assert.match(mkJson.manual_prompt, /exclude_celebrity=false/);
-        assert.match(mkJson.manual_prompt, /threads_crawl v1\.1/);
+        assert.match(mkJson.manual_prompt, /threads_crawl v1\.2/);
         assert.match(mkJson.manual_prompt, /strategy_version="3\.3 \(sửa đổi 28\/11\/2026\)"/);
         assert.match(mkJson.manual_prompt, /Contract & API Spec \(3\.2\)/);
         assert.match(mkJson.manual_prompt, /POST \/api\/crawl\/complete/);
@@ -7452,15 +7452,16 @@ function makeV33Env() {
     env24
   );
 
-  // 2a. Outdated skill_version (<1.1), empty capabilities, or partial capabilities MUST NOT enable V3.3
+  // 2a. Compatibility Gate r2: empty caps, Helper v1.1 (even with verified:true), old policy (even with v1.2+verified:true), or missing policy MUST NOT enable V3.3
   const emptyCapsHs = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/helper/handshake", {
       method: "POST",
       headers: museHeaders,
       body: JSON.stringify({
-        helper_version: "muse-helper/3.3.0",
+        helper_version: "muse-helper/3.3.2",
         supported_contracts: ["3.2", "3.3"],
-        skill_version: "1.1",
+        skill_version: "1.2",
+        quality_policy_version: "3.3-hot-only-r2-20261128",
         capabilities: [],
       }),
     }),
@@ -7475,22 +7476,44 @@ function makeV33Env() {
       body: JSON.stringify({
         helper_version: "muse-helper/3.3.0",
         supported_contracts: ["3.2", "3.3"],
-        skill_version: "1.0",
+        skill_version: "1.1",
+        quality_policy_version: "3.3-hot-only-r2-20261128",
+        verified: true,
+        v33_compatible: true,
         capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
       }),
     }),
     env24
   )).json();
-  assert.equal(outdatedSkillHs.helper_compatibility.v33_compatible, false);
+  assert.equal(outdatedSkillHs.helper_compatibility.v33_compatible, false, "Helper v1.1 MUST be rejected even with verified:true");
+
+  const oldPolicyHs = await (await worker.fetch(
+    new Request("https://worker.example/api/crawl/helper/handshake", {
+      method: "POST",
+      headers: museHeaders,
+      body: JSON.stringify({
+        helper_version: "muse-helper/3.3.1",
+        supported_contracts: ["3.2", "3.3"],
+        skill_version: "1.2",
+        quality_policy_version: "3.3-hot-only-20261128",
+        verified: true,
+        v33_compatible: true,
+        capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
+      }),
+    }),
+    env24
+  )).json();
+  assert.equal(oldPolicyHs.helper_compatibility.v33_compatible, false, "Old policy 3.3-hot-only-20261128 MUST be rejected");
 
   const partialHs = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/helper/handshake", {
       method: "POST",
       headers: museHeaders,
       body: JSON.stringify({
-        helper_version: "muse-helper/3.2.5",
+        helper_version: "muse-helper/3.3.2",
         supported_contracts: ["3.2", "3.3"],
-        skill_version: "1.1",
+        skill_version: "1.2",
+        quality_policy_version: "3.3-hot-only-r2-20261128",
         capabilities: ["lease_renew"],
       }),
     }),
@@ -7498,15 +7521,16 @@ function makeV33Env() {
   )).json();
   assert.equal(partialHs.helper_compatibility.v33_compatible, false);
 
-  // 2b. Complete V3.3 handshake (Skill v1.1 + all 4 capabilities) activates V3.3 + 60m default lease + Skill prompt
+  // 2b. Complete V3.3 r2 handshake (Skill v1.2 + policy 3.3-hot-only-r2-20261128 + all 4 capabilities) activates V3.3 + 60m default lease + Skill prompt
   const hsRes = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/helper/handshake", {
       method: "POST",
       headers: museHeaders,
       body: JSON.stringify({
-        helper_version: "muse-helper/3.3.0",
+        helper_version: "muse-helper/3.3.2",
         supported_contracts: ["3.2", "3.3"],
-        skill_version: "1.1",
+        skill_version: "1.2",
+        quality_policy_version: "3.3-hot-only-r2-20261128",
         capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
       }),
     }),
@@ -7514,6 +7538,8 @@ function makeV33Env() {
   )).json();
   assert.equal(hsRes.ok, true);
   assert.equal(hsRes.helper_compatibility.v33_compatible, true);
+  assert.equal(hsRes.helper_compatibility.skill_version, "1.2");
+  assert.equal(hsRes.helper_compatibility.quality_policy_version, "3.3-hot-only-r2-20261128");
 
   const healthV33 = await (await worker.fetch(
     new Request("https://worker.example/api/crawl/health", { headers: museHeaders }),
@@ -7521,6 +7547,8 @@ function makeV33Env() {
   )).json();
   assert.equal(healthV33.ok, true);
   assert.equal(healthV33.contract_version, "3.3");
+  assert.equal(healthV33.skill_version, "1.2");
+  assert.equal(healthV33.quality_policy_version, "3.3-hot-only-r2-20261128");
   assert.equal(healthV33.helper_compatibility.v33_compatible, true);
 
   const req33Res = await (await worker.fetch(
@@ -7540,13 +7568,14 @@ function makeV33Env() {
   )).json();
   assert.equal(req33Res.ok, true, JSON.stringify(req33Res));
   assert.equal(req33Res.request.contract_version, "3.3");
-  assert.equal(req33Res.request.skill_version, "1.1");
-  assert.equal(req33Res.request.quality_policy_version, "3.3-hot-only-20261128");
+  assert.equal(req33Res.request.skill_version, "1.2");
+  assert.equal(req33Res.request.quality_policy_version, "3.3-hot-only-r2-20261128");
   assert.equal(req33Res.request.target_metric, "quality_qualified_count");
   assert.equal(req33Res.request.lease_minutes, 60);
-  assert.match(req33Res.manual_prompt, /threads_crawl v1\.1/);
-  assert.match(req33Res.manual_prompt, /3\.3-hot-only-20261128/);
-  assert.match(req33Res.manual_prompt, /Hot & Very Hot only/);
+  assert.match(req33Res.manual_prompt, /threads_crawl v1\.2/);
+  assert.match(req33Res.manual_prompt, /3\.3-hot-only-r2-20261128/);
+  assert.match(req33Res.manual_prompt, /views > 5K hoặc likes >= 200/);
+  assert.match(req33Res.manual_prompt, /không SQL trực tiếp/);
   assert.match(req33Res.manual_prompt, /Contract & API Spec \(3\.3\)/);
   assert.match(req33Res.manual_prompt, /\/api\/crawl\/checkpoint/);
   assert.doesNotMatch(req33Res.manual_prompt, /Thời lượng lease|30 \/ 60 \/ 120|Watchlist:/i);
@@ -8159,15 +8188,16 @@ function makeV33Env() {
       latest_metrics_json: JSON.stringify({ views: 3500, likes: 40 }),
     });
 
-    // Verify Helper V3.3 via handshake with Skill v1.1 + 4 capabilities
+    // Verify Helper V3.3 via handshake with Skill v1.2 + Policy 3.3-hot-only-r2-20261128 + 4 capabilities
     const hsOk = await worker.fetch(
       new Request("https://worker.example/api/crawl/helper/handshake", {
         method: "POST",
         headers: museHeaders,
         body: JSON.stringify({
-          helper_version: "muse-helper/3.3.1",
+          helper_version: "muse-helper/3.3.2",
           supported_contracts: ["3.2", "3.3"],
-          skill_version: "1.1",
+          skill_version: "1.2",
+          quality_policy_version: "3.3-hot-only-r2-20261128",
           capabilities: ["multi_session", "lease_renew", "checkpoint", "quality_first_v33"],
         }),
       }),
@@ -8426,6 +8456,51 @@ function makeV33Env() {
     assert.equal(rowAfterDriveInc.pause_reason, "drive_target_incomplete");
     assert.equal(rowAfterDriveInc.accumulated_quality_count, 3);
     assert.equal(tgCount26, tgBeforeDriveInc, "Incomplete Drive V3.3 pause MUST NOT send completion Telegram");
+
+    // 26E: Policy 3.3-hot-only-r2-20261128 strict quantitative boundary tests (5000/5001, 199/200, 49999/50000, 999/1000)
+    const cl26S4 = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/claim", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({ request_id: id26 }),
+      }),
+      env26
+    )).json();
+    assert.equal(cl26S4.request.session_seq, 4);
+
+    const cpBoundary = await (await worker.fetch(
+      new Request("https://worker.example/api/crawl/checkpoint", {
+        method: "POST",
+        headers: museHeaders,
+        body: JSON.stringify({
+          request_id: id26,
+          attempt: cl26S4.request.attempt,
+          session_seq: 4,
+          pause_reason: "session_budget_reached",
+          run_id: `${id26}_s4`,
+          crawled_at: "2026-11-28T10:00:00Z",
+          items: [
+            makeV33ThreadsItem(901, { trend_tier: "hot", views: 5000, likes: 199, metrics: { views: 5000, likes: 199, comments: 10 }, quality_qualified: true }),
+            makeV33ThreadsItem(902, { trend_tier: "below_hot", views: 5001, likes: 0, metrics: { views: 5001, likes: 0, comments: 1 } }),
+            makeV33ThreadsItem(903, { trend_tier: "below_hot", views: 0, likes: 200, metrics: { views: 0, likes: 200, comments: 1 } }),
+            makeV33ThreadsItem(904, { trend_tier: "very_hot", views: 49999, likes: 999, metrics: { views: 49999, likes: 999, comments: 5 } }),
+            makeV33ThreadsItem(905, { trend_tier: "hot", views: 50000, likes: 0, metrics: { views: 50000, likes: 0, comments: 2 } }),
+            makeV33ThreadsItem(906, { trend_tier: "hot", views: 0, likes: 1000, metrics: { views: 0, likes: 1000, comments: 2 } }),
+          ],
+        }),
+      }),
+      env26
+    )).json();
+    assert.equal(cpBoundary.ok, true);
+    // 3 previous + 5 new passing (902..906) = 8; 901 (5000/199) MUST be excluded as below_hot!
+    assert.equal(cpBoundary.accumulated_quality_count, 8);
+    assert.equal(env26.DB.postRegistry.has("threads:post:V33Post_0901"), false);
+    assert.equal(env26.DB.requestQualityItems.get(`${id26}::threads:post:V33Post_0901`)?.trend_tier, "below_hot");
+    assert.equal(env26.DB.requestQualityItems.get(`${id26}::threads:post:V33Post_0902`)?.trend_tier, "hot");
+    assert.equal(env26.DB.requestQualityItems.get(`${id26}::threads:post:V33Post_0903`)?.trend_tier, "hot");
+    assert.equal(env26.DB.requestQualityItems.get(`${id26}::threads:post:V33Post_0904`)?.trend_tier, "hot");
+    assert.equal(env26.DB.requestQualityItems.get(`${id26}::threads:post:V33Post_0905`)?.trend_tier, "very_hot");
+    assert.equal(env26.DB.requestQualityItems.get(`${id26}::threads:post:V33Post_0906`)?.trend_tier, "very_hot");
   } finally {
     globalThis.fetch = prevFetch26;
   }
