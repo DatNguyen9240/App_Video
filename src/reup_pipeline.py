@@ -754,22 +754,31 @@ def mix_reup_audio(
         for idx, (st, en) in enumerate(merged):
             st = max(0, min(st, total_ms))
             en = max(0, min(en, total_ms))
-            ducked_chunk = ducked_bg[st:en]
-            if len(final_bg) > 300 and len(ducked_chunk) > 300:
-                final_bg = final_bg.append(ducked_chunk, crossfade=300)
+            # Giữ nguyên tổng thời lượng total_ms khi crossfade (bù phần chồng lấn trước khi append)
+            cf_in = 300 if (len(final_bg) > 300 and st >= 300 and (en - st) > 300) else 0
+            ducked_chunk = ducked_bg[st - cf_in:en]
+            if cf_in > 0:
+                final_bg = final_bg.append(ducked_chunk, crossfade=cf_in)
             else:
                 final_bg += ducked_chunk
+
             next_st = merged[idx + 1][0] if idx < len(merged) - 1 else total_ms
             next_st = max(0, min(next_st, total_ms))
             if next_st > en:
-                unducked_chunk = bg_track[en:next_st]
-                if len(final_bg) > 500 and len(unducked_chunk) > 500:
-                    final_bg = final_bg.append(unducked_chunk, crossfade=500)
+                cf_out = 500 if (len(final_bg) > 500 and en >= 500 and (next_st - en) > 500) else 0
+                unducked_chunk = bg_track[en - cf_out:next_st]
+                if cf_out > 0:
+                    final_bg = final_bg.append(unducked_chunk, crossfade=cf_out)
                 else:
                     final_bg += unducked_chunk
-        final_audio = final_bg.overlay(tts_track)
+
+        if len(final_bg) < total_ms:
+            final_bg += AudioSegment.silent(duration=total_ms - len(final_bg))
+        final_bg = final_bg[:total_ms]
+        # Overlay trên nền tts_track (giữ trọn vẹn 100% độ dài giọng đọc)
+        final_audio = tts_track.overlay(final_bg)
     else:
-        final_audio = bg_track.overlay(tts_track)
+        final_audio = tts_track.overlay(bg_track)
 
     final_audio.export(output_wav, format="wav")
     return output_wav

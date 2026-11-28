@@ -136,6 +136,22 @@ class TestReupPipeline(unittest.TestCase):
         st = tracker.get_state()
         self.assertEqual(st["progress_percent"], 96)
 
+    def test_mix_reup_audio_preserves_full_duration_across_crossfades(self):
+        from pydub import AudioSegment
+        with tempfile.TemporaryDirectory() as tmp:
+            seg1 = os.path.join(tmp, "s1.wav")
+            seg2 = os.path.join(tmp, "s2.wav")
+            AudioSegment.silent(duration=1500).export(seg1, format="wav")
+            AudioSegment.silent(duration=1500).export(seg2, format="wav")
+            segs = [
+                {"id": 1, "start_ms": 1000, "end_ms": 2500, "tts_path": seg1},
+                {"id": 2, "start_ms": 7000, "end_ms": 8500, "tts_path": seg2},
+            ]
+            out_wav = os.path.join(tmp, "mixed.wav")
+            reup_mod.mix_reup_audio(segs, "", out_wav, video_duration_ms=10000)
+            mixed = AudioSegment.from_wav(out_wav)
+            self.assertEqual(len(mixed), 10000)
+
 
 if __name__ == "__main__":
     unittest.main()
