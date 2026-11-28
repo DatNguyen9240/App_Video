@@ -594,18 +594,15 @@ HTML_TEMPLATE = """
                   <i class="fa-solid fa-microphone-lines text-pink-400"></i>
                   <span>Giọng đọc dẫn chuyện chính:</span>
                 </label>
-                <select v-model="authorVoiceInput" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
-                  <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng, bắt trend - Khuyên dùng)</option>
-                  <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, xéo xắt duyên dáng, đỉnh Threads)</option>
-                  <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời, kiểu Độ Mixi / PewPew)</option>
-                  <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương, vui tươi, hài nhẹ)</option>
-                  <option value="chi_google">🤖 Chị Google (Meme robot hài hước)</option>
-                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn (Nghiêm túc, ấm áp)</option>
-                  <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn (Truyền cảm, tự nhiên)</option>
-                  <option value="adam">🎙️ Adam (Podcast quốc tế)</option>
-                  <option value="brian">🎙️ Brian (Điện ảnh quốc tế)</option>
+                <select v-model="authorVoiceInput" @change="settings.voice = authorVoiceInput" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200">
+                  <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Ấm áp, rõ nét - Khuyên dùng)</option>
+                  <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh (Hồ sơ, Phóng sự)</option>
+                  <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm (Tự nhiên, cuốn hút)</option>
+                  <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén (Threads, Cà khịa nhanh)</option>
+                  <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động (Vui tươi, Gen Z)</option>
+                  <option value="gtts">🤖 Chị Google (Chỉ dùng cho meme robot)</option>
                 </select>
-                <span class="text-xs text-slate-400 block">Giọng đọc tiếng Việt tự nhiên 100%, rõ ràng, truyền cảm và chuẩn nhịp điệu</span>
+                <span class="text-xs text-slate-400 block">Sử dụng k2-fsa/OmniVoice AI (hỗ trợ Voice Cloning từ thư mục assets/voices/)</span>
               </div>
             </div>
 
@@ -703,15 +700,12 @@ HTML_TEMPLATE = """
                   <i class="fa-solid fa-microphone text-pink-400"></i> Giọng đọc bài chính:
                 </label>
                 <select v-model="post.voice_id" class="w-full glass-input rounded-xl px-3 py-2 text-xs bg-slate-800 text-slate-200 font-medium">
-                  <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng)</option>
-                  <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, hài hước)</option>
-                  <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời)</option>
-                  <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương)</option>
-                  <option value="chi_google">🤖 Chị Google (Meme robot)</option>
-                  <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn</option>
-                  <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn</option>
-                  <option value="adam">🎙️ Adam (Podcast)</option>
-                  <option value="brian">🎙️ Brian (Điện ảnh)</option>
+                  <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
+                  <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                  <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                  <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                  <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                  <option value="gtts">🤖 Chị Google (Meme robot)</option>
                 </select>
               </div>
 
@@ -920,15 +914,12 @@ HTML_TEMPLATE = """
                 <div>
                   <label class="text-xs font-semibold text-slate-400 block mb-1">Giọng đọc:</label>
                   <select v-model="cmt.voice_id" class="w-full glass-input rounded-xl px-3 py-1.5 text-xs bg-slate-800 text-slate-200 font-medium">
-                    <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, hài)</option>
-                    <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng)</option>
-                    <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời)</option>
-                    <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương)</option>
-                    <option value="chi_google">🤖 Chị Google (Robot meme)</option>
-                    <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn</option>
-                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn</option>
-                    <option value="adam">🎙️ Adam (Podcast)</option>
-                    <option value="brian">🎙️ Brian (Điện ảnh)</option>
+                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
+                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                    <option value="gtts">🤖 Chị Google (Robot meme)</option>
                   </select>
                 </div>
 
@@ -1306,16 +1297,13 @@ HTML_TEMPLATE = """
                   <label class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                     <i class="fa-solid fa-microphone text-emerald-400"></i> Giọng đọc chính:
                   </label>
-                  <select v-model="settings.voice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
-                    <option value="nam_hai">🔥 Nam Hài Hước (Dí dỏm, tưng tửng, bắt trend - Khuyên dùng)</option>
-                    <option value="nu_cakhia">🌸 Nữ Cà Khịa (Đanh đá, hài hước, duyên dáng)</option>
-                    <option value="nam_tram_hai">🎙️ Nam Trầm Hài (Bựa, cạn lời, kiểu Độ Mixi)</option>
-                    <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh (Dễ thương, vui tươi)</option>
-                    <option value="chi_google">🤖 Chị Google (Meme robot)</option>
-                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh Chuẩn (Ấm áp)</option>
-                    <option value="vi-VN-HoaiMyNeural">🌸 Hoài My Chuẩn (Truyền cảm)</option>
-                    <option value="adam">🎙️ Adam (Podcast)</option>
-                    <option value="brian">🎙️ Brian (Điện ảnh)</option>
+                  <select v-model="settings.voice" @change="authorVoiceInput = settings.voice" class="w-full glass-input rounded-xl px-2.5 py-2 text-xs bg-slate-800 text-slate-200">
+                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện (Khuyên dùng)</option>
+                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm Điện Ảnh</option>
+                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                    <option value="gtts">🤖 Chị Google (Meme robot)</option>
                   </select>
                 </div>
 
@@ -1922,15 +1910,12 @@ HTML_TEMPLATE = """
                 </div>
                 <div class="grid grid-cols-3 gap-2">
                   <select v-model="r.voice" class="col-span-2 glass-input rounded-lg p-1.5 text-xs bg-slate-800 text-slate-200">
-                    <option value="nam_hai">🔥 Nam Hài Hước</option>
-                    <option value="nu_cakhia">🌸 Nữ Cà Khịa</option>
-                    <option value="nam_tram_hai">🎙️ Nam Trầm Hài</option>
-                    <option value="nu_nhinhanh">✨ Nữ Nhí Nhảnh</option>
-                    <option value="chi_google">🤖 Chị Google</option>
-                    <option value="vi-VN-NamMinhNeural">🇻🇳 Nam Minh</option>
-                    <option value="vi-VN-HoaiMyNeural">🌸 Hoài My</option>
-                    <option value="adam">🎙️ Adam</option>
-                    <option value="brian">🎙️ Brian</option>
+                    <option value="nam_hai">🎙️ OmniVoice Nam Kể Chuyện</option>
+                    <option value="nam_tram_hai">🎬 OmniVoice Nam Trầm</option>
+                    <option value="hoai_my">🌸 OmniVoice Nữ Truyền Cảm</option>
+                    <option value="nu_cakhia">🔥 OmniVoice Nữ Sắc Bén</option>
+                    <option value="nu_nhinhanh">✨ OmniVoice Nữ Năng Động</option>
+                    <option value="gtts">🤖 Chị Google (Meme)</option>
                   </select>
                   <input v-model="r.rate" type="text" placeholder="+10%" class="glass-input rounded-lg p-1.5 text-xs font-mono text-center">
                 </div>
@@ -2363,6 +2348,68 @@ HTML_TEMPLATE = """
                     {{ k.is_active ? 'Đang bật' : 'Đang tắt' }}
                   </button>
                   <button type="button" @click="deleteGeminiKey(k.id)"
+                    class="px-2 py-1 rounded-lg text-[11px] text-rose-400 hover:bg-rose-950/40 cursor-pointer">
+                    <i class="fa-solid fa-trash"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Nhóm 9: Quản Lý Proxy Chống Quét & Xoay Vòng IP -->
+          <div class="space-y-3 pt-2 border-t border-slate-800/80">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
+                <i class="fa-solid fa-shield-halved"></i> 9. Quản Lý Proxy Chống Quét &amp; Xoay Vòng IP
+              </h3>
+              <span class="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950/60 text-cyan-300 border border-cyan-700/40">
+                Áp dụng cho Tìm Ảnh/Video • Bing • Threads • Edge-TTS
+              </span>
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-2">
+              <input v-model="newProxyLabel" type="text" placeholder="Nhãn (VD: Proxy US 1)"
+                class="sm:w-44 glass-input rounded-xl px-3 py-2 text-xs text-slate-200">
+              <textarea v-model="newProxyInput" rows="1" placeholder="ip:port, ip:port:user:pass hoặc http://user:pass@ip:port (nhiều proxy cách nhau bằng xuống dòng)"
+                class="flex-1 glass-input rounded-xl px-3 py-2 text-xs text-slate-200 font-mono"></textarea>
+              <button type="button" @click="testProxyInput" :disabled="isTestingProxy"
+                class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-700/50 text-xs font-semibold cursor-pointer shrink-0 disabled:opacity-60">
+                <i class="fa-solid fa-plug-circle-check mr-1"></i> {{ isTestingProxy ? 'Đang thử...' : 'Test Proxy' }}
+              </button>
+              <button type="button" @click="addProxy"
+                class="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer shrink-0">
+                <i class="fa-solid fa-plus mr-1"></i> Thêm Proxy
+              </button>
+            </div>
+
+            <div v-if="proxyTestResult" class="text-[11px] rounded-xl px-3 py-2 border"
+              :class="proxyTestResult.success ? 'bg-emerald-950/40 border-emerald-700/40 text-emerald-300' : 'bg-rose-950/40 border-rose-700/40 text-rose-300'">
+              <span v-if="proxyTestResult.success">✅ Kết nối thành công — IP đầu ra: <code class="font-mono font-bold">{{ proxyTestResult.ip }}</code> ({{ proxyTestResult.latency_ms }}ms)</span>
+              <span v-else>❌ Proxy lỗi: {{ proxyTestResult.error }}</span>
+            </div>
+
+            <div v-if="proxiesList.length === 0" class="text-[11px] text-slate-400 bg-slate-900/50 rounded-xl p-3 border border-slate-800">
+              Chưa có proxy trong DB — hệ thống chạy trực tiếp hoặc đọc từ <code class="text-cyan-300">PROXY_URL</code> / <code class="text-cyan-300">PROXY_LIST</code> trong <code class="text-cyan-300">.env</code>.
+            </div>
+
+            <div v-else class="space-y-1.5">
+              <div v-for="px in proxiesList" :key="px.id"
+                class="flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+                <div class="flex items-center gap-2.5 min-w-0">
+                  <span class="w-2 h-2 rounded-full shrink-0" :class="px.is_active ? 'bg-emerald-400' : 'bg-slate-600'"></span>
+                  <span class="font-semibold text-slate-200 truncate">{{ px.label }}</span>
+                  <code class="text-[11px] text-slate-400 font-mono truncate">{{ px.masked_proxy }}</code>
+                  <span v-if="px.error_count > 0" class="text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 text-rose-300 border border-rose-700/40">
+                    {{ px.error_count }} lỗi
+                  </span>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <button type="button" @click="toggleProxy(px)"
+                    class="px-2.5 py-1 rounded-lg text-[11px] font-medium border cursor-pointer"
+                    :class="px.is_active ? 'border-emerald-700/50 text-emerald-300 bg-emerald-950/40' : 'border-slate-700 text-slate-400 bg-slate-800'">
+                    {{ px.is_active ? 'Đang bật' : 'Đang tắt' }}
+                  </button>
+                  <button type="button" @click="deleteProxy(px.id)"
                     class="px-2 py-1 rounded-lg text-[11px] text-rose-400 hover:bg-rose-950/40 cursor-pointer">
                     <i class="fa-solid fa-trash"></i>
                   </button>
@@ -3598,6 +3645,11 @@ HTML_TEMPLATE = """
           geminiKeys: [],
           newGeminiKey: '',
           newGeminiLabel: '',
+          proxiesList: [],
+          newProxyInput: '',
+          newProxyLabel: '',
+          isTestingProxy: false,
+          proxyTestResult: null,
           isCancellingPipeline: false,
           pollTimer: null,
           crawlCenterTimer: null,
@@ -3718,6 +3770,7 @@ HTML_TEMPLATE = """
         this.loadDailyTrendingTopics(false);
         this.loadDirectorConfig();
         this.loadGeminiKeys();
+        this.loadProxies();
         this.loadAvatarGallery();
         this.loadMarketDashboard();
         this.startStatusPolling();
@@ -4189,6 +4242,7 @@ HTML_TEMPLATE = """
             this.settings.bg_mode = data.bg_mode || 'split_gameplay';
             this.settings.card_theme = data.card_theme || 'light';
             this.settings.voice = data.voice || 'nam_hai';
+            this.authorVoiceInput = this.settings.voice;
             this.settings.rate = data.rate || '+0%';
             this.settings.bgm_choice = data.bgm_choice || 'gentle_piano_satie.mp3';
             this.settings.bgm_volume = data.bgm_volume !== undefined ? data.bgm_volume : 25;
@@ -4260,6 +4314,70 @@ HTML_TEMPLATE = """
             await fetch('/api/gemini_keys/' + id, { method: 'DELETE' });
             await this.loadGeminiKeys();
             this.notify('Đã xóa key khỏi DB.', 'success');
+          } catch(e) {}
+        },
+        async loadProxies() {
+          try {
+            const res = await fetch('/api/proxies');
+            const data = await res.json();
+            this.proxiesList = data.proxies || [];
+          } catch(e) {}
+        },
+        async addProxy() {
+          if (!this.newProxyInput || !this.newProxyInput.trim()) return;
+          try {
+            const res = await fetch('/api/proxies', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ proxy_url: this.newProxyInput.trim(), label: this.newProxyLabel.trim() })
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.newProxyInput = '';
+              this.newProxyLabel = '';
+              this.proxyTestResult = null;
+              await this.loadProxies();
+              this.notify('✅ Đã lưu Proxy vào SQLite DB!', 'success');
+            } else {
+              this.notify(data.error || 'Lỗi thêm proxy', 'error');
+            }
+          } catch(e) {
+            this.notify('Lỗi kết nối: ' + e, 'error');
+          }
+        },
+        async testProxyInput() {
+          const firstLine = (this.newProxyInput || '').trim().split(/\\r?\\n/)[0];
+          if (!firstLine) return;
+          this.isTestingProxy = true;
+          this.proxyTestResult = null;
+          try {
+            const res = await fetch('/api/proxies/test', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ proxy_url: firstLine })
+            });
+            this.proxyTestResult = await res.json();
+          } catch(e) {
+            this.proxyTestResult = { success: false, error: String(e) };
+          } finally {
+            this.isTestingProxy = false;
+          }
+        },
+        async toggleProxy(px) {
+          try {
+            await fetch('/api/proxies/' + px.id, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ is_active: !px.is_active })
+            });
+            await this.loadProxies();
+          } catch(e) {}
+        },
+        async deleteProxy(id) {
+          try {
+            await fetch('/api/proxies/' + id, { method: 'DELETE' });
+            await this.loadProxies();
+            this.notify('Đã xóa proxy khỏi DB.', 'success');
           } catch(e) {}
         },
         async loadDirectorConfig() {
@@ -4860,6 +4978,45 @@ def api_gemini_key_item(key_id):
     data = request.json or {}
     ok = db_mod.toggle_gemini_key(key_id, bool(data.get("is_active", True)))
     return jsonify({"success": ok})
+
+
+@app.route("/api/proxies", methods=["GET", "POST"])
+def api_proxies():
+    db_mod = load_mod("db_store", "db_store.py")
+    if request.method == "POST":
+        data = request.json or {}
+        raw = (data.get("proxy_url") or "").strip()
+        label = (data.get("label") or "").strip()
+        if not raw:
+            return jsonify({"success": False, "error": "proxy_url không được rỗng."}), 400
+        lines = [ln.strip() for ln in raw.replace(",", "\n").splitlines() if ln.strip()]
+        added = []
+        for idx, ln in enumerate(lines, 1):
+            lbl = f"{label} #{idx}" if (label and len(lines) > 1) else label
+            added.append(db_mod.add_proxy(ln, label=lbl))
+        return jsonify({"success": True, "proxies": added, "count": len(added)})
+    return jsonify({"success": True, "proxies": db_mod.list_proxies()})
+
+
+@app.route("/api/proxies/<int:proxy_id>", methods=["PATCH", "DELETE"])
+def api_proxy_item(proxy_id):
+    db_mod = load_mod("db_store", "db_store.py")
+    if request.method == "DELETE":
+        ok = db_mod.delete_proxy(proxy_id)
+        return jsonify({"success": ok})
+    data = request.json or {}
+    ok = db_mod.toggle_proxy(proxy_id, bool(data.get("is_active", True)))
+    return jsonify({"success": ok})
+
+
+@app.route("/api/proxies/test", methods=["POST"])
+def api_proxy_test():
+    pm_mod = load_mod("proxy_manager", "proxy_manager.py")
+    data = request.json or {}
+    proxy_url = (data.get("proxy_url") or "").strip()
+    if not proxy_url:
+        return jsonify({"success": False, "error": "proxy_url không được rỗng."}), 400
+    return jsonify(pm_mod.test_proxy_connection(proxy_url))
 
 
 @app.route("/api/settings", methods=["GET", "POST", "DELETE"])

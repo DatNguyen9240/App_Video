@@ -27,6 +27,12 @@ import urllib.request
 from typing import Union, List
 from PIL import Image, ImageOps
 
+try:
+    import proxy_manager as _proxy_mgr
+    _urlopen = _proxy_mgr.urlopen_with_proxy
+except Exception:
+    _urlopen = urllib.request.urlopen
+
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets", "illustrations")
 OUT_DIR    = os.path.join(BASE_DIR, "output", "illustrations")
@@ -177,7 +183,7 @@ def search_wikipedia_images(query: str, limit: int = 4) -> List[str]:
         )
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=6) as resp:
+            with _urlopen(req, timeout=6) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             pages = data.get("query", {}).get("pages", {})
             for _, p in sorted(pages.items(), key=lambda kv: kv[1].get("index", 999)):
@@ -204,7 +210,7 @@ def search_wikimedia_images(query: str, limit: int = 5) -> List[str]:
     url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={encoded}&gsrnamespace=6&gsrlimit={limit * 2}&prop=imageinfo&iiprop=url|size|mime&iiurlwidth=1000&format=json"
     req = urllib.request.Request(url, headers=wiki_headers)
     try:
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with _urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         pages = data.get("query", {}).get("pages", {})
         urls = []
@@ -304,7 +310,7 @@ def search_bing_images(query: str, limit: int = 8) -> List[str]:
     req = urllib.request.Request(search_url, headers=headers)
     vn_book_junk = (".vn/", "sach", "baitap", "giaokhoa", "tienganh", "tiki", "shopee", "lazada", "fahasa", "nxbgd")
     try:
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with _urlopen(req, timeout=6) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
         murls = re.findall(r'&quot;murl&quot;:&quot;(http[^&]+)&quot;', html)
         clean_urls = []
@@ -329,7 +335,7 @@ def download_and_validate_image(img_url: str, output_path: str, target_width: in
     temp_file = output_path + ".tmp.jpg"
     try:
         req = urllib.request.Request(img_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with _urlopen(req, timeout=6) as resp:
             data = resp.read()
 
         if len(data) < 15000:
@@ -516,7 +522,7 @@ def search_wikimedia_videos(query: str, limit: int = 5) -> List[str]:
     )
     req = urllib.request.Request(url, headers=wiki_headers)
     try:
-        with urllib.request.urlopen(req, timeout=7) as resp:
+        with _urlopen(req, timeout=7) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         pages = data.get("query", {}).get("pages", {})
         urls = []
@@ -549,7 +555,7 @@ def search_archive_org_videos(query: str, limit: int = 4) -> List[str]:
     search_url = f"https://archive.org/advancedsearch.php?q={encoded}&fl[]=identifier&rows={limit}&output=json"
     try:
         req = urllib.request.Request(search_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=7) as resp:
+        with _urlopen(req, timeout=7) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         docs = data.get("response", {}).get("docs", [])
         urls = []
@@ -559,7 +565,7 @@ def search_archive_org_videos(query: str, limit: int = 4) -> List[str]:
                 continue
             meta_url = f"https://archive.org/metadata/{ident}/files"
             mreq = urllib.request.Request(meta_url, headers=headers)
-            with urllib.request.urlopen(mreq, timeout=6) as mresp:
+            with _urlopen(mreq, timeout=6) as mresp:
                 mdata = json.loads(mresp.read().decode("utf-8"))
             for f in mdata.get("result", []):
                 fname = f.get("name", "")
@@ -607,7 +613,7 @@ def search_and_download_real_video(
             out_path = os.path.join(output_dir, f"{prefix}{ext}")
             try:
                 req = urllib.request.Request(cand, headers=headers)
-                with urllib.request.urlopen(req, timeout=15) as resp:
+                with _urlopen(req, timeout=15) as resp:
                     data = resp.read()
                 if len(data) < 50_000:
                     continue

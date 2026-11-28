@@ -36,7 +36,7 @@ STEP_DEFINITIONS = [
     {
         "id": "tts",
         "title": "3. Diễn Xuất Giọng Nói Đa Vai",
-        "desc": "Microsoft Edge TTS đa giọng (Nam/Nữ) kèm biến thiên Rate & Pitch theo cảm xúc",
+        "desc": "OmniVoice AI đa giọng (Voice Design & Voice Cloning) kèm biến thiên tốc độ",
         "status": "idle",
         "time_str": ""
     },

@@ -62,6 +62,20 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS proxies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL DEFAULT '',
+            proxy_url TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            last_used_at TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -77,7 +91,7 @@ def _read_env_vars() -> Dict[str, str]:
                         result[k.strip()] = v.strip().strip('"').strip("'")
         except Exception:
             pass
-    for k in list(STUDIO_SETTING_DEFAULTS.keys()) + ["GEMINI_API_KEY"]:
+    for k in list(STUDIO_SETTING_DEFAULTS.keys()) + ["GEMINI_API_KEY", "PROXY_URL", "PROXY_LIST", "HTTP_PROXY", "HTTPS_PROXY"]:
         if k not in result and os.environ.get(k):
             result[k] = os.environ[k]
     return result
@@ -245,3 +259,148 @@ def reset_studio_settings(db_path: str = None) -> Dict[str, str]:
         conn.execute("DELETE FROM studio_settings")
         conn.commit()
     return get_studio_settings(db_path)
+
+
+def normalize_proxy_url(raw: str) -> str:
+    """Chuẩn hóa mọi định dạng proxy (ip:port, ip:port:user:pass, user:pass@ip:port, http://...) về URL chuẩn."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    lower = s.lower()
+    if lower.startswith(("http://", "https://", "socks4://", "socks5://")):
+        return s
+    if "@" not in s and s.count(":") == 3:
+        host, port, user, pwd = s.split(":", 3)
+        return f"http://{user}:{pwd}@{host}:{port}"
+    return f"http://{s}"
+
+
+def mask_proxy(proxy_url: str) -> str:
+    """Ẩn mật khẩu proxy khi hiển thị trên giao diện Web."""
+    if not proxy_url:
+        return ""
+    if "@" in proxy_url and "://" in proxy_url:
+        scheme, rest = proxy_url.split("://", 1)
+        creds, host = rest.rsplit("@", 1)
+        user = creds.split(":", 1)[0]
+        return f"{scheme}://{user}:***@{host}"
+    return proxy_url
+
+
+def list_proxies(db_path: str = None) -> List[Dict]:
+    with _get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, label, proxy_url, is_active, error_count, last_error, last_used_at, created_at "
+            "FROM proxies ORDER BY error_count ASC, id ASC"
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "label": r["label"] or f"Proxy #{r['id']}",
+                "masked_proxy": mask_proxy(r["proxy_url"]),
+                "is_active": bool(r["is_active"]),
+                "error_count": r["error_count"],
+                "last_error": r["last_error"],
+                "last_used_at": r["last_used_at"],
+                "created_at": r["created_at"],
+                "source": "DATABASE",
+            }
+            for r in rows
+        ]
+
+
+def add_proxy(proxy_url: str, label: str = "", db_path: str = None) -> Dict:
+    norm = normalize_proxy_url(proxy_url)
+    if not norm:
+        raise ValueError("Proxy URL không được rỗng.")
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    clean_label = (label or "").strip() or f"Proxy ({mask_proxy(norm)})"
+    with _get_conn(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO proxies (label, proxy_url, is_active, error_count, created_at)
+            VALUES (?, ?, 1, 0, ?)
+            ON CONFLICT(proxy_url) DO UPDATE SET
+                label = excluded.label,
+                is_active = 1,
+                error_count = 0,
+                last_error = ''
+            """,
+            (clean_label, norm, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, label, proxy_url, is_active, error_count, created_at FROM proxies WHERE proxy_url = ?",
+            (norm,),
+        ).fetchone()
+        return {
+            "id": row["id"],
+            "label": row["label"],
+            "masked_proxy": mask_proxy(row["proxy_url"]),
+            "is_active": bool(row["is_active"]),
+            "error_count": row["error_count"],
+            "created_at": row["created_at"],
+            "source": "DATABASE",
+        }
+
+
+def toggle_proxy(proxy_id: int, is_active: bool, db_path: str = None) -> bool:
+    with _get_conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE proxies SET is_active = ?, error_count = CASE WHEN ? = 1 THEN 0 ELSE error_count END WHERE id = ?",
+            (1 if is_active else 0, 1 if is_active else 0, proxy_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_proxy(proxy_id: int, db_path: str = None) -> bool:
+    with _get_conn(db_path) as conn:
+        cur = conn.execute("DELETE FROM proxies WHERE id = ?", (proxy_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def get_active_proxies(db_path: str = None) -> List[str]:
+    """Trả về danh sách proxy đang bật từ DB (ưu tiên ít lỗi), fallback sang biến môi trường / .env."""
+    proxies: List[str] = []
+    with _get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT proxy_url FROM proxies WHERE is_active = 1 ORDER BY error_count ASC, id ASC"
+        ).fetchall()
+        proxies = [r["proxy_url"] for r in rows if r["proxy_url"]]
+
+    env_vars = _read_env_vars()
+    for k in ("PROXY_LIST", "PROXY_URL", "HTTPS_PROXY", "HTTP_PROXY"):
+        raw = (env_vars.get(k) or "").strip()
+        if not raw:
+            continue
+        for item in raw.split(","):
+            norm = normalize_proxy_url(item)
+            if norm and norm not in proxies:
+                proxies.append(norm)
+    return proxies
+
+
+def report_proxy_success(proxy_url: str, db_path: str = None) -> None:
+    if not proxy_url:
+        return
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    with _get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE proxies SET error_count = 0, last_error = '', last_used_at = ? WHERE proxy_url = ?",
+            (now, proxy_url),
+        )
+        conn.commit()
+
+
+def report_proxy_error(proxy_url: str, err_msg: str = "", db_path: str = None) -> None:
+    if not proxy_url:
+        return
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    with _get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE proxies SET error_count = error_count + 1, last_error = ?, last_used_at = ? WHERE proxy_url = ?",
+            ((err_msg or "")[:200], now, proxy_url),
+        )
+        conn.commit()

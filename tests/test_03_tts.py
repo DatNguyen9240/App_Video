@@ -44,6 +44,29 @@ class TestTTSEngine(unittest.TestCase):
         self.assertTrue(bool(exe))
         self.assertTrue(isinstance(exe, str))
 
+    def test_omnivoice_primary_engine_replaces_edge_tts(self):
+        import numpy as np
+        from unittest.mock import patch
+
+        self.assertFalse(hasattr(tts_mod, "synthesize_edge_tts"))
+
+        class FakeOmniModel:
+            def generate(self, **kwargs):
+                self.last_kwargs = kwargs
+                # 0.5s sine wave at 24kHz
+                t = np.linspace(0, 0.5, 12000, dtype=np.float32)
+                return [0.2 * np.sin(2 * np.pi * 440 * t)]
+
+        fake_model = FakeOmniModel()
+        out_mp3 = os.path.join(self.test_dir, "test_omni.mp3")
+        with patch.object(tts_mod, "_get_omnivoice_model", return_value=fake_model):
+            res = tts_mod.text_to_speech("Thử nghiệm giọng nói OmniVoice tiếng Việt.", out_mp3, voice="nam_hai", rate="+15%")
+        self.assertEqual(res, out_mp3)
+        self.assertTrue(os.path.exists(out_mp3))
+        self.assertGreater(os.path.getsize(out_mp3), 1000)
+        self.assertEqual(fake_model.last_kwargs.get("language"), "vietnamese")
+        self.assertAlmostEqual(fake_model.last_kwargs.get("speed"), 1.15, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

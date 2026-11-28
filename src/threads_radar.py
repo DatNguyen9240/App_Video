@@ -45,6 +45,11 @@ os.makedirs(THREADS_AVATARS_DIR, exist_ok=True)
 def download_threads_avatar(username: str, save_path: str = None) -> Optional[str]:
     """Cào và tải avatar THẬT trực tiếp từ tài khoản Threads (threads.net/@username)."""
     import urllib.request
+    try:
+        import proxy_manager as _pm
+        _urlopen = _pm.urlopen_with_proxy
+    except Exception:
+        _urlopen = urllib.request.urlopen
     username = username.strip().lstrip("@")
     if not username:
         return None
@@ -63,7 +68,7 @@ def download_threads_avatar(username: str, save_path: str = None) -> Optional[st
         }
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with _urlopen(req, timeout=5) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
             if "isn't available" in html or "not available" in html:
                 return None
@@ -73,7 +78,7 @@ def download_threads_avatar(username: str, save_path: str = None) -> Optional[st
             if match:
                 img_url = match.group(1).replace("&amp;", "&")
                 img_req = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(img_req, timeout=5) as img_resp:
+                with _urlopen(img_req, timeout=5) as img_resp:
                     img_data = img_resp.read()
                     # Ảnh avatar người thật chuẩn Threads luôn > 12KB (ảnh logo Threads đen mặc định chỉ ~8.9KB)
                     if len(img_data) > 12000:

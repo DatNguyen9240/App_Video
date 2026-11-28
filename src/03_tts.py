@@ -1,14 +1,15 @@
 """
-MODULE 3: TẠO GIỌNG ĐỌC TIẾNG VIỆT ĐA VAI & CẢM XÚC (Emotional Multi-Voice TTS Engine)
+MODULE 3: TẠO GIỌNG ĐỌC TIẾNG VIỆT ĐA VAI & CẢM XÚC (OmniVoice Neural TTS Engine)
 ======================================================================================
 Chức năng:
-  - Diễn xuất giọng nói đa vai (Multi-Role Acting): Tác giả (Nam), Commenter 1 (Nữ), Commenter 2 (Nam bẻ lái),...
+  - Diễn xuất giọng nói đa vai bằng mô hình OmniVoice (k2-fsa/OmniVoice) hỗ trợ tiếng Việt
+    tự nhiên, Voice Design (theo mô tả) và Voice Cloning (từ file mẫu trong assets/voices/).
   - Hỗ trợ biến thiên cao độ (Pitch), tốc độ (Rate) theo cảm xúc từng câu
   - Tạo khoảng lặng tự nhiên (Breathing Room / Dramatic Pauses)
   - Đa tầng dự phòng chống sập 100%:
-    + Tầng 1: Microsoft Edge TTS (vi-VN-NamMinhNeural / vi-VN-HoaiMyNeural)
-    + Tầng 2: Google Translate TTS (gTTS)
-    + Tầng 3: Windows SAPI5 SpeechSynthesizer (Offline cục bộ)
+    + Tầng 1: OmniVoice Neural TTS (Voice Design / Voice Cloning)
+    + Tầng 2: Google Translate TTS (gTTS) nếu chưa tải model / lỗi mạng
+    + Tầng 3: Windows SAPI5 / Fallback tone an toàn
   - Tự động chuẩn hóa MP3 bằng FFmpeg 44100Hz Stereo sạch 100%.
 """
 
@@ -16,7 +17,7 @@ import os
 import re
 import time
 import shutil
-import asyncio
+import threading
 import subprocess
 from typing import Optional, Callable
 
@@ -220,12 +221,13 @@ VOICE_PROFILES = {
         "name": "Nam Hài Hước (Dí dỏm, nhanh nhảu, âm thanh sạch không rè)",
         "gender": "male"
     },
-    # 5. Nam Trầm Hài: Giọng Nam Minh chuẩn Việt trầm ấm, dứt khoát (+14%)
+    # 5. Nam Trầm Hài: Giọng nam trầm ấm, điện ảnh
     "nam_tram_hai": {
-        "base_voice": "vi-VN-NamMinhNeural",
-        "rate": "+14%",
+        "base_voice": "nam_tram_hai",
+        "instruct": "male, middle-aged, low pitch",
+        "rate": "+10%",
         "af_filter": "",
-        "name": "Nam Trầm Hài (Podcast, truyền cảm, trầm ấm)",
+        "name": "Nam Trầm Hài (OmniVoice - Trầm ấm, truyền cảm)",
         "gender": "male"
     },
     # 6. Nam Minh: Giọng nam chuẩn Việt Nam rõ ràng, truyền cảm
@@ -282,9 +284,9 @@ VOICE_MAP = {
 
     # Giọng Nam / Nữ chuẩn Việt Nam
     "nam_minh": "nam_minh",
-    "vi-vn-namminhneural": "vi-VN-NamMinhNeural",
+    "vi-vn-namminhneural": "nam_hai",
     "hoai_my": "hoai_my",
-    "vi-vn-hoaimyneural": "vi-VN-HoaiMyNeural",
+    "vi-vn-hoaimyneural": "hoai_my",
     "minh_quan": "nam_minh",
     "bao_long": "nam_minh",
     "khanh_linh": "hoai_my",
@@ -294,12 +296,12 @@ VOICE_MAP = {
     "nu": "nu_cakhia",
     "female": "nu_cakhia",
 
-    # Giọng dẫn chuyện chuẩn Việt & podcast (khi không dùng ElevenLabs)
-    "adam": "vi-VN-NamMinhNeural",
-    "andrew": "vi-VN-NamMinhNeural",
-    "brian": "vi-VN-NamMinhNeural",
-    "ava": "vi-VN-HoaiMyNeural",
-    "emma": "vi-VN-HoaiMyNeural",
+    # Giọng dẫn chuyện podcast (OmniVoice)
+    "adam": "nam_hai",
+    "andrew": "nam_tram_hai",
+    "brian": "nam_hai",
+    "ava": "hoai_my",
+    "emma": "hoai_my",
 }
 
 
@@ -363,42 +365,72 @@ def synthesize_elevenlabs(text: str, output_path: str, voice_id: str = "pNInz6ob
     return False
 
 
-async def _run_edge_tts_chunk_async(text: str, output_path: str, voice: str, rate: str = "+0%", max_retries: int = 3) -> bool:
-    """Tạo audio cho một câu / mệnh đề với cơ chế tự động thử lại khi Edge-TTS bị nghẽn mạng."""
-    import edge_tts
-    actual_voice = resolve_voice_id(voice)
-
-    for attempt in range(max_retries):
-        try:
-            # Endpoint mới của Edge-TTS trả về NoAudioReceived nếu rate != +0%; tốc độ sẽ được xử lý qua FFmpeg atempo
-            comm = edge_tts.Communicate(text, actual_voice, rate="+0%")
-            await comm.save(output_path)
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
-                return True
-        except Exception:
-            if attempt == max_retries - 1:
-                fallback_vi = "vi-VN-HoaiMyNeural" if "HoaiMy" in actual_voice else "vi-VN-NamMinhNeural"
-                if actual_voice != fallback_vi:
-                    try:
-                        fallback_comm = edge_tts.Communicate(text, fallback_vi, rate="+0%")
-                        await fallback_comm.save(output_path)
-                        if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
-                            return True
-                    except Exception:
-                        pass
-                return False
-            await asyncio.sleep(0.6 * (attempt + 1))
-    return False
+_omnivoice_lock = threading.Lock()
+_omnivoice_model = None
+VOICES_REF_DIR = os.path.join(BASE_DIR, "assets", "voices")
 
 
-def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0%", pitch: str = "+0Hz", style: str = "", extra_filter: str = "") -> bool:
+def _get_omnivoice_model():
+    """Khởi tạo và cache mô hình k2-fsa/OmniVoice (hỗ trợ GPU CUDA hoặc CPU)."""
+    global _omnivoice_model
+    if _omnivoice_model is not None:
+        return _omnivoice_model
+    with _omnivoice_lock:
+        if _omnivoice_model is not None:
+            return _omnivoice_model
+        import torch
+        from omnivoice import OmniVoice
+        model_id = os.environ.get("OMNIVOICE_MODEL", "k2-fsa/OmniVoice").strip() or "k2-fsa/OmniVoice"
+        use_cuda = torch.cuda.is_available()
+        device_map = "cuda:0" if use_cuda else "cpu"
+        dtype = torch.float16 if use_cuda else torch.float32
+        print(f"  🎙️ [OMNIVOICE]: Đang nạp mô hình {model_id} trên {device_map}...")
+        _omnivoice_model = OmniVoice.from_pretrained(
+            model_id,
+            device_map=device_map,
+            dtype=dtype,
+            load_asr=False,
+        )
+        return _omnivoice_model
+
+
+def _get_omnivoice_instruct(voice: str) -> str:
+    v_clean = (voice or "nam_hai").lower().strip()
+    mapped = VOICE_MAP.get(v_clean, v_clean)
+    prof = VOICE_PROFILES.get(mapped) or VOICE_PROFILES.get(v_clean) or {}
+    if prof.get("instruct"):
+        return prof["instruct"]
+    if mapped == "nu_cakhia":
+        return "female, young adult, high pitch"
+    if mapped == "nu_nhinhanh":
+        return "female, teenager, high pitch"
+    is_female = any(k in v_clean for k in ("nu", "female", "hoai", "ava", "emma", "chi_google", "khanh", "thu"))
+    if is_female:
+        return "female, young adult, moderate pitch"
+    return "male, young adult, moderate pitch"
+
+
+def _find_ref_voice_file(voice: str) -> Optional[str]:
+    if not os.path.isdir(VOICES_REF_DIR):
+        return None
+    v_clean = (voice or "").lower().strip()
+    mapped = VOICE_MAP.get(v_clean, v_clean)
+    for cand_name in (v_clean, mapped):
+        for ext in (".wav", ".mp3", ".flac"):
+            p = os.path.join(VOICES_REF_DIR, f"{cand_name}{ext}")
+            if os.path.exists(p) and os.path.getsize(p) > 2000:
+                return p
+    return None
+
+
+def synthesize_omnivoice(text: str, output_path: str, voice: str = "nam_hai", rate: str = "+0%", pitch: str = "+0Hz", style: str = "", extra_filter: str = "") -> bool:
     """
-    Tạo audio Edge-TTS tự nhiên 100%:
-    - Với câu chuẩn Threads / bình luận (< 500 ký tự): Gọi trực tiếp Edge-TTS 1 lượt duy nhất,
-      bảo toàn toàn bộ dấu câu, hơi thở và ngữ điệu tự nhiên, loại bỏ hoàn toàn việc cắt ghép gây rè/tách tiếng.
-    - Dự phòng nối câu qua audio filter re-encode nếu gặp đoạn văn cực dài (> 500 ký tự).
+    Tạo audio tiếng Việt tự nhiên bằng k2-fsa/OmniVoice:
+    - Nếu có file mẫu trong assets/voices/<voice>.wav(.mp3): tự động Voice Cloning.
+    - Ngược lại: dùng Voice Design (instruct) theo nhân vật.
     """
     try:
+        import soundfile as sf
         if os.path.exists(output_path):
             try: os.remove(output_path)
             except OSError: pass
@@ -407,63 +439,42 @@ def synthesize_edge_tts(text: str, output_path: str, voice: str, rate: str = "+0
         if not cleaned:
             return False
 
-        # Chuyển rate (+18%, -5%) thành bộ lọc atempo trong FFmpeg để tránh lỗi NoAudioReceived của Edge-TTS
-        tempo_filter = ""
+        model = _get_omnivoice_model()
         try:
             r_num = int(str(rate or "+0%").replace("%", "").replace("+", "").strip() or 0)
-            tempo = max(0.85, min(1.35, 1.0 + r_num / 100.0))
-            if abs(tempo - 1.0) >= 0.02:
-                tempo_filter = f"atempo={tempo:.2f}"
+            speed = max(0.85, min(1.30, 1.0 + r_num / 100.0))
         except Exception:
-            tempo_filter = ""
-        combined_filter = ",".join([f for f in [tempo_filter, extra_filter] if f])
+            speed = 1.0
 
-        # Tối ưu cho Threads: 100% bài đăng và bình luận dưới 500 ký tự được sinh trực tiếp nguyên khối
-        if len(cleaned) < 500:
-            ok = asyncio.run(_run_edge_tts_chunk_async(cleaned, output_path, voice, rate=rate))
-            if ok and os.path.exists(output_path) and os.path.getsize(output_path) > 400:
-                return verify_and_standardize_mp3(output_path, extra_filter=combined_filter)
+        ref_audio = _find_ref_voice_file(voice)
+        gen_kwargs = {
+            "text": cleaned,
+            "language": "vietnamese",
+            "speed": speed,
+        }
+        if ref_audio:
+            gen_kwargs["ref_audio"] = ref_audio
+        else:
+            gen_kwargs["instruct"] = _get_omnivoice_instruct(voice)
 
-        # Dự phòng cho kịch bản cực dài: Tách theo câu và ghép qua filter nối sạch
-        raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if len(s.strip()) > 3]
-        if not raw_sentences:
-            raw_sentences = [cleaned]
-
-        temp_files = []
-        exe = get_ffmpeg_exe()
-
-        for idx, s in enumerate(raw_sentences):
-            chunk_out = f"{output_path}.chunk_{idx}.mp3"
-            ok = asyncio.run(_run_edge_tts_chunk_async(s, chunk_out, voice, rate=rate))
-            if ok:
-                temp_files.append(chunk_out)
-
-        if not temp_files:
+        audio = model.generate(**gen_kwargs)
+        if not audio or len(audio) == 0:
             return False
 
-        if len(temp_files) == 1:
-            shutil.move(temp_files[0], output_path)
-        else:
-            # Ghép nối mượt mà bằng ffmpeg concat filter re-encoding (loại trừ 100% lỗi MP3 stream header pop/click)
-            inputs = []
-            filter_parts = []
-            for idx, tf in enumerate(temp_files):
-                inputs.extend(["-i", tf])
-                filter_parts.append(f"[{idx}:a]")
-            concat_filter = f"{''.join(filter_parts)}concat=n={len(temp_files)}:v=0:a=1[out]"
-            cmd = [exe, "-y"] + inputs + ["-filter_complex", concat_filter, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "320k", output_path]
-            subprocess.run(cmd, capture_output=True)
+        temp_wav = output_path + ".omni.wav"
+        sf.write(temp_wav, audio[0], 24000)
 
-        for tf in temp_files:
-            if os.path.exists(tf):
-                try: os.remove(tf)
-                except OSError: pass
+        exe = get_ffmpeg_exe()
+        cmd = [exe, "-y", "-i", temp_wav, "-ar", "44100", "-ac", "2", "-c:a", "libmp3lame", "-b:a", "256k", output_path]
+        subprocess.run(cmd, capture_output=True)
+        try: os.remove(temp_wav)
+        except OSError: pass
 
         if os.path.exists(output_path) and os.path.getsize(output_path) > 400:
-            return verify_and_standardize_mp3(output_path, extra_filter=combined_filter)
-
+            return verify_and_standardize_mp3(output_path, extra_filter=extra_filter)
         return False
     except Exception as e:
+        print(f"  ⚠️ OmniVoice TTS lỗi ({e})")
         if os.path.exists(output_path):
             try: os.remove(output_path)
             except OSError: pass
@@ -577,31 +588,23 @@ def text_to_speech(text: str, output_path: str,
         if synthesize_elevenlabs(cleaned, output_path, eleven_id):
             return output_path
 
-    # 0b. Chỉ dùng gTTS nếu người dùng cố ý chỉ định gtts / legacy_gtts (không dùng cho chi_google vì chi_google là Hoài My sắc nét)
-    actual_voice = resolve_voice_id(voice)
+    # 0b. Chỉ dùng gTTS nếu người dùng cố ý chỉ định gtts / legacy_gtts
     if v_lower in ["gtts", "legacy_gtts", "robot_google"]:
         print(f"     🤖 [LEGACY GTTS]: Đang tạo giọng Google TTS nguyên bản cho {os.path.basename(output_path)}...")
         if synthesize_gtts(cleaned, output_path, extra_filter=extra_filter):
             return output_path
-    for attempt in range(1, max_retries + 1):
-        if synthesize_edge_tts(cleaned, output_path, actual_voice, rate, pitch, style, extra_filter=extra_filter):
-            return output_path
-        time.sleep(0.5 * attempt)
 
-    # 1b. Dự phòng Edge-TTS thuần Việt nếu giọng chỉ định gặp sự cố
-    if actual_voice not in ["vi-VN-NamMinhNeural", "vi-VN-HoaiMyNeural"]:
-        fallback_vi = "vi-VN-HoaiMyNeural" if any(k in voice.lower() for k in ["female", "nu", "ava", "emma", "hoai"]) else "vi-VN-NamMinhNeural"
-        print(f"     ⚠️ Đang thử giọng dự phòng thuần Việt ({fallback_vi})...")
-        if synthesize_edge_tts(cleaned, output_path, fallback_vi, rate, "+0Hz", style, extra_filter=extra_filter):
-            return output_path
+    # 1. Tầng chính: OmniVoice (k2-fsa/OmniVoice)
+    if synthesize_omnivoice(cleaned, output_path, voice=voice, rate=rate, pitch=pitch, style=style, extra_filter=extra_filter):
+        return output_path
 
-    # 2. Thử gTTS tiếng Việt với extra_filter hài hước
-    print(f"     ⚠️ Edge TTS bận ({voice}), đang chuyển sang Google TTS tiếng Việt...")
+    # 2. Dự phòng gTTS tiếng Việt nếu OmniVoice gặp sự cố
+    print(f"     ⚠️ OmniVoice chưa sẵn sàng ({voice}), đang dùng dự phòng gTTS...")
     if synthesize_gtts(cleaned, output_path, extra_filter=extra_filter):
         return output_path
 
-    # 3. Fallback an toàn: Thử lại Nam Minh lần cuối với pitch chuẩn
-    if synthesize_edge_tts(cleaned, output_path, "vi-VN-NamMinhNeural", rate="+12%", pitch="+0Hz", extra_filter=extra_filter):
+    # 3. Fallback Windows SAPI5 offline
+    if synthesize_windows_sapi(cleaned, output_path, extra_filter=extra_filter):
         return output_path
 
     # 4. Fallback Tone
